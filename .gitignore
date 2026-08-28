@@ -4,3 +4,4 @@ build/
 # Cygwin/MSYS crash dumps -- `git add -A` on the Windows bench has swept these
 # into history in sibling repos.
 *.stackdump
+build-tests/
