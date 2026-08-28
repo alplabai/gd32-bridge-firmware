@@ -73,6 +73,32 @@ jobs:
       - name: build
         run: cmake --build build -j"$(nproc)"
 
+  unit-tests:
+    name: unit tests (host)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # These suites link the REAL firmware sources -- ota.c, crc32.c,
+      # transport_spi.c, protocol.c, bootloader.c -- not mocks, so the OTA
+      # bounds checks and the SPI CS-framing seams under test are the same code
+      # paths the device runs.  They came from alp-sdk, where they ran under
+      # twister; the firmware moved here (alp-sdk ADR 0031) and the tests moved
+      # with it, because a test that lives in a different repository from its
+      # subject is a test nobody runs.
+      #
+      # Host-only, no Zephyr: the code under test is freestanding C, and only
+      # the ztest harness was ever Zephyr-specific.  tests/unit/ztest_shim.h
+      # replaces the six macros the suites use.
+      - name: configure
+        run: cmake -S tests/unit -B build-tests -DCMAKE_BUILD_TYPE=Debug
+
+      - name: build
+        run: cmake --build build-tests --parallel
+
+      - name: run
+        run: ctest --test-dir build-tests --output-on-failure
+
   protocol-vectors:
     name: protocol vectors are regenerated
     runs-on: ubuntu-latest
