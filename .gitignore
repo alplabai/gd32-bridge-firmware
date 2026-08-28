@@ -1,0 +1,6 @@
+# Build artifacts from the CMake builds.
+build/
+
+# Cygwin/MSYS crash dumps -- `git add -A` on the Windows bench has swept these
+# into history in sibling repos.
+*.stackdump

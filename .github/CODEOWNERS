@@ -1,0 +1,16 @@
+# Every change here is reviewed by the maintainer.
+#
+# This firmware is a hardware SUPERVISOR -- it drives rails, resets and PWMs on
+# a real SoM -- and its wire protocol has a second half in alp-sdk. There is no
+# file in this tree where an unreviewed change is low-consequence.
+* @alpCaner
+
+# Called out separately because a mistake in these is the expensive kind:
+# the wire vectors are shared with a consumer in ANOTHER repository, and the
+# OTA path writes flash on a board that then has to boot.
+/tests/protocol_vectors.txt   @alpCaner
+/tests/gen_protocol_vectors.py @alpCaner
+/src/boot/                    @alpCaner
+/hal/fmc_ota.c                @alpCaner
+/firmware-version.txt         @alpCaner
+/.github/workflows/           @alpCaner
