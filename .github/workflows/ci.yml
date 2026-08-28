@@ -39,8 +39,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # This is Cortex-M33 firmware: every target is linked against a device
+      # linker script and post-processed with objcopy, so the host compiler
+      # cannot build it even with the stub HAL.  toolchain/arm-none-eabi.cmake
+      # is the invocation CMakeLists.txt documents, and it sets
+      # CMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY precisely because the
+      # result is freestanding and never runs on the builder.
+      - name: install the Arm GNU toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends gcc-arm-none-eabi
+          arm-none-eabi-gcc --version | head -1
+
       - name: configure
-        run: cmake -B build -S . -DCMAKE_BUILD_TYPE=Debug -DBRIDGE_HAL_BACKEND=stub
+        run: |
+          cmake -B build -S . \
+            -DCMAKE_TOOLCHAIN_FILE=toolchain/arm-none-eabi.cmake \
+            -DBRIDGE_HAL_BACKEND=stub
+
       - name: build
         run: cmake --build build -j"$(nproc)"
 
