@@ -5,18 +5,26 @@
 Regenerate firmware/gd32-bridge/tests/protocol_vectors.txt.
 
 This script is the authoritative source-of-truth for the canonical
-wire vectors consumed by:
+wire vectors consumed by BOTH sides of the bridge protocol, which now
+live in two repositories:
 
-  * the host-side driver tests under tests/zephyr/chips/gd32g553/
-  * the firmware-side unit tests under firmware/gd32-bridge/tests/
+  * the firmware-side tests in this repo, tests/protocol_vectors.txt
+  * the host-side driver tests in alp-sdk, under
+    tests/zephyr/chips/gd32g553/
+
+That split is why regenerating matters: a wire change made on one side
+has no local consumer that would notice the other side drifting. CI
+(.github/workflows/ci.yml) runs this script and fails if the committed
+tests/protocol_vectors.txt is not what it produces.
 
 It computes the CRC bytes natively (no external dependency) and
 emits exactly the format the consumers expect: one `<name> = <hex>`
 vector per line, comment lines start with `#`.
 
-Run from the alp-sdk repo root:
+Run from anywhere -- the output path is resolved relative to this
+file, not to the working directory:
 
-    python3 firmware/gd32-bridge/tests/gen_protocol_vectors.py
+    python3 tests/gen_protocol_vectors.py
 
 The output file is fully regenerated -- diff against git to spot
 unexpected wire changes.

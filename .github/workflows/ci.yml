@@ -1,0 +1,157 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# CI for the GD32 bridge firmware.
+#
+# What this CAN check, and what it deliberately cannot:
+#
+#   * The `gd32` backend needs the GD32 firmware library, which this repo does
+#     not vendor (CMakeLists.txt looks for it outside the tree).  CI builds the
+#     `stub` backend, which compiles every protocol/dispatch/OTA source; only
+#     the hardware-touching HAL is replaced.  That catches what actually breaks
+#     here: a wire change that does not compile, a handler that stops matching
+#     its table entry, an OTA path that stops building.
+#   * On-silicon behaviour is NOT covered.  The bridge talks SPI and I2C to a
+#     Renesas RZ/V2N on a real SoM; nothing here substitutes for a bench run.
+#
+# The protocol vectors ARE checked, and that is the strongest gate available
+# without hardware: tests/gen_protocol_vectors.py is the authoritative source
+# for the canonical wire vectors consumed by BOTH this firmware and the
+# host-side driver tests in alp-sdk.  Regenerating and diffing turns "the wire
+# changed" from something you notice on a bench into a failing check.
+
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  stub-build:
+    name: stub build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # This is Cortex-M33 firmware: every target is linked against a device
+      # linker script and post-processed with objcopy, so the host compiler
+      # cannot build it even with the stub HAL.  toolchain/arm-none-eabi.cmake
+      # is the invocation CMakeLists.txt documents, and it sets
+      # CMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY precisely because the
+      # result is freestanding and never runs on the builder.
+      - name: install the Arm GNU toolchain
+        run: |
+          sudo apt-get update -qq
+          # libnewlib-arm-none-eabi is NOT optional and is a separate package
+          # on Debian/Ubuntu: gcc-arm-none-eabi alone installs the compiler
+          # with no C library headers, so the first #include <string.h> fails
+          # with "No such file or directory" -- which reads like a source bug
+          # and is not one.
+          sudo apt-get install -y --no-install-recommends \
+            gcc-arm-none-eabi libnewlib-arm-none-eabi
+          arm-none-eabi-gcc --version | head -1
+          # Prove the headers are actually reachable before CMake tries, so a
+          # packaging regression reports itself here rather than as a confusing
+          # "fatal error: string.h" against a source file.
+          printf '#include <string.h>\nint main(void){return 0;}\n' > /tmp/hdr.c
+          arm-none-eabi-gcc -mcpu=cortex-m33 -mthumb -c /tmp/hdr.c -o /tmp/hdr.o
+          echo "newlib headers reachable"
+
+      - name: configure
+        run: |
+          cmake -B build -S . \
+            -DCMAKE_TOOLCHAIN_FILE=toolchain/arm-none-eabi.cmake \
+            -DBRIDGE_HAL_BACKEND=stub
+
+      - name: build
+        run: cmake --build build -j"$(nproc)"
+
+  protocol-vectors:
+    name: protocol vectors are regenerated
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # tests/gen_protocol_vectors.py calls itself the authoritative source for
+      # these vectors, and its own docstring says to diff the output against git
+      # to spot unexpected wire changes.  This is that diff, run automatically.
+      # A committed protocol_vectors.txt that the generator no longer produces
+      # means the wire moved and one of the two sides was not updated -- and the
+      # OTHER consumer is in a different repository (alp-sdk's host-side driver
+      # tests), so nothing else would notice.
+      - name: regenerate and diff
+        run: |
+          set -euo pipefail
+          python3 tests/gen_protocol_vectors.py
+          if ! git diff --exit-code -- tests/protocol_vectors.txt; then
+            echo "::error::tests/protocol_vectors.txt is not what gen_protocol_vectors.py produces."
+            echo "Regenerate it and commit the result, in the SAME change as the wire edit."
+            exit 1
+          fi
+
+  clang-format:
+    name: clang-format (diff only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Diff-only: this tree carries vendor-shaped sources and a tree-wide
+      # reformat would bury a real review in noise.
+      - name: install clang-format 22
+        run: pipx install "clang-format==22.1.5"
+
+      - name: check changed C/H files
+        run: |
+          set -euo pipefail
+          base="${{ github.event.pull_request.base.sha }}"
+          if [ -z "$base" ]; then base=$(git rev-parse HEAD~1); fi
+          files=$(git diff --name-only --diff-filter=ACMR "$base" HEAD -- '*.c' '*.h' || true)
+          if [ -z "$files" ]; then echo "no C/H files changed"; exit 0; fi
+          echo "$files"
+          # shellcheck disable=SC2086
+          clang-format --dry-run --Werror $files
+
+  no-build-artifacts:
+    name: no build artifacts or crash dumps
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The sibling cc3501e repo had a 14 MB .out, a 2 MB .map and MSYS
+      # *.stackdump files swept in by `git add -A` on the Windows bench.  This
+      # tree is clean today; the check is here to keep it that way.
+      - name: reject tracked artifacts
+        run: |
+          set -euo pipefail
+          bad=$(git ls-files | grep -E '\.(stackdump|out|map|o|obj|elf|bin|hex)$' || true)
+          if [ -n "$bad" ]; then
+            echo "::error::build artifacts / crash dumps are tracked:"
+            echo "$bad"
+            exit 1
+          fi
+          echo "clean"
+
+  python-lint:
+    name: python tooling compiles
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # tools/gen_ota_metadata.py builds the metadata that describes an OTA
+      # image.  A syntax error there is a broken release step, found at release
+      # time unless something checks it.
+      - name: byte-compile
+        run: python3 -m compileall -q tests tools
