@@ -29,7 +29,7 @@ host-side driver lives at [`chips/gd32g553/` (alp-sdk)](https://github.com/alpla
 ## Tree layout
 
 ```
-firmware/gd32-bridge/
+gd32-bridge-firmware/
 ├── CMakeLists.txt          ← top-level build entry (host-built, cross-compiled)
 ├── README.md               ← this file
 ├── toolchain/              ← ARM-GCC + linker script for GD32G553MEY7TR
@@ -60,14 +60,35 @@ The CMake build runs **outside** the Zephyr build (the Renesas
 side's `west build` does not descend here).  Invoke directly:
 
 ```bash
-cd firmware/gd32-bridge
 cmake -B build -DCMAKE_TOOLCHAIN_FILE=toolchain/arm-none-eabi.cmake
 cmake --build build
 ```
 
-The default build emits the monolithic `build/gd32-bridge.elf` + `.hex`
-+ `.bin` (OTA inert — the whole `0xF0..0xFF` range answers
-`STATUS_NOSUPPORT`, so the image cannot brick itself).
+`BRIDGE_HAL_BACKEND` defaults to `stub`, so this command emits only
+`build/gd32-bridge.elf` — the stub backend links no vendor
+`Reset_Handler`, so there's nothing for objcopy to extract into
+`.hex`/`.bin`. For a flashable image, select the `gd32` backend and
+point `GD32_VENDOR_DIR` at a checkout of alp-sdk's
+`vendors/gd32_firmware_library/` (this repo does not vendor the
+GigaDevice SDK):
+
+```bash
+cmake -B build -DCMAKE_TOOLCHAIN_FILE=toolchain/arm-none-eabi.cmake \
+    -DBRIDGE_HAL_BACKEND=gd32 \
+    -DGD32_VENDOR_DIR=<path to alp-sdk checkout>/vendors/gd32_firmware_library
+cmake --build build
+```
+
+`GD32_VENDOR_DIR` is empty by default.  Left empty, the build falls
+back to `../../vendors/gd32_firmware_library` **resolved against this
+source tree** — the pre-split layout, when this tree was nested at
+`<alp-sdk>/firmware/gd32-bridge/`.  A standalone clone has no such
+parent tree, so pass the flag explicitly; a relative value you pass is
+resolved against your shell's working directory, not the source tree,
+so prefer an absolute path. That build emits the monolithic
+`build/gd32-bridge.elf` + `.hex` + `.bin` (OTA inert — the whole
+`0xF0..0xFF` range answers `STATUS_NOSUPPORT`, so the image cannot
+brick itself).
 
 **`-DBRIDGE_OTA_PARTITIONED=ON`** (requires `BRIDGE_HAL_BACKEND=gd32`)
 arms the in-system upgrade path and emits the partitioned set instead:

@@ -41,11 +41,25 @@ commits die with the branch instead of becoming permanent history.
 ## Before you open a PR
 
 ```sh
-# stub build -- the same one CI runs. The gd32 backend needs the GD32 firmware
-# library, which this repo does not vendor, so this is the compile coverage
-# available to you.
-cmake -B build/stub -S . -DBRIDGE_HAL_BACKEND=stub
+# stub build -- the same one CI runs. This repo does not vendor the GD32
+# firmware library, so the stub backend is the compile coverage available
+# without one; with an alp-sdk checkout you can also build the gd32 backend by
+# adding -DBRIDGE_HAL_BACKEND=gd32 -DGD32_VENDOR_DIR=<path> (see README.md).
+# CMAKE_TOOLCHAIN_FILE is not optional: this is Cortex-M33 firmware linked
+# against a device linker script. Without it CMake configures against the host
+# compiler and the BUILD then dies on the first source file, which rejects
+# -mcpu=cortex-m33 -- the configure step itself still succeeds, so the failure
+# arrives later than you expect.
+cmake -B build/stub -S . -DCMAKE_TOOLCHAIN_FILE=toolchain/arm-none-eabi.cmake -DBRIDGE_HAL_BACKEND=stub
 cmake --build build/stub
+
+# host unit tests -- the same ones CI runs, against the real firmware sources
+# (ota.c, transport_spi.c, crc32.c, protocol.c, bootloader.c), not mocks, so
+# they cover the OTA bounds checks and the SPI CS-framing seams the device
+# actually runs.
+cmake -S tests/unit -B build-tests -DCMAKE_BUILD_TYPE=Debug
+cmake --build build-tests --parallel
+ctest --test-dir build-tests --output-on-failure
 
 # wire vectors -- must leave no diff
 python3 tests/gen_protocol_vectors.py && git diff --exit-code tests/protocol_vectors.txt
@@ -91,7 +105,8 @@ shipped image, and bump `firmware-version.txt` when you ship one.
 
 ## What not to commit
 
-Build output (`build/`), MSYS `*.stackdump` files, and anything from the GD32
+Build output (`build*/` — that covers `build/`, `build/stub` and `build-tests`
+alike), Python `__pycache__/`, MSYS `*.stackdump` files, and anything from the GD32
 firmware library. CI rejects tracked `.out`, `.map`, `.o`, `.elf`, `.bin` and
 `.hex` files — the sibling cc3501e repo had a 14 MB `.out` and several crash
 dumps swept in by a `git add -A` on the Windows bench.
