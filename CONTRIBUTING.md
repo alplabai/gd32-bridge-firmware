@@ -13,27 +13,47 @@ hardware — and **the wire contract has a second half in another repository**.
 
 ## Branch strategy
 
-`main` is the only long-lived branch, and it is protected. Every change —
-including a one-line fix, a revert of your own work, and a docs typo — starts on
-its own branch and lands through a pull request.
+There are two long-lived branches. **`dev` is the integration target** — every
+change, including a one-line fix, a revert of your own work, and a docs typo,
+branches off `dev` and lands back on `dev` through a pull request. **`main` is
+the release line**, and it only ever receives `dev`.
 
 ```sh
-git checkout main && git pull
+git checkout dev && git pull
 git checkout -b fix/<topic>        # or feat/, docs/, chore/
 # ... work, run the gates below ...
 git push -u origin fix/<topic>
-gh pr create --base main
+gh pr create --base dev
 ```
 
-Prefixes: `fix/`, `feat/`, `docs/`, `chore/`, `perf/`. Reference the alp-sdk
-issue where one exists (`alp-sdk#1730`) — most work here is tracked there,
-because the defect is usually visible from the host side first.
+Prefixes: `fix/`, `feat/`, `docs/`, `chore/`, `perf/`. Reference the issue in this
+repository where one exists, and the alp-sdk issue where the defect is tracked
+there instead (`alp-sdk#1730`) — much of this work is visible from the host side
+first, so the two backlogs both carry parts of it.
 
-**Why no `dev` branch**, unlike alp-sdk: this repo has a single long-lived
-artifact line and a bench that serialises anyway. An integration branch would
-add a merge step without adding a place for anything to be integrated. If that
-changes, revisit it; until then `main` plus short-lived branches is the honest
-shape.
+**Never target `main` directly.** A PR based on `main` skips the integration step,
+and if it was cut from `main` while `dev` is ahead it also carries a stale base.
+Check before opening one:
+
+```sh
+git fetch origin dev main
+git log --oneline origin/dev..HEAD   # every commit the PR would carry -- eyeball it
+```
+
+If that list contains commits you did not write for this change, the branch was
+cut from the wrong place.
+
+**`Closes #N` does not auto-close on a `dev` merge.** GitHub auto-closes a linked
+issue only when the merge lands on the repository's *default* branch, which is
+`main`. In a PR targeting `dev` the keyword still records intent and links the
+issue, but the issue has to be closed by hand after the merge. Use `Refs #N` when
+the change does not fully resolve the issue.
+
+**Why `dev` exists**, having previously not: this tree grew a host test suite and
+a set of cross-repo wire obligations, so changes now accumulate that are complete
+and gate-green but not yet release-ready. `dev` is where they accumulate. The
+bench still serialises, and that has not changed — what changed is that there is
+now something to integrate.
 
 Squash-merge is the default, so branch churn and the "try it on the bench"
 commits die with the branch instead of becoming permanent history.
