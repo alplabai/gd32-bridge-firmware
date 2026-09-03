@@ -38,6 +38,7 @@ change has two (host counters and firmware counters together).
 
 ## Checks
 
-- [ ] `cmake -DBRIDGE_HAL_BACKEND=stub` builds
+- [ ] `cmake -B build/stub -S . -DCMAKE_TOOLCHAIN_FILE=toolchain/arm-none-eabi.cmake -DBRIDGE_HAL_BACKEND=stub` builds
+- [ ] `ctest --test-dir build-tests --output-on-failure` passes
 - [ ] `python3 tests/gen_protocol_vectors.py` leaves no diff
 - [ ] `clang-format --dry-run --Werror` silent on changed C/H
