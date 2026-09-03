@@ -164,6 +164,19 @@
  * reach only the Renesas (P37/P36); see bridge_hw_da9292_status_cached. */
 void bridge_hw_init(void)
 {
+	/* SYSCFG hosts the TIMER quadrature-decoder mode fields
+     * (SYSCFG_TIMERxCFG0.TSCFGy) that qenc_channel_init() programs
+     * below, as well as the EXTI source mux that spi_cs_exti_init()
+     * programs later.  Its APB2 clock gate (RCU_APB2EN bit 14,
+     * SYSCFGEN) is off out of reset, and writes to a gated APB
+     * block do not stick, so this must run before ANY SYSCFG write
+     * -- in particular before the quadrature-encoder bring-up further
+     * down this function.  spi_cs_exti_init() keeps its own
+     * rcu_periph_clock_enable(RCU_SYSCFG) too (the call is
+     * idempotent); it must not become dependent on init ordering for
+     * its own SYSCFG writes. */
+	rcu_periph_clock_enable(RCU_SYSCFG);
+
 #if defined(BRIDGE_OTA_PARTITIONED) && defined(BRIDGE_APP_SLOT_BASE)
 	/* OTA Path-A: the app runs from a flash slot, not 0x08000000, so move
      * the vector table off the vendor SystemInit default before any NVIC
