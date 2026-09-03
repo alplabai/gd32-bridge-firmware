@@ -67,7 +67,14 @@ uint8_t bridge_hw_reset_reason(void);
 /* --------------------------------------------------------------- */
 
 /* Read the GD32's pad levels under @p mask.  Output @p levels has
- * bit i set iff (mask bit i set) and (pad reads high). */
+ * bit i set iff (mask bit i set) and (pad reads high).  This is
+ * always the MEASURED pad level (the input path stays live in
+ * output mode), never the level a prior bridge_hw_gpio_write()
+ * commanded (gh#62).  For a pad the caller has promoted to output,
+ * this means a shorted, contended, or open net now reads back
+ * whatever the pad is actually doing rather than an echo of the
+ * last write -- a genuine disagreement is a real fault, not a
+ * transport error. */
 int bridge_hw_gpio_read(uint32_t mask, uint32_t *levels);
 
 /* Atomically set/clear the pad outputs selected by @p mask to the

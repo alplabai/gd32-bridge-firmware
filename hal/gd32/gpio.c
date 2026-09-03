@@ -25,6 +25,20 @@
 /* because those positions are assigned to other peripherals on the   */
 /* board.  Host-side translation table lives in                     */
 /* `chips/gd32g553/gd32g553.c`.                                       */
+/*                                                                    */
+/* Bits 8/9 (PC14/PC15, E1M IO24/IO25) are NOT ordinary pads: they    */
+/* are supplied through the backup-domain power switch together with */
+/* SE_RST (PC13, hal/gd32/se_reset.c), sharing a typical 3 mA source  */
+/* budget, capped at 2 MHz output toggle rate with a 30 pF max load,  */
+/* and excluded from the datasheet's output voltage characterisation */
+/* (GD32G553xx Datasheet Rev2.0 p.130 Table 4-29 footnote 2; GD32G553 */
+/* User Manual Rev1.2 p.133 §3.3.1 -- both confirmed unchanged in     */
+/* Rev1.6/Rev1.3).  `GPIO_OSPEED_12MHZ` below is already OSPD = 00,   */
+/* the slowest class the part offers (UM Rev1.2 p.280 §7.4.3), so the */
+/* 2 MHz cap cannot be met by a register change -- the HOST must not  */
+/* toggle IO24/IO25 faster than 2 MHz or load them beyond 30 pF, and  */
+/* current drawn through them competes with the milliamps holding    */
+/* SE_RST released.  See gh#60. */
 /* ----------------------------------------------------------------- */
 
 const gd32_gpio_pad_t gpio_pad_map[] = {
@@ -36,8 +50,8 @@ const gd32_gpio_pad_t gpio_pad_map[] = {
 	{ GPIOF, GPIO_PIN_1 },  /* bit  5 = E1M IO13 */
 	{ GPIOB, GPIO_PIN_5 },  /* bit  6 = E1M IO14 */
 	{ GPIOC, GPIO_PIN_0 },  /* bit  7 = E1M IO16 */
-	{ GPIOC, GPIO_PIN_14 }, /* bit  8 = E1M IO24 */
-	{ GPIOC, GPIO_PIN_15 }, /* bit  9 = E1M IO25 */
+	{ GPIOC, GPIO_PIN_14 }, /* bit  8 = E1M IO24 -- power-switch pad, see block comment above */
+	{ GPIOC, GPIO_PIN_15 }, /* bit  9 = E1M IO25 -- power-switch pad, see block comment above */
 	{ GPIOB, GPIO_PIN_11 }, /* bit 10 = E1M IO27 */
 	{ GPIOC, GPIO_PIN_2 },  /* bit 11 = E1M IO28 */
 	{ GPIOD, GPIO_PIN_11 }, /* bit 12 = E1M IO29 */
@@ -53,9 +67,10 @@ _Static_assert(sizeof(gpio_pad_map) / sizeof(gpio_pad_map[0]) == GPIO_PAD_MAP_CO
 /* Per-pad direction tracking.  Boot configures every pad as INPUT +
  * PULL_UP; bridge_hw_gpio_write() flips an entry to OUTPUT push-pull
  * on first call (sticky until the next chip reset).  Avoids the
- * need for a separate `CMD_GPIO_CONFIGURE` opcode -- read-only
- * callers see the external level until they touch the pad with a
- * write, after which subsequent reads return the driven level. */
+ * need for a separate `CMD_GPIO_CONFIGURE` opcode.  Used ONLY by
+ * bridge_hw_gpio_write() to decide whether a pad still needs
+ * promoting -- bridge_hw_gpio_read() below always reads the measured
+ * pad level regardless of this flag (gh#62). */
 bool gpio_is_output[GPIO_PAD_MAP_COUNT];
 
 int bridge_hw_gpio_read(uint32_t mask, uint32_t *levels)
@@ -67,9 +82,16 @@ int bridge_hw_gpio_read(uint32_t mask, uint32_t *levels)
      * bits are treated as "no pad selected" rather than an error. */
 	for (size_t i = 0; i < GPIO_PAD_MAP_COUNT; ++i) {
 		if ((mask & ((uint32_t)1u << i)) == 0u) continue;
-		const FlagStatus s = gpio_is_output[i]
-		                         ? gpio_output_bit_get(gpio_pad_map[i].periph, gpio_pad_map[i].pin)
-		                         : gpio_input_bit_get(gpio_pad_map[i].periph, gpio_pad_map[i].pin);
+		/* GPIOx_ISTAT (offset 0x10) is read-only, hardware-updated
+         * every AHB cycle, and stays valid in output mode: UM
+         * Rev1.2 p.269 §7.3.6 "A read access to the port input
+         * status register gets the I/O state."  Always report the
+         * MEASURED pad level here, never GPIOx_OCTL (offset 0x14,
+         * "the last written value") -- a pad the host has promoted
+         * to output but that is shorted, contended, or open on the
+         * carrier must read back what the pad actually does, not
+         * what CMD_GPIO_WRITE last commanded (gh#62). */
+		const FlagStatus s = gpio_input_bit_get(gpio_pad_map[i].periph, gpio_pad_map[i].pin);
 		if (s == SET) {
 			*levels |= ((uint32_t)1u << i);
 		}
@@ -89,13 +111,35 @@ int bridge_hw_gpio_write(uint32_t mask, uint32_t levels)
              * GD32G5's slowest output speed (datasheet §7.4.1);
              * adequate for control lines, low EMI.  The bridge
              * dispatcher is single-threaded so no locking is
-             * needed around the mode flip + the flag write. */
+             * needed around the mode flip + the flag write.
+             *
+             * Preload the commanded level into GPIOx_OCTL via BOP
+             * (offset 0x18, write-only set/clear -- UM Rev1.2 p.283
+             * §7.4.7) BEFORE flipping the direction bits, while the
+             * pad is still INPUT+PULL_UP.  GPIOx_OCTL resets to
+             * 0x0000 0000 (UM Rev1.2 p.282 §7.4.6), so promoting the
+             * pad to OUTPUT first -- as this code used to -- drives
+             * it LOW for the gap until the level write below caught
+             * up, glitching every pad on its first commanded HIGH
+             * (gh#61). Writing OCTL while the pad is still an input
+             * is harmless (push-pull mode is not active yet), so
+             * this preload is a pure reordering with no new
+             * register access. */
+			if (levels & ((uint32_t)1u << i)) {
+				gpio_bit_set(gpio_pad_map[i].periph, gpio_pad_map[i].pin);
+			} else {
+				gpio_bit_reset(gpio_pad_map[i].periph, gpio_pad_map[i].pin);
+			}
 			gpio_output_options_set(
 			    gpio_pad_map[i].periph, GPIO_OTYPE_PP, GPIO_OSPEED_12MHZ, gpio_pad_map[i].pin);
 			gpio_mode_set(
 			    gpio_pad_map[i].periph, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, gpio_pad_map[i].pin);
 			gpio_is_output[i] = true;
 		}
+		/* Unconditional on every call (not just the first): a
+         * no-op immediately after the preload above, and the only
+         * level write on every subsequent call to an already-output
+         * pad. */
 		if (levels & ((uint32_t)1u << i)) {
 			gpio_bit_set(gpio_pad_map[i].periph, gpio_pad_map[i].pin);
 		} else {
