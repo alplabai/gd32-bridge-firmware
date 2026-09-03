@@ -40,6 +40,15 @@ ZTEST(gd32_bridge_fmc_ota_guard, test_running_slot_rejected)
 	zassert_true(
 	    ota_fmc_range_forbidden(OTA_SLOT_A_BASE + OTA_SLOT_SIZE - OTA_PAGE_SIZE, OTA_PAGE_SIZE),
 	    "the running slot's trailing page must be refused");
+	/* A range starting in metadata (adjacent, not overlapping the
+	 * bootloader) and extending across the metadata/slot-A boundary. */
+	zassert_true(ota_fmc_range_forbidden(OTA_SLOT_A_BASE - OTA_PAGE_SIZE, 2u * OTA_PAGE_SIZE),
+	             "a range straddling the metadata/running-slot boundary must be refused");
+	/* A range starting inside the running slot and extending across its
+	 * trailing boundary into the neighbouring (inactive) slot B. */
+	zassert_true(ota_fmc_range_forbidden(OTA_SLOT_A_BASE + OTA_SLOT_SIZE - OTA_PAGE_SIZE,
+	                                     2u * OTA_PAGE_SIZE),
+	             "a range straddling the running-slot/neighbour-slot boundary must be refused");
 }
 
 ZTEST(gd32_bridge_fmc_ota_guard, test_legitimate_ranges_allowed)

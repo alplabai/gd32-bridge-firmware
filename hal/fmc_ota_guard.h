@@ -49,6 +49,14 @@
  * skipping the running-slot half of the guard there costs nothing. */
 static inline bool ota_fmc_range_forbidden(uint32_t base, uint32_t len)
 {
+	if (len > (UINT32_MAX - base)) {
+		return true; /* base + len would wrap -- not currently reachable
+		              * (every caller bounds its own inputs) but this is
+		              * the one check future callers don't have to get
+		              * right; a wrapped `end` would otherwise compare
+		              * as < base and silently defeat both range checks
+		              * below. */
+	}
 	const uint32_t end = base + len;
 	if (base < OTA_BOOTLOADER_BASE + OTA_BOOTLOADER_SIZE && OTA_BOOTLOADER_BASE < end) {
 		return true;
