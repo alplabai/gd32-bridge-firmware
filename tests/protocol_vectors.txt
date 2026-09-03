@@ -28,135 +28,182 @@ crc16_ccitt_false_test_string  = 31323334353637383930
 # §2. SPI envelopes -- two-transaction request / reply pattern
 # ---------------------------------------------------------------------
 # SOF | CMD=0x00 (PING) | CRC -- empty payload
-spi_ping_request               = A500FF84
+spi_ping_request               = A50084FF
 # SOF | STATUS=0x00 (OK) | CRC -- empty payload
-spi_ping_reply_ok              = A500FF84
+spi_ping_reply_ok              = A50084FF
 # SOF | CMD=0x01 (GET_VERSION) | CRC -- empty payload
-spi_get_version_request        = A501EFA5
-# SOF | STATUS=0x00 | major=0 | minor=8 | patch=0 | CRC
-spi_get_version_reply_v0_8_0   = A5000008009196
+spi_get_version_request        = A501A5EF
+# SOF | STATUS=0x00 | major=0 | minor=9 | patch=0 | CRC
+spi_get_version_reply_v0_9_0   = A500000900A7A2
 
 # ---------------------------------------------------------------------
 # §3. I2C envelopes -- register-style framing
 # ---------------------------------------------------------------------
 # regaddr=0x00 | CMD=0x00 | CRC -- CRC excludes the regaddr byte
-i2c_ping_write                 = 0000E1F0
+i2c_ping_write                 = 0000F0E1
 # STATUS=0x00 | CRC -- empty payload
-i2c_ping_read_ok               = 00E1F0
+i2c_ping_read_ok               = 00F0E1
 
 # ---------------------------------------------------------------------
 # §4. v0.2 additions -- DAC, quadrature encoder, free-running counter
 # ---------------------------------------------------------------------
 # SOF | CMD=0x50 | channel=0 | resv=0 | value_mv=1650 (LE 0x0672) | CRC
-spi_dac_set_ch0_1650mv_request = A55000007206B7F6
+spi_dac_set_ch0_1650mv_request = A55000007206F6B7
 # SOF | CMD=0x51 | channel=1 | CRC
-spi_dac_get_ch1_request        = A55101B75F
+spi_dac_get_ch1_request        = A551015FB7
 # SOF | CMD=0x60 | encoder=0 | CRC
-spi_qenc_read_ch0_request      = A5600091DA
+spi_qenc_read_ch0_request      = A56000DA91
 # SOF | CMD=0x61 | encoder=3 | CRC
-spi_qenc_reset_ch3_request     = A561039288
+spi_qenc_reset_ch3_request     = A561038892
 # SOF | CMD=0x70 | counter=0 | CRC
-spi_counter_read_ch0_request   = A5700092A9
+spi_counter_read_ch0_request   = A57000A992
 # SOF | CMD=0x41 | assert=1 (hold OPTIGA Trust M in reset) | CRC
-spi_se_reset_assert_request    = A54101B42C
+spi_se_reset_assert_request    = A541012CB4
+# SOF | CMD=0x41 | assert=0 (release the SE) | CRC
+spi_se_reset_release_request   = A541000DA4
+# SOF | STATUS=0x06 (NOSUPPORT) | empty payload | CRC -- stub-firmware reply for any v0.2+ opcode whose HAL body is not yet wired
+spi_reply_nosupport            = A506429F
 
 # ---------------------------------------------------------------------
 # §5. v0.3 additions -- GD32G5 HW knobs (PWM_CONFIGURE, ADC_CONFIGURE,
 #                       ADC_STREAM_BEGIN / READ / END, TRNG_READ)
 # ---------------------------------------------------------------------
-# SOF | CMD=0x41 | assert=0 (release the SE) | CRC
-spi_se_reset_release_request   = A54100A40D
-# SOF | STATUS=0x06 (NOSUPPORT) | empty payload | CRC -- stub-firmware reply for any v0.2+ opcode whose HAL body is not yet wired
-spi_reply_nosupport            = A5069F42
 # SOF | CMD=0x22 | channel=0 | align=CENTER_UP | dead_time_ns=2000 | break_en | CRC
-spi_pwm_configure_ch0_request  = A5220001D007000001B070
+spi_pwm_configure_ch0_request  = A5220001D00700000170B0
 # SOF | CMD=0x32 | channel=3 | oversample=16 | sample_cycles~92 | resolution=16 | CRC
-spi_adc_configure_ch3_request  = A532030010005F0010029C
+spi_adc_configure_ch3_request  = A532030010005F00109C02
 # SOF | CMD=0x33 | stream_id=0 | channel=0 | rate_hz=1000 | CRC
-spi_adc_stream_begin_stream0_ch0_1ksps_request = A533000000E8030000A120
+spi_adc_stream_begin_stream0_ch0_1ksps_request = A533000000E803000020A1
 # SOF | CMD=0x34 | stream_id=0 | max_samples=32 | CRC -- reply length is 1 + max_samples*2 + 2 (CRC) bytes regardless of how many samples the firmware actually returns
-spi_adc_stream_read_stream0_max32_request = A5340020EFF4
+spi_adc_stream_read_stream0_max32_request = A5340020F4EF
+# SOF | CMD=0x35 | stream_id=0 | CRC
+spi_adc_stream_end_stream0_request = A535009060
+# SOF | CMD=0x80 | request 16 bytes of true random | CRC -- host receives 16 bytes of GD32G5 TRNG (NIST SP800-90B)
+spi_trng_read_16_request       = A580105993
 
 # ---------------------------------------------------------------------
 # §6. v0.4 additions -- GD32G5 TMU (CORDIC) math accelerator
 # ---------------------------------------------------------------------
-# SOF | CMD=0x35 | stream_id=0 | CRC
-spi_adc_stream_end_stream0_request = A535006090
+# SOF | CMD=0x90 | function=SQRT | format=F32 | in_a=4.0f (LE 0x40800000) | in_b=0 | CRC -- bridge replies 2.0f as 4 reply payload bytes + STATUS
+spi_tmu_compute_sqrt_f32_4p0_request = A590050100000000804000000000AB55
 
 # ---------------------------------------------------------------------
 # §7. v0.5 additions -- ADC-stream DSP pipeline (reserved opcode)
 # ---------------------------------------------------------------------
-# SOF | CMD=0x80 | request 16 bytes of true random | CRC -- host receives 16 bytes of GD32G5 TRNG (NIST SP800-90B)
-spi_trng_read_16_request       = A580109359
+# SOF | CMD=0x36 | (no payload yet) | CRC -- v0.5 reserved opcode; firmware replies STATUS_NOSUPPORT via the default-case dispatch until the wave-2 wire payload format finalises in v0.5.x
+spi_adc_stream_configure_dsp_probe_request = A53611A9
 
 # ---------------------------------------------------------------------
 # §8. v0.5 additions (§2B.2) -- advanced timer extras
 # ---------------------------------------------------------------------
-# SOF | CMD=0x90 | function=SQRT | format=F32 | in_a=4.0f (LE 0x40800000) | in_b=0 | CRC -- bridge replies 2.0f as 4 reply payload bytes + STATUS
-spi_tmu_compute_sqrt_f32_4p0_request = A59005010000000080400000000055AB
-# SOF | CMD=0x36 | (no payload yet) | CRC -- v0.5 reserved opcode; firmware replies STATUS_NOSUPPORT via the default-case dispatch until the wave-2 wire payload format finalises in v0.5.x
-spi_adc_stream_configure_dsp_probe_request = A536A911
+# SOF | CMD=0x23 | channel=0 | edge=BOTH | CRC -- dispatched to handle_pwm_capture_begin() (protocol.c); production body in hal/gd32/pwm_capture.c (bridge_hw_pwm_capture_begin).  The stub HAL backend still answers STATUS_NOSUPPORT (BRIDGE_HW_ERR_NOTIMPL)
+spi_pwm_capture_begin_probe_request = A5230002272D
+# SOF | CMD=0x26 | channel=0 | pulse_ns=1000 (LE 0x000003E8) | CRC -- dispatched to handle_pwm_single_pulse() (protocol.c); production body in hal/gd32/pwm.c (bridge_hw_pwm_single_pulse).  The stub HAL backend still answers STATUS_NOSUPPORT (BRIDGE_HW_ERR_NOTIMPL)
+spi_pwm_single_pulse_probe_request = A52600000000E80300007D5B
 
 # ---------------------------------------------------------------------
 # §9. v0.5 additions (§2B.3) -- system power-mode set
 # ---------------------------------------------------------------------
-# SOF | CMD=0x23 | channel=0 | edge=BOTH | CRC -- dispatched to handle_pwm_capture_begin() (protocol.c); production body in hal/gd32/pwm_capture.c (bridge_hw_pwm_capture_begin).  The stub HAL backend still answers STATUS_NOSUPPORT (BRIDGE_HW_ERR_NOTIMPL)
-spi_pwm_capture_begin_probe_request = A52300022D27
+# SOF | CMD=0x28 | mode=DEEP_SLEEP | wake_bitmap=RTC|GPIO | wake_after_ms=10000 (LE 0x00002710) | CRC -- dispatched to handle_power_mode_set() (protocol.c); production body in hal/gd32/power.c (bridge_hw_power_mode_set).  The stub HAL backend still answers STATUS_NOSUPPORT (BRIDGE_HW_ERR_NOTIMPL)
+spi_power_mode_set_probe_request = A52802000300000010270000A348
 
 # ---------------------------------------------------------------------
 # §10. v0.5 additions (§2B wave-2) -- chunked DSP-chain upload
 #       (CHAIN_OPEN / STAGE_PUSH / CHAIN_BIND)
 # ---------------------------------------------------------------------
-# SOF | CMD=0x26 | channel=0 | pulse_ns=1000 (LE 0x000003E8) | CRC -- dispatched to handle_pwm_single_pulse() (protocol.c); production body in hal/gd32/pwm.c (bridge_hw_pwm_single_pulse).  The stub HAL backend still answers STATUS_NOSUPPORT (BRIDGE_HW_ERR_NOTIMPL)
-spi_pwm_single_pulse_probe_request = A52600000000E80300005B7D
-# SOF | CMD=0x28 | mode=DEEP_SLEEP | wake_bitmap=RTC|GPIO | wake_after_ms=10000 (LE 0x00002710) | CRC -- dispatched to handle_power_mode_set() (protocol.c); production body in hal/gd32/power.c (bridge_hw_power_mode_set).  The stub HAL backend still answers STATUS_NOSUPPORT (BRIDGE_HW_ERR_NOTIMPL)
-spi_power_mode_set_probe_request = A5280200030000001027000048A3
 # SOF | CMD=0x37 | (no payload) | CRC -- dispatched to handle_adc_dsp_chain_open() (protocol.c); production body in hal/gd32/adc_stream.c (bridge_hw_adc_dsp_chain_open).  Reply payload is chain_id:u8.  The stub HAL backend still answers STATUS_NOSUPPORT (BRIDGE_HW_ERR_NOTIMPL)
-spi_adc_dsp_chain_open_probe_request = A537B930
+spi_adc_dsp_chain_open_probe_request = A53730B9
+# SOF | CMD=0x38 | chain_id=0 | stage_index=0 | kind=WINDOW(2) | chunk_offset=0 | chunk_total_size=4 | shape=Hann | reserved[3] | CRC -- dispatched to handle_adc_dsp_stage_push() (protocol.c); production body in hal/gd32/adc_stream.c (bridge_hw_adc_dsp_stage_push).  The stub HAL backend still answers STATUS_NOSUPPORT (BRIDGE_HW_ERR_NOTIMPL)
+spi_adc_dsp_stage_push_window_hann_request = A53800000200000400010000002004
+# SOF | CMD=0x39 | chain_id=0 | stream_id=0 | CRC -- dispatched to handle_adc_dsp_chain_bind() (protocol.c); production body in hal/gd32/adc_stream.c (bridge_hw_adc_dsp_chain_bind).  The stub HAL backend still answers STATUS_NOSUPPORT (BRIDGE_HW_ERR_NOTIMPL)
+spi_adc_dsp_chain_bind_probe_request = A5390000C789
 
 # ---------------------------------------------------------------------
 # §11. OTA Path-A opcodes (0xF0..0xF6) -- in-system upgrade over the
 #       bridge (docs/gd32-bridge-protocol.md §10 Path A).  Unarmed
 #       firmware replies STATUS_NOSUPPORT to every OTA opcode.
 # ---------------------------------------------------------------------
-# SOF | CMD=0x38 | chain_id=0 | stage_index=0 | kind=WINDOW(2) | chunk_offset=0 | chunk_total_size=4 | shape=Hann | reserved[3] | CRC -- dispatched to handle_adc_dsp_stage_push() (protocol.c); production body in hal/gd32/adc_stream.c (bridge_hw_adc_dsp_stage_push).  The stub HAL backend still answers STATUS_NOSUPPORT (BRIDGE_HW_ERR_NOTIMPL)
-spi_adc_dsp_stage_push_window_hann_request = A53800000200000400010000000420
-# SOF | CMD=0x39 | chain_id=0 | stream_id=0 | CRC -- dispatched to handle_adc_dsp_chain_bind() (protocol.c); production body in hal/gd32/adc_stream.c (bridge_hw_adc_dsp_chain_bind).  The stub HAL backend still answers STATUS_NOSUPPORT (BRIDGE_HW_ERR_NOTIMPL)
-spi_adc_dsp_chain_bind_probe_request = A539000089C7
 # SOF | CMD=0xF0 | size=41976 (LE 0x0000A3F8) | expected_crc32=0xDEADBEEF (LE) | CRC
-spi_ota_begin_request          = A5F0F8A30000EFBEADDE50A8
+spi_ota_begin_request          = A5F0F8A30000EFBEADDEA850
 # SOF | CMD=0xF0 | size=41976 (LE) | expected_crc32=0xDEADBEEF (LE) | fw_major=0 | fw_minor=2 | fw_patch=9 | CRC -- the v0.7 ADDITIVE form: the triple lands in the A/B metadata at COMMIT (fw_version[slot], 0 = unknown); pre-v0.7 firmware ignores the 3 trailing bytes, and the 8-byte legacy form stays valid
-spi_ota_begin_request_v0_7     = A5F0F8A30000EFBEADDE0002093D52
+spi_ota_begin_request_v0_7     = A5F0F8A30000EFBEADDE000209523D
 # SOF | STATUS=0x00 | chunk_max=60 (LE 0x003C) | target_slot=B(1) | CRC -- 60 = MAX_PAYLOAD(65) - offset:u32 - len:u8 header
-spi_ota_begin_reply_slot_b     = A5003C0001B8DA
+spi_ota_begin_reply_slot_b     = A5003C0001DAB8
 # SOF | CMD=0xF1 | offset=0 (LE) | len=8 | data=01..08 (one FMC doubleword) | CRC -- the len byte rejects transaction-merged zero-extended captures that survive the span CRC via the palindromic-CRC self-consumption hole; offsets pace on 8-byte boundaries
-spi_ota_write_chunk_off0_8b_request = A5F100000000080102030405060708B140
+spi_ota_write_chunk_off0_8b_request = A5F10000000008010203040506070840B1
 # SOF | STATUS=0x00 | received_bytes=8 (LE, cumulative high-water) | CRC
-spi_ota_write_chunk_reply_8b   = A5000800000029FA
+spi_ota_write_chunk_reply_8b   = A50008000000FA29
 # SOF | CMD=0xF2 | (no payload -- CRC was supplied at BEGIN) | CRC
-spi_ota_verify_request         = A5F230D9
+spi_ota_verify_request         = A5F2D930
 # SOF | STATUS=0x00 | computed_crc32=0xDEADBEEF (LE) | verified=1 | CRC
-spi_ota_verify_reply_match     = A500EFBEADDE0199DC
+spi_ota_verify_reply_match     = A500EFBEADDE01DC99
 # SOF | CMD=0xF3 | (no payload; firmware resets on success) | CRC
-spi_ota_commit_request         = A5F320F8
+spi_ota_commit_request         = A5F3F820
 # SOF | CMD=0xF4 | (no payload; firmware resets on success) | CRC
-spi_ota_rollback_request       = A5F4501F
+spi_ota_rollback_request       = A5F41F50
 # SOF | CMD=0xF5 | (no payload) | CRC
-spi_ota_get_state_request      = A5F5403E
+spi_ota_get_state_request      = A5F53E40
 # SOF | STATUS=0x00 | state=READY(1) | active=A(0) | pending=B(1) | boot_count=1 (LE, metadata generation) | CRC -- pending=0xFF when no session is open
-spi_ota_get_state_reply_ready  = A5000100010100E336
+spi_ota_get_state_reply_ready  = A500010001010036E3
+# SOF | CMD=0xF6 | (no payload) | CRC
+spi_ota_abort_request          = A5F65D70
+# SOF | STATUS=0x02 (NOT_READY) | CRC -- WRITE_CHUNK / VERIFY without a BEGIN-opened session, or COMMIT before VERIFY
+spi_ota_reply_not_ready        = A502C6DF
 
 # ---------------------------------------------------------------------
 # §12. v0.7 additions -- link-feature negotiation (CMD_LINK_FEATURES)
 #       + the STATUS_SEQ stamped-reply framing (SPI only)
 # ---------------------------------------------------------------------
-# SOF | CMD=0xF6 | (no payload) | CRC
-spi_ota_abort_request          = A5F6705D
-# SOF | STATUS=0x02 (NOT_READY) | CRC -- WRITE_CHUNK / VERIFY without a BEGIN-opened session, or COMMIT before VERIFY
-spi_ota_reply_not_ready        = A502DFC6
 # SOF | CMD=0x81 (LINK_FEATURES) | features=0x01 (STATUS_SEQ wanted) | CRC -- pre-v0.7 firmware answers STATUS_NOSUPPORT
-spi_link_features_request      = A58101A278
+spi_link_features_request      = A5810178A2
 # SOF | STATUS=0x10 (code OK, stamp=1 -- the firmware arms the feature BEFORE staging, so the negotiation reply itself is stamped and the host baselines from it) | granted=0x01 | CRC
-spi_link_features_reply_granted_seq1 = A5100189A2
+spi_link_features_reply_granted_seq1 = A51001A289
 # SOF | STATUS=0x50 (code OK, stamp=5) | CRC -- example stamped reply: code = STATUS & 0x0F, stamp = STATUS >> 4; a reply whose stamp equals the previously accepted one is a STALE re-serve
-spi_ping_reply_ok_seq5         = A550A571
+spi_ping_reply_ok_seq5         = A55071A5
+
+# ---------------------------------------------------------------------
+# §13. Day-one opcode coverage (#31 E4) -- GET_BUILD_ID, RESET_REASON,
+#       GPIO_READ/WRITE, legacy PWM_SET/GET, ADC_READ,
+#       DA9292_STATUS_FORWARD
+# ---------------------------------------------------------------------
+# SOF | CMD=0x02 (GET_BUILD_ID) | CRC -- empty payload.  The success reply is GD32_BRIDGE_BUILD_ID_LEN=20 ASCII bytes "<fw-version>+<git-sha-prefix>", baked at CMake build time by cmake/gen_build_id.cmake into a generated header (protocol.c) -- not a fixed wire constant, so no reply vector is given
+spi_get_build_id_request       = A502C6DF
+# SOF | CMD=0x03 (RESET_REASON) | CRC -- empty payload
+spi_reset_reason_request       = A503E7CF
+# SOF | STATUS=0x00 | reason=0(UNKNOWN) | CRC -- the STUB HAL's bridge_hw_reset_reason() hardcodes 0u; on real hardware this reads (and clears) the live MCU reset-cause flags, so this vector pins only the stub-backend value, not a representative live one
+spi_reset_reason_reply_unknown = A50000F09A
+# SOF | CMD=0x10 | mask=0x00000001 (LE) | CRC -- reply (on the gd32 backend) is levels:u32(LE); see spi_reply_io for what the stub backend answers today
+spi_gpio_read_mask_bit0_request = A51001000000D7DE
+# SOF | CMD=0x11 | mask=0x00000001 (LE) | levels=0x00000001 (LE) | CRC -- empty-payload reply on success; see spi_reply_io for what the stub backend answers today
+spi_gpio_write_mask_bit0_high_request = A5110100000001000000CA77
+# SOF | CMD=0x20 | channel=0 | period_ns=1000000 (LE) | duty_ns=500000 (LE, 50%) | CRC -- empty-payload reply on success; see spi_reply_io for what the stub backend answers today
+spi_pwm_set_ch0_1ms_period_500us_duty_request = A520000040420F0020A107008A4E
+# SOF | CMD=0x21 | channel=0 | CRC -- reply (on the gd32 backend) is period_ns:u32(LE) duty_ns:u32(LE); see spi_reply_io for what the stub backend answers today
+spi_pwm_get_ch0_request        = A5210027AF
+# SOF | CMD=0x30 | channel=0 | samples=4 | CRC -- reply (on the gd32 backend) is samples:u8 (echoed) + samples*mv:u16(LE); see spi_reply_io for what the stub backend answers today
+spi_adc_read_ch0_4samples_request = A5300004D257
+# SOF | CMD=0x40 (DA9292_STATUS_FORWARD) | CRC -- empty payload
+spi_da9292_status_forward_request = A54040B7
+# SOF | STATUS=0x00 | status=0xFF ("no sample available") | CRC -- bridge_hw_da9292_status_cached() returns this sentinel on both the stub HAL and this SoM revision's real hardware (no DA9292 net reaches the GD32 on this SoM rev; see hal/bridge_hw_stub.c)
+spi_da9292_status_forward_reply_no_sample = A500FF0084
+# SOF | STATUS=0x05 (IO) | empty payload | CRC -- the reply handle_gpio_read/write, handle_pwm_set/get and handle_adc_read (protocol.c) give on the STUB HAL backend for any BRIDGE_HW_ERR (they don't special-case BRIDGE_HW_ERR_NOTIMPL the way the status_from_hw()-routed handlers do -- see spi_reply_nosupport for that family's stub reply instead)
+spi_reply_io                   = A50521AF
+
+# ---------------------------------------------------------------------
+# §14. v0.5 additions (§2B.2), continued (#31 E4) -- PWM_CAPTURE_READ/
+#       END, TIMER_SYNC
+# ---------------------------------------------------------------------
+# SOF | CMD=0x24 | channel=0 | CRC -- dispatched to handle_pwm_capture_read() (protocol.c); reply on the gd32 backend is period_ns:u32(LE) pulse_width_ns:u32(LE).  The stub HAL backend answers STATUS_NOSUPPORT (BRIDGE_HW_ERR_NOTIMPL via status_from_hw); see spi_reply_nosupport
+spi_pwm_capture_read_ch0_request = A52400D250
+# SOF | CMD=0x25 | channel=0 | CRC -- dispatched to handle_pwm_capture_end() (protocol.c); empty-payload reply on success.  The stub HAL backend answers STATUS_NOSUPPORT; see spi_reply_nosupport
+spi_pwm_capture_end_ch0_request = A52500E363
+# SOF | CMD=0x27 | master=0(TIMER0) | slave=7(TIMER7) | mode=0 | CRC -- dispatched to handle_timer_sync() (protocol.c); the mode encoding beyond master/slave linkage is HAL-internal and undocumented at the wire layer, so this pins only the 3-byte request framing.  The stub HAL backend answers STATUS_NOSUPPORT; see spi_reply_nosupport
+spi_timer_sync_t0_master_t7_slave_request = A527000700CBE7
+
+# ---------------------------------------------------------------------
+# §15. CMD_ADC_SPECTRUM_READ (#496, #31 E2) -- FFT-chain bin readback
+# ---------------------------------------------------------------------
+# SOF | CMD=0x3A | stream_id=0 | bin_offset=0 | max_bins=4 | CRC
+spi_adc_spectrum_read_stream0_request = A53A00000004FDA6
+# SOF | STATUS=0x00 | seq=1 (LE) | total_bins=10 (LE) | got=2 | bins[0]=4.0f | bins[1]=8.0f | bins[2..3]=0 (zero-padded, i >= got) | CRC -- REPRESENTATIVE of the wired gd32 HAL body, not the stub backend's STATUS_NOSUPPORT reply
+spi_adc_spectrum_read_reply_example = A500010000000A00020000804000000041000000000000000096ED
