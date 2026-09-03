@@ -1,0 +1,241 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# THROWAWAY MEASUREMENT -- not a permanent gate, no merge is planned for
+# this workflow. It answers one question: does MCUboot fit in the 32 KB
+# bootloader region (toolchain/gd32g553_bootloader.ld: FLASH ORIGIN =
+# 0x08000000, LENGTH = 32K) that the current hand-rolled A/B bootloader
+# (8+ brick-class defects: #3, #11, #14, #37, #49, #50, #74, ...) occupies
+# today. It links MCUboot's real bootutil sources (boot/bootutil/src/*.c
+# from the upstream "bootutil" library target) against a throwaway port
+# under tools/mcuboot-size/ -- NOT a working bootloader, just enough for
+# arm-none-eabi-size to report a representative number. See the job
+# summary at the end of the run for exactly what is and is not included.
+#
+# MCUboot is pinned to the v2.4.0 tag's commit, not a floating branch or a
+# bare tag name -- a measurement that moves under you is worthless:
+#   https://github.com/mcu-tools/mcuboot/commit/6d3b3d2c38ab20c242e5b9abb04d050086383eb2
+
+name: mcuboot-size
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mcuboot-size-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  MCUBOOT_REF: v2.4.0
+  MCUBOOT_SHA: 6d3b3d2c38ab20c242e5b9abb04d050086383eb2
+  BUDGET_BYTES: 32768 # toolchain/gd32g553_bootloader.ld: LENGTH = 32K
+
+jobs:
+  measure:
+    name: measure MCUboot direct-XIP footprint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same install as .github/workflows/ci.yml's "stub build" job, byte
+      # for byte -- see that file for why libnewlib-arm-none-eabi is a
+      # separate, non-optional package.
+      - name: install the Arm GNU toolchain
+        run: |
+          sudo apt-get update -qq
+          # libnewlib-arm-none-eabi is NOT optional and is a separate package
+          # on Debian/Ubuntu: gcc-arm-none-eabi alone installs the compiler
+          # with no C library headers, so the first #include <string.h> fails
+          # with "No such file or directory" -- which reads like a source bug
+          # and is not one.
+          sudo apt-get install -y --no-install-recommends \
+            gcc-arm-none-eabi libnewlib-arm-none-eabi
+          arm-none-eabi-gcc --version | head -1
+          # Prove the headers are actually reachable before this job's own
+          # sources are compiled, so a packaging regression reports itself
+          # here rather than as a confusing "fatal error: string.h".
+          printf '#include <string.h>\nint main(void){return 0;}\n' > /tmp/hdr.c
+          arm-none-eabi-gcc -mcpu=cortex-m33 -mthumb -c /tmp/hdr.c -o /tmp/hdr.o
+          echo "newlib headers reachable"
+
+      - name: fetch MCUboot (pinned commit, not a floating ref)
+        uses: actions/checkout@v4
+        with:
+          repository: mcu-tools/mcuboot
+          ref: ${{ env.MCUBOOT_SHA }}
+          path: .mcuboot-src
+
+      - name: verify the pin actually resolved to the pinned commit
+        run: |
+          set -euo pipefail
+          got="$(git -C .mcuboot-src rev-parse HEAD)"
+          if [ "$got" != "$MCUBOOT_SHA" ]; then
+            echo "::error::MCUboot checkout resolved to $got, expected $MCUBOOT_SHA ($MCUBOOT_REF)"
+            exit 1
+          fi
+          echo "MCUboot pinned at $MCUBOOT_SHA ($MCUBOOT_REF) -- confirmed"
+
+      - name: measure all configurations
+        id: measure
+        run: |
+          set -euo pipefail
+
+          MCUBOOT="$PWD/.mcuboot-src"
+          PORT="$PWD/tools/mcuboot-size/port"
+          LD="$PWD/tools/mcuboot-size/linker/probe.ld"
+          OUT="$RUNNER_TEMP/mcuboot-size-out"
+          mkdir -p "$OUT"
+          CC=arm-none-eabi-gcc
+
+          # newlib-nano matters a lot for a representative number (full
+          # newlib pulls in reentrant-locking / iostream-adjacent machinery
+          # that roughly doubles text size even with --gc-sections) -- but
+          # it is a separate multilib variant and its presence under the
+          # apt-installed toolchain is not guaranteed the way it is in the
+          # official Arm binary release. Detect it instead of assuming it.
+          NANO_PROBE="$(arm-none-eabi-gcc -print-file-name=nano.specs)"
+          if [ "$NANO_PROBE" != "nano.specs" ] && [ -f "$NANO_PROBE" ]; then
+            SPECS_FLAG="-specs=nano.specs"
+            LIBC_NOTE="newlib-nano"
+          else
+            SPECS_FLAG=""
+            LIBC_NOTE="FULL newlib (nano.specs not found on this runner -- text is inflated by non-nano libc overhead, NOT representative of a size-tuned build)"
+          fi
+          echo "libc: $LIBC_NOTE"
+
+          # Exact source list from upstream boot/bootutil/CMakeLists.txt's
+          # "bootutil" static-lib target -- NOT a directory glob: src/ also
+          # holds ed25519_psa.c and encrypted_psa.c, which require
+          # <psa/crypto.h> and are excluded from that target on purpose.
+          # Files whose feature is off for a given configuration compile to
+          # near-empty translation units (each guards its body with
+          # #ifdef MCUBOOT_SIGN_RSA / MCUBOOT_ENC_IMAGES / etc.) rather than
+          # being conditionally included here, matching how upstream builds
+          # bootutil as one library for every signature/swap combination.
+          BOOTUTIL_SRCS="boot_record.c bootutil_find_key.c bootutil_img_hash.c \
+            bootutil_img_security_cnt.c bootutil_misc.c bootutil_area.c \
+            bootutil_loader.c bootutil_public.c caps.c encrypted.c \
+            fault_injection_hardening.c \
+            fault_injection_hardening_delay_rng_mbedtls.c image_ecdsa.c \
+            image_ed25519.c image_rsa.c image_validate.c loader.c \
+            swap_misc.c swap_move.c swap_offset.c swap_scratch.c \
+            ram_load.c tlv.c"
+
+          build_one() {
+            local label="$1" ec256="$2" revert="$3" lto="$4" tag="$5"
+            local objdir="$OUT/$tag"
+            mkdir -p "$objdir"
+
+            local cflags=(-mcpu=cortex-m33 -mthumb -mfloat-abi=soft -Os \
+              -ffreestanding -ffunction-sections -fdata-sections \
+              -DMCUBOOT_SIZE_PROBE_EC256="$ec256" -DMCUBOOT_SIZE_PROBE_REVERT="$revert" \
+              -I "$PORT" -I "$MCUBOOT/boot/bootutil/include" \
+              -I "$MCUBOOT/boot/bootutil/src" \
+              -I "$MCUBOOT/ext/tinycrypt/lib/include")
+            [ "$lto" = "1" ] && cflags+=(-flto)
+            [ "$ec256" = "1" ] && cflags+=(-I "$MCUBOOT/ext/mbedtls-asn1/include")
+
+            local srcs=("$PORT/boot_main.c" "$PORT/flash_map_backend.c" \
+              "$PORT/csprng_stub.c" "$PORT/syscalls_stub.c")
+            for f in $BOOTUTIL_SRCS; do
+              srcs+=("$MCUBOOT/boot/bootutil/src/$f")
+            done
+            srcs+=("$MCUBOOT/ext/tinycrypt/lib/source/sha256.c" \
+              "$MCUBOOT/ext/tinycrypt/lib/source/utils.c")
+            if [ "$ec256" = "1" ]; then
+              srcs+=("$MCUBOOT/ext/tinycrypt/lib/source/ecc.c" \
+                "$MCUBOOT/ext/tinycrypt/lib/source/ecc_dsa.c" \
+                "$MCUBOOT/ext/mbedtls-asn1/src/asn1parse.c" \
+                "$MCUBOOT/ext/mbedtls-asn1/src/platform_util.c" \
+                "$PORT/keys_stub.c")
+            fi
+
+            local objs=()
+            for src in "${srcs[@]}"; do
+              local base dir obj
+              base="$(basename "$src" .c)"
+              dir="$(basename "$(dirname "$src")")"
+              obj="$objdir/${dir}_${base}.o"
+              if ! "$CC" "${cflags[@]}" -c "$src" -o "$obj" 2>"$objdir/${dir}_${base}.log"; then
+                echo "| $label | $([ "$lto" = "1" ] && echo yes || echo no) | DID NOT BUILD | compile failed on $(basename "$src") -- see log below |" >>"$OUT/rows.md"
+                echo "::group::compile failure: $tag / $(basename "$src")"
+                cat "$objdir/${dir}_${base}.log"
+                echo "::endgroup::"
+                return 0
+              fi
+              objs+=("$obj")
+            done
+
+            local elf="$OUT/$tag.elf"
+            if ! "$CC" -mcpu=cortex-m33 -mthumb -mfloat-abi=soft -Os \
+                 $([ "$lto" = "1" ] && echo -flto) \
+                 -nostartfiles $SPECS_FLAG -T "$LD" -Wl,--gc-sections \
+                 -o "$elf" "${objs[@]}" 2>"$objdir/link.log"; then
+              echo "| $label | $([ "$lto" = "1" ] && echo yes || echo no) | DID NOT LINK | see log below |" >>"$OUT/rows.md"
+              echo "::group::link failure: $tag"
+              cat "$objdir/link.log"
+              echo "::endgroup::"
+              return 0
+            fi
+
+            local sizeline text data bss dec hexv textdata verdict margin
+            sizeline="$(arm-none-eabi-size "$elf" | tail -n1)"
+            text=$(awk '{print $1}' <<<"$sizeline")
+            data=$(awk '{print $2}' <<<"$sizeline")
+            bss=$(awk '{print $3}' <<<"$sizeline")
+            dec=$(awk '{print $4}' <<<"$sizeline")
+            hexv=$(awk '{print $5}' <<<"$sizeline")
+            textdata=$((text + data))
+            if [ "$textdata" -le "$BUDGET_BYTES" ]; then
+              margin=$((BUDGET_BYTES - textdata))
+              verdict="PASS (margin ${margin} B)"
+            else
+              margin=$((textdata - BUDGET_BYTES))
+              verdict="FAIL (over by ${margin} B)"
+            fi
+            echo "| $label | $([ "$lto" = "1" ] && echo yes || echo no) | text=$text data=$data bss=$bss dec=$dec (0x$hexv) | text+data=$textdata -- $verdict |" >>"$OUT/rows.md"
+          }
+
+          : >"$OUT/rows.md"
+          build_one "(a) hash-only (SHA-256, no signature)"                        0 0 0 a-noLTO
+          build_one "(a) hash-only (SHA-256, no signature)"                        0 0 1 a-LTO
+          build_one "(b) SHA-256 + ECDSA-P256 verify (tinycrypt, sw)"              1 0 0 b-noLTO
+          build_one "(b) SHA-256 + ECDSA-P256 verify (tinycrypt, sw)"              1 0 1 b-LTO
+          build_one "(c) direct-XIP+REVERT on top of (b)"                         1 1 0 c-noLTO
+          build_one "(c) direct-XIP+REVERT on top of (b)"                         1 1 1 c-LTO
+
+          {
+            echo "## MCUboot direct-XIP size probe"
+            echo
+            echo "MCUboot pinned at \`$MCUBOOT_SHA\` (\`$MCUBOOT_REF\`). Target: Cortex-M33,"
+            echo "\`-mcpu=cortex-m33 -mthumb -mfloat-abi=soft\`, \`-Os\`. libc: $LIBC_NOTE."
+            echo "Budget: **${BUDGET_BYTES} B** (32 KB, \`toolchain/gd32g553_bootloader.ld\`)."
+            echo
+            echo "| configuration | LTO | arm-none-eabi-size | text+data vs 32 KB budget |"
+            echo "|---|---|---|---|"
+            cat "$OUT/rows.md"
+            echo
+            echo "### What this does NOT include"
+            echo
+            echo "- The real \`flash_map_backend\` over \`hal/fmc_ota.c\` (real GD32 FMC"
+            echo "  unlock/program/erase + dual-bank page-size selection) -- estimate"
+            echo "  200-400 lines. \`tools/mcuboot-size/port/flash_map_backend.c\` is a"
+            echo "  link-time-only stub that never touches flash."
+            echo "- The real vector table, startup code (clock/GPIO init,"
+            echo "  \`SCB->VTOR\` handoff), and any newlib runtime bits the real"
+            echo "  bootloader links -- \`tools/mcuboot-size/port/boot_main.c\` supplies"
+            echo "  only a 2-word placeholder vector table and a Reset_Handler that"
+            echo "  calls \`boot_go()\` and spins."
+            echo "- A real embedded public key -- \`keys_stub.c\` is a size-correct"
+            echo "  (91-byte DER SubjectPublicKeyInfo) but all-zero dummy; no factory"
+            echo "  key exists yet (\`src/ota_layout.h\`)."
+            echo "- \`mcuboot_config.h\` options this probe leaves off: measured boot,"
+            echo "  encrypted images, serial recovery, RSA/Ed25519 signing, HW rollback"
+            echo "  protection, and any log backend (\`MCUBOOT_HAVE_LOGGING\` undefined)."
+          } >>"$GITHUB_STEP_SUMMARY"
+
+          echo "----- summary -----"
+          cat "$GITHUB_STEP_SUMMARY"

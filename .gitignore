@@ -5,3 +5,13 @@ build/
 # into history in sibling repos.
 *.stackdump
 build-tests/
+
+# .github/workflows/mcuboot-size.yml checks MCUboot out here (and CI's own
+# build output lives under $RUNNER_TEMP, never in the tree) -- ignored so a
+# local rerun of the same steps doesn't leave an untracked source checkout
+# or stray ELFs/maps sitting under tools/mcuboot-size/.
+/.mcuboot-src/
+tools/mcuboot-size/build/
+tools/mcuboot-size/**/*.elf
+tools/mcuboot-size/**/*.map
+tools/mcuboot-size/**/*.o
