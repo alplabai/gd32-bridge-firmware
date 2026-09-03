@@ -45,16 +45,51 @@ set(TEST_FLAGS -std=c11 -Wall -Wextra -Werror)
 # The flash read/program seams are redirected into a host buffer by the weak
 # ota_fmc_* overrides inside the test source, so no raw 32-bit flash address is
 # ever dereferenced on a 64-bit host.
-add_executable(test_ota
-    ota/src/test_ota.c
-    ${FW}/src/ota.c
-    ${FW}/src/crc32.c
-)
-target_include_directories(test_ota PRIVATE ${FW}/src ${FW}/hal)
-target_compile_definitions(test_ota PRIVATE BRIDGE_OTA_PARTITIONED)
-target_compile_options(test_ota PRIVATE ${TEST_FLAGS})
-target_link_libraries(test_ota PRIVATE ztest_shim)
-add_test(NAME ota COMMAND test_ota)
+#
+# Built TWICE off the same source (#3): ota.c derives the compile-time
+# OTA_RUNNING_SLOT from -DBRIDGE_APP_SLOT_BASE (see ota.c), and that
+# derivation is only exercised for the value it is actually built with --
+# an A-resident-only test build would never compile the OTA_SLOT_B_BASE
+# arm of the #elif chain.
+#
+# The two bases below are PARSED out of src/ota_layout.h -- the same
+# header ota.c includes -- rather than hand-copied, so this copy cannot
+# drift silently against it.  Two other independent copies of the same
+# numbers remain and are NOT derived here: the top-level CMakeLists.txt's
+# gd32-bridge-slot-a / gd32-bridge-slot-b BRIDGE_APP_SLOT_BASE compile
+# defines (:197,202) and APP_SLOT_BASE linker-script sets (:187,190) --
+# out of scope for this fix, and that file is explicitly not to be edited
+# here -- and OTA_SLOT_SIZE's separate copy in tools/gen_ota_metadata.py:34.
+# A mismatch in either of those still fails loudly: ota.c's own #error
+# chain rejects any BRIDGE_APP_SLOT_BASE that doesn't equal
+# OTA_SLOT_A_BASE/OTA_SLOT_B_BASE from the header.
+set(_OTA_LAYOUT_H ${FW}/src/ota_layout.h)
+file(STRINGS ${_OTA_LAYOUT_H} _OTA_SLOT_A_BASE_LINE
+     REGEX "^#define[ \t]+OTA_SLOT_A_BASE[ \t]+0x[0-9A-Fa-f]+u")
+file(STRINGS ${_OTA_LAYOUT_H} _OTA_SLOT_B_BASE_LINE
+     REGEX "^#define[ \t]+OTA_SLOT_B_BASE[ \t]+0x[0-9A-Fa-f]+u")
+string(REGEX MATCH "0x[0-9A-Fa-f]+u" _OTA_SLOT_A_BASE "${_OTA_SLOT_A_BASE_LINE}")
+string(REGEX MATCH "0x[0-9A-Fa-f]+u" _OTA_SLOT_B_BASE "${_OTA_SLOT_B_BASE_LINE}")
+if(NOT _OTA_SLOT_A_BASE OR NOT _OTA_SLOT_B_BASE)
+    message(FATAL_ERROR
+        "tests/unit/CMakeLists.txt: could not parse OTA_SLOT_A_BASE / "
+        "OTA_SLOT_B_BASE out of ${_OTA_LAYOUT_H} -- has the #define layout changed?")
+endif()
+foreach(_slot A B)
+    string(TOLOWER "${_slot}" _slot_lc)
+    set(_tgt test_ota_slot_${_slot_lc})
+    add_executable(${_tgt}
+        ota/src/test_ota.c
+        ${FW}/src/ota.c
+        ${FW}/src/crc32.c
+    )
+    target_include_directories(${_tgt} PRIVATE ${FW}/src ${FW}/hal)
+    target_compile_definitions(${_tgt} PRIVATE
+        BRIDGE_OTA_PARTITIONED BRIDGE_APP_SLOT_BASE=${_OTA_SLOT_${_slot}_BASE})
+    target_compile_options(${_tgt} PRIVATE ${TEST_FLAGS})
+    target_link_libraries(${_tgt} PRIVATE ztest_shim)
+    add_test(NAME ota_slot_${_slot_lc} COMMAND ${_tgt})
+endforeach()
 
 # --- transport_spi: transport + dispatcher over the stub HAL ---------------
 add_executable(test_transport_spi

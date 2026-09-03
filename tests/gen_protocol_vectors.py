@@ -487,10 +487,16 @@ def build_vectors() -> list[tuple[str, str, str | None]]:
         "spi_ota_begin_reply_slot_b",
         spi_frame(SOF, STATUS_OK,
                   bytes([0x3C, 0x00,                      # chunk_max = 60 (LE)
-                         0x01,                            # target_slot = B
+                         0x01,                            # target_slot = B (this
+                                                           # example is a slot-A
+                                                           # -resident build)
                   ])).hex().upper(),
         "SOF | STATUS=0x00 | chunk_max=60 (LE 0x003C) | target_slot=B(1) |"
-        " CRC -- 60 = MAX_PAYLOAD(65) - offset:u32 - len:u8 header",
+        " CRC -- 60 = MAX_PAYLOAD(65) - offset:u32 - len:u8 header."
+        " target_slot is ota.c's compile-time OTA_RUNNING_SLOT complement"
+        " (#3), a BUILD property: this vector's value B is only what a"
+        " slot-A-resident build replies (its own non-running slot); a"
+        " slot-B-resident build replies A for the identical request",
     ))
     out.append((
         "spi_ota_write_chunk_off0_8b_request",
@@ -544,13 +550,21 @@ def build_vectors() -> list[tuple[str, str, str | None]]:
         "spi_ota_get_state_reply_ready",
         spi_frame(SOF, STATUS_OK,
                   bytes([0x01,                            # state = READY
-                         0x00,                            # active_slot = A
+                         0x00,                            # active = A (build-
+                                                           # derived running
+                                                           # slot, see below)
                          0x01,                            # pending_slot = B
                          0x01, 0x00,                      # boot_count = 1 (LE)
                   ])).hex().upper(),
         "SOF | STATUS=0x00 | state=READY(1) | active=A(0) | pending=B(1) |"
         " boot_count=1 (LE, metadata generation) | CRC -- pending=0xFF when"
-        " no session is open",
+        " no session is open. active is ota.c's compile-time OTA_RUNNING_SLOT"
+        " (#3), a BUILD property reporting the slot THIS firmware executes"
+        " from -- NOT metadata's active_slot field.  The two normally agree,"
+        " but diverge across the bootloader's newest-first fallback"
+        " (boot_main.c), where metadata can legitimately name a slot that"
+        " is not running; this byte is what lets the host observe that"
+        " divergence.  This example value (A) is a slot-A-resident build",
     ))
     out.append((
         "spi_ota_abort_request",
