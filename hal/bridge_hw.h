@@ -22,14 +22,27 @@
 /* --------------------------------------------------------------- */
 /* Performance notes for the hal/gd32/ backend implementer:          */
 /*                                                                  */
-/* * The GD32G5 carries a hardware CRC unit (datasheet §95) that    */
-/*   processes one byte per AHB clock vs the ~16 cycles the         */
-/*   software byte-XOR loop in protocol.c needs.  The bridge wire   */
-/*   protocol uses CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF,    */
-/*   non-reflected, xor-out 0x0000); the CRC unit's user-           */
-/*   configurable polynomial supports that pattern.  Plumb both     */
-/*   transports' framing layers through the HW unit and the         */
-/*   software fallback becomes a self-test reference only.          */
+/* * The GD32G553 has exactly ONE CRC calculation unit (base        */
+/*   0x4002_3000, GD32G553 User Manual Rev1.2 ch.10 pp.321-326;     */
+/*   Datasheet Rev2.0 SS3.10 p.96 -- not "SS95", that section        */
+/*   doesn't exist).  Its running state lives in CRC_DATA, which    */
+/*   cannot be read back and restored (a write feeds new data, it   */
+/*   does not load state -- UM p.324), and CRC_CTL has no busy,     */
+/*   ready, lock or interrupt bit to arbitrate contenders (UM       */
+/*   p.325 bit map).  DO NOT plumb both transports' framing layers  */
+/*   through it: protocol_dispatch() runs synchronously inside      */
+/*   both the SPI CS EXTI handler and the I2C ISR                   */
+/*   (hal/transport_hw_gd32.c, src/transport_i2c.c), which pre-empt */
+/*   each other (BRIDGE_CS_IRQ_PRIO=1 < BRIDGE_I2C_IRQ_PRIO=2 in    */
+/*   hal/bridge_board_config.h), so one handler's frame CRC can     */
+/*   reseed CRC_DATA mid-computation for the other.  Full           */
+/*   derivation, register recipes and a bootloader-only option:     */
+/*   gh#58.  As of this comment nothing in the tree clocks or       */
+/*   touches the unit -- RCU_AHB1EN bit 12 (CRCEN) is set nowhere   */
+/*   and gd32g5x3_crc.h is absent from hal/gd32g5x3_libopt.h -- and */
+/*   src/crc32.c and src/protocol.c's crc16_ccitt_false() stay      */
+/*   software-only unless a single, provably non-pre-emptable       */
+/*   owner is adopted alongside a CI-enforced single-writer rule.   */
 /*                                                                  */
 /* * Both DMA controllers (DMA0 + DMA1, 7 channels each) are        */
 /*   available -- bind one ADC stream's DMA to DMA0 channel 1 and   */

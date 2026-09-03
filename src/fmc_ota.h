@@ -21,11 +21,16 @@
 bool ota_fmc_supported(void);
 
 /* Erase [base, base+len): base + len must be page-aligned (OTA_PAGE_SIZE).
- * Returns false on FMC error. */
+ * Returns false on FMC error, or if the funnel guard (hal/fmc_ota_guard.h,
+ * #79) refuses the range -- it always refuses the bootloader, and, in a
+ * partitioned build that knows its own BRIDGE_APP_SLOT_BASE, this build's
+ * own running slot. */
 bool ota_fmc_erase_range(uint32_t base, uint32_t len);
 
 /* Program `len` bytes at `addr` (flash). `addr` and `len` honour the
- * device's program granularity (handled inside). Returns false on error. */
+ * device's program granularity (handled inside). Returns false on FMC
+ * error, or on the same funnel-guard refusal ota_fmc_erase_range()
+ * documents above. */
 bool ota_fmc_program(uint32_t addr, const uint8_t *data, size_t len);
 
 /* Resolve a flash address to a readable pointer.  Default (target) is a
