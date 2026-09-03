@@ -280,7 +280,36 @@ int bridge_hw_adc_read(uint8_t channel, uint8_t samples, uint16_t *mv)
      * ADC_CLK_SYNC_HCLK_DIV6 clock -- negligible next to the samples
      * loop below.  A false return means the calibration FSM never
      * finished (wedged converter); report IO rather than serve
-     * readings from an unproven converter. */
+     * readings from an unproven converter.
+     *
+     * DISCLOSURE (#34 review): before this PR, adc_calibrate_bounded's
+     * worst case -- two phases x 100000 iterations if the RSTCLB/CLB
+     * FSM is wedged, ~200000 iterations total -- mattered once, at
+     * boot (adc_periph_init).  It now runs here on every CMD_ADC_READ,
+     * and identically in bridge_hw_adc_stream_begin and the ROVF
+     * recovery path (adc_stream.c), all three inside the priority-1
+     * CS-EXTI transport ISR.  A wedged calibration FSM now costs that
+     * same ~200000-iteration worst case on essentially every analog
+     * request, not just once.  This is not wrong -- #34's correctness
+     * fix REQUIRES recalibrating after every ADCON toggle -- but it is
+     * a real, disclosed increase in worst-case ISR dwell, of the same
+     * order as the EOC bound below.
+     *
+     * Considered shortening the bound so a wedged FSM fails faster.
+     * Declined: tCAL (25.06 us, above) is a hardware-cycle figure at
+     * the ADC clock, not a CPU-iteration count, and -- exactly as the
+     * EOC bound's own per-iteration cost is unverified two comments
+     * down (no -O flag anywhere in this repo, #26) -- there is no
+     * verified conversion from tCAL to an iteration count for THIS
+     * loop either.  Shortening it on a guess risks turning a
+     * legitimately-slow-but-healthy calibration into a false IO
+     * failure, which is a worse outcome than the bounded ~200000-
+     * iteration wait: that wait is still hard-bounded (same "abort
+     * latch" shape as the EOC bound), and the loop body here is a
+     * plain register read/compare (no out-of-line call like
+     * adc_flag_get), so it is very likely cheaper per iteration than
+     * the EOC poll.  Left at the existing, already-in-service bound
+     * rather than re-deriving a smaller one from a guess. */
 	if (!adc_calibrate_bounded(ch->periph)) return BRIDGE_HW_ERR_IO;
 
 	/* A stale EOC (e.g. the in-flight conversion that completes after
@@ -314,22 +343,45 @@ int bridge_hw_adc_read(uint8_t channel, uint8_t samples, uint16_t *mv)
      * CK_ADC (UM Rev1.2 17.4.9, p.431): the default 240-cycle config
      * this file uses is ~7.0 us, and the slowest legal config
      * (sample_cycles clamped to 638 in bridge_hw_adc_configure) is
-     * ~18.1 us.  So a HEALTHY oversampled read costs at most
-     * ratio * 18.1 us -- ~4.6 ms at ratio=256.
+     * ~18.1 us.  That is HARDWARE conversion time (ADC clock cycles),
+     * independent of firmware -- so a healthy oversampled read costs
+     * at most ratio * 18.1 us of actual ADC dwell, ~4.6 ms at
+     * ratio=256.
      *
-     * The pre-existing un-scaled bound (100000u iterations) is
-     * documented at the top of this comment block as ~4.6 ms of
-     * real dwell for a single ~6.3-7.0 us conversion -- about 650-730x
-     * headroom, calibrated empirically against the silicon incident
-     * this latch was added for.  Reuse that iterations-per-microsecond
-     * ratio (100000 / 4600 us =~ 21.7 iter/us) for the additive step
-     * instead of re-deriving a new constant: 25000u iterations =~
-     * 1.15 ms per oversample step, so even the worst-case healthy
-     * 256x/638-cycle read (~4.6 ms) sits comfortably under the
-     * absolute ceiling below with room to spare, and a wedged
-     * converter is bounded at ~400000 iterations =~ 18.4 ms --
-     * "tens of milliseconds", not the 0.5-1.2 s the multiplicative
-     * form produced -- regardless of how high ratio climbs. */
+     * THE BOUND THIS CODE ACTUALLY GUARANTEES IS AN ITERATION COUNT,
+     * not a millisecond figure: 100000u base + 25000u per oversample
+     * step, capped at 400000u total.  Translating that count to
+     * wall-clock time depends on the EOC poll loop's per-iteration
+     * cost, which is UNVERIFIED here -- disassembling this handler
+     * (arm-none-eabi-gcc 13.3.1) shows adc_flag_get() compiled as an
+     * out-of-line `bl` per iteration, a function call, not the
+     * inlined register read a ~10-cycles/iteration estimate would
+     * assume, and this repo sets no -O flag anywhere (neither
+     * CMakeLists.txt nor ci.yml sets CMAKE_BUILD_TYPE, #26).  So the
+     * true per-iteration cost, and therefore any millisecond figure
+     * below, is plausibly several times higher than a naive estimate
+     * and is NOT measured on real hardware here.
+     *
+     * An earlier version of this comment claimed the pre-existing
+     * 100000u bound was "documented at the top of this comment block
+     * as ~4.6 ms of real dwell" -- that was false: no in-file
+     * measurement of this loop exists anywhere in this repo; the only
+     * source for a 4.6 ms figure was an issue-body assertion, not a
+     * recorded measurement.  The ~4.6 ms two paragraphs up is a math
+     * estimate from the datasheet-derived HARDWARE conversion timing,
+     * not a measured dwell of this polling loop, and must not be read
+     * as one.
+     *
+     * What holds regardless of per-iteration cost: this is a hard,
+     * fixed iteration ceiling -- 400000u -- so the wait is bounded no
+     * matter how expensive a single iteration turns out to be, the
+     * same abort-latch shape as the rest of this file's handler-safe
+     * waits.  As a rough ESTIMATE only (contingent on #26, not to be
+     * quoted as a fact): "tens of milliseconds" at the high end,
+     * still roughly 64x fewer iterations than the old
+     * `100000u * ovs_ratio` multiplicative form reached at the 256x
+     * ceiling (25 600 000 iterations) -- regardless of what the true
+     * per-iteration cost is. */
 	uint32_t ovs_ratio = adc_oversample_ratio_cache[channel];
 	if (ovs_ratio < 1u) ovs_ratio = 1u;
 	if (ovs_ratio > ADC_OVERSAMPLE_RATIO_MAX) ovs_ratio = ADC_OVERSAMPLE_RATIO_MAX;

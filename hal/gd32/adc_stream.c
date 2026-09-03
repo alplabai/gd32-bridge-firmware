@@ -195,7 +195,14 @@ int bridge_hw_adc_stream_begin(uint8_t stream_id, uint8_t channel, uint32_t samp
      * a false return means the calibration FSM never finished, so
      * fail the begin rather than arm a stream on an unproven
      * converter -- the DMA channel + lap ISR are not armed yet at
-     * this point, so there is no live stream state to unwind. */
+     * this point, so there is no live stream state to unwind.
+     *
+     * DISCLOSURE (#34 review): this is one of three request-path call
+     * sites (the others: bridge_hw_adc_read in adc.c, and
+     * adc_stream_recover_rovf below) that now pay calibration's
+     * ~200000-iteration wedged-FSM worst case on every invocation,
+     * not just once at boot -- see adc.c's bridge_hw_adc_read for the
+     * full disclosure and the decision not to shorten the bound. */
 	if (!adc_calibrate_bounded(ch->periph)) return BRIDGE_HW_ERR_IO;
 
 	/* Arm the lap counter BEFORE the channel starts: clear any stale
@@ -264,7 +271,26 @@ int bridge_hw_adc_stream_begin(uint8_t stream_id, uint8_t channel, uint32_t samp
  * pacing timer never stopped, so step 9 ("start conversion") needs no
  * explicit call here -- the next TRGO edge resumes conversion once
  * ADCON is back.  Returns false only if the recalibration's bounded
- * spin never completes (the converter itself stayed wedged). */
+ * spin never completes (the converter itself stayed wedged).
+ *
+ * DISCLOSURE (#34 review): this is the third of three request-path
+ * call sites that now pay adc_calibrate_bounded's ~200000-iteration
+ * wedged-FSM worst case on every invocation rather than once at boot
+ * -- see adc.c's bridge_hw_adc_read for the full disclosure and the
+ * decision not to shorten the bound.
+ *
+ * The DMA full-transfer-finish (FTF) interrupt flag is cleared as
+ * part of step 3's "reinit DMA module": ROVF and a ring-wrap FTF can
+ * land in the same window (this handler runs at CS-EXTI priority 1,
+ * which blocks the priority-3 lap ISR -- DMA0/1_Channel0_IRQHandler
+ * above -- from running until this function returns), and a FTF left
+ * pending here fires the instant this handler returns, bumping
+ * lap_count against a total_read the caller is about to re-anchor to
+ * "0 new samples since recovery" -- the next poll would then
+ * misreport a full-ring loss it didn't actually see (the #18 phantom-
+ * loss class).  UM Rev1.2 §8.4.8 (p.295): the flag lives in DMA_INTF,
+ * cleared via the dedicated bit in DMA_INTC (FTFIFC) -- disabling
+ * CHEN does not clear it, so it needs its own clear here. */
 static bool adc_stream_recover_rovf(adc_stream_state_t *s, const gd32_adc_ch_t *ch)
 {
 	adc_dma_mode_disable(ch->periph); /* 1. Clear DMA bit of ADC_CTL1. */
@@ -273,10 +299,13 @@ static bool adc_stream_recover_rovf(adc_stream_state_t *s, const gd32_adc_ch_t *
 	/* 3. Clear CHEN bit of DMA_CHxCTL, reinit the DMA module.  The
 	 * count register is reloaded to the full ring length explicitly:
 	 * an overflow almost certainly caught the channel mid-ring rather
-	 * than exactly at a circular-reload boundary. */
+	 * than exactly at a circular-reload boundary.  A stale FTF (see
+	 * the function comment above) is cleared here too, alongside the
+	 * rest of the reinit, before the channel comes back up. */
 	dma_channel_disable(s->dma_periph, (dma_channel_enum)s->dma_channel);
 	dma_transfer_number_config(
 	    s->dma_periph, (dma_channel_enum)s->dma_channel, BRIDGE_ADC_STREAM_RING_SAMPLES);
+	dma_interrupt_flag_clear(s->dma_periph, (dma_channel_enum)s->dma_channel, DMA_INT_FLAG_FTF);
 
 	adc_flag_clear(ch->periph, ADC_FLAG_ROVF); /* 4. Clear ROVF bit of ADC_STAT. */
 	dma_channel_enable(s->dma_periph, (dma_channel_enum)s->dma_channel); /* 5. Set CHEN. */
