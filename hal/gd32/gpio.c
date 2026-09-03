@@ -38,7 +38,31 @@
 /* 2 MHz cap cannot be met by a register change -- the HOST must not  */
 /* toggle IO24/IO25 faster than 2 MHz or load them beyond 30 pF, and  */
 /* current drawn through them competes with the milliamps holding    */
-/* SE_RST released.  See gh#60. */
+/* SE_RST released.  See gh#60.  PC14/PC15 land here as plain GPIO    */
+/* rather than LXTAL (OSC32_IN/OSC32_OUT) because this backend never  */
+/* selects LXTAL as the RTC clock source -- hal/gd32/power.c hardcodes*/
+/* rcu_rtc_clock_config(RCU_RTCSRC_IRC32K) -- so the pins are free for*/
+/* E1M IO use by construction.  See gh#64 for that reasoning.         */
+/* ----------------------------------------------------------------- */
+/*                                                                    */
+/* Nothing below cross-checks this table against the pins already    */
+/* claimed by other peripheral tables in this backend: dac_channels[] */
+/* (hal/gd32/dac.c: PA4, PA6, analog mode), adc_channels_map[]        */
+/* (hal/gd32/adc.c: PD9, PB12, PE13, PE11, PC4, PA5, PA2, PA3, analog */
+/* mode), pwm_channels[] (hal/gd32/pwm.c: PA11, PB1, PB14, PC5, PC10, */
+/* PC11, PC12, PD0, AF mode), qenc_map[] (hal/gd32/qenc.c: PA0, PB3,  */
+/* PC6, PC7, PB6, PB7, PB2, PA1, AF mode).  None overlap today -- a   */
+/* C _Static_assert can't compare these against each other, since     */
+/* each table is a separate TU's array literal and there is no       */
+/* single translation unit that sees all of them at once.  But if a   */
+/* FUTURE entry here ever reuses an ADC or DAC pin, the reused pad's   */
+/* ISTAT bit is hardware-forced to 0 whenever the pin is in Analog    */
+/* mode (UM Rev1.2 p.270 §7.3.7: "The port input status register of  */
+/* this I/O port bit is '0'"), so bridge_hw_gpio_read()'s unconditional*/
+/* gpio_input_bit_get() would silently and permanently report LOW for */
+/* that bit -- the exact class of silent wrong answer gh#62 just      */
+/* fixed for OCTL, relocated to ISTAT.  Grep the four tables above     */
+/* before adding a pad here. */
 /* ----------------------------------------------------------------- */
 
 const gd32_gpio_pad_t gpio_pad_map[] = {

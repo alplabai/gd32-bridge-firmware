@@ -182,6 +182,22 @@ void bridge_hw_init(void)
 	__enable_irq();
 #endif
 
+	/* Secure-element reset (SE_RST = PC13): promote it to a released-
+     * level push-pull output FIRST, ahead of every other peripheral
+     * bring-up below.  PC13 has no entry in `gpio_pad_map` (see
+     * hal/gd32/gpio.c), so from reset until whichever statement first
+     * touches it, it sits at its GPIO POR default -- ANALOG mode,
+     * with the input buffer and both pull resistors disabled (UM
+     * Rev1.2 p.270 §7.3.7): genuinely floating, not merely un-pulled.
+     * The TRNG bring-up a few statements below this used to run first
+     * and can alone spend up to ~1 ms in that state (hal/gd32/trng.c),
+     * dwarfing the sub-microsecond OCTL-preload-vs-mode-promote gap
+     * gh#61 closed inside se_reset_configure() itself.  Needs only
+     * its own GPIOC clock; the bulk AHB2 enable just below re-enables
+     * it harmlessly for the rest of port C's pads. */
+	rcu_periph_clock_enable(RCU_GPIOC);
+	se_reset_init();
+
 	/* Enable AHB2 clocks for every GPIO port the pad map references.
      * The chip's RCU keeps unused GPIO ports clock-gated to save
      * power; we enable A..F unconditionally because the E1M IO map
@@ -244,13 +260,6 @@ void bridge_hw_init(void)
 		dac_mode_config(dac_channels[i].periph, dac_channels[i].out, NORMAL_PIN_BUFFON);
 		dac_enable(dac_channels[i].periph, dac_channels[i].out);
 	}
-
-	/* Secure-element reset (SE_RST = PC13): park it DEASSERTED so the
-     * OPTIGA Trust M runs and the line stops floating at the GPIO POR
-     * default.  The host pulses it via CMD_SE_RESET to recover a
-     * BRD_I2C bus the SE has clock-stretched low.  (GPIOC clock was
-     * enabled above.) */
-	se_reset_init();
 
 	/* Free-running counter: enable the Cortex-M33 DWT cycle counter.
      * TRCENA in CoreDebug->DEMCR gates the entire DWT/ITM trace block;
