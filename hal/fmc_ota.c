@@ -32,6 +32,7 @@
 #include "gd32g5x3.h"
 
 #include "fmc_ota.h"
+#include "fmc_ota_guard.h"
 #include "ota_layout.h"
 
 #if defined(BRIDGE_OTA_PARTITIONED)
@@ -144,9 +145,22 @@ OTA_RAMFUNC static fmc_state_enum erase_one_page(uint32_t addr)
 	FMC_CTL &= ~FMC_CTL_PNSEL;
 	FMC_CTL |= page << OTA_FMC_CTL_PNSEL_OFFSET;
 	FMC_CTL |= FMC_CTL_PER;
-	FMC_CTL |= FMC_CTL_START;
 
+	/* #5: mask interrupts for exactly the busy window (START set ->
+     * BUSY clear).  A vector fetch taken while this page's bank is busy
+     * is undefined per the vendor manual (UM Rev1.2 p.97, 2.3.6: "the
+     * software may run out of control ... The FMC will not provide any
+     * notification when it occurs") and unflagged (p.115-116 FMC_STAT
+     * has no busy-read-during-op bit).  Both this function and
+     * program_one_dword must stay in lockstep -- masking only one path
+     * leaves the other exposed.  Save/restore rather than a bare
+     * enable/disable pair so a caller that is itself already inside a
+     * masked section is not silently unmasked on return. */
+	const uint32_t pm = __get_PRIMASK();
+	__disable_irq();
+	FMC_CTL |= FMC_CTL_START;
 	st = ota_fmc_wait_ready(FMC_TIMEOUT_COUNT);
+	__set_PRIMASK(pm);
 
 	FMC_CTL &= ~FMC_CTL_PER;
 	FMC_CTL &= ~FMC_CTL_PNSEL;
@@ -161,6 +175,9 @@ bool ota_fmc_erase_range(uint32_t base, uint32_t len)
      * page size so dual-bank (1 KB pages) erases every page. */
 	if ((base % OTA_PAGE_SIZE) != 0u || (len % OTA_PAGE_SIZE) != 0u) {
 		return false;
+	}
+	if (ota_fmc_range_forbidden(base, len)) {
+		return false; /* #79: bootloader / running-slot -- refused, not erased */
 	}
 	const uint32_t step =
 	    ((FMC_OBCTL & FMC_OBCTL_DBS) != 0u) ? OTA_FMC_PAGE_SIZE_DBANK : OTA_FMC_PAGE_SIZE_SBANK;
@@ -184,12 +201,16 @@ OTA_RAMFUNC static fmc_state_enum program_one_dword(uint32_t addr, uint64_t dw)
 	if (st != FMC_READY) {
 		return st;
 	}
+	/* #5: same masked busy window as erase_one_page, PG set -> BUSY
+     * clear.  Both sites move in lockstep -- see the comment there. */
+	const uint32_t pm = __get_PRIMASK();
+	__disable_irq();
 	FMC_CTL |= FMC_CTL_PG;
 	REG32(addr) = (uint32_t)(dw & 0xFFFFFFFFu);
 	__ISB();
 	REG32(addr + 4u) = (uint32_t)(dw >> 32);
-
-	st = ota_fmc_wait_ready(FMC_TIMEOUT_COUNT);
+	st               = ota_fmc_wait_ready(FMC_TIMEOUT_COUNT);
+	__set_PRIMASK(pm);
 
 	FMC_CTL &= ~FMC_CTL_PG;
 	return st;
@@ -202,6 +223,9 @@ bool ota_fmc_program(uint32_t addr, const uint8_t *data, size_t len)
      * with 0xFF (erased state). */
 	if ((addr % 8u) != 0u) {
 		return false;
+	}
+	if (ota_fmc_range_forbidden(addr, (uint32_t)len)) {
+		return false; /* #79: bootloader / running-slot -- refused, not programmed */
 	}
 	bool ok = true;
 	fmc_unlock();

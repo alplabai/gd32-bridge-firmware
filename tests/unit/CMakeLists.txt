@@ -70,3 +70,13 @@ target_include_directories(test_transport_spi PRIVATE ${FW}/src ${FW}/hal)
 target_compile_options(test_transport_spi PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_transport_spi PRIVATE ztest_shim)
 add_test(NAME transport_spi COMMAND test_transport_spi)
+
+# --- fmc_ota_guard: the #79 address guard, header-only, no GD32 register
+# dependency (see hal/fmc_ota_guard.h) -------------------------------------
+add_executable(test_fmc_ota_guard fmc_ota_guard/src/test_fmc_ota_guard.c)
+target_include_directories(test_fmc_ota_guard PRIVATE ${FW}/src ${FW}/hal)
+target_compile_definitions(test_fmc_ota_guard PRIVATE
+    BRIDGE_OTA_PARTITIONED BRIDGE_APP_SLOT_BASE=0x0800A000u)
+target_compile_options(test_fmc_ota_guard PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_fmc_ota_guard PRIVATE ztest_shim)
+add_test(NAME fmc_ota_guard COMMAND test_fmc_ota_guard)
