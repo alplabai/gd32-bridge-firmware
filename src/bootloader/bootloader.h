@@ -5,7 +5,7 @@
  * gd32-bridge application bootloader -- internal header.
  *
  * Wires the OTA opcodes `0xF0..0xFF` reserved in
- * docs/gd32-bridge-protocol.md §10 into a separate dispatcher above
+ * alp-sdk docs/gd32-bridge-protocol.md §10 into a separate dispatcher above
  * protocol.c.  Handler bodies + integration detail are tracked by
  * the maintainer outside this tree; the scaffold replies
  * STATUS_NOSUPPORT so the wire path is exercisable.
