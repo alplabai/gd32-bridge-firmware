@@ -95,8 +95,19 @@ clang-format -i <your files> && clang-format --dry-run --Werror <your files>
 ### The wire vectors are shared across repositories
 
 `tests/gen_protocol_vectors.py` is the authoritative source for the canonical
-vectors, and they have **two** consumers: the firmware tests here, and the
-host-side driver tests in alp-sdk under `tests/zephyr/chips/gd32g553/`.
+vectors, and they have **two** consumers: `tests/unit/protocol_vectors/` here,
+and the host-side driver tests in alp-sdk under `tests/zephyr/chips/gd32g553/`.
+
+The firmware-side consumer drives the real `transport_spi.c` / `transport_i2c.c`
+-> `protocol.c`, on the stub HAL backend, and asserts the emitted bytes against
+the vector file — but not the WHOLE file. Five OTA reply vectors need an armed
+`-DBRIDGE_OTA_PARTITIONED` session against a real (or host-buffer-overridden)
+FMC, which is `tests/unit/ota/`'s own separate link target; one ADC-spectrum
+reply vector is explicitly commented as representative of the wired gd32 HAL
+body, not the stub's answer, and needs the fake HAL (`tests/unit/protocol/`'s
+own separate link target) instead. See
+`tests/unit/protocol_vectors/src/test_protocol_vectors.c`'s file header for the
+exact, itemized list of what is and is not covered and why.
 
 Nothing in this repo fails when the alp-sdk side drifts. So a wire change is not
 finished when CI here is green — it needs the matching alp-sdk change, and the
