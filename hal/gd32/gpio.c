@@ -18,13 +18,13 @@
 
 /* ----------------------------------------------------------------- */
 /* GPIO pad map -- E1M IO logical-index to GD32 (port, pin) lookup.   */
-/* Sourced from `metadata/e1m_modules/v2n/gd32-io-mcu-map.tsv`        */
+/* Sourced from `alp-sdk metadata/e1m_modules/v2n/gd32-io-mcu-map.tsv` */
 /* (the "E1M IO*" rows).  Wire-side `mask` bit i selects entry i in   */
 /* this table; numbering is compact (0..17) rather than matching the  */
 /* physical E1M IO numbering, which has gaps at 15 / 17..23 / 26 / 33 */
 /* because those positions are assigned to other peripherals on the   */
 /* board.  Host-side translation table lives in                     */
-/* `chips/gd32g553/gd32g553.c`.                                       */
+/* https://github.com/alplabai/alp-sdk/blob/main/chips/gd32g553/gd32g553.c. */
 /*                                                                    */
 /* Bits 8/9 (PC14/PC15, E1M IO24/IO25) are NOT ordinary pads: they    */
 /* are supplied through the backup-domain power switch together with */
@@ -51,18 +51,27 @@
 /* (hal/gd32/adc.c: PD9, PB12, PE13, PE11, PC4, PA5, PA2, PA3, analog */
 /* mode), pwm_channels[] (hal/gd32/pwm.c: PA11, PB1, PB14, PC5, PC10, */
 /* PC11, PC12, PD0, AF mode), qenc_map[] (hal/gd32/qenc.c: PA0, PB3,  */
-/* PC6, PC7, PB6, PB7, PB2, PA1, AF mode).  None overlap today -- a   */
-/* C _Static_assert can't compare these against each other, since     */
-/* each table is a separate TU's array literal and there is no       */
-/* single translation unit that sees all of them at once.  But if a   */
-/* FUTURE entry here ever reuses an ADC or DAC pin, the reused pad's   */
-/* ISTAT bit is hardware-forced to 0 whenever the pin is in Analog    */
-/* mode (UM Rev1.2 p.270 §7.3.7: "The port input status register of  */
-/* this I/O port bit is '0'"), so bridge_hw_gpio_read()'s unconditional*/
-/* gpio_input_bit_get() would silently and permanently report LOW for */
-/* that bit -- the exact class of silent wrong answer gh#62 just      */
-/* fixed for OCTL, relocated to ISTAT.  Grep the four tables above     */
-/* before adding a pad here. */
+/* PC6, PC7, PB6, PB7, PB2, PA1, AF mode).  None overlap today.  All   */
+/* five tables ARE visible together at compile time -- gd32_common.h  */
+/* externs each one and init.c includes it -- so TU visibility is not */
+/* why a C _Static_assert can't do this cross-check.  The real reason */
+/* is that a _Static_assert condition must be an integer constant     */
+/* expression, and subscripting a `const`-qualified array object --   */
+/* gpio_pad_map[i] et al -- is not one in C, visible or not; a        */
+/* compile-time check would have to hand-unroll every cross-table     */
+/* pair as literal macro comparisons instead of walking the arrays.   */
+/* A boot-time runtime overlap check over the ~40 combined entries    */
+/* would be cheap and is worth adding -- not done here, out of scope  */
+/* for this PR.                                                       */
+/*                                                                    */
+/* If a FUTURE entry here ever reuses an ADC or DAC pin, the reused   */
+/* pad's ISTAT bit is hardware-forced to 0 whenever the pin is in     */
+/* Analog mode (UM Rev1.2 p.270 §7.3.7: "The port input status        */
+/* register of this I/O port bit is '0'"), so bridge_hw_gpio_read()'s */
+/* unconditional gpio_input_bit_get() would silently and permanently  */
+/* report LOW for that bit -- the exact class of silent wrong answer  */
+/* gh#62 just fixed for OCTL, relocated to ISTAT.  Grep the four      */
+/* tables above before adding a pad here.                             */
 /* ----------------------------------------------------------------- */
 
 const gd32_gpio_pad_t gpio_pad_map[] = {

@@ -190,11 +190,18 @@ void bridge_hw_init(void)
      * with the input buffer and both pull resistors disabled (UM
      * Rev1.2 p.270 §7.3.7): genuinely floating, not merely un-pulled.
      * The TRNG bring-up a few statements below this used to run first
-     * and can alone spend up to ~1 ms in that state (hal/gd32/trng.c),
-     * dwarfing the sub-microsecond OCTL-preload-vs-mode-promote gap
-     * gh#61 closed inside se_reset_configure() itself.  Needs only
-     * its own GPIOC clock; the bulk AHB2 enable just below re-enables
-     * it harmlessly for the rest of port C's pads. */
+     * and can alone spend up to ~1 ms in that state (hal/gd32/trng.c)
+     * -- but that is NOT the dominant exposure: the pre-main() SramInit
+     * loop floats PC13 for ~20-25 ms before bridge_hw_init() is ever
+     * called (see the header comment in hal/gd32/se_reset.c for the
+     * derivation).  That window is not fixable by moving this call any
+     * earlier -- there is nowhere earlier in this backend to move it
+     * to -- so gh#61 stays open after this reorder; this promotion
+     * only bounds boot from main() onward and closes the separate
+     * sub-microsecond OCTL-preload-vs-mode-promote gap inside
+     * se_reset_configure() itself.  Needs only its own GPIOC clock;
+     * the bulk AHB2 enable just below
+     * re-enables it harmlessly for the rest of port C's pads. */
 	rcu_periph_clock_enable(RCU_GPIOC);
 	se_reset_init();
 

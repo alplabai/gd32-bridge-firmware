@@ -6,7 +6,7 @@
  *
  * SE_RST = GD32 PC13 drives the on-module OPTIGA Trust M's reset
  * (the SE is a slave on the shared BRD_I2C management bus, per
- * metadata/e1m_modules/v2n/gd32-io-mcu-map.tsv).  Before this TU the
+ * alp-sdk metadata/e1m_modules/v2n/gd32-io-mcu-map.tsv).  Before this TU the
  * pin was left at its GPIO power-on-reset default -- ANALOG mode, per
  * GD32G553_CTL reset value 0xFFFF FFFF for port C (UM Rev1.2 p.275
  * §7.4.1, CTL13[1:0] = 11), not a floating INPUT -- so the host had no
@@ -27,6 +27,40 @@
  * PC13 is also a power-switch pad sharing a 3 mA / 2 MHz / 30 pF
  * budget with PC14/PC15 (E1M IO24/IO25, hal/gd32/gpio.c) -- see the
  * block comment there and gh#60.
+ *
+ * REMAINING WINDOW (gh#61, not closed by this TU): se_reset_init()
+ * being the first thing bridge_hw_init() does only bounds the part of
+ * boot from main() onward.  Before main() runs, Reset_Handler
+ * (vendors/gd32_firmware_library upstream
+ * .../CMSIS/GD/GD32G5x3/Source/GCC/startup_gd32g5x3.S, SramInit: loop)
+ * reads SRAM_DENSITY[15:0] at 0x1FFFB3E0 (UM Rev1.2 p.89 §1.8.1,
+ * value in KBytes) and zeroes that many bytes of SRAM one word at a
+ * time BEFORE calling SystemInit or main.  GD32G553MEY7TR reports 128
+ * KB total on-chip SRAM (Datasheet Rev2.0 p.11 part-number table) =
+ * 32768 four-instruction loop iterations (stm/subs/cmp/bne), and the
+ * loop runs at the RCU reset-default clock, not the 216 MHz
+ * SystemInit() later programs: RCU_CFG0 resets to 0x0000_0000 (UM
+ * Rev1.2 p.164 §4.3.3), SCS[1:0] = 00 selects CK_IRC8M = 8 MHz
+ * (p.166), AHBPSC[3:0] = 0000 applies no division.  At roughly 5-6
+ * cycles/iteration that is ~164k-197k cycles, i.e. ~20-25 ms at 8
+ * MHz -- not the sub-microsecond OCTL-preload gap gh#61 closed, and
+ * not the ~1 ms TRNG figure this backend's comments cite elsewhere;
+ * this window is roughly TWENTY TIMES that.  PC13 sits ANALOG/floating
+ * (UM Rev1.2 p.270 §7.3.7: pull-up/down disabled, output buffer
+ * disabled) for the entire ~20-25 ms.
+ *
+ * This is NOT fixable from bridge_hw_init(), or from anything else
+ * that runs after main() is reached -- by the time se_reset_init()
+ * is the first bridge_hw_init() statement, the SramInit loop is
+ * already 20+ ms in the past.  A SystemInit() hook or a C++-style
+ * constructor could in principle run earlier, but SramInit executes
+ * before either of those too (it precedes __libc_init_array, which is
+ * what runs constructors, and precedes the bl SystemInit call itself)
+ * -- so no firmware hook available in this toolchain's reset sequence
+ * can win the race.  Left unaddressed, the honest fix is external:
+ * a pull resistor on PC13 at the board level, sized so the SE reads a
+ * defined (released) level while the pin is ANALOG.  Tracked on gh#61;
+ * do not read that issue as closed by this file.
  */
 
 #include <stdbool.h>
