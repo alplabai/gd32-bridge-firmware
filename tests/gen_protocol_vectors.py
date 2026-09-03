@@ -51,10 +51,16 @@ def crc16_ccitt_false(data: bytes) -> int:
 
 
 def spi_frame(framing_byte: int, op_or_status: int, payload: bytes = b"") -> bytes:
-    """Build a SPI envelope: `SOF | CMD-or-STATUS | PAYLOAD | CRC(MSB,LSB)`."""
+    """Build a SPI envelope: `SOF | CMD-or-STATUS | PAYLOAD | CRC(LSB,MSB)`.
+
+    The CRC is the one field in the envelope that is NOT big-endian --
+    both transports (transport_spi.c, transport_i2c.c) and the host
+    driver (alp-sdk chips/gd32g553/gd32g553.c) emit and parse it low
+    byte first, silicon-verified.  See issue #68.
+    """
     body = bytes([framing_byte, op_or_status]) + payload
     crc = crc16_ccitt_false(body)
-    return body + crc.to_bytes(2, "big")
+    return body + crc.to_bytes(2, "little")
 
 
 def i2c_write(cmd: int, payload: bytes = b"") -> bytes:
@@ -62,18 +68,19 @@ def i2c_write(cmd: int, payload: bytes = b"") -> bytes:
 
     Wire layout per docs/gd32-bridge-protocol.md §5: the host clocks
     `<reg-addr=0x00> CMD PAYLOAD CRC(2)` after the I2C
-    `S | ADDR | W` envelope.  CRC covers `CMD | PAYLOAD` only.
+    `S | ADDR | W` envelope.  CRC covers `CMD | PAYLOAD` only and is
+    transmitted low byte first (see spi_frame's docstring, issue #68).
     """
     body = bytes([cmd]) + payload
     crc = crc16_ccitt_false(body)
-    return bytes([0x00]) + body + crc.to_bytes(2, "big")
+    return bytes([0x00]) + body + crc.to_bytes(2, "little")
 
 
 def i2c_read(status: int, payload: bytes = b"") -> bytes:
-    """Build an I2C read envelope: `STATUS PAYLOAD CRC(2)` (CRC over `STATUS | PAYLOAD`)."""
+    """Build an I2C read envelope: `STATUS PAYLOAD CRC(2)` (CRC over `STATUS | PAYLOAD`, low byte first)."""
     body = bytes([status]) + payload
     crc = crc16_ccitt_false(body)
-    return body + crc.to_bytes(2, "big")
+    return body + crc.to_bytes(2, "little")
 
 
 # ---------------------------------------------------------------------
@@ -83,7 +90,14 @@ def i2c_read(status: int, payload: bytes = b"") -> bytes:
 SOF = 0xA5
 CMD_PING                     = 0x00
 CMD_GET_VERSION              = 0x01
+CMD_GET_BUILD_ID             = 0x02
+CMD_RESET_REASON             = 0x03
+CMD_GPIO_READ                = 0x10
+CMD_GPIO_WRITE               = 0x11
+CMD_PWM_SET                  = 0x20
+CMD_PWM_GET                  = 0x21
 CMD_PWM_CONFIGURE            = 0x22
+CMD_ADC_READ                 = 0x30
 CMD_ADC_CONFIGURE            = 0x32
 CMD_ADC_STREAM_BEGIN         = 0x33
 CMD_ADC_STREAM_READ          = 0x34
@@ -92,6 +106,7 @@ CMD_ADC_STREAM_CONFIGURE_DSP = 0x36
 CMD_ADC_DSP_CHAIN_OPEN       = 0x37
 CMD_ADC_DSP_STAGE_PUSH       = 0x38
 CMD_ADC_DSP_CHAIN_BIND       = 0x39
+CMD_ADC_SPECTRUM_READ        = 0x3A
 CMD_PWM_CAPTURE_BEGIN        = 0x23
 CMD_PWM_CAPTURE_READ         = 0x24
 CMD_PWM_CAPTURE_END          = 0x25
@@ -106,6 +121,7 @@ CMD_QENC_READ                = 0x60
 CMD_QENC_RESET               = 0x61
 CMD_COUNTER_READ             = 0x70
 CMD_SE_RESET                 = 0x41
+CMD_DA9292_STATUS_FORWARD    = 0x40
 CMD_LINK_FEATURES            = 0x81
 CMD_OTA_BEGIN                = 0xF0
 CMD_OTA_WRITE_CHUNK          = 0xF1
@@ -116,11 +132,12 @@ CMD_OTA_GET_STATE            = 0xF5
 CMD_OTA_ABORT                = 0xF6
 STATUS_OK                    = 0x00
 STATUS_NOT_READY             = 0x02
+STATUS_IO                    = 0x05
 STATUS_NOSUPPORT             = 0x06
 
 # Firmware-declared version triple; bump when protocol.h's
 # PROTOCOL_VERSION_{MAJOR,MINOR,PATCH} change.
-FW_VERSION = (0, 8, 0)
+FW_VERSION = (0, 9, 0)
 
 
 HEADER = """\
@@ -590,6 +607,184 @@ def build_vectors() -> list[tuple[str, str, str | None]]:
         " stamp equals the previously accepted one is a STALE re-serve",
     ))
 
+    # ----- §13. Day-one opcode coverage (#31 E4) ----------------------
+    # CMD_GET_BUILD_ID, CMD_RESET_REASON, CMD_GPIO_{READ,WRITE},
+    # CMD_PWM_{SET,GET}, CMD_ADC_READ and CMD_DA9292_STATUS_FORWARD
+    # predate the versioned §4+ additions above but had no wire vector
+    # until now.  GPIO_READ/WRITE, PWM_SET/GET and ADC_READ share one
+    # reply vector (spi_reply_io): their handlers
+    # (handle_gpio_read/write, handle_pwm_set/get, handle_adc_read in
+    # protocol.c) do NOT special-case BRIDGE_HW_ERR_NOTIMPL the way
+    # status_from_hw()-routed handlers do, so on the stub HAL backend
+    # (the only one CI compiles, #31 E1) they fall through to
+    # `if (rv < 0) return STATUS_IO;` -- STATUS_IO, not NOSUPPORT.
+    # Their real success-reply payloads carry live GPIO/PWM/ADC state
+    # and are not a wire-format constant, so only the request framing
+    # is vectorized here.
+    out.append((
+        "spi_get_build_id_request",
+        spi_frame(SOF, CMD_GET_BUILD_ID).hex().upper(),
+        "SOF | CMD=0x02 (GET_BUILD_ID) | CRC -- empty payload.  The"
+        " success reply is GD32_BRIDGE_BUILD_ID_LEN=20 ASCII bytes"
+        " \"<fw-version>+<git-sha-prefix>\", baked at CMake build time"
+        " by cmake/gen_build_id.cmake into a generated header (protocol.c)"
+        " -- not a fixed wire constant, so no reply vector is given",
+    ))
+    out.append((
+        "spi_reset_reason_request",
+        spi_frame(SOF, CMD_RESET_REASON).hex().upper(),
+        "SOF | CMD=0x03 (RESET_REASON) | CRC -- empty payload",
+    ))
+    out.append((
+        "spi_reset_reason_reply_unknown",
+        spi_frame(SOF, STATUS_OK, bytes([0x00])).hex().upper(),
+        "SOF | STATUS=0x00 | reason=0(UNKNOWN) | CRC -- the STUB HAL's"
+        " bridge_hw_reset_reason() hardcodes 0u; on real hardware this"
+        " reads (and clears) the live MCU reset-cause flags, so this"
+        " vector pins only the stub-backend value, not a representative"
+        " live one",
+    ))
+    out.append((
+        "spi_gpio_read_mask_bit0_request",
+        spi_frame(SOF, CMD_GPIO_READ, bytes([0x01, 0x00, 0x00, 0x00])).hex().upper(),
+        "SOF | CMD=0x10 | mask=0x00000001 (LE) | CRC -- reply (on the"
+        " gd32 backend) is levels:u32(LE); see spi_reply_io for what"
+        " the stub backend answers today",
+    ))
+    out.append((
+        "spi_gpio_write_mask_bit0_high_request",
+        spi_frame(SOF, CMD_GPIO_WRITE,
+                  bytes([0x01, 0x00, 0x00, 0x00,   # mask = bit0 (LE)
+                         0x01, 0x00, 0x00, 0x00,   # levels = bit0 high (LE)
+                  ])).hex().upper(),
+        "SOF | CMD=0x11 | mask=0x00000001 (LE) | levels=0x00000001 (LE)"
+        " | CRC -- empty-payload reply on success; see spi_reply_io for"
+        " what the stub backend answers today",
+    ))
+    out.append((
+        "spi_pwm_set_ch0_1ms_period_500us_duty_request",
+        spi_frame(SOF, CMD_PWM_SET,
+                  bytes([0x00, 0x00,               # channel=0, reserved
+                         0x40, 0x42, 0x0F, 0x00,   # period_ns = 1_000_000 (LE)
+                         0x20, 0xA1, 0x07, 0x00,   # duty_ns   =   500_000 (LE)
+                  ])).hex().upper(),
+        "SOF | CMD=0x20 | channel=0 | period_ns=1000000 (LE) |"
+        " duty_ns=500000 (LE, 50%) | CRC -- empty-payload reply on"
+        " success; see spi_reply_io for what the stub backend answers"
+        " today",
+    ))
+    out.append((
+        "spi_pwm_get_ch0_request",
+        spi_frame(SOF, CMD_PWM_GET, bytes([0x00])).hex().upper(),
+        "SOF | CMD=0x21 | channel=0 | CRC -- reply (on the gd32 backend)"
+        " is period_ns:u32(LE) duty_ns:u32(LE); see spi_reply_io for"
+        " what the stub backend answers today",
+    ))
+    out.append((
+        "spi_adc_read_ch0_4samples_request",
+        spi_frame(SOF, CMD_ADC_READ, bytes([0x00, 0x04])).hex().upper(),
+        "SOF | CMD=0x30 | channel=0 | samples=4 | CRC -- reply (on the"
+        " gd32 backend) is samples:u8 (echoed) + samples*mv:u16(LE);"
+        " see spi_reply_io for what the stub backend answers today",
+    ))
+    out.append((
+        "spi_da9292_status_forward_request",
+        spi_frame(SOF, CMD_DA9292_STATUS_FORWARD).hex().upper(),
+        "SOF | CMD=0x40 (DA9292_STATUS_FORWARD) | CRC -- empty payload",
+    ))
+    out.append((
+        "spi_da9292_status_forward_reply_no_sample",
+        spi_frame(SOF, STATUS_OK, bytes([0xFF])).hex().upper(),
+        "SOF | STATUS=0x00 | status=0xFF (\"no sample available\") | CRC"
+        " -- bridge_hw_da9292_status_cached() returns this sentinel on"
+        " both the stub HAL and this SoM revision's real hardware (no"
+        " DA9292 net reaches the GD32 on this SoM rev; see"
+        " hal/bridge_hw_stub.c)",
+    ))
+    out.append((
+        "spi_reply_io",
+        spi_frame(SOF, STATUS_IO).hex().upper(),
+        "SOF | STATUS=0x05 (IO) | empty payload | CRC -- the reply"
+        " handle_gpio_read/write, handle_pwm_set/get and handle_adc_read"
+        " (protocol.c) give on the STUB HAL backend for any BRIDGE_HW_ERR"
+        " (they don't special-case BRIDGE_HW_ERR_NOTIMPL the way the"
+        " status_from_hw()-routed handlers do -- see spi_reply_nosupport"
+        " for that family's stub reply instead)",
+    ))
+
+    # ----- §14. v0.5 additions (§2B.2), continued (#31 E4) ------------
+    # CMD_PWM_CAPTURE_READ / CMD_PWM_CAPTURE_END / CMD_TIMER_SYNC round
+    # out the advanced-timer-extras trio §8 already introduces
+    # (CMD_PWM_CAPTURE_BEGIN, CMD_PWM_SINGLE_PULSE); their handlers
+    # route through status_from_hw(), which maps the stub HAL's
+    # BRIDGE_HW_ERR_NOTIMPL to STATUS_NOSUPPORT -- the existing
+    # spi_reply_nosupport vector is their stub-backend reply too.
+    out.append((
+        "spi_pwm_capture_read_ch0_request",
+        spi_frame(SOF, CMD_PWM_CAPTURE_READ, bytes([0x00])).hex().upper(),
+        "SOF | CMD=0x24 | channel=0 | CRC -- dispatched to"
+        " handle_pwm_capture_read() (protocol.c); reply on the gd32"
+        " backend is period_ns:u32(LE) pulse_width_ns:u32(LE).  The"
+        " stub HAL backend answers STATUS_NOSUPPORT"
+        " (BRIDGE_HW_ERR_NOTIMPL via status_from_hw); see"
+        " spi_reply_nosupport",
+    ))
+    out.append((
+        "spi_pwm_capture_end_ch0_request",
+        spi_frame(SOF, CMD_PWM_CAPTURE_END, bytes([0x00])).hex().upper(),
+        "SOF | CMD=0x25 | channel=0 | CRC -- dispatched to"
+        " handle_pwm_capture_end() (protocol.c); empty-payload reply on"
+        " success.  The stub HAL backend answers STATUS_NOSUPPORT; see"
+        " spi_reply_nosupport",
+    ))
+    out.append((
+        "spi_timer_sync_t0_master_t7_slave_request",
+        spi_frame(SOF, CMD_TIMER_SYNC, bytes([0x00, 0x07, 0x00])).hex().upper(),
+        "SOF | CMD=0x27 | master=0(TIMER0) | slave=7(TIMER7) | mode=0"
+        " | CRC -- dispatched to handle_timer_sync() (protocol.c); the"
+        " mode encoding beyond master/slave linkage is HAL-internal and"
+        " undocumented at the wire layer, so this pins only the 3-byte"
+        " request framing.  The stub HAL backend answers"
+        " STATUS_NOSUPPORT; see spi_reply_nosupport",
+    ))
+
+    # ----- §15. CMD_ADC_SPECTRUM_READ (#496, #31 E2) -------------------
+    # req: stream_id:u8 bin_offset:u16(LE) max_bins:u8 (protocol.c:530).
+    # reply: seq:u32(LE) total_bins:u16(LE) got:u8 bins[max_bins*4]
+    # (float32 LE, zero-padded past `got`; protocol.c:552-566).  The
+    # reply below is REPRESENTATIVE of the wired gd32 HAL body with
+    # got(2) < max_bins(4) so the zero-pad tail is pinned, reusing the
+    # float-pattern convention already established by
+    # spi_tmu_compute_sqrt_f32_4p0_request (§6) -- it is not what the
+    # stub HAL backend answers today, which is STATUS_NOSUPPORT
+    # (handle_adc_spectrum_read special-cases BRIDGE_HW_ERR_NOTIMPL
+    # explicitly; see spi_reply_nosupport).
+    out.append((
+        "spi_adc_spectrum_read_stream0_request",
+        spi_frame(SOF, CMD_ADC_SPECTRUM_READ,
+                  bytes([0x00,             # stream_id = 0
+                         0x00, 0x00,       # bin_offset = 0 (LE)
+                         0x04,             # max_bins = 4
+                  ])).hex().upper(),
+        "SOF | CMD=0x3A | stream_id=0 | bin_offset=0 | max_bins=4 | CRC",
+    ))
+    out.append((
+        "spi_adc_spectrum_read_reply_example",
+        spi_frame(SOF, STATUS_OK,
+                  bytes([0x01, 0x00, 0x00, 0x00,   # seq = 1 (LE)
+                         0x0A, 0x00,               # total_bins = 10 (LE)
+                         0x02,                     # got = 2 (< max_bins=4)
+                         0x00, 0x00, 0x80, 0x40,   # bins[0] = 4.0f (LE 0x40800000)
+                         0x00, 0x00, 0x00, 0x41,   # bins[1] = 8.0f (LE 0x41000000)
+                         0x00, 0x00, 0x00, 0x00,   # bins[2] = 0 (zero-pad, i >= got)
+                         0x00, 0x00, 0x00, 0x00,   # bins[3] = 0 (zero-pad, i >= got)
+                  ])).hex().upper(),
+        "SOF | STATUS=0x00 | seq=1 (LE) | total_bins=10 (LE) | got=2 |"
+        " bins[0]=4.0f | bins[1]=8.0f | bins[2..3]=0 (zero-padded, i >="
+        " got) | CRC -- REPRESENTATIVE of the wired gd32 HAL body, not"
+        " the stub backend's STATUS_NOSUPPORT reply",
+    ))
+
     return out
 
 
@@ -628,7 +823,7 @@ def emit(vectors: list[tuple[str, str, str | None]]) -> str:
     chunks.append("\n# ---------------------------------------------------------------------")
     chunks.append("# §4. v0.2 additions -- DAC, quadrature encoder, free-running counter")
     chunks.append("# ---------------------------------------------------------------------")
-    for name, value, comment in vectors[9:15]:
+    for name, value, comment in vectors[9:17]:
         if comment:
             chunks.append(f"# {comment}")
         chunks.append(f"{name:<30} = {value}")
@@ -638,7 +833,7 @@ def emit(vectors: list[tuple[str, str, str | None]]) -> str:
     chunks.append("# §5. v0.3 additions -- GD32G5 HW knobs (PWM_CONFIGURE, ADC_CONFIGURE,")
     chunks.append("#                       ADC_STREAM_BEGIN / READ / END, TRNG_READ)")
     chunks.append("# ---------------------------------------------------------------------")
-    for name, value, comment in vectors[15:21]:
+    for name, value, comment in vectors[17:23]:
         if comment:
             chunks.append(f"# {comment}")
         chunks.append(f"{name:<30} = {value}")
@@ -647,7 +842,7 @@ def emit(vectors: list[tuple[str, str, str | None]]) -> str:
     chunks.append("\n# ---------------------------------------------------------------------")
     chunks.append("# §6. v0.4 additions -- GD32G5 TMU (CORDIC) math accelerator")
     chunks.append("# ---------------------------------------------------------------------")
-    for name, value, comment in vectors[21:22]:
+    for name, value, comment in vectors[23:24]:
         if comment:
             chunks.append(f"# {comment}")
         chunks.append(f"{name:<30} = {value}")
@@ -656,7 +851,7 @@ def emit(vectors: list[tuple[str, str, str | None]]) -> str:
     chunks.append("\n# ---------------------------------------------------------------------")
     chunks.append("# §7. v0.5 additions -- ADC-stream DSP pipeline (reserved opcode)")
     chunks.append("# ---------------------------------------------------------------------")
-    for name, value, comment in vectors[22:23]:
+    for name, value, comment in vectors[24:25]:
         if comment:
             chunks.append(f"# {comment}")
         chunks.append(f"{name:<30} = {value}")
@@ -665,7 +860,7 @@ def emit(vectors: list[tuple[str, str, str | None]]) -> str:
     chunks.append("\n# ---------------------------------------------------------------------")
     chunks.append("# §8. v0.5 additions (§2B.2) -- advanced timer extras")
     chunks.append("# ---------------------------------------------------------------------")
-    for name, value, comment in vectors[23:25]:
+    for name, value, comment in vectors[25:27]:
         if comment:
             chunks.append(f"# {comment}")
         chunks.append(f"{name:<30} = {value}")
@@ -674,7 +869,7 @@ def emit(vectors: list[tuple[str, str, str | None]]) -> str:
     chunks.append("\n# ---------------------------------------------------------------------")
     chunks.append("# §9. v0.5 additions (§2B.3) -- system power-mode set")
     chunks.append("# ---------------------------------------------------------------------")
-    for name, value, comment in vectors[25:26]:
+    for name, value, comment in vectors[27:28]:
         if comment:
             chunks.append(f"# {comment}")
         chunks.append(f"{name:<30} = {value}")
@@ -684,7 +879,7 @@ def emit(vectors: list[tuple[str, str, str | None]]) -> str:
     chunks.append("# §10. v0.5 additions (§2B wave-2) -- chunked DSP-chain upload")
     chunks.append("#       (CHAIN_OPEN / STAGE_PUSH / CHAIN_BIND)")
     chunks.append("# ---------------------------------------------------------------------")
-    for name, value, comment in vectors[26:29]:
+    for name, value, comment in vectors[28:31]:
         if comment:
             chunks.append(f"# {comment}")
         chunks.append(f"{name:<30} = {value}")
@@ -695,7 +890,7 @@ def emit(vectors: list[tuple[str, str, str | None]]) -> str:
     chunks.append("#       bridge (docs/gd32-bridge-protocol.md §10 Path A).  Unarmed")
     chunks.append("#       firmware replies STATUS_NOSUPPORT to every OTA opcode.")
     chunks.append("# ---------------------------------------------------------------------")
-    for name, value, comment in vectors[29:42]:
+    for name, value, comment in vectors[31:44]:
         if comment:
             chunks.append(f"# {comment}")
         chunks.append(f"{name:<30} = {value}")
@@ -705,7 +900,37 @@ def emit(vectors: list[tuple[str, str, str | None]]) -> str:
     chunks.append("# §12. v0.7 additions -- link-feature negotiation (CMD_LINK_FEATURES)")
     chunks.append("#       + the STATUS_SEQ stamped-reply framing (SPI only)")
     chunks.append("# ---------------------------------------------------------------------")
-    for name, value, comment in vectors[42:]:
+    for name, value, comment in vectors[44:47]:
+        if comment:
+            chunks.append(f"# {comment}")
+        chunks.append(f"{name:<30} = {value}")
+
+    # ----- §13 block -------------------------------------------------
+    chunks.append("\n# ---------------------------------------------------------------------")
+    chunks.append("# §13. Day-one opcode coverage (#31 E4) -- GET_BUILD_ID, RESET_REASON,")
+    chunks.append("#       GPIO_READ/WRITE, legacy PWM_SET/GET, ADC_READ,")
+    chunks.append("#       DA9292_STATUS_FORWARD")
+    chunks.append("# ---------------------------------------------------------------------")
+    for name, value, comment in vectors[47:58]:
+        if comment:
+            chunks.append(f"# {comment}")
+        chunks.append(f"{name:<30} = {value}")
+
+    # ----- §14 block -------------------------------------------------
+    chunks.append("\n# ---------------------------------------------------------------------")
+    chunks.append("# §14. v0.5 additions (§2B.2), continued (#31 E4) -- PWM_CAPTURE_READ/")
+    chunks.append("#       END, TIMER_SYNC")
+    chunks.append("# ---------------------------------------------------------------------")
+    for name, value, comment in vectors[58:61]:
+        if comment:
+            chunks.append(f"# {comment}")
+        chunks.append(f"{name:<30} = {value}")
+
+    # ----- §15 block -------------------------------------------------
+    chunks.append("\n# ---------------------------------------------------------------------")
+    chunks.append("# §15. CMD_ADC_SPECTRUM_READ (#496, #31 E2) -- FFT-chain bin readback")
+    chunks.append("# ---------------------------------------------------------------------")
+    for name, value, comment in vectors[61:63]:
         if comment:
             chunks.append(f"# {comment}")
         chunks.append(f"{name:<30} = {value}")
