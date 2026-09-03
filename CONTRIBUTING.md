@@ -61,9 +61,13 @@ commits die with the branch instead of becoming permanent history.
 ## Before you open a PR
 
 ```sh
-# stub build -- the same one CI runs. The gd32 backend needs the GD32 firmware
-# library, which this repo does not vendor, so this is the compile coverage
-# available to you.
+# stub build -- the same one CI runs. This repo does not vendor the GD32
+# firmware library, so the stub backend is the compile coverage available to
+# you locally without one; CI's `gd32 backend build` job fetches the real
+# library from the pinned public mirror and compiles the gd32 backend too --
+# see .github/workflows/ci.yml -- but that coverage is CI-only unless you
+# have your own copy of vendors/gd32_firmware_library (e.g. an alp-sdk
+# checkout) to point BRIDGE_HAL_BACKEND=gd32 at.
 cmake -B build/stub -S . -DBRIDGE_HAL_BACKEND=stub
 cmake --build build/stub
 
@@ -87,8 +91,13 @@ two should land close together. Say in your PR which alp-sdk PR pairs with it.
 ## Bench evidence is part of the change
 
 A patch that touches a transport, the OTA path, or a supervised output is **not
-reviewable without a bench run**. CI builds the stub backend; it cannot tell you
-whether the link survives, and it cannot tell you what a rail did.
+reviewable without a bench run**. CI's `gd32 backend build` job now compiles and
+links the real gd32 backend, including the armed OTA state machine and the
+bootloader, against the real GD32 firmware library -- so it can catch a wrong
+register name, bit width, or type. It cannot tell you whether the link
+survives on silicon, and it cannot tell you what a rail did: compile-and-link
+proves nothing about register *sequences*, timing, or electrical behaviour on
+real hardware.
 
 Paste the actual console output, not a summary:
 

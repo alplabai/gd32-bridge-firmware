@@ -32,6 +32,8 @@ host-side driver lives at [`chips/gd32g553/` (alp-sdk)](https://github.com/alpla
 firmware/gd32-bridge/
 ├── CMakeLists.txt          ← top-level build entry (host-built, cross-compiled)
 ├── README.md               ← this file
+├── ci/                     ← CI-only glue (e.g. the vendor-library wrapper CMakeLists
+│                              staged by the `gd32 backend build` job; not GigaDevice IP)
 ├── toolchain/              ← ARM-GCC + linker script for GD32G553MEY7TR
 ├── hal/                    ← thin shims around the GigaDevice firmware library
 ├── src/
