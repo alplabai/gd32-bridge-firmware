@@ -27,20 +27,102 @@
 
 /* --------------------------------------------------------------- */
 /* CRC-16 / CCITT-FALSE -- shared with transports.                   */
+/*                                                                    */
+/* Table-driven (#26, #104): this is the FRAMING CRC -- both          */
+/* transports call it TWICE per round trip (verify the request,      */
+/* compute the reply), on the path inside the SPI CS EXTI handler /   */
+/* the I2C ISR.  The previous bit-serial form cost 8 shift-and-branch */
+/* iterations per byte.  crc16_table[] below is the standard Sarwate  */
+/* byte-wise table, adapted for this CRC's non-reflected / MSB-first  */
+/* shape (poly 0x1021, init 0xFFFF, xor-out 0x0000) rather than       */
+/* copied from CRC-32's reflected construction (see crc32.c): the     */
+/* incoming byte combines with the crc's TOP byte, and the table is   */
+/* indexed by `(crc >> 8) ^ byte`.  Measured (arm-none-eabi-gcc       */
+/* 13.3.1, -mcpu=cortex-m33 -mthumb, disassembly of just this         */
+/* function): table-driven crc16_ccitt_false() is ~8.4x fewer         */
+/* instructions executed per byte at -Os than the bit-serial form it  */
+/* replaces (9 vs 76 -- PR #115's CRC-32 table win was ~5.75x, smaller */
+/* because that inner loop carries less per-bit overhead), at a cost  */
+/* of 512 B of .rodata.                                               */
+/*                                                                    */
+/* The table is GENERATED, not hand-typed: tools/gen_crc16_table.py   */
+/* produces the exact block between the clang-format fence below from */
+/* the polynomial alone, and its --check mode proves this checked-in  */
+/* copy still matches that output --                                  */
+/*     python3 tools/gen_crc16_table.py --check src/protocol.c        */
+/* -- so nobody has to eyeball 256 magic numbers and trust them.      */
+/* tools/test_gen_crc16_table.py runs that check under `python3 -m    */
+/* compileall`'s neighbourhood (byte-compiled by the python-lint CI   */
+/* job) and additionally as its own assertion.                        */
+/*                                                                    */
+/* Bit-identical to the bit-serial routine it replaces, proved         */
+/* exhaustively by tests/unit/crc16/src/test_crc16.c: the standard    */
+/* CRC-16/CCITT-FALSE check value 0x29B1 for "123456789", all 256     */
+/* single-byte inputs, and a set of multi-byte vectors -- against a   */
+/* reference implementation kept local to that test file, independent */
+/* of this one.  tests/protocol_vectors.txt (regenerated + diffed in  */
+/* CI) is the end-to-end proof: every pinned frame carries a real CRC */
+/* computed by tests/gen_protocol_vectors.py's own bit-serial Python  */
+/* copy, so a wrong table entry would show up there too.              */
+/*                                                                    */
+/* Kept IN this file rather than split into its own crc16.c/.h        */
+/* (unlike ota_crc32, which lives in crc32.c): alp-sdk's frame-fuzz   */
+/* harness (tests/fuzz/gd32_bridge_frame_fuzz.c, see this repo's      */
+/* README.md) links crc16_ccitt_false by compiling src/protocol.c     */
+/* directly, by hardcoded path, from a sibling repo this change does  */
+/* not touch -- moving the symbol out of protocol.c would silently    */
+/* break that build.                                                  */
+/*                                                                    */
+/* Checked in rather than computed at first use, for the same reason  */
+/* as crc32_table: this is ROM-resident .rodata with no boot-time     */
+/* budget to spend building a table before the first frame arrives.   */
+/*                                                                    */
+/* (The fence-post survives clang-format only because of the          */
+/* "clang-format off/on" markers -- see crc32.c for why.)             */
 /* --------------------------------------------------------------- */
+
+/* clang-format off */
+static const uint16_t crc16_table[256] = {
+	0x0000u, 0x1021u, 0x2042u, 0x3063u, 0x4084u, 0x50A5u, 0x60C6u, 0x70E7u,
+	0x8108u, 0x9129u, 0xA14Au, 0xB16Bu, 0xC18Cu, 0xD1ADu, 0xE1CEu, 0xF1EFu,
+	0x1231u, 0x0210u, 0x3273u, 0x2252u, 0x52B5u, 0x4294u, 0x72F7u, 0x62D6u,
+	0x9339u, 0x8318u, 0xB37Bu, 0xA35Au, 0xD3BDu, 0xC39Cu, 0xF3FFu, 0xE3DEu,
+	0x2462u, 0x3443u, 0x0420u, 0x1401u, 0x64E6u, 0x74C7u, 0x44A4u, 0x5485u,
+	0xA56Au, 0xB54Bu, 0x8528u, 0x9509u, 0xE5EEu, 0xF5CFu, 0xC5ACu, 0xD58Du,
+	0x3653u, 0x2672u, 0x1611u, 0x0630u, 0x76D7u, 0x66F6u, 0x5695u, 0x46B4u,
+	0xB75Bu, 0xA77Au, 0x9719u, 0x8738u, 0xF7DFu, 0xE7FEu, 0xD79Du, 0xC7BCu,
+	0x48C4u, 0x58E5u, 0x6886u, 0x78A7u, 0x0840u, 0x1861u, 0x2802u, 0x3823u,
+	0xC9CCu, 0xD9EDu, 0xE98Eu, 0xF9AFu, 0x8948u, 0x9969u, 0xA90Au, 0xB92Bu,
+	0x5AF5u, 0x4AD4u, 0x7AB7u, 0x6A96u, 0x1A71u, 0x0A50u, 0x3A33u, 0x2A12u,
+	0xDBFDu, 0xCBDCu, 0xFBBFu, 0xEB9Eu, 0x9B79u, 0x8B58u, 0xBB3Bu, 0xAB1Au,
+	0x6CA6u, 0x7C87u, 0x4CE4u, 0x5CC5u, 0x2C22u, 0x3C03u, 0x0C60u, 0x1C41u,
+	0xEDAEu, 0xFD8Fu, 0xCDECu, 0xDDCDu, 0xAD2Au, 0xBD0Bu, 0x8D68u, 0x9D49u,
+	0x7E97u, 0x6EB6u, 0x5ED5u, 0x4EF4u, 0x3E13u, 0x2E32u, 0x1E51u, 0x0E70u,
+	0xFF9Fu, 0xEFBEu, 0xDFDDu, 0xCFFCu, 0xBF1Bu, 0xAF3Au, 0x9F59u, 0x8F78u,
+	0x9188u, 0x81A9u, 0xB1CAu, 0xA1EBu, 0xD10Cu, 0xC12Du, 0xF14Eu, 0xE16Fu,
+	0x1080u, 0x00A1u, 0x30C2u, 0x20E3u, 0x5004u, 0x4025u, 0x7046u, 0x6067u,
+	0x83B9u, 0x9398u, 0xA3FBu, 0xB3DAu, 0xC33Du, 0xD31Cu, 0xE37Fu, 0xF35Eu,
+	0x02B1u, 0x1290u, 0x22F3u, 0x32D2u, 0x4235u, 0x5214u, 0x6277u, 0x7256u,
+	0xB5EAu, 0xA5CBu, 0x95A8u, 0x8589u, 0xF56Eu, 0xE54Fu, 0xD52Cu, 0xC50Du,
+	0x34E2u, 0x24C3u, 0x14A0u, 0x0481u, 0x7466u, 0x6447u, 0x5424u, 0x4405u,
+	0xA7DBu, 0xB7FAu, 0x8799u, 0x97B8u, 0xE75Fu, 0xF77Eu, 0xC71Du, 0xD73Cu,
+	0x26D3u, 0x36F2u, 0x0691u, 0x16B0u, 0x6657u, 0x7676u, 0x4615u, 0x5634u,
+	0xD94Cu, 0xC96Du, 0xF90Eu, 0xE92Fu, 0x99C8u, 0x89E9u, 0xB98Au, 0xA9ABu,
+	0x5844u, 0x4865u, 0x7806u, 0x6827u, 0x18C0u, 0x08E1u, 0x3882u, 0x28A3u,
+	0xCB7Du, 0xDB5Cu, 0xEB3Fu, 0xFB1Eu, 0x8BF9u, 0x9BD8u, 0xABBBu, 0xBB9Au,
+	0x4A75u, 0x5A54u, 0x6A37u, 0x7A16u, 0x0AF1u, 0x1AD0u, 0x2AB3u, 0x3A92u,
+	0xFD2Eu, 0xED0Fu, 0xDD6Cu, 0xCD4Du, 0xBDAAu, 0xAD8Bu, 0x9DE8u, 0x8DC9u,
+	0x7C26u, 0x6C07u, 0x5C64u, 0x4C45u, 0x3CA2u, 0x2C83u, 0x1CE0u, 0x0CC1u,
+	0xEF1Fu, 0xFF3Eu, 0xCF5Du, 0xDF7Cu, 0xAF9Bu, 0xBFBAu, 0x8FD9u, 0x9FF8u,
+	0x6E17u, 0x7E36u, 0x4E55u, 0x5E74u, 0x2E93u, 0x3EB2u, 0x0ED1u, 0x1EF0u,
+};
+/* clang-format on */
 
 uint16_t crc16_ccitt_false(const uint8_t *buf, size_t len)
 {
 	uint16_t crc = 0xFFFFu;
 	for (size_t i = 0; i < len; ++i) {
-		crc ^= (uint16_t)buf[i] << 8;
-		for (unsigned b = 0; b < 8; ++b) {
-			if (crc & 0x8000u) {
-				crc = (uint16_t)((crc << 1) ^ 0x1021u);
-			} else {
-				crc <<= 1;
-			}
-		}
+		crc = (uint16_t)((crc << 8) ^ crc16_table[((crc >> 8) ^ buf[i]) & 0xFFu]);
 	}
 	return crc;
 }
@@ -85,6 +167,13 @@ static void put_le32(uint8_t *p, uint32_t v)
 /* --------------------------------------------------------------- */
 /* Per-opcode handlers                                                */
 /* --------------------------------------------------------------- */
+
+/* Translate a BRIDGE_HW_ERR_* return into a STATUS_*.  Centralised so
+ * every handler below reports the same code for the same HAL error --
+ * forward-declared here (defined with the v0.5 handler set) so the
+ * legacy handlers earlier in this file can route through it instead
+ * of hand-rolling their own STATUS_IO-flattening ladder (#23). */
+static gd32_bridge_status_t status_from_hw(int rv);
 
 static gd32_bridge_status_t
 handle_ping(const uint8_t *req, size_t req_len, uint8_t *reply, size_t reply_cap, size_t *reply_len)
@@ -192,9 +281,7 @@ static gd32_bridge_status_t handle_pwm_set(const uint8_t *req,
 	const uint32_t duty_ns   = get_le32(&req[6]);
 	if (duty_ns > period_ns) return STATUS_INVAL;
 	const int rv = bridge_hw_pwm_set(channel, period_ns, duty_ns);
-	if (rv == BRIDGE_HW_ERR_RANGE) return STATUS_OUT_OF_RANGE;
-	if (rv == BRIDGE_HW_ERR_INVAL) return STATUS_INVAL;
-	if (rv < 0) return STATUS_IO;
+	if (rv != BRIDGE_HW_OK) return status_from_hw(rv);
 	*reply_len = 0u;
 	return STATUS_OK;
 }
@@ -210,8 +297,7 @@ static gd32_bridge_status_t handle_pwm_get(const uint8_t *req,
 	uint32_t  period_ns = 0u;
 	uint32_t  duty_ns   = 0u;
 	const int rv        = bridge_hw_pwm_get(req[0], &period_ns, &duty_ns);
-	if (rv == BRIDGE_HW_ERR_INVAL) return STATUS_INVAL;
-	if (rv < 0) return STATUS_IO;
+	if (rv != BRIDGE_HW_OK) return status_from_hw(rv);
 	put_le32(&reply[0], period_ns);
 	put_le32(&reply[4], duty_ns);
 	*reply_len = 8u;
@@ -241,8 +327,7 @@ static gd32_bridge_status_t handle_adc_read(const uint8_t *req,
 	reply[0] = samples; /* echoes back the (validated) value */
 	uint16_t  mv[GD32_BRIDGE_ADC_MAX_SAMPLES];
 	const int rv = bridge_hw_adc_read(channel, samples, mv);
-	if (rv == BRIDGE_HW_ERR_INVAL) return STATUS_INVAL;
-	if (rv < 0) return STATUS_IO;
+	if (rv != BRIDGE_HW_OK) return status_from_hw(rv);
 	for (uint8_t i = 0u; i < samples; ++i) {
 		reply[1u + i * 2u]      = (uint8_t)(mv[i] & 0xFFu);
 		reply[1u + i * 2u + 1u] = (uint8_t)((mv[i] >> 8) & 0xFFu);
@@ -493,11 +578,11 @@ static gd32_bridge_status_t handle_adc_stream_read(const uint8_t *req,
 	if (rv == BRIDGE_HW_ERR_NOTIMPL) return STATUS_NOSUPPORT;
 	/* Ring overrun (the DMA writer lapped the host's read cursor):
      * the documented wire answer is STATUS_BUSY -- "host should poll
-     * faster" (docs/gd32-bridge-protocol.md §3.10).  The HAL has
+     * faster" (alp-sdk docs/gd32-bridge-protocol.md §3.10).  The HAL has
      * already dropped the corrupt backlog and resynced its cursor,
      * so the next READ returns fresh samples. */
 	if (rv == BRIDGE_HW_ERR_BUSY) return STATUS_BUSY;
-	if (rv < 0) return STATUS_IO;
+	if (rv != BRIDGE_HW_OK) return status_from_hw(rv);
 	if (got > max_samples) return STATUS_IO; /* HAL contract violation */
 
 	const size_t need = 1u + (size_t)max_samples * 2u;
@@ -586,10 +671,6 @@ static gd32_bridge_status_t handle_adc_stream_end(const uint8_t *req,
 	return STATUS_OK;
 }
 
-/* Defined with the v0.5 handler set below; the TRNG handler (v0.4)
- * shares the central mapping for its BUSY/IO discrimination. */
-static gd32_bridge_status_t status_from_hw(int rv);
-
 static gd32_bridge_status_t handle_trng_read(const uint8_t *req,
                                              size_t         req_len,
                                              uint8_t       *reply,
@@ -640,14 +721,14 @@ static gd32_bridge_status_t handle_tmu_compute(const uint8_t *req,
 /* ----------------------------------------------------------------- */
 /* v0.5 (§2B.2) -- advanced timer extras                              */
 /*                                                                    */
-/* Wire frames per docs/gd32-bridge-protocol.md §3.y.  Every handler  */
-/* validates the request payload length, calls into the HAL hook,    */
-/* and maps the BRIDGE_HW_ERR_* return into the on-wire STATUS_*     */
-/* code.  On the stub backend (bridge_hw_stub.c) all of these return */
-/* BRIDGE_HW_ERR_NOTIMPL -- which protocol_dispatch maps to          */
-/* STATUS_NOSUPPORT on the wire -- so host code sees a precise       */
-/* NOSUPPORT contract; the gd32 backend's real bodies live in the    */
-/* per-peripheral TUs under hal/gd32/.                                */
+/* Wire frames per alp-sdk docs/gd32-bridge-protocol.md §3.y.  Every  */
+/* handler validates the request payload length, calls into the HAL  */
+/* hook, and maps the BRIDGE_HW_ERR_* return into the on-wire        */
+/* STATUS_* code.  On the stub backend (bridge_hw_stub.c) all of     */
+/* these return BRIDGE_HW_ERR_NOTIMPL -- which protocol_dispatch     */
+/* maps to STATUS_NOSUPPORT on the wire -- so host code sees a       */
+/* precise NOSUPPORT contract; the gd32 backend's real bodies live   */
+/* in the per-peripheral TUs under hal/gd32/.                        */
 /* ----------------------------------------------------------------- */
 
 /* Translate a BRIDGE_HW_ERR_* return into a STATUS_*.  Centralised so
@@ -770,7 +851,7 @@ static gd32_bridge_status_t handle_power_mode_set(const uint8_t *req,
 /* ----------------------------------------------------------------- */
 /* v0.5 (§2B wave-2) -- chunked DSP-chain upload                      */
 /*                                                                    */
-/* Wire frames per docs/gd32-bridge-protocol.md §3.x.                 */
+/* Wire frames per alp-sdk docs/gd32-bridge-protocol.md §3.x.         */
 /* ----------------------------------------------------------------- */
 
 static gd32_bridge_status_t handle_adc_dsp_chain_open(const uint8_t *req,

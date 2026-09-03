@@ -4,14 +4,25 @@
 #
 # What this CAN check, and what it deliberately cannot:
 #
-#   * The `gd32` backend needs the GD32 firmware library, which this repo does
-#     not vendor (CMakeLists.txt looks for it outside the tree).  CI builds the
-#     `stub` backend, which compiles every protocol/dispatch/OTA source; only
-#     the hardware-touching HAL is replaced.  That catches what actually breaks
-#     here: a wire change that does not compile, a handler that stops matching
-#     its table entry, an OTA path that stops building.
-#   * On-silicon behaviour is NOT covered.  The bridge talks SPI and I2C to a
-#     Renesas RZ/V2N on a real SoM; nothing here substitutes for a bench run.
+#   * The `stub` backend job compiles every protocol/dispatch source with the
+#     hardware-touching HAL replaced by hal/bridge_hw_stub.c.  src/ota.c's
+#     armed state machine is gated by BRIDGE_OTA_PARTITIONED (CMakeLists.txt),
+#     which defaults OFF and is preprocessed away to a 22-line inert stub
+#     when unset -- that job alone does NOT compile the OTA state machine.
+#     BRIDGE_HAL_BACKEND=stub only forces this transitively: CMakeLists.txt
+#     FATAL_ERRORs if BRIDGE_OTA_PARTITIONED=ON is combined with the stub
+#     backend, since the armed OTA path needs the real gd32 HAL to flash.
+#   * The `gd32 backend build` job (below) stages the real GD32 firmware
+#     library from the pinned public mirror
+#     https://github.com/alplabai/gd32g5x3-firmware-library and configures
+#     -DBRIDGE_HAL_BACKEND=gd32 -DBRIDGE_OTA_PARTITIONED=ON, which compiles
+#     and links every hal/gd32/*.c file, hal/transport_hw_gd32.c,
+#     hal/fmc_ota.c, src/ota.c's real armed state machine, and
+#     src/boot/boot_main.c -- the layer no other job here touches.
+#     Compile-and-link only; it proves nothing about on-silicon behaviour.
+#   * On-silicon behaviour is NOT covered by any job here.  The bridge talks
+#     SPI and I2C to a Renesas RZ/V2N on a real SoM; nothing here substitutes
+#     for a bench run.
 #
 # The protocol vectors ARE checked, and that is the strongest gate available
 # without hardware: tests/gen_protocol_vectors.py is the authoritative source
@@ -79,13 +90,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # These suites link the REAL firmware sources -- ota.c, crc32.c,
-      # transport_spi.c, protocol.c, bootloader.c -- not mocks, so the OTA
-      # bounds checks and the SPI CS-framing seams under test are the same code
-      # paths the device runs.  They came from alp-sdk, where they ran under
-      # twister; the firmware moved here (alp-sdk ADR 0031) and the tests moved
-      # with it, because a test that lives in a different repository from its
-      # subject is a test nobody runs.
+      # Four suites, all linking the REAL firmware sources -- ota.c, crc32.c,
+      # transport_spi.c, transport_i2c.c, protocol.c, bootloader.c -- so the OTA
+      # bounds checks and the CS/register framing seams under test are the same
+      # code paths the device runs.  ota, transport_spi and transport_i2c link
+      # hal/bridge_hw_stub.c and are mock-free end to end.
+      #
+      # The `protocol` suite is the deliberate exception: it links
+      # tests/unit/fake/bridge_hw_fake.c INSTEAD of the stub.  The stub answers
+      # BRIDGE_HW_ERR_NOTIMPL for nearly everything, so only about two hardware
+      # opcodes can ever reach STATUS_OK through it -- which left src/protocol.c's
+      # reply encoding and its BRIDGE_HW_ERR_* -> STATUS_* ladders unreachable
+      # from any host test.  The fake is injectable (a forced return code per
+      # function) and resettable, so that suite trades the real HAL for
+      # reachability.  It is test-only and lives under tests/unit/ so no firmware
+      # build can pick it up.
+      #
+      # The first two suites came from alp-sdk, where they ran under twister; the
+      # firmware moved here (alp-sdk ADR 0031) and the tests moved with it,
+      # because a test that lives in a different repository from its subject is a
+      # test nobody runs.
       #
       # Host-only, no Zephyr: the code under test is freestanding C, and only
       # the ztest harness was ever Zephyr-specific.  tests/unit/ztest_shim.h
@@ -181,3 +205,120 @@ jobs:
       # time unless something checks it.
       - name: byte-compile
         run: python3 -m compileall -q tests tools
+
+  gd32-backend-build:
+    name: gd32 backend build
+    runs-on: ubuntu-latest
+    steps:
+      # No CI job compiles hal/gd32/*.c, hal/fmc_ota.c, src/ota.c's real armed
+      # state machine, or src/boot/boot_main.c (Refs #77, #31 E1) -- the
+      # stub-build job above replaces the hardware HAL and never enables
+      # BRIDGE_OTA_PARTITIONED. This job builds them for real, against the
+      # real GD32 firmware library.  Compile-and-link only: it proves a
+      # register name, a bit width, or a type is right enough to build --
+      # NOT that the register sequence is correct on real silicon.  Nothing
+      # here is a substitute for a bench run, and this job intentionally
+      # carries no `needs-silicon` label.
+      #
+      # Checked out at $GITHUB_WORKSPACE/firmware/gd32-bridge, i.e. two
+      # levels below $GITHUB_WORKSPACE, where the vendor tree gets staged
+      # below -- so CMakeLists.txt's existing hardcoded fallback
+      # (CMAKE_CURRENT_SOURCE_DIR/../../vendors/gd32_firmware_library, the
+      # pre-split alp-sdk layout) resolves with NO CMakeLists.txt change.
+      # This job does not depend on PR #67's GD32_VENDOR_DIR cache-variable
+      # override landing first; see the PR body for why.
+      - uses: actions/checkout@v4
+        with:
+          path: firmware/gd32-bridge
+
+      # ci/gd32_vendor_wrapper/CMakeLists.txt is this repo's own Apache-2.0
+      # glue (a copy of alp-sdk's vendors/gd32_firmware_library/CMakeLists.txt
+      # wrapper) -- it is NOT GigaDevice IP and carries no vendor licence
+      # terms.  Stage it at the fallback path the real wrapper normally
+      # occupies.
+      - name: stage the vendor wrapper CMakeLists
+        run: |
+          set -euo pipefail
+          mkdir -p vendors/gd32_firmware_library
+          cp firmware/gd32-bridge/ci/gd32_vendor_wrapper/CMakeLists.txt \
+             vendors/gd32_firmware_library/CMakeLists.txt
+
+      # The actual GD32G5x3 firmware library IS GigaDevice IP, redistributed
+      # under SLA-GD0001 v1.1 -- see that licence's terms, quoted in full in
+      # this repo's PR body and in alp-sdk's vendors/gd32_firmware_library/
+      # README.md.  It is not vendored into any repo's main tree; fetched
+      # here from the pinned public mirror alp-sdk itself pins as a
+      # submodule, at the immutable commit alp-sdk's gitlink points to --
+      # NOT by tag: `git clone --branch` resolves a mutable annotated tag
+      # (or a same-named branch, silently preferred if one ever exists),
+      # so anyone with push to the mirror could retarget what this
+      # required check compiles with no diff in this repo. The clone still
+      # requests the tag (cheap, shallow, matches today's history), but the
+      # checkout below fails closed if that tag no longer points where
+      # alp-sdk's .gitmodules says it does.
+      - name: fetch the GD32 vendor firmware library (pinned commit, via tag)
+        timeout-minutes: 5
+        env:
+          GD32_VENDOR_PIN: 4a0258080c45227a31fd4c32fa2c4860ba11c16a
+        run: |
+          set -euo pipefail
+          git clone --branch v1.5.0 --depth 1 \
+            https://github.com/alplabai/gd32g5x3-firmware-library.git \
+            vendors/gd32_firmware_library/upstream
+          actual="$(git -C vendors/gd32_firmware_library/upstream rev-parse HEAD)"
+          if [ "$actual" != "$GD32_VENDOR_PIN" ]; then
+            echo "::error::vendor firmware library HEAD is $actual, expected $GD32_VENDOR_PIN -- tag v1.5.0 no longer points at the commit alp-sdk's .gitmodules pins. Update GD32_VENDOR_PIN here in lockstep with any deliberate alp-sdk submodule bump; otherwise this is a moved tag and the build must not proceed."
+            exit 1
+          fi
+
+      # Same install as the stub-build job above, INCLUDING the newlib-header
+      # preflight: libnewlib-arm-none-eabi is a separate Debian/Ubuntu
+      # package from gcc-arm-none-eabi, and without it the first
+      # #include <string.h> here fails with a confusing "No such file or
+      # directory" that reads like a source bug in this job's own code.
+      - name: install the Arm GNU toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            gcc-arm-none-eabi libnewlib-arm-none-eabi
+          arm-none-eabi-gcc --version | head -1
+          printf '#include <string.h>\nint main(void){return 0;}\n' > /tmp/hdr.c
+          arm-none-eabi-gcc -mcpu=cortex-m33 -mthumb -c /tmp/hdr.c -o /tmp/hdr.o
+          echo "newlib headers reachable"
+
+      # BRIDGE_OTA_PARTITIONED=ON, with the gd32 backend, builds THREE
+      # targets from one configure: gd32-bridge-slot-a and
+      # gd32-bridge-slot-b (both compile src/ota.c's real BEGIN / WRITE_CHUNK
+      # / VERIFY / COMMIT / ROLLBACK / GET_STATE / ABORT machine, since
+      # BRIDGE_OTA_PARTITIONED is defined for them and src/ota.c:56-482 is no
+      # longer preprocessed out), and gd32-bootloader (the only target that
+      # compiles src/boot/boot_main.c).  All three share
+      # CMakeLists.txt's GD32_BRIDGE_SOURCES list, so this single configure
+      # also compiles every hal/gd32/*.c file and hal/transport_hw_gd32.c.
+      - name: configure (gd32 backend, OTA partitioned)
+        working-directory: firmware/gd32-bridge
+        run: |
+          cmake -B build-gd32 -S . \
+            -DCMAKE_TOOLCHAIN_FILE=toolchain/arm-none-eabi.cmake \
+            -DBRIDGE_HAL_BACKEND=gd32 \
+            -DBRIDGE_OTA_PARTITIONED=ON
+
+      - name: build
+        working-directory: firmware/gd32-bridge
+        run: cmake --build build-gd32 -j"$(nproc)"
+
+      # BRIDGE_OTA_PARTITIONED defaults OFF: that's the non-partitioned
+      # `gd32-bridge` target linked against toolchain/gd32g553_flash.ld --
+      # the image actually flashed to the bench -- and no other job here
+      # links it against the gd32 backend. Same vendor fetch already staged
+      # above; one extra configure+build closes that gap.
+      - name: configure (gd32 backend, full-flash / non-partitioned)
+        working-directory: firmware/gd32-bridge
+        run: |
+          cmake -B build-gd32-flash -S . \
+            -DCMAKE_TOOLCHAIN_FILE=toolchain/arm-none-eabi.cmake \
+            -DBRIDGE_HAL_BACKEND=gd32
+
+      - name: build (full-flash)
+        working-directory: firmware/gd32-bridge
+        run: cmake --build build-gd32-flash -j"$(nproc)"

@@ -1,7 +1,14 @@
-# Build artifacts from the CMake builds.
-build/
+# Build artifacts from the CMake builds. The trailing `*` catches every
+# out-of-tree name in use here, not just the literal `build/`: this repo's
+# own `build-tests/` (host unit suites), CONTRIBUTING.md's documented
+# `build/stub`, and sibling forms such as `build-gd32/`.
+build*/
 
 # Cygwin/MSYS crash dumps -- `git add -A` on the Windows bench has swept these
 # into history in sibling repos.
 *.stackdump
-build-tests/
+
+# Python bytecode cache. `tests/gen_protocol_vectors.py` and
+# `python3 -m compileall -q tests tools` both create these under tests/ and
+# tools/.
+__pycache__/
