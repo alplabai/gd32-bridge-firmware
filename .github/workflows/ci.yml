@@ -5,10 +5,13 @@
 # What this CAN check, and what it deliberately cannot:
 #
 #   * The `stub` backend job compiles every protocol/dispatch source with the
-#     hardware-touching HAL replaced by hal/bridge_hw_stub.c.  With
-#     BRIDGE_HAL_BACKEND=stub (the CMake default), src/ota.c's armed state
-#     machine is preprocessed away to a 22-line inert stub -- that job alone
-#     does NOT compile the OTA state machine.
+#     hardware-touching HAL replaced by hal/bridge_hw_stub.c.  src/ota.c's
+#     armed state machine is gated by BRIDGE_OTA_PARTITIONED (CMakeLists.txt),
+#     which defaults OFF and is preprocessed away to a 22-line inert stub
+#     when unset -- that job alone does NOT compile the OTA state machine.
+#     BRIDGE_HAL_BACKEND=stub only forces this transitively: CMakeLists.txt
+#     FATAL_ERRORs if BRIDGE_OTA_PARTITIONED=ON is combined with the stub
+#     backend, since the armed OTA path needs the real gd32 HAL to flash.
 #   * The `gd32 backend build` job (below) stages the real GD32 firmware
 #     library from the pinned public mirror
 #     https://github.com/alplabai/gd32g5x3-firmware-library and configures
@@ -232,20 +235,43 @@ jobs:
       # this repo's PR body and in alp-sdk's vendors/gd32_firmware_library/
       # README.md.  It is not vendored into any repo's main tree; fetched
       # here from the pinned public mirror alp-sdk itself pins as a
-      # submodule, by TAG (v1.5.0), never a moving branch.
-      - name: fetch the GD32 vendor firmware library (v1.5.0, pinned by tag)
+      # submodule, at the immutable commit alp-sdk's gitlink points to --
+      # NOT by tag: `git clone --branch` resolves a mutable annotated tag
+      # (or a same-named branch, silently preferred if one ever exists),
+      # so anyone with push to the mirror could retarget what this
+      # required check compiles with no diff in this repo. The clone still
+      # requests the tag (cheap, shallow, matches today's history), but the
+      # checkout below fails closed if that tag no longer points where
+      # alp-sdk's .gitmodules says it does.
+      - name: fetch the GD32 vendor firmware library (pinned commit, via tag)
+        timeout-minutes: 5
+        env:
+          GD32_VENDOR_PIN: 4a0258080c45227a31fd4c32fa2c4860ba11c16a
         run: |
+          set -euo pipefail
           git clone --branch v1.5.0 --depth 1 \
             https://github.com/alplabai/gd32g5x3-firmware-library.git \
             vendors/gd32_firmware_library/upstream
+          actual="$(git -C vendors/gd32_firmware_library/upstream rev-parse HEAD)"
+          if [ "$actual" != "$GD32_VENDOR_PIN" ]; then
+            echo "::error::vendor firmware library HEAD is $actual, expected $GD32_VENDOR_PIN -- tag v1.5.0 no longer points at the commit alp-sdk's .gitmodules pins. Update GD32_VENDOR_PIN here in lockstep with any deliberate alp-sdk submodule bump; otherwise this is a moved tag and the build must not proceed."
+            exit 1
+          fi
 
-      # Same install as the stub-build job above.
+      # Same install as the stub-build job above, INCLUDING the newlib-header
+      # preflight: libnewlib-arm-none-eabi is a separate Debian/Ubuntu
+      # package from gcc-arm-none-eabi, and without it the first
+      # #include <string.h> here fails with a confusing "No such file or
+      # directory" that reads like a source bug in this job's own code.
       - name: install the Arm GNU toolchain
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             gcc-arm-none-eabi libnewlib-arm-none-eabi
           arm-none-eabi-gcc --version | head -1
+          printf '#include <string.h>\nint main(void){return 0;}\n' > /tmp/hdr.c
+          arm-none-eabi-gcc -mcpu=cortex-m33 -mthumb -c /tmp/hdr.c -o /tmp/hdr.o
+          echo "newlib headers reachable"
 
       # BRIDGE_OTA_PARTITIONED=ON, with the gd32 backend, builds THREE
       # targets from one configure: gd32-bridge-slot-a and
@@ -267,3 +293,19 @@ jobs:
       - name: build
         working-directory: firmware/gd32-bridge
         run: cmake --build build-gd32 -j"$(nproc)"
+
+      # BRIDGE_OTA_PARTITIONED defaults OFF: that's the non-partitioned
+      # `gd32-bridge` target linked against toolchain/gd32g553_flash.ld --
+      # the image actually flashed to the bench -- and no other job here
+      # links it against the gd32 backend. Same vendor fetch already staged
+      # above; one extra configure+build closes that gap.
+      - name: configure (gd32 backend, full-flash / non-partitioned)
+        working-directory: firmware/gd32-bridge
+        run: |
+          cmake -B build-gd32-flash -S . \
+            -DCMAKE_TOOLCHAIN_FILE=toolchain/arm-none-eabi.cmake \
+            -DBRIDGE_HAL_BACKEND=gd32
+
+      - name: build (full-flash)
+        working-directory: firmware/gd32-bridge
+        run: cmake --build build-gd32-flash -j"$(nproc)"

@@ -6,8 +6,10 @@
 
 <!--
 REQUIRED for any change touching a transport, the OTA path, or a supervised
-output (rail, reset, PWM). CI builds the stub backend only -- it cannot tell you
-whether the link survives, and it certainly cannot tell you what a rail did.
+output (rail, reset, PWM). CI's `gd32 backend build` job compiles and links
+the real gd32 backend against the real GD32 firmware library, but that is
+compile-and-link only -- it cannot tell you whether the link survives on
+silicon, and it certainly cannot tell you what a rail did.
 
 Paste the actual console output, not a summary. Include BOTH sides where the
 change has two (host counters and firmware counters together).
