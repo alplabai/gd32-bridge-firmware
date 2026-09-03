@@ -194,10 +194,20 @@ int bridge_hw_tmu_compute(uint8_t   function,
 /* --------------------------------------------------------------- */
 
 /* Set the @p channel DAC output to @p value_mv (millivolts).  The
- * firmware rounds to its hardware-achievable resolution. */
+ * firmware rounds to its hardware-achievable resolution, AND clamps
+ * into the output buffer's achievable window -- 200 mV to (VREF_mV -
+ * 200 mV) on the GD32G5x3's buffered DAC channels (Datasheet Rev2.0
+ * p.136 Table 4-42) -- before programming the code, so a request
+ * outside that window is answered STATUS_OK but programs the nearest
+ * reachable edge, not the requested value.  bridge_hw_dac_get is the
+ * only way the host learns that happened (gd32-bridge-firmware#45). */
 int bridge_hw_dac_set(uint8_t channel, uint16_t value_mv);
 
-/* Read back the currently-programmed @p channel DAC output in mV. */
+/* Read back the currently-programmed @p channel DAC output in mV --
+ * the digital code the DAC is converting (User Manual Rev1.2 p.484
+ * DAC_OUTx_DO), not a measurement of the pad.  Reflects any clamp
+ * bridge_hw_dac_set applied, so this is how the host discovers that a
+ * requested value_mv landed outside the buffer's achievable window. */
 int bridge_hw_dac_get(uint8_t channel, uint16_t *value_mv);
 
 /* --------------------------------------------------------------- */

@@ -283,56 +283,47 @@ void bridge_hw_init(void)
 
 	/* Analog REFERENCE bring-up -- MUST precede any ADC/DAC use.
      *
-     * On this module revision the converters' reference node is served
-     * by the GD32's ON-CHIP reference buffer -- there is no external
-     * reference source (hardware rationale in the internal bench
-     * notes).  At reset VREF_CS defaults to 0x02 (HIPM high-impedance):
-     * the buffer is parked, the reference node is undriven, and EVERY
-     * ADC channel + both DACs reference a dead node -- the entire
-     * analog subsystem read garbage/zero (silently, since the old ADC
-     * assertions were ceiling-only and DAC_GET echoes the digital hold
-     * register, not the pad).
+     * v0.2.8..this commit drove the on-chip VREF buffer at its 2.048 V
+     * target (VREFEN=1, HIPM=0, VREFS[1:0]=00) on the strength of a
+     * DAC->ADC copper-loopback bench check.  That is out of spec:
+     * Datasheet Rev2.0 p.109 Table 4-3, VDDA row, condition "VREFBUF
+     * used", requires VDDA >= VREFP+0.3 -- at the 2.048 V target that
+     * is VDDA >= 2.348 V, and the V2N's analog rail is 1.8 V (the same
+     * maintainer-confirmed figure ADC_VREF_MV / DAC_VREF_MV assume,
+     * gd32_common.h).  The buffer cannot regulate above its own supply,
+     * so VREFP settled at an UNSPECIFIED voltage -- neither 1.8 V nor
+     * 2.048 V -- and the loopback's ratiometric cancellation hid
+     * exactly that (alp-sdk-internal gd32-bridge-firmware#59).
      *
-     * Fix: enable the buffer.  Its three targets (2.048 / 2.5 /
-     * 2.9 V) all exceed the module's 1.8 V VDDA, so the buffer
-     * regulates as high as the rail allows (~VDDA); the lowest
-     * target (2.048 V) is the closest fit and least headroom stress.
-     * Bench-proven: VREFEN -> VREFRDY sets, and a DAC->ADC copper
-     * loopback then tracks 1:1 (DAC 2730 -> ADC 2730).  The reference
-     * cancels ratiometrically in that loop, so correctness is
-     * independent of the exact railed reference value; the absolute mV
-     * scale (ADC_VREF_MV / DAC_VREF_MV) tracks the railed VDDA.
+     * Fix: leave VREF_CS at its POR value, 0x0000 0002 (VREFEN=0,
+     * HIPM=1 -- external voltage reference mode, User Manual Rev1.2
+     * p.520 Table 20-1).  Table 4-3's VREFBUF-used VDDA floor does not
+     * apply when the buffer is off; the applicable row (ADC used,
+     * fADCMAX <= 50 MHz) only requires VDDA >= 1.71 V, which the 1.8 V
+     * rail clears.  DO NOT write VREFEN=0 with HIPM=0 to "simplify"
+     * this further -- that is Table 20-1's FIRST row, "VREF disabled,
+     * VREFP pin pulled-down to VSSA", which grounds the node and is
+     * strictly worse than either state above.  Just don't touch
+     * VREF_CS at all and the reset value holds.
      *
-     * VREFRDY wait is BOUNDED (boot-time, no SysTick yet): a spin
-     * cap, not an unbounded poll -- a never-ready buffer must not hang
-     * the bridge before the transports come online. */
-	rcu_periph_clock_enable(RCU_VREF);
-	vref_voltage_select(VREF_VOLTAGE_SEL_2_048V); /* lowest target = closest under VDDA */
-	/* CLEAR HIPM first.  VREF_CS resets to 0x02 (HIPM high-impedance),
-     * and the SPL's vref_enable() is a read-modify-write that only
-     * sets VREFEN -- it PRESERVES the reset HIPM bit, leaving the
-     * buffer output high-Z so VREFRDY never sets and the reference
-     * node stays dead (silicon-caught 2026-06-05: VREF_CS read 0x03 =
-     * VREFEN|HIPM, ADC still zero).  HIPM must be cleared for the
-     * buffer to drive the node. */
-	vref_high_impedance_mode_disable();
-	vref_enable();
-	for (uint32_t vr = 0u; vr < 100000u; ++vr) {
-		if (vref_status_get() == SET) break; /* VREFRDY -- buffer locked */
-	}
-	/* Latch the verdict.  A buffer that never locked leaves vref_ok
-     * false and every ADC/DAC op answers IO instead of serving
-     * garbage referenced to a dead node (the exact silent failure the
-     * VREF bring-up exists to cure).  vref_ready_check() re-probes on
-     * each analog op, so a late lock self-promotes. */
-	vref_ok = (vref_status_get() == SET);
+     * VREFRDY has no documented meaning outside internal voltage-
+     * reference mode (User Manual Rev1.2 p.520: the wait-for-VREFRDY
+     * sentence is scoped to "VREF is configured in internal voltage
+     * reference mode"), so there is nothing left for this firmware to
+     * poll -- vref_ready_check() (vref.c) no longer waits on it.
+     *
+     * Open hardware question, NOT resolved by this change: whether
+     * VREFP is board-tied to VDDA on this SoM revision, which is what
+     * ADC_VREF_MV / DAC_VREF_MV assume in external-reference mode.
+     * That needs a meter on the VREFP ball (J6) -- see the PR's bench
+     * validation section. */
 
 	/* ADC bring-up: configure 8 pads as analog, enable all four ADC
-     * peripheral clocks, run the per-peripheral init.  Calibration
-     * inside adc_periph_init now runs against a LIVE reference (it
-     * previously self-calibrated against the undriven reference node,
-     * baking in a bogus offset); the VREF bring-up above is the
-     * prerequisite that makes that calibration meaningful. */
+     * peripheral clocks, run the per-peripheral init.  adc_periph_init's
+     * self-calibration runs against whatever VREFP is at this point --
+     * the VREF block above intentionally leaves VREF_CS at its reset
+     * value rather than driving it (#59), so this calibration is only
+     * as meaningful as the still-open VREFP-vs-VDDA board question. */
 	for (size_t i = 0; i < ADC_CHANNEL_MAP_COUNT; ++i) {
 		gpio_mode_set(adc_channels_map[i].gpio_port,
 		              GPIO_MODE_ANALOG,
