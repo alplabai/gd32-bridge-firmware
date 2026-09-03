@@ -78,6 +78,14 @@ int bridge_hw_gpio_write(uint32_t mask, uint32_t levels);
 /* PWM                                                              */
 /* --------------------------------------------------------------- */
 
+/* period_ns > 0 required (BRIDGE_HW_ERR_RANGE otherwise); duty_ns must not
+ * exceed period_ns (BRIDGE_HW_ERR_INVAL).  period_ns beyond what the 16-bit
+ * timer can hold is silently reduced to the hardware max (ARR always fits),
+ * but a duty request that would not fit the 16-bit compare register at the
+ * (possibly-reduced) period -- only reachable via 100 % duty at the
+ * clamped-max edge-aligned period -- answers BRIDGE_HW_ERR_RANGE rather
+ * than silently truncating; poll bridge_hw_pwm_get for what is actually
+ * live. */
 int bridge_hw_pwm_set(uint8_t channel, uint32_t period_ns, uint32_t duty_ns);
 
 /* Report what the channel's pad is ACTUALLY generating by reading the
@@ -295,7 +303,11 @@ int bridge_hw_pwm_capture_end(uint8_t channel);
  * to low.  Implemented on the GD32 by setting OPM (one-pulse mode) on
  * the timer + programming period = pulse_ns.  The PWM stays in
  * one-pulse mode until the next bridge_hw_pwm_set call switches it
- * back to continuous output. */
+ * back to continuous output (that call also re-enables the timer if a
+ * prior single pulse left it halted).  pulse_ns == 0 answers
+ * BRIDGE_HW_ERR_RANGE; the widest pulse the 16-bit timer can produce is
+ * 65535 us (65535000 ns) -- a wider request answers BRIDGE_HW_ERR_RANGE
+ * rather than silently firing a shorter pulse than commanded. */
 int bridge_hw_pwm_single_pulse(uint8_t channel, uint32_t pulse_ns);
 
 /* Configure master-slave timer sync.  @p master and @p slave name two

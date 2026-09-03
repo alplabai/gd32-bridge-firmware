@@ -79,6 +79,12 @@ void pwm_timer_init(uint32_t periph)
 	ip.repetitioncounter = 0u;
 	timer_deinit(periph);
 	timer_init(periph, &ip);
+	/* Auto-reload shadow: TIMERx_CAR writes land in the preload register
+	 * only and transfer to the active reload at the next update event
+	 * (User Manual Rev1.2 p.575-576, Fig 23-5 / 23-7) instead of hitting
+	 * the live comparator mid-period -- see bridge_hw_pwm_set for the
+	 * glitch this prevents. */
+	timer_auto_reload_shadow_enable(periph);
 	timer_primary_output_config(periph, ENABLE);
 	timer_enable(periph);
 }
@@ -104,7 +110,12 @@ void pwm_channel_init(const gd32_pwm_ch_t *ch)
 	timer_channel_output_config(ch->periph, ch->channel, &oc);
 	timer_channel_output_pulse_value_config(ch->periph, ch->channel, 0u);
 	timer_channel_output_mode_config(ch->periph, ch->channel, TIMER_OC_MODE_PWM0);
-	timer_channel_output_shadow_config(ch->periph, ch->channel, TIMER_OC_SHADOW_DISABLE);
+	/* Compare shadow: TIMERx_CHxCV writes land in the preload register
+	 * only and transfer to the active compare at the next update event
+	 * (User Manual Rev1.2 p.649, CH0COMSEN) instead of the live
+	 * comparator -- the manual permits leaving this disabled only in
+	 * single-pulse mode, and this channel also runs continuous PWM. */
+	timer_channel_output_shadow_config(ch->periph, ch->channel, TIMER_OC_SHADOW_ENABLE);
 }
 
 /* Sticky per-TIMER counter-alignment mode set by bridge_hw_pwm_configure.
@@ -168,10 +179,44 @@ int bridge_hw_pwm_set(uint8_t channel, uint32_t period_ns, uint32_t duty_ns)
 		cmp = half_duty;
 	}
 
+	/* cmp must fit the 16-bit CHxCV.  The edge-aligned branch above
+	 * clamps period_us but not the resulting compare, so a 100 %-duty
+	 * request at the clamped max period (cmp == PWM_TIMER_ARR_MAX + 1,
+	 * i.e. 65536) would otherwise truncate to 0 in CHxCV and park the
+	 * pad at the complementary rail while still answering STATUS_OK
+	 * (#16).  Reject rather than silently honour a different duty than
+	 * commanded -- bridge_hw_pwm_get reads the live registers back for a
+	 * host that wants to poll what IS running instead. The
+	 * centre-aligned branch above already keeps half_duty <=
+	 * PWM_TIMER_ARR_MAX so this never trips there; the guard lives at
+	 * this single write site so neither branch can reintroduce the
+	 * truncation. */
+	if (cmp > PWM_TIMER_ARR_MAX) return BRIDGE_HW_ERR_RANGE;
+
 	/* Updates ALL channels of the same timer -- the contract documents
-	 * this shared-ARR constraint. */
+	 * this shared-ARR constraint.  CHxCOMSEN + ARSE are enabled
+	 * (pwm_channel_init / pwm_timer_init, #43) so the two writes below
+	 * land in the preload register only and would otherwise wait for
+	 * this timer's own next overflow to reach the live comparator --
+	 * fine for a channel already running cleanly, but PWM_SET is also
+	 * the documented recovery path after bridge_hw_pwm_single_pulse
+	 * (#8), which halts CEN at ITS OWN update event with the one-shot's
+	 * short-lived ARR/CHxCV still active and no future overflow pending
+	 * to ever transfer the shadow.  Force the transfer unconditionally
+	 * with a software update event so PWM_SET is correct on both the
+	 * running and the halted-by-single-pulse path; it also re-seats CNT
+	 * to 0, restarting the period rather than phase-preserving the
+	 * change (User Manual Rev1.2 p.575-576 Fig 23-5/23-7 auto-reload
+	 * shadow timing; p.649 CH0COMSEN) -- accepted here as the simplest
+	 * correct behaviour rather than only forcing it on the halted path,
+	 * since it also keeps pwm_capture.c's direct TIMER_CAR read always
+	 * in sync with the live counter with no separate fix needed there. */
 	timer_autoreload_value_config(ch->periph, arr);
 	timer_channel_output_pulse_value_config(ch->periph, ch->channel, cmp);
+	timer_event_software_generate(ch->periph, TIMER_EVENT_SRC_UPG);
+	timer_enable(ch->periph); /* idempotent if already running; re-arms
+	                            * CEN after a prior single-pulse left it
+	                            * clear (#8) */
 	return BRIDGE_HW_OK;
 }
 
@@ -302,10 +347,16 @@ int bridge_hw_pwm_single_pulse(uint8_t channel, uint32_t pulse_ns)
 
 	uint32_t pulse_us = pulse_ns / PWM_TIMER_TICK_NS;
 	if (pulse_us == 0u) return BRIDGE_HW_ERR_RANGE;
-	if (pulse_us > PWM_TIMER_ARR_MAX + 1u) pulse_us = PWM_TIMER_ARR_MAX + 1u;
+	/* pulse_us is written verbatim into the 16-bit CHxCV below (compare
+	 * = ARR + 1, see the comment there), so 65536 truncates to 0 and
+	 * parks the pad at the complementary rail while still answering
+	 * STATUS_OK -- the widest one-shot the timer can produce is 65535 us
+	 * (#16).  Reject rather than silently honour a shorter pulse than
+	 * commanded. */
+	if (pulse_us > PWM_TIMER_ARR_MAX) return BRIDGE_HW_ERR_RANGE;
 
 	/* Reset the timer counter so the pulse starts from t=0 then
-     * program ARR = pulse_us (counts up; the channel output stays
+     * program ARR = pulse_us - 1 (counts up; the channel output stays
      * high until the counter reaches the compare value).  Setting
      * compare = ARR + 1 keeps the output high through the entire
      * period so the pulse width matches `pulse_us`.  After ARR the
@@ -314,6 +365,19 @@ int bridge_hw_pwm_single_pulse(uint8_t channel, uint32_t pulse_ns)
 	timer_counter_value_config(ch->periph, 0u);
 	timer_autoreload_value_config(ch->periph, (uint32_t)(pulse_us - 1u));
 	timer_channel_output_pulse_value_config(ch->periph, ch->channel, pulse_us);
+
+	/* CHxCOMSEN + ARSE are enabled for every channel/timer
+	 * (pwm_channel_init / pwm_timer_init, #43) so the two writes above
+	 * land in the preload register only -- the counter still compares
+	 * against whatever was active before this call until an update
+	 * event transfers them (User Manual Rev1.2 p.575-576, Fig 23-5 /
+	 * 23-7).  Single-pulse mode's OWN "next update event" is the one
+	 * that halts CEN at the END of the pulse (p.617-618), so without
+	 * forcing one here the pulse would fire using the STALE values left
+	 * by whatever ran on this timer before it, not the ones just
+	 * written.  Force the transfer now, before arming -- it also
+	 * re-seats CNT to 0, idempotent with the reset above. */
+	timer_event_software_generate(ch->periph, TIMER_EVENT_SRC_UPG);
 	timer_single_pulse_mode_config(ch->periph, TIMER_SP_MODE_SINGLE);
 	timer_enable(ch->periph);
 
