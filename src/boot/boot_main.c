@@ -104,9 +104,22 @@ static void jump_to_slot(uint32_t slot_base)
 	__disable_irq();
 	SCB->VTOR = slot_base; /* relocate the vector table to the slot */
 	__DSB();
-	__set_MSP(msp);
-	__ISB();
-	((void (*)(void))reset)(); /* no return */
+	/* MSP write and the branch to the slot's reset vector MUST be one
+	 * atomic asm block, not two C statements (#14): CMSIS __set_MSP() is
+	 * a bare "msr msp" with no memory clobber, so nothing stops the
+	 * compiler from spilling `reset` to the (old) stack and reloading it
+	 * SP-relative *after* MSP has already moved to the slot's
+	 * uninitialised stack top -- today's build only avoids that by
+	 * -O0 codegen accident, not by anything the source guarantees.
+	 * Folding msr+isb+bx into one volatile asm statement forces both
+	 * `msp` and `reset` to be materialised into registers before the
+	 * block executes (asm input operands are read on entry and never
+	 * re-read from memory afterward), and there is no C statement
+	 * boundary inside the block for a spill/reload to land in -- the
+	 * instruction order is fixed by the instruction stream itself, the
+	 * same at -O0 as at -O2. */
+	__asm volatile("msr msp, %0\n\tisb 0xF\n\tbx %1" : : "r"(msp), "r"(reset) : "memory");
+	__builtin_unreachable(); /* no return */
 }
 
 int main(void)
