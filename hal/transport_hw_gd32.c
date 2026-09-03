@@ -349,23 +349,35 @@ void bridge_transport_i2c_hw_init(void)
 	rcu_periph_clock_enable(BRIDGE_I2C_RCU);
 	i2c_gpio_init();
 
-	/* Compute the I2C timing from the live APB1 kernel clock (set as the
-     * I2C source just above) so it tracks whatever SystemInit configured
-     * -- the GD32G553 core/APB clock has historically been ambiguous.
-     * For a SLAVE only the prescaler + data setup (SCLDEL) + data hold
-     * (SDADEL) matter; the SCL high/low periods (the 400 kHz bus rate)
-     * are driven by the master, not us.  Target a ~8 MHz timing tick;
-     * SCLDEL=2 / SDADEL=1 then give Fast-mode setup/hold, with the analog
-     * filter on for Fm (400 kHz) spike suppression. */
-	uint32_t apb1_hz = rcu_clock_freq_get(CK_APB1);
-	uint32_t psc     = apb1_hz / 8000000u; /* tick ~= (psc+1)/apb1 */
-	if (psc > 0u) {
-		psc -= 1u;
-	}
-	if (psc > 15u) {
-		psc = 15u;
-	} /* TIMING_PSC is a 4-bit field */
-	i2c_timing_config(BRIDGE_I2C_PERIPH, psc, 2u /*scl_dely*/, 1u /*sda_dely*/);
+	/* I2C timing (UM Rev1.2 p.1261 SS28.3.4 SCLDELY/SDADELY inequalities;
+     * UM Rev1.2 p.1287-1288 I2C_TIMING field layout; Datasheet Rev2.0
+     * p.141 Table 4-48 Fast-mode AC timing).  APB1 is fixed at 216 MHz on
+     * this board (vendors/gd32_firmware_library/overrides/system_gd32g5x3.c
+     * sets __SYSTEM_CLOCK_216M_PLL_IRC8M and leaves APB1 undivided from
+     * AHB), so PSC/SCLDELY/SDADELY below are constants tied to that one
+     * clock configuration rather than derived at runtime.  The previous
+     * "psc = apb1_hz / 8000000u" computation silently saturated PSC from
+     * 26 down to 15 (a 4-bit field) on every normal boot, and even the
+     * clamped value paired with SCLDEL=2/SDADEL=1 violated both Fast-mode
+     * delay minimums with no flag or assertion anywhere.
+     *
+     *   tI2CCLK = 1 / 216 MHz = 4.6296 ns
+     *   PSC = 15  ->  tPSC = (PSC+1) * tI2CCLK = 74.07 ns
+     *   SCLDELY >= [tr(max)+tSU;DAT(min)] / tPSC - 1
+     *            = (300 ns + 100 ns) / 74.07 ns - 1 = 4.40  ->  SCLDELY = 5
+     *   SDADELY >= {tf(max)+tHD;DAT(min)-tAF(min)-[(DNF+3)*tI2CCLK]} / tPSC
+     *            = (300 ns + 0 - 0 - 13.9 ns) / 74.07 ns = 3.86  ->  SDADELY = 4
+     *   (tAF(min) is unspecified in either document and taken as 0, the
+     *   conservative direction for a lower bound; DNF = 0000, the reset
+     *   value -- I2C_CTL0's digital-filter field is never written.)
+     *
+     * If I2C0 is ever clocked from a different live APB1 frequency --
+     * e.g. a future PLL-relock path after Deep-sleep wake, which does
+     * NOT exist in this firmware today (UM Rev1.2 p.142: Deep-sleep
+     * disables IRC8M/HXTAL/PLL, and nothing here re-locks them) -- these
+     * three constants must be re-derived from the inequalities above for
+     * the new tPSC before this function is trusted at that clock. */
+	i2c_timing_config(BRIDGE_I2C_PERIPH, 15u, 5u /*scl_dely*/, 4u /*sda_dely*/);
 	i2c_analog_noise_filter_enable(BRIDGE_I2C_PERIPH);
 
 	i2c_address_config(
@@ -383,15 +395,35 @@ void bridge_transport_i2c_hw_init(void)
 }
 
 /* I2C0 event ISR: address match (direction-aware), RX during a write,
- * TX during a read, and STOP. */
+ * STOP, and TX during a read.
+ *
+ * STPDET is tested AHEAD of TI.  At the end of a normal read, the last
+ * envelope byte drains I2C_TDATA (setting TI) and the master then NACKs
+ * and issues STOP (setting STPDET) essentially back-to-back, so both
+ * flags are typically pending together on the interrupt that follows.
+ * Servicing STPDET first disables I2C_INT_TI before the TI arm below can
+ * run, so no orphan byte is ever written into TDATA for a transaction
+ * that has already stopped (see the TDATA-flush comment on the read arm
+ * for what happens if one gets written anyway). */
 void BRIDGE_I2C_EV_HANDLER(void)
 {
 	if (RESET != i2c_interrupt_flag_get(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_ADDSEND)) {
 		const bool is_transmitter = (RESET != i2c_flag_get(BRIDGE_I2C_PERIPH, I2C_FLAG_TR));
 		i2c_interrupt_flag_clear(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_ADDSEND);
 		if (is_transmitter) {
-			/* Repeated-START read: make sure the reply for the just-
-             * received write is staged, then start clocking it out. */
+			/* Repeated-START read: flush TDATA FIRST -- a prior read
+             * can leave an orphan byte behind (UM Rev1.2 p.1292: TBE,
+             * bit 0 of I2C_STAT, is hardware-set when TDATA is empty
+             * and is also software-writable to empty TDATA; it is NOT
+             * one of the flags I2C_STATC can clear, see i2c_flag_clear()'s
+             * documented argument list in the SPL, so this is a direct
+             * write to I2C_STAT itself).  Without the flush, that orphan
+             * is shifted out first on this read and displaces every
+             * field of the reply envelope by one byte, permanently
+             * failing the CRC the host recomputes.  Then make sure the
+             * reply for the just-received write is staged, and start
+             * clocking it out. */
+			I2C_STAT(BRIDGE_I2C_PERIPH) |= I2C_STAT_TBE;
 			(void)i2c_slave_write_end();
 			i2c_interrupt_enable(BRIDGE_I2C_PERIPH, I2C_INT_TI);
 		} else {
@@ -399,21 +431,58 @@ void BRIDGE_I2C_EV_HANDLER(void)
 		}
 	} else if (RESET != i2c_interrupt_flag_get(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_RBNE)) {
 		i2c_slave_rx_byte((uint8_t)i2c_data_receive(BRIDGE_I2C_PERIPH));
-	} else if (RESET != i2c_interrupt_flag_get(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_TI)) {
-		i2c_data_transmit(BRIDGE_I2C_PERIPH, i2c_slave_tx_next_byte());
 	} else if (RESET != i2c_interrupt_flag_get(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_STPDET)) {
 		i2c_interrupt_flag_clear(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_STPDET);
 		i2c_interrupt_disable(BRIDGE_I2C_PERIPH, I2C_INT_TI);
+		/* Belt-and-suspenders: flush here too, so a byte written by a
+         * TI race that slipped in before this STPDET was serviced
+         * cannot strand itself across into the next transaction. */
+		I2C_STAT(BRIDGE_I2C_PERIPH) |= I2C_STAT_TBE;
 		/* STOP after a write with no read: stage the reply so a later
          * separate read transaction can fetch it. */
 		(void)i2c_slave_write_end();
+	} else if (RESET != i2c_interrupt_flag_get(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_TI)) {
+		i2c_data_transmit(BRIDGE_I2C_PERIPH, i2c_slave_tx_next_byte());
 	}
 }
 
-/* I2C0 error ISR: clear NACK + bus errors so the slave re-syncs. */
+/* I2C0 error ISR: clear NACK and every bus error the enabled group
+ * (I2C_INT_ERR, see bridge_transport_i2c_hw_init()) can raise, then
+ * resynchronise the slave framing so the transport recovers instead of
+ * merely no longer re-interrupting.  LOSTARB is a master-mode condition
+ * and unreachable on this pure slave, so it is not handled here. */
 void BRIDGE_I2C_ER_HANDLER(void)
 {
+	const uint32_t stat      = I2C_STAT(BRIDGE_I2C_PERIPH); /* snapshot before clearing */
+	bool           bus_error = false;
+
 	if (RESET != i2c_interrupt_flag_get(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_NACK)) {
 		i2c_interrupt_flag_clear(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_NACK);
+	}
+	if (RESET != i2c_interrupt_flag_get(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_BERR)) {
+		i2c_interrupt_flag_clear(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_BERR);
+		bus_error = true;
+	}
+	if (RESET != i2c_interrupt_flag_get(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_OUERR)) {
+		i2c_interrupt_flag_clear(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_OUERR);
+		bus_error = true;
+	}
+
+	/* Catch-all: blanket-clear every software-clearable status bit the
+     * snapshot shows set.  I2C_STATC mirrors I2C_STAT's bit positions
+     * for ADDSEND/NACK/STPDET/BERR/LOSTARB/OUERR/PECERR/TIMEOUT/SMBALT
+     * (UM Rev1.2 p.1291-1292 vs p.1292-1293), so writing the snapshot
+     * masked to those bits back into I2C_STATC clears exactly the set
+     * ones in one access.  This is the safety net for a source this
+     * handler does not model by name -- it must not be the only thing
+     * that keeps the vector from level-holding; the explicit arms above
+     * are the contract. */
+	I2C_STATC(BRIDGE_I2C_PERIPH) = stat & (I2C_STAT_ADDSEND | I2C_STAT_NACK | I2C_STAT_STPDET |
+	                                       I2C_STAT_BERR | I2C_STAT_LOSTARB | I2C_STAT_OUERR |
+	                                       I2C_STAT_PECERR | I2C_STAT_TIMEOUT | I2C_STAT_SMBALT);
+
+	if (bus_error) {
+		i2c_interrupt_disable(BRIDGE_I2C_PERIPH, I2C_INT_TI);
+		i2c_slave_write_start();
 	}
 }

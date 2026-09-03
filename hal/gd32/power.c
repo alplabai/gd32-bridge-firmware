@@ -14,7 +14,9 @@
 #include "bridge_hw.h"
 #include "gd32g5x3.h"
 
+#include "bridge_board_config.h" /* BRIDGE_I2C_PERIPH */
 #include "gd32_common.h"
+#include "transport.h" /* bridge_transport_i2c_hw_init() */
 
 /* ----------------------------------------------------------------- */
 /* v0.5 (§2B.3) -- system power-mode set                             */
@@ -151,12 +153,40 @@ int bridge_hw_power_mode_set(uint8_t mode, uint32_t wake_bitmap, uint32_t wake_a
 			int            rc = rtc_wakeup_arm_ms(ms);
 			if (rc != BRIDGE_HW_OK) return rc;
 		}
+		/* I2C0 is one of the modules the PMU keeps powered across
+         * Deep-sleep (UM Rev1.2 p.132, Fig 3-2: "Deep-sleep power on
+         * modules: ... I2C0 ..."), so I2CEN stays live across this
+         * mode unless software disables it first.  UM Rev1.2 SS28.3.11
+         * (p.1279): "Before entering power saving mode (I2CEN = 0), the
+         * I2C peripheral must be disabled if wakeup from power saving
+         * mode is disabled (WUEN = 0)."  This firmware never sets WUEN
+         * (bridge_transport_i2c_hw_init() does not touch it), so every
+         * prior Deep-sleep entry ran I2C0 outside its documented
+         * operating procedure.  Disable it here and bring it fully back
+         * up on the way out. */
+		i2c_disable(BRIDGE_I2C_PERIPH);
 		/* PMU_LDO_LOWPOWER drops the core LDO into its low-power
          * regulation point during deepsleep (saves a few hundred
          * uA at the cost of a slightly slower wakeup); WFI_CMD
          * issues the actual `wfi` instruction that suspends the
          * core.  Returns here once a wakeup source fires. */
 		pmu_to_deepsleepmode(PMU_LDO_LOWPOWER, WFI_CMD);
+		/* Wake path.  UM Rev1.2 p.142 Table 3-1: Deep-sleep disables
+         * IRC8M, HXTAL and PLL, and this firmware has no PLL-relock
+         * step anywhere (a separate, pre-existing gap outside this
+         * fix) -- so CK_APB1 may still be running on IRC8M rather than
+         * the normal 216 MHz PLL when this line executes.
+         * bridge_transport_i2c_hw_init() redoes the GPIO/timing/address/
+         * IRQ setup and re-runs i2c_enable(), so the peripheral comes
+         * back up in a known state and a half-finished transaction from
+         * before sleep cannot resume against it -- that part is correct
+         * regardless of clock.  Its I2C_TIMING constants are fixed for
+         * the 216 MHz case (see the timing comment in that function), so
+         * a read/write attempted before the clock tree is restored would
+         * be timed for the wrong tI2CCLK.  Fixing that is the PLL-relock
+         * gap noted above, not this issue's scope: WUEN=0 across
+         * Deep-sleep is the defect this change closes. */
+		bridge_transport_i2c_hw_init();
 		return BRIDGE_HW_OK;
 	case 3u: /* standby */
 		rcu_periph_clock_enable(RCU_PMU);

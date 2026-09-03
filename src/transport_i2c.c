@@ -106,6 +106,24 @@ void i2c_slave_rx_byte(uint8_t b)
  * staged in its place so the next read still gets a valid envelope). */
 bool i2c_slave_write_end(void)
 {
+	if (pending_reply_valid) {
+		/* Already decoded + dispatched for this addressed write.  The
+	     * EV ISR calls this function unconditionally from both the
+	     * repeated-START read arm and the STPDET arm (see the module
+	     * banner), so a second or third entry against the same
+	     * untouched i2c_rx_buf must be a no-op rather than a re-decode
+	     * -- pending_reply_valid is cleared only in
+	     * i2c_slave_write_start(), so it is false exactly once per
+	     * addressed write and true for every repeat entry within the
+	     * same transaction.  Falling through instead would re-run
+	     * protocol_dispatch() on identical bytes (non-idempotent
+	     * opcodes execute twice, ring-consuming opcodes drop a batch,
+	     * OTA erase/program steps replay) and, on the framing-failure
+	     * path, would call stage_no_pending() and clobber the reply
+	     * already staged for this write before the host clocks it out. */
+		return true;
+	}
+
 	/* Smallest valid envelope: reg(1) + cmd(1) + 0-byte payload + crc(2). */
 	if (i2c_rx_len < 4u || i2c_rx_buf[0] != GD32_BRIDGE_I2C_REG_CMD) {
 		stage_no_pending();
