@@ -79,13 +79,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # These suites link the REAL firmware sources -- ota.c, crc32.c,
-      # transport_spi.c, protocol.c, bootloader.c -- not mocks, so the OTA
-      # bounds checks and the SPI CS-framing seams under test are the same code
-      # paths the device runs.  They came from alp-sdk, where they ran under
-      # twister; the firmware moved here (alp-sdk ADR 0031) and the tests moved
-      # with it, because a test that lives in a different repository from its
-      # subject is a test nobody runs.
+      # Four suites, all linking the REAL firmware sources -- ota.c, crc32.c,
+      # transport_spi.c, transport_i2c.c, protocol.c, bootloader.c -- so the OTA
+      # bounds checks and the CS/register framing seams under test are the same
+      # code paths the device runs.  ota, transport_spi and transport_i2c link
+      # hal/bridge_hw_stub.c and are mock-free end to end.
+      #
+      # The `protocol` suite is the deliberate exception: it links
+      # tests/unit/fake/bridge_hw_fake.c INSTEAD of the stub.  The stub answers
+      # BRIDGE_HW_ERR_NOTIMPL for nearly everything, so only about two hardware
+      # opcodes can ever reach STATUS_OK through it -- which left src/protocol.c's
+      # reply encoding and its BRIDGE_HW_ERR_* -> STATUS_* ladders unreachable
+      # from any host test.  The fake is injectable (a forced return code per
+      # function) and resettable, so that suite trades the real HAL for
+      # reachability.  It is test-only and lives under tests/unit/ so no firmware
+      # build can pick it up.
+      #
+      # The first two suites came from alp-sdk, where they ran under twister; the
+      # firmware moved here (alp-sdk ADR 0031) and the tests moved with it,
+      # because a test that lives in a different repository from its subject is a
+      # test nobody runs.
       #
       # Host-only, no Zephyr: the code under test is freestanding C, and only
       # the ztest harness was ever Zephyr-specific.  tests/unit/ztest_shim.h
