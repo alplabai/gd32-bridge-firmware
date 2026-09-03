@@ -6,7 +6,7 @@
  * protocol opcodes + the dispatcher entry that both transports
  * (SPI + I2C) feed into.
  *
- * The wire-side spec is in ../docs/gd32-bridge-protocol.md; opcode
+ * The wire-side spec is in alp-sdk docs/gd32-bridge-protocol.md; opcode
  * numbering MUST stay in sync with <alp/chips/gd32g553.h> on the
  * host side.
  */
@@ -25,7 +25,7 @@
 #define GD32_BRIDGE_SOF         0xA5u
 #define GD32_BRIDGE_I2C_REG_CMD 0x00u
 /* Default 7-bit I2C slave address (host: GD32G553_BRIDGE_DEFAULT_I2C_ADDR;
- * metadata/chips/gd32g553.yaml default_address_7bit). */
+ * alp-sdk metadata/chips/gd32g553.yaml default_address_7bit). */
 #define GD32_BRIDGE_DEFAULT_I2C_ADDR 0x70u
 #define GD32_BRIDGE_ADC_MAX_SAMPLES  8u
 #define GD32_BRIDGE_BUILD_ID_LEN     20u
@@ -104,7 +104,7 @@ typedef enum {
      * inputs).  On V2N every E1M PWM channel rides one of the GD32's
      * 16-bit advanced timers (PWM0..3 -> TIMER0 channels MCH0..MCH3,
      * PWM4..7 -> TIMER7 channels MCH0..MCH3 per
-     * `metadata/e1m_modules/v2n/gd32-io-mcu-map.tsv`).  The 16-bit
+     * alp-sdk `metadata/e1m_modules/v2n/gd32-io-mcu-map.tsv`).  The 16-bit
      * counter at the GD32's 216 MHz core clock gives ~4.63 ns LSB
      * resolution + 303 us maximum period; CMD_PWM_GET reports the
      * actual programmed value so callers can see what rounding the
@@ -128,7 +128,7 @@ typedef enum {
 	CMD_DA9292_STATUS_FORWARD = 0x40,
 	/* v0.8: secure-element reset line.  SE_RST = GD32 PC13 drives the
      * OPTIGA Trust M's reset (the SE sits on the shared BRD_I2C bus per
-     * metadata/e1m_modules/v2n/gd32-io-mcu-map.tsv).  Request payload
+     * alp-sdk metadata/e1m_modules/v2n/gd32-io-mcu-map.tsv).  Request payload
      * `assert:u8` -- 0 = release (SE runs), 1 = hold the SE in reset;
      * empty reply.  Pulsing it (1 -> wait -> 0) is the recovery for a
      * wedged BRD_I2C where the SE clock-stretches SCL low; the host
@@ -146,9 +146,12 @@ typedef enum {
 	CMD_COUNTER_READ = 0x70,
 	/* v0.3: GD32G5 security block.  TRNG is the NIST SP800-90B
      * pre-certified true-random generator -- 32-bit pull per op (or
-     * 128-bit on the NIST path; firmware-internal choice).  CAU
-     * (AES/DES hardware) is reserved for v0.4 once the PSA Crypto
-     * entropy / cipher driver registration lands. */
+     * 128-bit on the NIST path; firmware-internal choice).  The CAU
+     * (0x4802 1000) is SYMMETRIC-ONLY -- DES/TDES/AES; the GD32G553 has
+     * no PKA, HMAC, CMAC or message-hash engine (GD32G553 User Manual
+     * Rev1.2 p.350 §13.1; confirmed absent from the peripheral memory
+     * map, Datasheet Rev2.0 p.19).  There is no image-signing path on
+     * this part -- see SECURITY.md. */
 	CMD_TRNG_READ = 0x80,
 	/* v0.4: GD32G5 TMU (CORDIC) math accelerator.  General-purpose
      * fixed-function trig / sqrt / log / exp / vector-magnitude block
@@ -264,7 +267,7 @@ typedef enum {
 	BRIDGE_TMU_FMT__COUNT = 2u, /**< sentinel.                   */
 } gd32_bridge_tmu_format_t;
 
-/* Wire-side status byte; mirrors the table in docs/gd32-bridge-protocol.md §6.
+/* Wire-side status byte; mirrors the table in alp-sdk docs/gd32-bridge-protocol.md §6.
  * Note the unsigned magnitude vs the host's negative alp_status_t -- the
  * firmware doesn't depend on the host's signed enum. */
 typedef enum {
