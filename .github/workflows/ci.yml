@@ -220,28 +220,73 @@ jobs:
       # here is a substitute for a bench run, and this job intentionally
       # carries no `needs-silicon` label.
       #
-      # Checked out at $GITHUB_WORKSPACE/firmware/gd32-bridge, i.e. two
-      # levels below $GITHUB_WORKSPACE, where the vendor tree gets staged
-      # below -- so CMakeLists.txt's existing hardcoded fallback
-      # (CMAKE_CURRENT_SOURCE_DIR/../../vendors/gd32_firmware_library, the
-      # pre-split alp-sdk layout) resolves with NO CMakeLists.txt change.
-      # This job does not depend on PR #67's GD32_VENDOR_DIR cache-variable
-      # override landing first; see the PR body for why.
+      # Checked out at $GITHUB_WORKSPACE (repo root) -- NOT re-nested at
+      # firmware/gd32-bridge. This repo split out of alp-sdk (alp-sdk#1370)
+      # and that pre-split nesting exists nowhere any more; reconstructing
+      # it here just to let CMakeLists.txt's `../../vendors/gd32_firmware_
+      # library` fallback resolve (Refs #110) meant a typo'd or rescoped
+      # GD32_VENDOR_DIR, and the FATAL_ERROR #67 added for a missing vendor
+      # tree, both stayed untested -- every job here took the fallback
+      # branch instead. The vendor tree is staged under $RUNNER_TEMP below
+      # and passed explicitly via -DGD32_VENDOR_DIR, so this job now
+      # exercises the flag PR #67 actually added.
       - uses: actions/checkout@v4
-        with:
-          path: firmware/gd32-bridge
+
+      # Same install as the stub-build job above, INCLUDING the newlib-header
+      # preflight: libnewlib-arm-none-eabi is a separate Debian/Ubuntu
+      # package from gcc-arm-none-eabi, and without it the first
+      # #include <string.h> here fails with a confusing "No such file or
+      # directory" that reads like a source bug in this job's own code.
+      # Installed before any `cmake` invocation below: project() probes the
+      # toolchain immediately, before CMakeLists.txt's own GD32_VENDOR_DIR
+      # logic ever runs.
+      - name: install the Arm GNU toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            gcc-arm-none-eabi libnewlib-arm-none-eabi
+          arm-none-eabi-gcc --version | head -1
+          printf '#include <string.h>\nint main(void){return 0;}\n' > /tmp/hdr.c
+          arm-none-eabi-gcc -mcpu=cortex-m33 -mthumb -c /tmp/hdr.c -o /tmp/hdr.o
+          echo "newlib headers reachable"
+
+      # Negative path (Refs #110): no -DGD32_VENDOR_DIR, and nothing staged
+      # yet at any fallback location, so CMakeLists.txt's
+      # `if(NOT EXISTS ${_GD32_VENDOR_DIR}/CMakeLists.txt)` guard must fire.
+      # Asserts on the FATAL_ERROR message text, not just the non-zero exit
+      # -- the message naming `-DGD32_VENDOR_DIR` is the actual fix #67
+      # delivered; a exit-code-only check would pass just as happily if the
+      # message regressed to something unhelpful.
+      - name: configure (gd32 backend, no vendor tree) must fail naming the flag
+        run: |
+          set -uo pipefail
+          if out=$(cmake -B build-negative -S . \
+              -DCMAKE_TOOLCHAIN_FILE=toolchain/arm-none-eabi.cmake \
+              -DBRIDGE_HAL_BACKEND=gd32 2>&1); then
+            echo "$out"
+            echo "::error::configure succeeded with no GD32_VENDOR_DIR and no vendor tree staged; expected the FATAL_ERROR from #67"
+            exit 1
+          fi
+          echo "$out"
+          if ! echo "$out" | grep -q -- '-DGD32_VENDOR_DIR'; then
+            echo "::error::configure failed as expected, but the message does not name -DGD32_VENDOR_DIR"
+            exit 1
+          fi
+          echo "negative path OK: FATAL_ERROR names -DGD32_VENDOR_DIR"
 
       # ci/gd32_vendor_wrapper/CMakeLists.txt is this repo's own Apache-2.0
       # glue (a copy of alp-sdk's vendors/gd32_firmware_library/CMakeLists.txt
       # wrapper) -- it is NOT GigaDevice IP and carries no vendor licence
-      # terms.  Stage it at the fallback path the real wrapper normally
-      # occupies.
+      # terms.  Staged under $RUNNER_TEMP (outside the checkout, cleaned up
+      # by the runner after the job) -- a location with no significance
+      # other than "somewhere GD32_VENDOR_DIR can point at", which is the
+      # point: it is not the fallback path.
       - name: stage the vendor wrapper CMakeLists
         run: |
           set -euo pipefail
-          mkdir -p vendors/gd32_firmware_library
-          cp firmware/gd32-bridge/ci/gd32_vendor_wrapper/CMakeLists.txt \
-             vendors/gd32_firmware_library/CMakeLists.txt
+          mkdir -p "$RUNNER_TEMP/gd32_vendor/gd32_firmware_library"
+          cp ci/gd32_vendor_wrapper/CMakeLists.txt \
+             "$RUNNER_TEMP/gd32_vendor/gd32_firmware_library/CMakeLists.txt"
 
       # The actual GD32G5x3 firmware library IS GigaDevice IP, redistributed
       # under SLA-GD0001 v1.1 -- see that licence's terms, quoted in full in
@@ -264,27 +309,12 @@ jobs:
           set -euo pipefail
           git clone --branch v1.5.0 --depth 1 \
             https://github.com/alplabai/gd32g5x3-firmware-library.git \
-            vendors/gd32_firmware_library/upstream
-          actual="$(git -C vendors/gd32_firmware_library/upstream rev-parse HEAD)"
+            "$RUNNER_TEMP/gd32_vendor/gd32_firmware_library/upstream"
+          actual="$(git -C "$RUNNER_TEMP/gd32_vendor/gd32_firmware_library/upstream" rev-parse HEAD)"
           if [ "$actual" != "$GD32_VENDOR_PIN" ]; then
             echo "::error::vendor firmware library HEAD is $actual, expected $GD32_VENDOR_PIN -- tag v1.5.0 no longer points at the commit alp-sdk's .gitmodules pins. Update GD32_VENDOR_PIN here in lockstep with any deliberate alp-sdk submodule bump; otherwise this is a moved tag and the build must not proceed."
             exit 1
           fi
-
-      # Same install as the stub-build job above, INCLUDING the newlib-header
-      # preflight: libnewlib-arm-none-eabi is a separate Debian/Ubuntu
-      # package from gcc-arm-none-eabi, and without it the first
-      # #include <string.h> here fails with a confusing "No such file or
-      # directory" that reads like a source bug in this job's own code.
-      - name: install the Arm GNU toolchain
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            gcc-arm-none-eabi libnewlib-arm-none-eabi
-          arm-none-eabi-gcc --version | head -1
-          printf '#include <string.h>\nint main(void){return 0;}\n' > /tmp/hdr.c
-          arm-none-eabi-gcc -mcpu=cortex-m33 -mthumb -c /tmp/hdr.c -o /tmp/hdr.o
-          echo "newlib headers reachable"
 
       # BRIDGE_OTA_PARTITIONED=ON, with the gd32 backend, builds THREE
       # targets from one configure: gd32-bridge-slot-a and
@@ -295,16 +325,18 @@ jobs:
       # compiles src/boot/boot_main.c).  All three share
       # CMakeLists.txt's GD32_BRIDGE_SOURCES list, so this single configure
       # also compiles every hal/gd32/*.c file and hal/transport_hw_gd32.c.
+      # -DGD32_VENDOR_DIR points at the tree staged above -- the positive
+      # path (Refs #110): this is the flag itself doing the work, not the
+      # CMakeLists.txt fallback.
       - name: configure (gd32 backend, OTA partitioned)
-        working-directory: firmware/gd32-bridge
         run: |
           cmake -B build-gd32 -S . \
             -DCMAKE_TOOLCHAIN_FILE=toolchain/arm-none-eabi.cmake \
             -DBRIDGE_HAL_BACKEND=gd32 \
-            -DBRIDGE_OTA_PARTITIONED=ON
+            -DBRIDGE_OTA_PARTITIONED=ON \
+            -DGD32_VENDOR_DIR="$RUNNER_TEMP/gd32_vendor/gd32_firmware_library"
 
       - name: build
-        working-directory: firmware/gd32-bridge
         run: cmake --build build-gd32 -j"$(nproc)"
 
       # BRIDGE_OTA_PARTITIONED defaults OFF: that's the non-partitioned
@@ -313,12 +345,11 @@ jobs:
       # links it against the gd32 backend. Same vendor fetch already staged
       # above; one extra configure+build closes that gap.
       - name: configure (gd32 backend, full-flash / non-partitioned)
-        working-directory: firmware/gd32-bridge
         run: |
           cmake -B build-gd32-flash -S . \
             -DCMAKE_TOOLCHAIN_FILE=toolchain/arm-none-eabi.cmake \
-            -DBRIDGE_HAL_BACKEND=gd32
+            -DBRIDGE_HAL_BACKEND=gd32 \
+            -DGD32_VENDOR_DIR="$RUNNER_TEMP/gd32_vendor/gd32_firmware_library"
 
       - name: build (full-flash)
-        working-directory: firmware/gd32-bridge
         run: cmake --build build-gd32-flash -j"$(nproc)"
