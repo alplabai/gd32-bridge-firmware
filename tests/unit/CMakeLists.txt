@@ -8,10 +8,19 @@
 #   cmake --build build-tests
 #   ctest --test-dir build-tests --output-on-failure
 #
-# These suites moved here from alp-sdk when the firmware split into its own
-# repository (alp-sdk ADR 0031).  They link the REAL firmware sources -- not
-# mocks -- so the bounds checks and CS-framing seams under test are the same
+# The `ota` and `transport_spi` suites moved here from alp-sdk when the firmware
+# split into its own repository (alp-sdk ADR 0031).  They, and `transport_i2c`,
+# link the REAL firmware sources against hal/bridge_hw_stub.c -- not mocks -- so
+# the bounds checks and the CS/register framing seams under test are the same
 # code paths the device runs.
+#
+# `protocol` is the deliberate exception: it links tests/unit/fake/bridge_hw_fake.c
+# INSTEAD of the stub.  The stub answers BRIDGE_HW_ERR_NOTIMPL for nearly
+# everything, so only about two hardware opcodes can reach STATUS_OK through it,
+# which left src/protocol.c's reply encoding and its BRIDGE_HW_ERR_* -> STATUS_*
+# ladders unreachable from any host test.  The fake is injectable (a forced return
+# code per function) and resettable, trading the real HAL for reachability.  It is
+# test-only and lives under tests/unit/ so no firmware build can pick it up.
 cmake_minimum_required(VERSION 3.20)
 project(gd32-bridge-unit-tests LANGUAGES C)
 
@@ -70,3 +79,42 @@ target_include_directories(test_transport_spi PRIVATE ${FW}/src ${FW}/hal)
 target_compile_options(test_transport_spi PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_transport_spi PRIVATE ztest_shim)
 add_test(NAME transport_spi COMMAND test_transport_spi)
+
+# --- transport_i2c: transport + dispatcher over the stub HAL ---------------
+add_executable(test_transport_i2c
+    transport_i2c/src/test_transport_i2c.c
+    ${FW}/src/transport_i2c.c
+    ${FW}/src/protocol.c
+    ${FW}/src/bootloader/bootloader.c
+    ${FW}/src/ota.c
+    ${FW}/src/crc32.c
+    ${FW}/hal/bridge_hw_stub.c
+)
+target_include_directories(test_transport_i2c PRIVATE ${FW}/src ${FW}/hal)
+target_compile_options(test_transport_i2c PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_transport_i2c PRIVATE ztest_shim)
+add_test(NAME transport_i2c COMMAND test_transport_i2c)
+
+# --- protocol: dispatcher over a TEST-ONLY injectable fake HAL -------------
+#
+# hal/bridge_hw_stub.c answers BRIDGE_HW_ERR_NOTIMPL for essentially every
+# call, so it can only ever prove STATUS_OK on the opcodes with no hardware
+# dependency (PING/GET_VERSION/GET_BUILD_ID/LINK_FEATURES) -- the rest of
+# src/protocol.c's 1025 lines goes untouched by transport_spi/transport_i2c.
+# fake/bridge_hw_fake.c stands in for hal/bridge_hw_stub.c here instead, so
+# every opcode's success path AND its BRIDGE_HW_ERR_* -> STATUS_* mapping is
+# reachable.  Not -DBRIDGE_OTA_PARTITIONED (matching transport_spi/
+# transport_i2c, not the standalone `ota` target above): the 0xF0..0xFF OTA
+# range is exercised here only as the inert, unpartitioned default.
+add_executable(test_protocol
+    protocol/src/test_protocol.c
+    fake/bridge_hw_fake.c
+    ${FW}/src/protocol.c
+    ${FW}/src/bootloader/bootloader.c
+    ${FW}/src/ota.c
+    ${FW}/src/crc32.c
+)
+target_include_directories(test_protocol PRIVATE ${FW}/src ${FW}/hal ${CMAKE_CURRENT_SOURCE_DIR}/fake)
+target_compile_options(test_protocol PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_protocol PRIVATE ztest_shim)
+add_test(NAME protocol COMMAND test_protocol)

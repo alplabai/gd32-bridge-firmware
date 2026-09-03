@@ -180,7 +180,7 @@ function(gd32_firmware_target tgt linker_script)
     target_compile_options(${tgt} PRIVATE
         -mcpu=cortex-m33 -mthumb -mfloat-abi=soft
         -ffunction-sections -fdata-sections
-        -Wall -Wextra -Wshadow -Wpedantic)
+        -Wall -Wextra -Wshadow -Wpedantic -Werror)
     target_link_options(${tgt} PRIVATE
         -mcpu=cortex-m33 -mthumb -mfloat-abi=soft
         -Wl,--gc-sections -nostartfiles -T${linker_script})

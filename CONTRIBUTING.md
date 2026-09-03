@@ -13,27 +13,47 @@ hardware — and **the wire contract has a second half in another repository**.
 
 ## Branch strategy
 
-`main` is the only long-lived branch, and it is protected. Every change —
-including a one-line fix, a revert of your own work, and a docs typo — starts on
-its own branch and lands through a pull request.
+There are two long-lived branches. **`dev` is the integration target** — every
+change, including a one-line fix, a revert of your own work, and a docs typo,
+branches off `dev` and lands back on `dev` through a pull request. **`main` is
+the release line**, and it only ever receives `dev`.
 
 ```sh
-git checkout main && git pull
+git checkout dev && git pull
 git checkout -b fix/<topic>        # or feat/, docs/, chore/
 # ... work, run the gates below ...
 git push -u origin fix/<topic>
-gh pr create --base main
+gh pr create --base dev
 ```
 
-Prefixes: `fix/`, `feat/`, `docs/`, `chore/`, `perf/`. Reference the alp-sdk
-issue where one exists (`alp-sdk#1730`) — most work here is tracked there,
-because the defect is usually visible from the host side first.
+Prefixes: `fix/`, `feat/`, `docs/`, `chore/`, `perf/`. Reference the issue in this
+repository where one exists, and the alp-sdk issue where the defect is tracked
+there instead (`alp-sdk#1730`) — much of this work is visible from the host side
+first, so the two backlogs both carry parts of it.
 
-**Why no `dev` branch**, unlike alp-sdk: this repo has a single long-lived
-artifact line and a bench that serialises anyway. An integration branch would
-add a merge step without adding a place for anything to be integrated. If that
-changes, revisit it; until then `main` plus short-lived branches is the honest
-shape.
+**Never target `main` directly.** A PR based on `main` skips the integration step,
+and if it was cut from `main` while `dev` is ahead it also carries a stale base.
+Check before opening one:
+
+```sh
+git fetch origin dev main
+git log --oneline origin/dev..HEAD   # every commit the PR would carry -- eyeball it
+```
+
+If that list contains commits you did not write for this change, the branch was
+cut from the wrong place.
+
+**`Closes #N` does not auto-close on a `dev` merge.** GitHub auto-closes a linked
+issue only when the merge lands on the repository's *default* branch, which is
+`main`. In a PR targeting `dev` the keyword still records intent and links the
+issue, but the issue has to be closed by hand after the merge. Use `Refs #N` when
+the change does not fully resolve the issue.
+
+**Why `dev` exists**, having previously not: this tree grew a host test suite and
+a set of cross-repo wire obligations, so changes now accumulate that are complete
+and gate-green but not yet release-ready. `dev` is where they accumulate. The
+bench still serialises, and that has not changed — what changed is that there is
+now something to integrate.
 
 Squash-merge is the default, so branch churn and the "try it on the bench"
 commits die with the branch instead of becoming permanent history.
@@ -42,12 +62,16 @@ commits die with the branch instead of becoming permanent history.
 
 ```sh
 # stub build -- the same one CI runs. This repo does not vendor the GD32
-# firmware library, so the stub backend is the compile coverage available
-# without one; with an alp-sdk checkout you can also build the gd32 backend by
-# adding -DBRIDGE_HAL_BACKEND=gd32 -DGD32_VENDOR_DIR=<path> (see README.md).
+# firmware library, so the stub backend is the compile coverage available to
+# you locally without one; CI's `gd32 backend build` job fetches the real
+# library from the pinned public mirror and compiles the gd32 backend too --
+# see .github/workflows/ci.yml -- but that coverage is CI-only unless you
+# have your own copy of vendors/gd32_firmware_library (e.g. an alp-sdk
+# checkout) to point at with -DBRIDGE_HAL_BACKEND=gd32
+# -DGD32_VENDOR_DIR=<path> (see README.md).
 # CMAKE_TOOLCHAIN_FILE is not optional: this is Cortex-M33 firmware linked
 # against a device linker script. Without it CMake configures against the host
-# compiler and the BUILD then dies on the first source file, which rejects
+# compiler and the build then dies on the first source file, which rejects
 # -mcpu=cortex-m33 -- the configure step itself still succeeds, so the failure
 # arrives later than you expect.
 cmake -B build/stub -S . -DCMAKE_TOOLCHAIN_FILE=toolchain/arm-none-eabi.cmake -DBRIDGE_HAL_BACKEND=stub
@@ -81,8 +105,13 @@ two should land close together. Say in your PR which alp-sdk PR pairs with it.
 ## Bench evidence is part of the change
 
 A patch that touches a transport, the OTA path, or a supervised output is **not
-reviewable without a bench run**. CI builds the stub backend; it cannot tell you
-whether the link survives, and it cannot tell you what a rail did.
+reviewable without a bench run**. CI's `gd32 backend build` job now compiles and
+links the real gd32 backend, including the armed OTA state machine and the
+bootloader, against the real GD32 firmware library -- so it can catch a wrong
+register name, bit width, or type. It cannot tell you whether the link
+survives on silicon, and it cannot tell you what a rail did: compile-and-link
+proves nothing about register *sequences*, timing, or electrical behaviour on
+real hardware.
 
 Paste the actual console output, not a summary:
 
