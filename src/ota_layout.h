@@ -18,12 +18,15 @@
  *   0x08045000  slot B      236 KB
  *   0x08080000  end
  *
- * NOTE: OTA self-flashing is only safe when the firmware is built with
- * the partitioned bootloader layout (-DBRIDGE_OTA_PARTITIONED, paired
- * with the bootloader image + slot-linked app).  The default full-flash
- * build leaves OTA inert (ota_dispatch -> STATUS_NOSUPPORT).  Until the
- * bootloader path is validated on real silicon, GD32 updates go through
- * an external SWD probe (host-driven SWD reflash is not wired this HW rev).
+ * NOTE: OTA self-flashing needs the partitioned bootloader layout
+ * (-DBRIDGE_OTA_PARTITIONED, paired with the bootloader image +
+ * slot-linked app).  The default full-flash build leaves OTA inert
+ * (ota_dispatch -> STATUS_NOSUPPORT).  Path A was silicon-validated
+ * 2026-06-04 (bench, protocol v0.6) for the A->B update + rollback
+ * direction; B->A has NOT been exercised.  It remains HIL-gated: a
+ * bad bootloader bricks the part, and this HW revision has no
+ * host-driven SWD reflash, so recovery needs a bench SWD probe on the
+ * physical board (see src/bootloader/DESIGN.md).
  */
 #ifndef GD32_BRIDGE_OTA_LAYOUT_H
 #define GD32_BRIDGE_OTA_LAYOUT_H
@@ -50,12 +53,16 @@
 enum { OTA_SLOT_A = 0u, OTA_SLOT_B = 1u };
 
 /* Image header — lives at the start of a slot, carried in the image body
- * (written via OTA_WRITE_CHUNK).  The signature is reserved; verified only
- * when signing is enabled (recommended default: CRC32 enforced, signature
- * hook reserved-but-off until factory key provisioning exists). */
+ * (written via OTA_WRITE_CHUNK).  `signature` is reserved and UNVERIFIABLE
+ * on this part as specified: the GD32G553's only crypto engine is the CAU,
+ * which is symmetric-only (DES/TDES/AES) -- there is no PKA, HMAC, CMAC or
+ * message-hash engine on this device (GD32G553 User Manual Rev1.2 p.350
+ * §13.1; confirmed absent from the peripheral memory map, Datasheet
+ * Rev2.0 p.19).  See SECURITY.md.  Only body_crc32 is enforced today;
+ * nothing in this tree populates or checks `signature`. */
 #define OTA_IMG_MAGIC       0x4F544131u /* "OTA1" */
 #define OTA_IMG_FMT_VERSION 1u
-#define OTA_SIG_LEN         64u /* ECDSA-P256 (r||s) */
+#define OTA_SIG_LEN         64u /* NOT ECDSA-P256-verifiable on this part; see comment above */
 
 typedef struct {
 	uint32_t magic;       /* OTA_IMG_MAGIC */

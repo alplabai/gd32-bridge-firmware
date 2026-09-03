@@ -1,0 +1,6 @@
+# tests/gen_protocol_vectors.py writes tests/protocol_vectors.txt with LF
+# endings. Without this, a Windows checkout with core.autocrlf=true rewrites
+# the working-tree copy to CRLF, and the file is permanently stat-dirty --
+# which breaks the `git diff --exit-code tests/protocol_vectors.txt` gate
+# documented in CONTRIBUTING.md and run in .github/workflows/ci.yml.
+tests/protocol_vectors.txt text eol=lf
