@@ -80,8 +80,10 @@
  *                               Wire `mode` byte translated to the
  *                               vendor's TIMER_SLAVE_MODE_* /
  *                               TIMER_QUAD_DECODER_MODE* encoding.
- *                               Slave listens to ITI0; SYSCFG router
- *                               left at chip default.
+ *                               Slave ITIx looked up per (master, slave)
+ *                               pair (timer_sync_iti_lookup, hal/gd32/
+ *                               timer_sync_iti.c, UM p.570); an
+ *                               unconnected pair returns INVAL.
  *   16. POWER_MODE_SET       -- DONE (§C.15c + §C.25): mode 0/1
  *                               (run/sleep) accepted no-ops, mode 2
  *                               (deep-sleep) calls

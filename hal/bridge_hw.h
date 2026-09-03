@@ -300,7 +300,9 @@ int bridge_hw_pwm_single_pulse(uint8_t channel, uint32_t pulse_ns);
 
 /* Configure master-slave timer sync.  @p master and @p slave name two
  * of TIMER0 / TIMER7 / TIMER19 by integer id; @p mode selects the
- * slave-mode select field (per GD32G553 §17.4.3 SMC bits):
+ * slave-mode select field (SYSCFG_TIMERxCFG2 TSCFG15[4:0], GD32G553
+ * User Manual Rev1.2 §1.7.23 p.83 -- TIMERx_SMCFG has no SMC/TRGS
+ * field on this part; bits 6:4 and 2:0 are Reserved, p.634/p.636):
  * 0 = disabled, 1 = reset, 2 = gated, 3 = trigger, 4 = external-clock,
  * 5 = encoder-mode-1 etc.  Used to synchronise multi-channel PWM
  * outputs across the three advanced-timer groups.  The internal-
