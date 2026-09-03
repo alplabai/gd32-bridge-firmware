@@ -55,7 +55,7 @@ void qenc_channel_init(const gd32_qenc_t *e)
 	gpio_af_set(e->gpio_y_port, e->gpio_af, e->gpio_y_pin);
 
 	timer_parameter_struct ip;
-	timer_struct_para_init(&ip);
+	timer_struct_para_init(&ip)
 	ip.prescaler         = 0u; /* count every encoder edge   */
 	ip.alignedmode       = TIMER_COUNTER_EDGE;
 	ip.counterdirection  = TIMER_COUNTER_UP;
@@ -65,7 +65,7 @@ void qenc_channel_init(const gd32_qenc_t *e)
 	timer_deinit(e->timer_periph);
 	timer_init(e->timer_periph, &ip);
 	timer_quadrature_decoder_mode_config(e->timer_periph,
-	                                     TIMER_QUAD_DECODER_MODE9,
+	                                     TIMER_QUAD_DECODER_MODE2,
 	                                     TIMER_IC_POLARITY_RISING,
 	                                     TIMER_IC_POLARITY_RISING);
 	timer_enable(e->timer_periph);
