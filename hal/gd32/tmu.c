@@ -87,6 +87,34 @@ int bridge_hw_tmu_compute(uint8_t   function,
 		return BRIDGE_HW_ERR_NOTIMPL;
 	}
 
+	/* SQRT / LN / SINH / COSH in Q31 (format 0, IFLTEN=OFLTEN=0) need a
+     * non-zero FACTOR[2:0] scaling factor: fixed 3'b001 for cosh/sinh
+     * (GD32G553 User Manual Rev1.2 Table 14-16 p.390, Table 14-18
+     * p.391) and an operand-dependent factor for ln/sqrt (Table 14-23
+     * p.393, Table 14-26 p.394).  Per p.398 that factor is not just a
+     * register bit -- it is a SOFTWARE pre-/post-scale on both sides
+     * of the TMU call ("TMU_IDATA = the actual input parameter/
+     * 2^FACTOR[2:0]" / "the actual output result = TMU_ODATA*
+     * 2^FACTOR[2:0]"), and for all four modes the *post-scaled*
+     * result routinely exceeds the signed Q31 [-1,1) domain the wire
+     * word has to fit back into -- cosh(x) >= 1 for every x, and
+     * sinh/ln/sqrt overflow it across large parts of their
+     * documented input ranges (e.g. Table 14-26's f=2 sqrt band goes
+     * up to real sqrt(x) = 1.53).  This driver has no
+     * saturation/overflow convention for that yet, so refuse the Q31
+     * form of these four instead of handing back a value that is
+     * numerically wrong either way -- previously FACTOR was left at
+     * the F32-only 3'b000 with an unscaled operand, which silently
+     * violated the p.390/p.391 note and answered STATUS_OK with a
+     * wrong number (alplabai/gd32-bridge-firmware#46).  F32
+     * (IFLTEN=OFLTEN=1) is unaffected: Table 14-5 and its per-mode
+     * mirrors require FACTOR=3'b000 in that case, which is already
+     * what cfg.scale below writes unconditionally. */
+	if (format == 0u && (d->mode == TMU_MODE_SQRT || d->mode == TMU_MODE_LN ||
+	                     d->mode == TMU_MODE_SINH || d->mode == TMU_MODE_COSH)) {
+		return BRIDGE_HW_ERR_NOTIMPL;
+	}
+
 	/* Configure TMU for this op.  Per-call config keeps the dispatch
      * stateless -- a previous SIN call doesn't leave the TMU in a
      * state that surprises a subsequent SQRT call. */
