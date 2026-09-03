@@ -28,14 +28,17 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "../hal/bridge_hw.h" /* BRIDGE_HW_OK */
 #include "protocol.h"
 #include "transport.h"
 
 /* Weak default: the stub backend links this no-op so it needs no vendor
  * library.  The gd32 backend's hal/transport_hw_gd32.c overrides it with
- * the real I2C0 slave bring-up. */
-__attribute__((weak)) void bridge_transport_i2c_hw_init(void)
+ * the real I2C0 slave bring-up (and its real BRIDGE_HW_OK /
+ * BRIDGE_HW_ERR_RANGE return). */
+__attribute__((weak)) int bridge_transport_i2c_hw_init(void)
 {
+	return BRIDGE_HW_OK;
 }
 
 #define I2C_MAX_WRITE_BYTES \
@@ -90,6 +93,22 @@ void i2c_slave_write_start(void)
 	pending_reply_valid = false;
 }
 
+/* Call on a bus-error resync (BRIDGE_I2C_ER_HANDLER's bus_error arm):
+ * drops the tx-side staging alongside i2c_slave_write_start()'s rx-side
+ * reset.  Without this, a bus error mid-reply-transmission left
+ * i2c_tx_buf/i2c_tx_len/i2c_tx_cursor untouched, so a retried read
+ * resumed from the half-consumed cursor (replaying the tail of the old
+ * reply) instead of getting a clean, freshly-decided answer.  Setting
+ * i2c_tx_cursor == i2c_tx_len (both zeroed) makes the next
+ * i2c_slave_tx_next_byte() call land on the same "already fully
+ * drained" path i2c_slave_write_end()'s once-only guard now stages
+ * NO_PENDING from. */
+void i2c_slave_tx_abort(void)
+{
+	i2c_tx_len    = 0u;
+	i2c_tx_cursor = 0u;
+}
+
 /* Call per received byte during the write phase. */
 void i2c_slave_rx_byte(uint8_t b)
 {
@@ -120,7 +139,25 @@ bool i2c_slave_write_end(void)
 	     * opcodes execute twice, ring-consuming opcodes drop a batch,
 	     * OTA erase/program steps replay) and, on the framing-failure
 	     * path, would call stage_no_pending() and clobber the reply
-	     * already staged for this write before the host clocks it out. */
+	     * already staged for this write before the host clocks it out.
+	     *
+	     * One exception: if the staged reply has ALREADY been fully
+	     * clocked out (i2c_tx_cursor caught up with i2c_tx_len) by the
+	     * time this repeat call lands, re-stage NO_PENDING instead of a
+	     * bare no-op.  Two call sites land here with that true: the
+	     * STOP-time tail call after a read that finished draining (no
+	     * further byte ever reads tx_buf this transaction either way,
+	     * so re-staging is unobservable there), and a genuinely NEW,
+	     * separate read transaction with no intervening write -- which
+	     * is the case that matters, since without this a bare repeated
+	     * read after the reply drained would return the idle 0xFF
+	     * pattern forever instead of the documented STATUS_NO_PENDING
+	     * sentinel.  A reply that has only been PARTIALLY drained is
+	     * left alone (falls through to the plain no-op below) -- an
+	     * early-STOP mid-read is not the case this guards. */
+		if (i2c_tx_cursor >= i2c_tx_len) {
+			stage_no_pending();
+		}
 		return true;
 	}
 
@@ -174,6 +211,13 @@ void transport_i2c_init(void)
 	pending_reply_valid = false;
 	/* I2C0 slave bring-up (PA15/PB9, addr GD32_BRIDGE_DEFAULT_I2C_ADDR)
      * lives in the gd32 HAL backend (hal/transport_hw_gd32.c); the stub
-     * backend's weak no-op keeps this hardware-free for host tests. */
-	bridge_transport_i2c_hw_init();
+     * backend's weak no-op keeps this hardware-free for host tests.
+     * Return value ignored here on purpose: at boot CK_APB1 is whatever
+     * SystemInit already brought up (216 MHz on this board) before
+     * main() runs, so the out-of-range refusal
+     * (hal/transport_hw_gd32.c's i2c_timing_derive()) is not a live
+     * boot-time concern the way it is on the Deep-sleep wake path
+     * (hal/gd32/power.c, which DOES propagate it) -- and there is no
+     * host link yet at boot to report a failure to. */
+	(void)bridge_transport_i2c_hw_init();
 }

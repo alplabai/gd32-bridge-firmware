@@ -171,23 +171,28 @@ int bridge_hw_power_mode_set(uint8_t mode, uint32_t wake_bitmap, uint32_t wake_a
          * issues the actual `wfi` instruction that suspends the
          * core.  Returns here once a wakeup source fires. */
 		pmu_to_deepsleepmode(PMU_LDO_LOWPOWER, WFI_CMD);
-		/* Wake path.  UM Rev1.2 p.142 Table 3-1: Deep-sleep disables
-         * IRC8M, HXTAL and PLL, and this firmware has no PLL-relock
-         * step anywhere (a separate, pre-existing gap outside this
-         * fix) -- so CK_APB1 may still be running on IRC8M rather than
-         * the normal 216 MHz PLL when this line executes.
+		/* Wake path.  UM Rev1.2 p.142 "Deep-sleep mode": "all of IRC8M,
+         * HXTAL and PLL are disabled ... When exiting the Deep-sleep
+         * mode, the IRC8M is selected as the system clock" -- and this
+         * firmware has no PLL-relock step anywhere (gh#12, tracked
+         * separately), so CK_APB1 can still be running on ~8 MHz IRC8M
+         * rather than the normal 216 MHz PLL when this line executes.
          * bridge_transport_i2c_hw_init() redoes the GPIO/timing/address/
          * IRQ setup and re-runs i2c_enable(), so the peripheral comes
          * back up in a known state and a half-finished transaction from
          * before sleep cannot resume against it -- that part is correct
-         * regardless of clock.  Its I2C_TIMING constants are fixed for
-         * the 216 MHz case (see the timing comment in that function), so
-         * a read/write attempted before the clock tree is restored would
-         * be timed for the wrong tI2CCLK.  Fixing that is the PLL-relock
-         * gap noted above, not this issue's scope: WUEN=0 across
-         * Deep-sleep is the defect this change closes. */
-		bridge_transport_i2c_hw_init();
-		return BRIDGE_HW_OK;
+         * regardless of clock.  Its I2C_TIMING fields are now derived
+         * from the LIVE CK_APB1 on every call (not a 216-MHz-only
+         * constant), so this call is correctly timed at whatever clock
+         * CK_APB1 is actually running on here -- including 8 MHz IRC8M,
+         * with no PLL relock required for I2C0 specifically.  If the
+         * derivation still refuses (BRIDGE_HW_ERR_RANGE: the live
+         * apb1_hz is below the Fast-mode floor or produced fields that
+         * don't fit their 4-bit registers), I2C0 is left disabled by
+         * that function rather than brought up mistimed -- surface that
+         * to the caller instead of claiming BRIDGE_HW_OK for a deep-sleep
+         * transition that left the I2C bridge transport down. */
+		return bridge_transport_i2c_hw_init();
 	case 3u: /* standby */
 		rcu_periph_clock_enable(RCU_PMU);
 		power_wake_pins_enable(wake_bitmap);

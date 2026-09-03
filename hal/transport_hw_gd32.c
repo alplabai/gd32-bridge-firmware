@@ -55,6 +55,7 @@
 #include "gd32g5x3.h"
 
 #include "bridge_board_config.h"
+#include "bridge_hw.h" /* BRIDGE_HW_OK / BRIDGE_HW_ERR_RANGE */
 #include "protocol.h"  /* GD32_BRIDGE_DEFAULT_I2C_ADDR */
 #include "transport.h" /* the seams we drive */
 
@@ -343,41 +344,133 @@ static void i2c_gpio_init(void)
 	gpio_af_set(BRIDGE_I2C_SDA_PORT, af, BRIDGE_I2C_SDA_PIN);
 }
 
-void bridge_transport_i2c_hw_init(void)
+/* I2C_TIMING (PSC/SCLDELY/SDADELY) fields are 4 bits each (UM Rev1.2
+ * p.1287-1288) -- 0-15. */
+#define I2C_TIMING_FIELD_MAX 15u
+
+/* Fast-mode floor for the I2C kernel clock: Datasheet Rev2.0 p.141
+ * Table 4-48, footnote (2), "To ensure the fast mode I2C frequency,
+ * fPCLK1 must be at least 4 MHz."  BRIDGE_I2C_CK_SRC feeds I2C0 from
+ * CK_APB1 (RCU_I2CSRC_APB1, hal/bridge_board_config.h), i.e. fPCLK1 IS
+ * apb1_hz here -- this is the acceptable I2CCLK range's documented
+ * floor. */
+#define I2C_APB1_MIN_HZ_FAST_MODE 4000000u
+
+/* Derive PSC/SCLDELY/SDADELY from the LIVE APB1 kernel clock (UM Rev1.2
+ * p.1261 SS28.3.4 SCLDELY/SDADELY inequalities; Datasheet Rev2.0 p.141
+ * Table 4-48 Fast-mode AC timing) rather than trusting a constant tied
+ * to one clock configuration.
+ *
+ * Why this exists (gh#12, gh#38, gh#41): the Deep-sleep wake path
+ * (hal/gd32/power.c) calls bridge_transport_i2c_hw_init() while CK_APB1
+ * can still be running off ~8 MHz IRC8M -- UM Rev1.2 p.142, "Deep-sleep
+ * mode": "all of IRC8M, HXTAL and PLL are disabled ... When exiting the
+ * Deep-sleep mode, the IRC8M is selected as the system clock", and this
+ * firmware has no PLL-relock step anywhere (gh#12, still open).  A PSC/
+ * SCLDELY/SDADELY set computed for 216 MHz and reused verbatim at 8 MHz
+ * (an earlier revision of this function did exactly that) makes tPSC
+ * ~27x coarser than intended -- multiple microseconds of granularity
+ * against sub-microsecond Fast-mode delay targets -- which is a real
+ * synchronisation failure, not just imprecise timing.  Re-deriving from
+ * the live clock on every call (what this function did before it was
+ * replaced with fixed constants) fixes the wake path directly, because
+ * the inequalities below are just as solvable at 8 MHz as at 216 MHz;
+ * see the worked example below.
+ *
+ *   tI2CCLK = 1 / apb1_hz
+ *   PSC: target ~8 MHz tick (apb1_hz/8MHz, clamped to the 4-bit field);
+ *        a coarser divider keeps SCLDELY/SDADELY small at high apb1_hz
+ *        instead of needing near-max field values.
+ *   tPSC = (PSC+1) * tI2CCLK
+ *   SCLDELY >= [tr(max)+tSU;DAT(min)] / tPSC - 1
+ *   SDADELY >= {tf(max)+tHD;DAT(min)-tAF(min)-[(DNF+3)*tI2CCLK]} / tPSC
+ *   (tAF(min) unspecified in either document, taken as 0 -- the
+ *   conservative direction for a lower bound; DNF = 0000, the reset
+ *   value, since I2C_CTL0's digital-filter field is never written; all
+ *   Fast-mode column values from Datasheet Rev2.0 p.141 Table 4-48:
+ *   tr(max)=300ns, tSU;DAT(min)=100ns, tf(max)=300ns, tHD;DAT(min)=0ns.)
+ *
+ *   At apb1_hz = 216,000,000 (this board's normal run clock): PSC=15,
+ *   tPSC=74.07ns, SCLDELY=5, SDADELY=4 -- the exact constants this
+ *   function hardcoded before, re-derived rather than assumed.
+ *   At apb1_hz = 8,000,000 (IRC8M, the Deep-sleep wake case): PSC=0,
+ *   tPSC=125ns, SCLDELY=3, SDADELY=0 -- all in range; the 216 MHz
+ *   constants were never valid here, but a live re-derivation is.
+ *
+ * Returns false -- and leaves *psc, *scl_dely, *sda_dely untouched --
+ * if apb1_hz is below the Fast-mode kernel-clock floor, or if the
+ * derived fields would not fit their 4-bit registers (defensive: not
+ * reachable at any clock this SoC can actually run I2C0's kernel from,
+ * per the two data points above, but a mis-read RCU register must
+ * refuse loudly, not silently clamp into a wrong-but-plausible value --
+ * that silent-clamp failure mode is exactly what gh#38 fixed once
+ * already, for PSC alone). */
+static bool
+i2c_timing_derive(uint32_t apb1_hz, uint32_t *psc, uint32_t *scl_dely, uint32_t *sda_dely)
+{
+	if (apb1_hz < I2C_APB1_MIN_HZ_FAST_MODE) {
+		return false;
+	}
+
+	uint32_t p = apb1_hz / 8000000u;
+	if (p > 0u) {
+		p -= 1u;
+	}
+	if (p > I2C_TIMING_FIELD_MAX) {
+		p = I2C_TIMING_FIELD_MAX;
+	}
+
+	/* Picosecond fixed-point: apb1_hz up to ~500 MHz and (p+1) <= 16
+     * keep every intermediate well inside 64 bits. */
+	const uint64_t t_i2cclk_ps = 1000000000000ULL / apb1_hz;
+	const uint64_t t_psc_ps    = (uint64_t)(p + 1u) * t_i2cclk_ps;
+
+	const uint64_t tr_max_ps      = 300000ULL;
+	const uint64_t tsu_dat_min_ps = 100000ULL;
+	const uint64_t tf_max_ps      = 300000ULL;
+	const uint64_t dnf3_term_ps   = 3ULL * t_i2cclk_ps; /* (DNF+3)*tI2CCLK, DNF=0 */
+
+	/* SCLDELY >= [tr(max)+tSU;DAT(min)]/tPSC - 1, ceiling division so
+     * the inequality holds for the chosen integer field value. */
+	const uint64_t scldely_q = (tr_max_ps + tsu_dat_min_ps + t_psc_ps - 1u) / t_psc_ps;
+	const uint32_t scl       = (scldely_q > 0u) ? (uint32_t)(scldely_q - 1u) : 0u;
+
+	/* SDADELY >= {tf(max)-tAF(min)-[(DNF+3)*tI2CCLK]}/tPSC (tHD;DAT(min)=0
+     * drops out).  Can go non-positive at a low enough apb1_hz once the
+     * DNF term dominates -- SDADELY=0 satisfies that case. */
+	uint32_t sda = 0u;
+	if (tf_max_ps > dnf3_term_ps) {
+		const uint64_t sdadely_num = tf_max_ps - dnf3_term_ps;
+		sda                        = (uint32_t)((sdadely_num + t_psc_ps - 1u) / t_psc_ps);
+	}
+
+	if (p > I2C_TIMING_FIELD_MAX || scl > I2C_TIMING_FIELD_MAX || sda > I2C_TIMING_FIELD_MAX) {
+		return false;
+	}
+
+	*psc      = p;
+	*scl_dely = scl;
+	*sda_dely = sda;
+	return true;
+}
+
+int bridge_transport_i2c_hw_init(void)
 {
 	rcu_i2c_clock_config(BRIDGE_I2C_RCU_IDX, BRIDGE_I2C_CK_SRC);
 	rcu_periph_clock_enable(BRIDGE_I2C_RCU);
 	i2c_gpio_init();
 
-	/* I2C timing (UM Rev1.2 p.1261 SS28.3.4 SCLDELY/SDADELY inequalities;
-     * UM Rev1.2 p.1287-1288 I2C_TIMING field layout; Datasheet Rev2.0
-     * p.141 Table 4-48 Fast-mode AC timing).  APB1 is fixed at 216 MHz on
-     * this board (vendors/gd32_firmware_library/overrides/system_gd32g5x3.c
-     * sets __SYSTEM_CLOCK_216M_PLL_IRC8M and leaves APB1 undivided from
-     * AHB), so PSC/SCLDELY/SDADELY below are constants tied to that one
-     * clock configuration rather than derived at runtime.  The previous
-     * "psc = apb1_hz / 8000000u" computation silently saturated PSC from
-     * 26 down to 15 (a 4-bit field) on every normal boot, and even the
-     * clamped value paired with SCLDEL=2/SDADEL=1 violated both Fast-mode
-     * delay minimums with no flag or assertion anywhere.
-     *
-     *   tI2CCLK = 1 / 216 MHz = 4.6296 ns
-     *   PSC = 15  ->  tPSC = (PSC+1) * tI2CCLK = 74.07 ns
-     *   SCLDELY >= [tr(max)+tSU;DAT(min)] / tPSC - 1
-     *            = (300 ns + 100 ns) / 74.07 ns - 1 = 4.40  ->  SCLDELY = 5
-     *   SDADELY >= {tf(max)+tHD;DAT(min)-tAF(min)-[(DNF+3)*tI2CCLK]} / tPSC
-     *            = (300 ns + 0 - 0 - 13.9 ns) / 74.07 ns = 3.86  ->  SDADELY = 4
-     *   (tAF(min) is unspecified in either document and taken as 0, the
-     *   conservative direction for a lower bound; DNF = 0000, the reset
-     *   value -- I2C_CTL0's digital-filter field is never written.)
-     *
-     * If I2C0 is ever clocked from a different live APB1 frequency --
-     * e.g. a future PLL-relock path after Deep-sleep wake, which does
-     * NOT exist in this firmware today (UM Rev1.2 p.142: Deep-sleep
-     * disables IRC8M/HXTAL/PLL, and nothing here re-locks them) -- these
-     * three constants must be re-derived from the inequalities above for
-     * the new tPSC before this function is trusted at that clock. */
-	i2c_timing_config(BRIDGE_I2C_PERIPH, 15u, 5u /*scl_dely*/, 4u /*sda_dely*/);
+	uint32_t psc, scl_dely, sda_dely;
+	if (!i2c_timing_derive(rcu_clock_freq_get(CK_APB1), &psc, &scl_dely, &sda_dely)) {
+		/* Refuse rather than clamp: no i2c_timing_config()/i2c_enable()
+         * below, so I2C0 stays disabled and every access on the bus
+         * gets a hard failure the host/analyser can see, instead of a
+         * peripheral that answers with silently wrong timing.  See
+         * i2c_timing_derive()'s banner (gh#12/gh#38/gh#41) for why a
+         * silent clamp is exactly the defect this refusal avoids. */
+		return BRIDGE_HW_ERR_RANGE;
+	}
+	i2c_timing_config(BRIDGE_I2C_PERIPH, psc, scl_dely, sda_dely);
 	i2c_analog_noise_filter_enable(BRIDGE_I2C_PERIPH);
 
 	i2c_address_config(
@@ -392,6 +485,7 @@ void bridge_transport_i2c_hw_init(void)
 	nvic_irq_enable(BRIDGE_I2C_ER_IRQN, BRIDGE_I2C_IRQ_PRIO, BRIDGE_I2C_IRQ_SUBPRIO);
 
 	i2c_enable(BRIDGE_I2C_PERIPH);
+	return BRIDGE_HW_OK;
 }
 
 /* I2C0 event ISR: address match (direction-aware), RX during a write,
@@ -468,21 +562,40 @@ void BRIDGE_I2C_ER_HANDLER(void)
 		bus_error = true;
 	}
 
-	/* Catch-all: blanket-clear every software-clearable status bit the
-     * snapshot shows set.  I2C_STATC mirrors I2C_STAT's bit positions
-     * for ADDSEND/NACK/STPDET/BERR/LOSTARB/OUERR/PECERR/TIMEOUT/SMBALT
-     * (UM Rev1.2 p.1291-1292 vs p.1292-1293), so writing the snapshot
-     * masked to those bits back into I2C_STATC clears exactly the set
-     * ones in one access.  This is the safety net for a source this
-     * handler does not model by name -- it must not be the only thing
-     * that keeps the vector from level-holding; the explicit arms above
-     * are the contract. */
-	I2C_STATC(BRIDGE_I2C_PERIPH) = stat & (I2C_STAT_ADDSEND | I2C_STAT_NACK | I2C_STAT_STPDET |
-	                                       I2C_STAT_BERR | I2C_STAT_LOSTARB | I2C_STAT_OUERR |
-	                                       I2C_STAT_PECERR | I2C_STAT_TIMEOUT | I2C_STAT_SMBALT);
+	/* Catch-all: blanket-clear every software-clearable ERROR-domain
+     * status bit the snapshot shows set -- the safety net for a source
+     * this handler does not model by name (LOSTARB/PECERR/TIMEOUT/
+     * SMBALT).  I2C_STATC mirrors I2C_STAT's bit positions (UM Rev1.2
+     * p.1291-1292 vs p.1292-1293), so writing the snapshot masked to
+     * these bits back into I2C_STATC clears exactly the set ones in one
+     * access.  This must not be the only thing that keeps the vector
+     * from level-holding; the explicit arms above are the contract.
+     *
+     * ADDSEND and STPDET are deliberately EXCLUDED from this mask, even
+     * though UM p.1292-1293 lists them as clearable the same way.  Both
+     * are EV-domain events (serviced by BRIDGE_I2C_EV_HANDLER, never
+     * raised by anything this ER handler itself does), but I2C_STAT is
+     * one shared register: if either was pending in the `stat` snapshot
+     * above because the EV IRQ simply hadn't run yet, including them
+     * here would clear them out from under BRIDGE_I2C_EV_HANDLER and
+     * lose an address match or a STOP.  An earlier revision of this
+     * mask included them and only held because BRIDGE_I2C_EV_IRQN (31)
+     * sorts below BRIDGE_I2C_ER_IRQN (32) at the same NVIC priority
+     * (hal/bridge_board_config.h) -- correct per the Cortex-M tie-break
+     * rule (lower IRQn serviced first among equal-priority pendings),
+     * but an unstated dependency an unrelated IRQn/priority change could
+     * silently break.  Narrowing the mask to bits this handler actually
+     * owns removes that dependency instead of merely documenting it. */
+	I2C_STATC(BRIDGE_I2C_PERIPH) =
+	    stat & (I2C_STAT_NACK | I2C_STAT_BERR | I2C_STAT_LOSTARB | I2C_STAT_OUERR |
+	            I2C_STAT_PECERR | I2C_STAT_TIMEOUT | I2C_STAT_SMBALT);
 
 	if (bus_error) {
 		i2c_interrupt_disable(BRIDGE_I2C_PERIPH, I2C_INT_TI);
 		i2c_slave_write_start();
+		/* Drop the tx side too -- see i2c_slave_tx_abort()'s banner.
+         * Without this a retried read resumes from (or exhausts past)
+         * a half-consumed reply instead of getting a clean answer. */
+		i2c_slave_tx_abort();
 	}
 }
