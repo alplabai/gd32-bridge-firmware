@@ -40,7 +40,9 @@ firmware/gd32-bridge/
 │   ├── protocol.h          ← internal header
 │   ├── transport_spi.c     ← SPI-slave receive + reply staging
 │   ├── transport_i2c.c     ← I2C-slave receive + reply staging
-│   └── …                   ← per-feature handlers (pwm.c, gpio.c, adc.c, …)
+│   ├── ota.c               ← OTA Path-A state machine
+│   ├── crc32.c             ← CRC-32 (OTA image/metadata)
+│   └── boot/, bootloader/  ← application bootloader
 └── tests/
     └── protocol_vectors.txt  ← canonical CRC + wire vectors (shared with host tests)
 ```
@@ -80,6 +82,12 @@ needs the factory A/B metadata record —
 recovery loop.  The full Path-A wire contract is
 [`docs/gd32-bridge-protocol.md` (alp-sdk)](https://github.com/alplabai/alp-sdk/blob/main/docs/gd32-bridge-protocol.md) §10.
 
+Validated on silicon 2026-06-04 (bench, protocol v0.6) for the A→B
+update + rollback direction only — B→A has **not** been exercised.
+Still HIL-gated: a bad bootloader bricks the part, and this HW
+revision has no host-driven SWD reflash, so recovery needs a bench SWD
+probe on the physical board.
+
 Development flashing uses an external SWD probe on `GD32_SWDIO` /
 `GD32_SWCLK` (J-Link, ST-Link, OpenOCD).
 
@@ -87,9 +95,10 @@ Development flashing uses an external SWD probe on `GD32_SWDIO` /
 > real peripheral HAL (per-peripheral TUs under `hal/gd32/`), the
 > **SPI1 + I2C0 slave transports** (`hal/transport_hw_gd32.c`), and
 > the **OTA Path-A state machine** (`src/ota.c` + `hal/fmc_ota.c` —
-> silicon-validated end-to-end 2026-06-04; armed only with
-> `BRIDGE_OTA_PARTITIONED`).  The fw v0.2.3–v0.2.7 campaign cleared
-> the soak-quarantined HAL defects (`pwm_capture`, `adc_stream`,
+> silicon-validated 2026-06-04 for A→B update + rollback; B→A not yet
+> exercised; armed only with `BRIDGE_OTA_PARTITIONED`).  The fw
+> v0.2.3–v0.2.7 campaign cleared the soak-quarantined HAL defects
+> (`pwm_capture`, `adc_stream`,
 > `qenc`, `tmu` — silicon-validated; the analog subsystem additionally
 > needed the v0.2.6 internal-VREF bring-up).  The ADC DSP-chain runtime
 > dispatch (FIR/IIR via the FAC, FFT via `CMD_ADC_SPECTRUM_READ`) is
@@ -107,9 +116,13 @@ it as a wire-incompatible change and stage carefully.
 ## GPIO + PWM channel maps
 
 The wire-side **logical** ids that the protocol uses do **not**
-match GD32 silicon pad indices.  The mapping lives in
-[`src/protocol.c`](src/protocol.c) in the `pwm_channel_map[]` /
-`gpio_pad_map[]` tables, sourced from
+match GD32 silicon pad indices.  `src/protocol.c` passes channel ids
+to the HAL untranslated; all pad translation happens in the gd32
+backend, in [`hal/gd32/gpio.c`](hal/gd32/gpio.c) (`gpio_pad_map[]`)
+and [`hal/gd32/pwm.c`](hal/gd32/pwm.c) (`pwm_channels[]`), with the
+ADC and encoder maps in `hal/gd32/adc.c` (`adc_channels_map[]`) and
+`hal/gd32/qenc.c` (`qenc_map[]`); all four are declared `extern` in
+`hal/gd32/gd32_common.h`.  Sourced from
 [`metadata/e1m_modules/v2n/gd32-io-mcu-map.tsv` (alp-sdk)](https://github.com/alplabai/alp-sdk/blob/main/metadata/e1m_modules/v2n/gd32-io-mcu-map.tsv).
 Host code reaches a channel by its logical id; the firmware
 translates internally.

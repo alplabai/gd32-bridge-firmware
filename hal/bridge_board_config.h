@@ -8,7 +8,7 @@
  * This header is included ONLY by the gd32 HAL backend
  * (hal/transport_hw_gd32.c); it references GigaDevice register macros.
  *
- * SOURCE OF TRUTH for the pin map:
+ * SOURCE OF TRUTH for the pin map (alp-sdk):
  *   metadata/e1m_modules/v2n/gd32-io-mcu-map.tsv
  *   metadata/chips/gd32g553.yaml
  * Peripheral + pin assignments below are CONFIRMED against the
