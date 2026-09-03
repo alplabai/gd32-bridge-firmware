@@ -72,6 +72,8 @@ elseif(BRIDGE_HAL_BACKEND STREQUAL "gd32")
         hal/gd32/adc_stream.c
         hal/gd32/counter.c
         hal/gd32/dac.c
+        hal/gd32/fault_diag.c
+        hal/gd32/fault_handlers.c
         hal/gd32/gpio.c
         hal/gd32/power.c
         hal/gd32/pwm.c

@@ -70,3 +70,17 @@ target_include_directories(test_transport_spi PRIVATE ${FW}/src ${FW}/hal)
 target_compile_options(test_transport_spi PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_transport_spi PRIVATE ztest_shim)
 add_test(NAME transport_spi COMMAND test_transport_spi)
+
+# --- fault_diag: CFSR/SYSCFG_STAT -> fault_record_t decode (issue #36) ------
+#
+# Pure logic, no vendor register header (see hal/gd32/fault_diag.h) -- the
+# only slice of the fault-handler fix that's host-testable at all, since no
+# CI job compiles hal/gd32/*.c (issue #77).
+add_executable(test_fault_diag
+    fault_diag/src/test_fault_diag.c
+    ${FW}/hal/gd32/fault_diag.c
+)
+target_include_directories(test_fault_diag PRIVATE ${FW}/hal/gd32)
+target_compile_options(test_fault_diag PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_fault_diag PRIVATE ztest_shim)
+add_test(NAME fault_diag COMMAND test_fault_diag)
