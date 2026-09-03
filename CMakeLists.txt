@@ -101,16 +101,10 @@ elseif(BRIDGE_HAL_BACKEND STREQUAL "gd32")
         hal/fmc_ota.c
         hal/gd32_libc_stubs.c
     )
-    # -Wconversion (added below, gd32_firmware_target()) flags one site in
-    # this list today: hal/gd32/pwm.c:125's `(periph == TIMER0) ? 0u : 1u`
-    # narrowed into a uint8_t return.  That file is owned by open PR #82
-    # (three review rounds in); it is not this change's to edit.  Silence
-    # -Wconversion for this one source only so the flag can go live now
-    # instead of waiting on #82 -- routed to that PR as a one-line fix.
-    # TODO(#82): delete this override in the same change that lands the
-    # cast, so -Wconversion covers hal/gd32/pwm.c like everything else.
-    set_source_files_properties(hal/gd32/pwm.c PROPERTIES
-        COMPILE_OPTIONS "-Wno-conversion")
+    # -Wno-conversion override for hal/gd32/pwm.c (#109) deleted here: #82
+    # lands the one-line cast in pwm_timer_index() that was the only site
+    # -Wconversion flagged, so this source needs no override any more and
+    # -Wconversion now covers it like everything else in the list above.
     # Pull in the GigaDevice firmware-library wrapper.  Its CMakeLists
     # fatal-errors with a clear "drop the SDK into sdk/" instruction
     # when the unpacked archive is missing, so an unconfigured

@@ -133,7 +133,13 @@ static uint8_t pwm_align_mode[2];
 /* TIMER base -> pwm_align_mode index. */
 static uint8_t pwm_timer_index(uint32_t periph)
 {
-	return (periph == TIMER0) ? 0u : 1u;
+	/* The ternary's operands are the unsigned-int constants 0u/1u
+	 * (usual arithmetic conversions promote the whole expression to
+	 * unsigned int before the narrowing return), so -Wconversion can't
+	 * see that only 0 or 1 ever reaches this uint8_t return. Both fit;
+	 * the cast is a no-op at runtime, added only to satisfy the warning
+	 * (#109 TODO). */
+	return (uint8_t)((periph == TIMER0) ? 0u : 1u);
 }
 
 int bridge_hw_pwm_set(uint8_t channel, uint32_t period_ns, uint32_t duty_ns)
