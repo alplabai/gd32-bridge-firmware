@@ -218,6 +218,14 @@ bool trng_poll_ready(void);            /* trng.c */
 bool vref_ready_check(void);           /* vref.c */
 bool adc_periph_init(uint32_t periph); /* adc.c */
 
+/* Bounded RSTCLB/CLB calibration cycle (UM Rev1.2 17.4.1, p.424-425),
+ * shared with the stream path: any ADCON toggle invalidates the
+ * calibration factor (it is applied only "until the next ADC
+ * power-off"), so every re-enable on the request path -- single-shot
+ * read, stream_begin, and the stream ROVF recovery -- must recalibrate
+ * rather than assume adc_periph_init's boot calibration survived. */
+bool adc_calibrate_bounded(uint32_t periph); /* adc.c */
+
 /* Resolution/oversample helpers (adc.c) shared with the stream path.
  * adc_full_scale_for_bits maps a cached resolution to its code range;
  * adc_apply_conv_format programs a channel's cached resolution +

@@ -140,7 +140,10 @@ adc_oversample_params(uint16_t ratio, bool *enable_out, uint16_t *ovsr_out, uint
  * ADC3_resolution_oversample example brackets every change with
  * adc_disable/adc_enable).  Shared by the single-shot read (which
  * wraps it in a disable/enable/tSTAB) and stream_begin (already inside
- * its own disable..enable window). */
+ * its own disable..enable window).  That disable/enable bracket is
+ * also an ADCON power-off/on: both callers must recalibrate
+ * (adc_calibrate_bounded) after their tSTAB dwell, not just re-apply
+ * the format -- the calibration factor does not survive it (#34). */
 void adc_apply_conv_format(uint32_t periph, uint8_t channel)
 {
 	uint32_t res_reg;
@@ -174,8 +177,11 @@ void adc_apply_conv_format(uint32_t periph, uint8_t channel)
  * Without the irony: the self-heal for a wedged converter must not
  * itself trust that converter to terminate a loop.  Same register
  * sequence as the vendor, same bound family as the other handler-safe
- * waits in this file; returns false if either phase never completes. */
-static bool adc_calibrate_bounded(uint32_t periph)
+ * waits in this file; returns false if either phase never completes.
+ * NOT static: adc_stream.c's stream_begin and ROVF recovery share it
+ * (declared in gd32_common.h) -- every ADCON toggle needs the same
+ * bounded recalibration, not just adc_periph_init's boot call. */
+bool adc_calibrate_bounded(uint32_t periph)
 {
 	uint32_t to;
 
@@ -255,7 +261,12 @@ int bridge_hw_adc_read(uint8_t channel, uint8_t samples, uint16_t *mv)
      * share each converter and may hold different formats, so this
      * re-applies every read; the sibling-stream case already returned
      * BUSY above, so no live stream owns the converter here.  The
-     * ADCON toggle preserves the boot calibration. */
+     * ADCON toggle does NOT preserve the boot calibration -- UM
+     * Rev1.2 p.424 17.4.1: the calibration factor is applied "until
+     * the next ADC power-off", and clearing ADCON IS that power-off
+     * (p.447).  17.7 exposes no calibration-value register to save
+     * and restore across the toggle, so it must be recomputed below,
+     * every read (#34). */
 	adc_disable(ch->periph);
 	adc_apply_conv_format(ch->periph, channel);
 	adc_routine_channel_config(ch->periph, 0u, ch->channel, adc_sample_cycles_cache[channel]);
@@ -263,6 +274,14 @@ int bridge_hw_adc_read(uint8_t channel, uint8_t samples, uint16_t *mv)
 	for (volatile uint32_t stab = 0u; stab < 4096u; ++stab) {
 		/* tSTAB dwell after ADCON */
 	}
+	/* Recalibrate: bounded (UM Rev1.2 17.4.1 sequence, adc_calibrate_
+     * bounded above), cost tCAL = 902 1/fADC (GD32G553xx Datasheet
+     * Rev2.0 Table 4-35) = 25.06 us at this driver's fixed 36 MHz
+     * ADC_CLK_SYNC_HCLK_DIV6 clock -- negligible next to the samples
+     * loop below.  A false return means the calibration FSM never
+     * finished (wedged converter); report IO rather than serve
+     * readings from an unproven converter. */
+	if (!adc_calibrate_bounded(ch->periph)) return BRIDGE_HW_ERR_IO;
 
 	/* A stale EOC (e.g. the in-flight conversion that completes after
      * a stream END drops continuous mode) would satisfy the first poll
@@ -282,17 +301,40 @@ int bridge_hw_adc_read(uint8_t channel, uint8_t samples, uint16_t *mv)
      * reconfig + recalibrate) so the NEXT read starts from a clean
      * converter -- same self-healing shape as the TRNG fault path.
      *
-     * SCALE the bound by the oversample ratio: with oversampling ON,
-     * ONE triggered "conversion" is `ratio` back-to-back samples (up to
-     * 256), so a healthy oversampled conversion legitimately takes up to
-     * ~ratio x longer than the ~6.3 us un-oversampled case.  A fixed
-     * 100k bound would false-timeout every legal high-ratio read and
-     * needlessly recalibrate.  The floored-to-pow2 ratio is what the
-     * hardware actually runs; clamp the raw cache to [1,256] to match. */
+     * SCALE the bound by the oversample ratio, ADDITIVELY and CAPPED
+     * (#17) -- NOT `100000u * ovs_ratio`, which reaches 25 600 000
+     * iterations at the 256x ceiling and, at that magnitude, turns
+     * this handler-context spin into the same "whole link down"
+     * failure the bound exists to prevent, just with a longer fuse.
+     *
+     * With oversampling ON, ONE triggered conversion is `ratio`
+     * back-to-back sub-conversions before a single EOC.  At this
+     * driver's fixed ADC_CLK_SYNC_HCLK_DIV6 clock (36 MHz, HCLK =
+     * 216 MHz) one sub-conversion takes (sample_cycles + 12.5)
+     * CK_ADC (UM Rev1.2 17.4.9, p.431): the default 240-cycle config
+     * this file uses is ~7.0 us, and the slowest legal config
+     * (sample_cycles clamped to 638 in bridge_hw_adc_configure) is
+     * ~18.1 us.  So a HEALTHY oversampled read costs at most
+     * ratio * 18.1 us -- ~4.6 ms at ratio=256.
+     *
+     * The pre-existing un-scaled bound (100000u iterations) is
+     * documented at the top of this comment block as ~4.6 ms of
+     * real dwell for a single ~6.3-7.0 us conversion -- about 650-730x
+     * headroom, calibrated empirically against the silicon incident
+     * this latch was added for.  Reuse that iterations-per-microsecond
+     * ratio (100000 / 4600 us =~ 21.7 iter/us) for the additive step
+     * instead of re-deriving a new constant: 25000u iterations =~
+     * 1.15 ms per oversample step, so even the worst-case healthy
+     * 256x/638-cycle read (~4.6 ms) sits comfortably under the
+     * absolute ceiling below with room to spare, and a wedged
+     * converter is bounded at ~400000 iterations =~ 18.4 ms --
+     * "tens of milliseconds", not the 0.5-1.2 s the multiplicative
+     * form produced -- regardless of how high ratio climbs. */
 	uint32_t ovs_ratio = adc_oversample_ratio_cache[channel];
 	if (ovs_ratio < 1u) ovs_ratio = 1u;
 	if (ovs_ratio > ADC_OVERSAMPLE_RATIO_MAX) ovs_ratio = ADC_OVERSAMPLE_RATIO_MAX;
-	const uint32_t eoc_bound = 100000u * ovs_ratio;
+	uint32_t eoc_bound = 100000u + 25000u * ovs_ratio;
+	if (eoc_bound > 400000u) eoc_bound = 400000u;
 	for (uint8_t i = 0; i < samples; ++i) {
 		adc_software_trigger_enable(ch->periph, ADC_ROUTINE_CHANNEL);
 		uint32_t to = eoc_bound;
