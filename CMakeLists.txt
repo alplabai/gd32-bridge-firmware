@@ -9,7 +9,12 @@
 #   cmake -B build -DCMAKE_TOOLCHAIN_FILE=toolchain/arm-none-eabi.cmake
 #   cmake --build build
 #
-# The output binary lives at build/gd32-bridge.elf (+ .hex + .bin).
+# Every target links to build/<target>.elf (CMAKE_EXECUTABLE_SUFFIX, set
+# directly below project()).  The default BRIDGE_HAL_BACKEND=stub
+# build stops there -- the stub backend links no vendor Reset_Handler, so
+# there is nothing for objcopy to extract into .hex/.bin.  Add
+# -DBRIDGE_HAL_BACKEND=gd32 (and -DGD32_VENDOR_DIR=<path>, see below) for
+# the flashable set: build/gd32-bridge.elf + .hex + .bin.
 #
 # Status: both backends build clean (arm-none-eabi-gcc 13.x).  The gd32
 # backend links the GigaDevice firmware library at
@@ -19,6 +24,16 @@
 
 cmake_minimum_required(VERSION 3.20)
 project(gd32-bridge LANGUAGES C ASM)
+
+# Every add_executable() target links to <name>.elf rather than the bare
+# <name> a Generic-system build otherwise produces, so the artifacts carry
+# the names this file's header and README.md document (#27 D9).
+#
+# This has to sit AFTER project(), not in toolchain/arm-none-eabi.cmake:
+# CMake re-establishes the per-language executable suffix while processing
+# project(), so a value set in the toolchain file is discarded and the
+# targets still link to the bare name.
+set(CMAKE_EXECUTABLE_SUFFIX ".elf")
 
 # ----------------------------------------------------------------- #
 # Backend selection                                                  #
@@ -88,17 +103,38 @@ elseif(BRIDGE_HAL_BACKEND STREQUAL "gd32")
         hal/fmc_ota.c
         hal/gd32_libc_stubs.c
     )
+    # -Wconversion (added below, gd32_firmware_target()) flags one site in
+    # this list today: hal/gd32/pwm.c:125's `(periph == TIMER0) ? 0u : 1u`
+    # narrowed into a uint8_t return.  That file is owned by open PR #82
+    # (three review rounds in); it is not this change's to edit.  Silence
+    # -Wconversion for this one source only so the flag can go live now
+    # instead of waiting on #82 -- routed to that PR as a one-line fix.
+    # TODO(#82): delete this override in the same change that lands the
+    # cast, so -Wconversion covers hal/gd32/pwm.c like everything else.
+    set_source_files_properties(hal/gd32/pwm.c PROPERTIES
+        COMPILE_OPTIONS "-Wno-conversion")
     # Pull in the GigaDevice firmware-library wrapper.  Its CMakeLists
     # fatal-errors with a clear "drop the SDK into sdk/" instruction
     # when the unpacked archive is missing, so an unconfigured
     # workspace doesn't fall through to a confusing link error.
-    set(_GD32_VENDOR_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../vendors/gd32_firmware_library)
+    # GD32_VENDOR_DIR overrides where the vendor tree is located.  The
+    # ../../vendors/gd32_firmware_library fallback is the pre-split layout
+    # (this tree nested at <alp-sdk>/firmware/gd32-bridge/); a standalone
+    # clone of this repo has no such parent tree, so it must pass
+    # -DGD32_VENDOR_DIR explicitly.
+    set(GD32_VENDOR_DIR "" CACHE PATH "Path to alp-sdk's vendors/gd32_firmware_library")
+    if(GD32_VENDOR_DIR)
+        set(_GD32_VENDOR_DIR ${GD32_VENDOR_DIR})
+    else()
+        set(_GD32_VENDOR_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../vendors/gd32_firmware_library)
+    endif()
     if(NOT EXISTS ${_GD32_VENDOR_DIR}/CMakeLists.txt)
         message(FATAL_ERROR
             "BRIDGE_HAL_BACKEND=gd32 selected but "
             "${_GD32_VENDOR_DIR}/CMakeLists.txt is missing.\n"
-            "Check out the alp-sdk repo's vendors/gd32_firmware_library/ "
-            "tree (the wrapper README documents the manual SDK drop).")
+            "Pass -DGD32_VENDOR_DIR=<path> pointing at the alp-sdk repo's "
+            "vendors/gd32_firmware_library/ tree (the wrapper README "
+            "documents the manual SDK drop).")
     endif()
     add_subdirectory(${_GD32_VENDOR_DIR} ${CMAKE_BINARY_DIR}/vendors/gd32_firmware_library)
     # gd32g5x3.h #error-guards on the device-family macro; pick
@@ -156,16 +192,21 @@ function(gd32_firmware_target tgt linker_script)
     target_compile_options(${tgt} PRIVATE
         -mcpu=cortex-m33 -mthumb -mfloat-abi=soft
         -ffunction-sections -fdata-sections
-        -Wall -Wextra -Wshadow -Wpedantic)
+        -Wall -Wextra -Wshadow -Wpedantic -Wconversion -Werror)
     target_link_options(${tgt} PRIVATE
         -mcpu=cortex-m33 -mthumb -mfloat-abi=soft
         -Wl,--gc-sections -nostartfiles -T${linker_script})
     if(BRIDGE_HAL_BACKEND STREQUAL "gd32")
         target_link_libraries(${tgt} PRIVATE gd32_firmware_library)
         set(_bin ${CMAKE_BINARY_DIR}/${tgt})
+        # The linked file carries CMAKE_EXECUTABLE_SUFFIX (.elf, set just
+        # below project() above) -- that's objcopy's input.  The
+        # .hex/.bin outputs stay named off the bare target, matching the
+        # README's documented artifact names.
+        set(_elf ${_bin}${CMAKE_EXECUTABLE_SUFFIX})
         add_custom_command(TARGET ${tgt} POST_BUILD
-            COMMAND ${CMAKE_OBJCOPY} -O ihex   ${_bin} ${_bin}.hex
-            COMMAND ${CMAKE_OBJCOPY} -O binary ${_bin} ${_bin}.bin
+            COMMAND ${CMAKE_OBJCOPY} -O ihex   ${_elf} ${_bin}.hex
+            COMMAND ${CMAKE_OBJCOPY} -O binary ${_elf} ${_bin}.bin
             BYPRODUCTS ${_bin}.hex ${_bin}.bin)
     endif()
 endfunction()

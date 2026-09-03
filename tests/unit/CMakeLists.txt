@@ -8,10 +8,31 @@
 #   cmake --build build-tests
 #   ctest --test-dir build-tests --output-on-failure
 #
-# These suites moved here from alp-sdk when the firmware split into its own
-# repository (alp-sdk ADR 0031).  They link the REAL firmware sources -- not
-# mocks -- so the bounds checks and CS-framing seams under test are the same
+# The `ota` and `transport_spi` suites moved here from alp-sdk when the firmware
+# split into its own repository (alp-sdk ADR 0031).  They, and `transport_i2c`,
+# link the REAL firmware sources against hal/bridge_hw_stub.c -- not mocks -- so
+# the bounds checks and the CS/register framing seams under test are the same
 # code paths the device runs.
+#
+# `crc32` (#26 C2, #104) pins the table-driven ota_crc32() bit-identical to
+# the bit-serial implementation it replaced, against a reference copy of the
+# old algorithm kept local to the test file, plus the standard CRC-32 check
+# value and the streaming/chunked seed contract src/ota.c's h_write depends
+# on.
+#
+# `crc16` (#26, #104) is the same proof for src/protocol.c's table-driven
+# crc16_ccitt_false() -- the FRAMING CRC, called twice per round trip.  It
+# links protocol.c itself (not a standalone crc16.c/.h -- see the comment
+# ahead of crc16_table[] in protocol.c for why) plus protocol.c's other
+# dependencies, the same set transport_spi/transport_i2c below link.
+#
+# `protocol` is the deliberate exception: it links tests/unit/fake/bridge_hw_fake.c
+# INSTEAD of the stub.  The stub answers BRIDGE_HW_ERR_NOTIMPL for nearly
+# everything, so only about two hardware opcodes can reach STATUS_OK through it,
+# which left src/protocol.c's reply encoding and its BRIDGE_HW_ERR_* -> STATUS_*
+# ladders unreachable from any host test.  The fake is injectable (a forced return
+# code per function) and resettable, trading the real HAL for reachability.  It is
+# test-only and lives under tests/unit/ so no firmware build can pick it up.
 cmake_minimum_required(VERSION 3.20)
 project(gd32-bridge-unit-tests LANGUAGES C)
 
@@ -56,6 +77,30 @@ target_compile_options(test_ota PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_ota PRIVATE ztest_shim)
 add_test(NAME ota COMMAND test_ota)
 
+# --- crc32: table-driven CRC-32 pinned bit-identical to bit-serial ---------
+add_executable(test_crc32
+    crc32/src/test_crc32.c
+    ${FW}/src/crc32.c
+)
+target_include_directories(test_crc32 PRIVATE ${FW}/src ${FW}/hal)
+target_compile_options(test_crc32 PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_crc32 PRIVATE ztest_shim)
+add_test(NAME crc32 COMMAND test_crc32)
+
+# --- crc16: table-driven framing CRC-16 pinned bit-identical to bit-serial -
+add_executable(test_crc16
+    crc16/src/test_crc16.c
+    ${FW}/src/protocol.c
+    ${FW}/src/bootloader/bootloader.c
+    ${FW}/src/ota.c
+    ${FW}/src/crc32.c
+    ${FW}/hal/bridge_hw_stub.c
+)
+target_include_directories(test_crc16 PRIVATE ${FW}/src ${FW}/hal)
+target_compile_options(test_crc16 PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_crc16 PRIVATE ztest_shim)
+add_test(NAME crc16 COMMAND test_crc16)
+
 # --- transport_spi: transport + dispatcher over the stub HAL ---------------
 add_executable(test_transport_spi
     transport_spi/src/test_transport_spi.c
@@ -84,3 +129,86 @@ target_include_directories(test_fault_diag PRIVATE ${FW}/hal/gd32)
 target_compile_options(test_fault_diag PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_fault_diag PRIVATE ztest_shim)
 add_test(NAME fault_diag COMMAND test_fault_diag)
+
+# --- transport_i2c: transport + dispatcher over the stub HAL ---------------
+add_executable(test_transport_i2c
+    transport_i2c/src/test_transport_i2c.c
+    ${FW}/src/transport_i2c.c
+    ${FW}/src/protocol.c
+    ${FW}/src/bootloader/bootloader.c
+    ${FW}/src/ota.c
+    ${FW}/src/crc32.c
+    ${FW}/hal/bridge_hw_stub.c
+)
+target_include_directories(test_transport_i2c PRIVATE ${FW}/src ${FW}/hal)
+target_compile_options(test_transport_i2c PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_transport_i2c PRIVATE ztest_shim)
+add_test(NAME transport_i2c COMMAND test_transport_i2c)
+
+# --- protocol: dispatcher over a TEST-ONLY injectable fake HAL -------------
+#
+# hal/bridge_hw_stub.c answers BRIDGE_HW_ERR_NOTIMPL for essentially every
+# call, so it can only ever prove STATUS_OK on the opcodes with no hardware
+# dependency (PING/GET_VERSION/GET_BUILD_ID/LINK_FEATURES) -- the rest of
+# src/protocol.c's 1025 lines goes untouched by transport_spi/transport_i2c.
+# fake/bridge_hw_fake.c stands in for hal/bridge_hw_stub.c here instead, so
+# every opcode's success path AND its BRIDGE_HW_ERR_* -> STATUS_* mapping is
+# reachable.  Not -DBRIDGE_OTA_PARTITIONED (matching transport_spi/
+# transport_i2c, not the standalone `ota` target above): the 0xF0..0xFF OTA
+# range is exercised here only as the inert, unpartitioned default.
+add_executable(test_protocol
+    protocol/src/test_protocol.c
+    fake/bridge_hw_fake.c
+    ${FW}/src/protocol.c
+    ${FW}/src/bootloader/bootloader.c
+    ${FW}/src/ota.c
+    ${FW}/src/crc32.c
+)
+target_include_directories(test_protocol PRIVATE ${FW}/src ${FW}/hal ${CMAKE_CURRENT_SOURCE_DIR}/fake)
+target_compile_options(test_protocol PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_protocol PRIVATE ztest_shim)
+add_test(NAME protocol COMMAND test_protocol)
+
+# --- protocol_vectors: the firmware-side consumer of tests/protocol_vectors.txt
+#     CONTRIBUTING.md claims (#31 finding E5) -------------------------------
+#
+# Feeds the canonical vectors' own bytes through the REAL transport_spi.c /
+# transport_i2c.c -> protocol.c seams (same link set as test_transport_spi /
+# test_transport_i2c above: hal/bridge_hw_stub.c, unpartitioned OTA) and
+# asserts the emitted reply bytes.  Before this target, nothing under
+# tests/unit/ read tests/protocol_vectors.txt at all -- the only automation
+# touching the file was the generator's own regenerate-and-diff, a comparison
+# with itself (see issue #68's postmortem: that comparison stayed green
+# through a whole-file CRC byte-order inversion).
+#
+# The vectors are baked into a generated header (not parsed at test runtime)
+# by tests/gen_protocol_vectors_header.py, mirroring cmake/gen_build_id.cmake's
+# generate-don't-parse precedent -- see that script's docstring.  Regenerated
+# on every build; never committed.
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+set(PV_TXT ${FW}/tests/protocol_vectors.txt)
+set(PV_GEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/protocol_vectors_gen)
+set(PV_GEN_HEADER ${PV_GEN_DIR}/protocol_vectors_gen.h)
+add_custom_command(
+    OUTPUT ${PV_GEN_HEADER}
+    COMMAND ${Python3_EXECUTABLE} ${FW}/tests/gen_protocol_vectors_header.py
+            ${PV_TXT} ${PV_GEN_HEADER}
+    DEPENDS ${PV_TXT} ${FW}/tests/gen_protocol_vectors_header.py
+    COMMENT "Generating protocol_vectors_gen.h from tests/protocol_vectors.txt")
+add_custom_target(protocol-vectors-header DEPENDS ${PV_GEN_HEADER})
+
+add_executable(test_protocol_vectors
+    protocol_vectors/src/test_protocol_vectors.c
+    ${FW}/src/transport_spi.c
+    ${FW}/src/transport_i2c.c
+    ${FW}/src/protocol.c
+    ${FW}/src/bootloader/bootloader.c
+    ${FW}/src/ota.c
+    ${FW}/src/crc32.c
+    ${FW}/hal/bridge_hw_stub.c
+)
+add_dependencies(test_protocol_vectors protocol-vectors-header)
+target_include_directories(test_protocol_vectors PRIVATE ${FW}/src ${FW}/hal ${PV_GEN_DIR})
+target_compile_options(test_protocol_vectors PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_protocol_vectors PRIVATE ztest_shim)
+add_test(NAME protocol_vectors COMMAND test_protocol_vectors)
