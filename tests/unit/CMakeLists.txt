@@ -14,6 +14,12 @@
 # the bounds checks and the CS/register framing seams under test are the same
 # code paths the device runs.
 #
+# `crc32` (#26 C2, #104) pins the table-driven ota_crc32() bit-identical to
+# the bit-serial implementation it replaced, against a reference copy of the
+# old algorithm kept local to the test file, plus the standard CRC-32 check
+# value and the streaming/chunked seed contract src/ota.c's h_write depends
+# on.
+#
 # `protocol` is the deliberate exception: it links tests/unit/fake/bridge_hw_fake.c
 # INSTEAD of the stub.  The stub answers BRIDGE_HW_ERR_NOTIMPL for nearly
 # everything, so only about two hardware opcodes can reach STATUS_OK through it,
@@ -64,6 +70,16 @@ target_compile_definitions(test_ota PRIVATE BRIDGE_OTA_PARTITIONED)
 target_compile_options(test_ota PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_ota PRIVATE ztest_shim)
 add_test(NAME ota COMMAND test_ota)
+
+# --- crc32: table-driven CRC-32 pinned bit-identical to bit-serial ---------
+add_executable(test_crc32
+    crc32/src/test_crc32.c
+    ${FW}/src/crc32.c
+)
+target_include_directories(test_crc32 PRIVATE ${FW}/src ${FW}/hal)
+target_compile_options(test_crc32 PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_crc32 PRIVATE ztest_shim)
+add_test(NAME crc32 COMMAND test_crc32)
 
 # --- transport_spi: transport + dispatcher over the stub HAL ---------------
 add_executable(test_transport_spi
