@@ -15,6 +15,7 @@
 #include "gd32g5x3.h"
 
 #include "gd32_common.h"
+#include "tmu_q31_scale.h"
 
 /* ----------------------------------------------------------------- */
 /* TMU (CORDIC math accelerator) dispatch.                            */
@@ -88,31 +89,81 @@ int bridge_hw_tmu_compute(uint8_t   function,
 	}
 
 	/* SQRT / LN / SINH / COSH in Q31 (format 0, IFLTEN=OFLTEN=0) need a
-     * non-zero FACTOR[2:0] scaling factor: fixed 3'b001 for cosh/sinh
-     * (GD32G553 User Manual Rev1.2 Table 14-16 p.390, Table 14-18
-     * p.391) and an operand-dependent factor for ln/sqrt (Table 14-23
-     * p.393, Table 14-26 p.394).  Per p.398 that factor is not just a
-     * register bit -- it is a SOFTWARE pre-/post-scale on both sides
-     * of the TMU call ("TMU_IDATA = the actual input parameter/
-     * 2^FACTOR[2:0]" / "the actual output result = TMU_ODATA*
-     * 2^FACTOR[2:0]"), and for all four modes the *post-scaled*
-     * result routinely exceeds the signed Q31 [-1,1) domain the wire
-     * word has to fit back into -- cosh(x) >= 1 for every x, and
-     * sinh/ln/sqrt overflow it across large parts of their
-     * documented input ranges (e.g. Table 14-26's f=2 sqrt band goes
-     * up to real sqrt(x) = 1.53).  This driver has no
-     * saturation/overflow convention for that yet, so refuse the Q31
-     * form of these four instead of handing back a value that is
-     * numerically wrong either way -- previously FACTOR was left at
-     * the F32-only 3'b000 with an unscaled operand, which silently
-     * violated the p.390/p.391 note and answered STATUS_OK with a
-     * wrong number (alplabai/gd32-bridge-firmware#46).  F32
-     * (IFLTEN=OFLTEN=1) is unaffected: Table 14-5 and its per-mode
-     * mirrors require FACTOR=3'b000 in that case, which is already
-     * what cfg.scale below writes unconditionally. */
-	if (format == 0u && (d->mode == TMU_MODE_SQRT || d->mode == TMU_MODE_LN ||
-	                     d->mode == TMU_MODE_SINH || d->mode == TMU_MODE_COSH)) {
-		return BRIDGE_HW_ERR_NOTIMPL;
+     * non-zero FACTOR[2:0] scaling factor: fixed 3'b001 for sinh (GD32G553
+     * User Manual Rev1.2 Table 14-18 p.391) and an operand-dependent
+     * factor for ln/sqrt (Table 14-23 p.393, Table 14-26 p.394).  Per
+     * p.398 that factor is not just a register bit -- it is a SOFTWARE
+     * pre-/post-scale on both sides of the TMU call ("TMU_IDATA = the
+     * actual input parameter/2^FACTOR[2:0]" / "the actual output result =
+     * TMU_ODATA*2^FACTOR[2:0]").
+     *
+     * This bridge's Q31 wire contract is narrower than the manual's own
+     * worked examples (which post-scale to values > 1, e.g. cosh(1.0) =
+     * 1.543): docs/gd32-bridge-protocol.md SS3.12 defines format=0 as Q31
+     * full-scale +-1.0 for BOTH inputs and outputs, with no exponent/
+     * factor field on the wire, so an operand or a post-scaled result
+     * that needs |value| >= 1.0 cannot be encoded at all.  Against that
+     * actual domain (not the manual's real-world illustrative inputs):
+     *
+     *   COSH  cosh(x) >= 1 for every x (minimum exactly 1.0 at x=0; UM
+     *         Table 14-15's own output range [1,1.692] confirms it) --
+     *         never representable.  Genuinely, permanently unsupported
+     *         in this wire format: NOTIMPL is the honest code.
+     *   SQRT  sqrt(x) for x in [0,1) is itself in [0,1) (sqrt is
+     *         monotone, sqrt(1)=1) -- ALWAYS representable, never
+     *         refused.  See tmu_q31_sqrt_factor() for the per-band
+     *         FACTOR selection (UM Table 14-26).
+     *   SINH  representable for |x| < asinh(1) (~0.8814, ~88% of the
+     *         domain) -- see tmu_q31_sinh_representable().  FACTOR is
+     *         fixed at f=1 per UM Table 14-18, not operand-dependent.
+     *   LN    representable for x > e^-1 (~0.3679, ~63% of the domain)
+     *         -- see tmu_q31_ln_representable().  FACTOR is fixed at
+     *         f=1 in the only Q31-reachable band (UM Table 14-23).
+     *
+     * An out-of-range SINH/LN operand is an operand problem, not a
+     * capability absence, so it returns BRIDGE_HW_ERR_RANGE (->
+     * STATUS_OUT_OF_RANGE) below, the same mapping already used a few
+     * lines down for the hardware-detected negative-sqrt-input case
+     * (issue #23: STATUS_NOSUPPORT means "the capability is absent",
+     * not "this call didn't work out"). */
+	uint32_t q31_scale      = TMU_SCALING_FACTOR_1; /* f=0; F32 always uses this */
+	unsigned q31_pre_shift  = 0u; /* right-shift applied to the Q31 operand before TMU_IDATA */
+	unsigned q31_post_shift = 0u; /* left-shift applied to the raw Q31 result after TMU_ODATA */
+
+	if (format == 0u) {
+		switch (d->mode) {
+		case TMU_MODE_COSH:
+			return BRIDGE_HW_ERR_NOTIMPL;
+
+		case TMU_MODE_SQRT: {
+			const unsigned f = tmu_q31_sqrt_factor(in_a);
+			q31_scale        = SCALE(f);
+			q31_pre_shift    = f;
+			q31_post_shift   = f;
+			break;
+		}
+
+		case TMU_MODE_LN:
+			if (!tmu_q31_ln_representable(in_a)) {
+				return BRIDGE_HW_ERR_RANGE;
+			}
+			q31_scale      = TMU_SCALING_FACTOR_2; /* f=1, UM Table 14-23 */
+			q31_pre_shift  = 1u;
+			q31_post_shift = 2u; /* output is ln(x)/2^(f+1); f+1=2 */
+			break;
+
+		case TMU_MODE_SINH:
+			if (!tmu_q31_sinh_representable(in_a)) {
+				return BRIDGE_HW_ERR_RANGE;
+			}
+			q31_scale      = TMU_SCALING_FACTOR_2; /* f=1, UM Table 14-18 */
+			q31_pre_shift  = 1u;
+			q31_post_shift = 1u;
+			break;
+
+		default:
+			break; /* every other mode keeps FACTOR=3'b000, no shift */
+		}
 	}
 
 	/* Configure TMU for this op.  Per-call config keeps the dispatch
@@ -122,7 +173,7 @@ int bridge_hw_tmu_compute(uint8_t   function,
 	tmu_struct_para_init(&cfg);
 	tmu_deinit();
 	cfg.mode            = d->mode;
-	cfg.scale           = TMU_SCALING_FACTOR_1;
+	cfg.scale           = q31_scale;
 	cfg.dma_read        = TMU_READ_DMA_DISABLE;
 	cfg.dma_write       = TMU_WRITE_DMA_DISABLE;
 	cfg.input_width     = TMU_INPUT_WIDTH_32;
@@ -160,6 +211,15 @@ int bridge_hw_tmu_compute(uint8_t   function,
 		} else {
 			b = 0x7FFFFFFFu; /* Q31 ~1.0 */
 		}
+	} else if (q31_pre_shift != 0u) {
+		/* SQRT / LN / SINH pre-scale: TMU_IDATA = the actual input
+         * parameter / 2^FACTOR[2:0] (UM p.398).  Arithmetic
+         * (sign-extending) right shift -- implementation-defined by
+         * the C standard for a negative left operand, but GCC/Clang
+         * (this toolchain: arm-none-eabi-gcc 13.x, CMakeLists.txt)
+         * document it as sign-preserving, which is what a fixed-point
+         * divide-by-2^n needs for SINH's signed domain. */
+		a = (uint32_t)((int32_t)a >> q31_pre_shift);
 	}
 
 	/* PACED input writes -- do NOT use the vendor tmu_two_*_write():
@@ -223,6 +283,19 @@ int bridge_hw_tmu_compute(uint8_t   function,
 			*result_out = f32_to_bits(fr);
 		} else {
 			tmu_one_q31_read(result_out);
+			if (q31_post_shift != 0u) {
+				/* SQRT / LN / SINH post-scale: the actual
+                 * output result = TMU_ODATA * 2^FACTOR[2:0]
+                 * (LN uses FACTOR+1, see the q31_post_shift
+                 * assignment above) (UM p.398).  Shifting the
+                 * unsigned bit pattern is well-defined (unlike a
+                 * signed left shift of a negative value) and
+                 * bit-identical to a two's-complement multiply by
+                 * 2^q31_post_shift, since the representability
+                 * checks above already guarantee the true
+                 * magnitude fits Q31. */
+				*result_out <<= q31_post_shift;
+			}
 		}
 	}
 	return BRIDGE_HW_OK;

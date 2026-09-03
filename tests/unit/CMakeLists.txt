@@ -70,3 +70,18 @@ target_include_directories(test_transport_spi PRIVATE ${FW}/src ${FW}/hal)
 target_compile_options(test_transport_spi PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_transport_spi PRIVATE ztest_shim)
 add_test(NAME transport_spi COMMAND test_transport_spi)
+
+# --- tmu_q31_scale: Q31 FACTOR band-selection logic (gd32-bridge#46) -------
+#
+# hal/gd32/tmu.c itself needs the Cortex-M33 vendor register headers and is
+# compiled by no CI job (issue #77).  The FACTOR band arithmetic has no such
+# dependency, so it lives in its own translation unit (hal/gd32/tmu_q31_scale.c,
+# no gd32g5x3.h include) purely so it can be linked and tested here.
+add_executable(test_tmu_q31_scale
+    tmu_q31_scale/src/test_tmu_q31_scale.c
+    ${FW}/hal/gd32/tmu_q31_scale.c
+)
+target_include_directories(test_tmu_q31_scale PRIVATE ${FW}/hal/gd32)
+target_compile_options(test_tmu_q31_scale PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_tmu_q31_scale PRIVATE ztest_shim)
+add_test(NAME tmu_q31_scale COMMAND test_tmu_q31_scale)
