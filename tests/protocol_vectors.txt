@@ -1,8 +1,16 @@
 # gd32-bridge canonical wire-test vectors
 #
-# Both the host-side driver tests (tests/zephyr/chips/gd32g553/) and
-# the firmware-side unit tests (firmware/gd32-bridge/tests/) consume this file
-# so the two implementations cannot diverge.
+# Consumed by the host-side driver tests in alp-sdk, under
+# tests/zephyr/chips/gd32g553/, and by this repo's own firmware-side
+# consumer, tests/unit/protocol_vectors/ -- which drives MOST (not all) of
+# these vectors through the real transport_spi.c / transport_i2c.c ->
+# protocol.c, on the stub HAL backend, and asserts the emitted bytes.  See
+# tests/unit/protocol_vectors/src/test_protocol_vectors.c's file header for
+# exactly which vectors it reaches, and which it does not and why (five
+# armed-OTA reply vectors + one fake-HAL-only spectrum reply, all needing a
+# link target this suite deliberately does not stitch together); see
+# CONTRIBUTING.md's "The wire vectors are shared across repositories"
+# section for the two-repository picture.
 #
 # Format: one vector per non-comment line, `<name> = <hex>` where
 # <hex> is a sequence of byte values with no separators.  Whitespace
@@ -176,17 +184,17 @@ spi_reset_reason_reply_unknown = A50000F09A
 spi_gpio_read_mask_bit0_request = A51001000000D7DE
 # SOF | CMD=0x11 | mask=0x00000001 (LE) | levels=0x00000001 (LE) | CRC -- empty-payload reply on success; see spi_reply_io for what the stub backend answers today
 spi_gpio_write_mask_bit0_high_request = A5110100000001000000CA77
-# SOF | CMD=0x20 | channel=0 | period_ns=1000000 (LE) | duty_ns=500000 (LE, 50%) | CRC -- empty-payload reply on success; see spi_reply_io for what the stub backend answers today
+# SOF | CMD=0x20 | channel=0 | period_ns=1000000 (LE) | duty_ns=500000 (LE, 50%) | CRC -- empty-payload reply on success; see spi_reply_nosupport for what the stub backend answers today (status_from_hw(), #23)
 spi_pwm_set_ch0_1ms_period_500us_duty_request = A520000040420F0020A107008A4E
-# SOF | CMD=0x21 | channel=0 | CRC -- reply (on the gd32 backend) is period_ns:u32(LE) duty_ns:u32(LE); see spi_reply_io for what the stub backend answers today
+# SOF | CMD=0x21 | channel=0 | CRC -- reply (on the gd32 backend) is period_ns:u32(LE) duty_ns:u32(LE); see spi_reply_nosupport for what the stub backend answers today (status_from_hw(), #23)
 spi_pwm_get_ch0_request        = A5210027AF
-# SOF | CMD=0x30 | channel=0 | samples=4 | CRC -- reply (on the gd32 backend) is samples:u8 (echoed) + samples*mv:u16(LE); see spi_reply_io for what the stub backend answers today
+# SOF | CMD=0x30 | channel=0 | samples=4 | CRC -- reply (on the gd32 backend) is samples:u8 (echoed) + samples*mv:u16(LE); see spi_reply_nosupport for what the stub backend answers today (status_from_hw(), #23)
 spi_adc_read_ch0_4samples_request = A5300004D257
 # SOF | CMD=0x40 (DA9292_STATUS_FORWARD) | CRC -- empty payload
 spi_da9292_status_forward_request = A54040B7
 # SOF | STATUS=0x00 | status=0xFF ("no sample available") | CRC -- bridge_hw_da9292_status_cached() returns this sentinel on both the stub HAL and this SoM revision's real hardware (no DA9292 net reaches the GD32 on this SoM rev; see hal/bridge_hw_stub.c)
 spi_da9292_status_forward_reply_no_sample = A500FF0084
-# SOF | STATUS=0x05 (IO) | empty payload | CRC -- the reply handle_gpio_read/write, handle_pwm_set/get and handle_adc_read (protocol.c) give on the STUB HAL backend for any BRIDGE_HW_ERR (they don't special-case BRIDGE_HW_ERR_NOTIMPL the way the status_from_hw()-routed handlers do -- see spi_reply_nosupport for that family's stub reply instead)
+# SOF | STATUS=0x05 (IO) | empty payload | CRC -- the reply handle_gpio_read/write (protocol.c) give on the STUB HAL backend for any BRIDGE_HW_ERR (they don't special-case BRIDGE_HW_ERR_NOTIMPL the way the status_from_hw()-routed handlers do -- see spi_reply_nosupport for that family's stub reply instead).  handle_pwm_set/get and handle_adc_read used to share this reply too until #23 routed them through status_from_hw(); GPIO_READ/WRITE are out of scope for #23 and still land here
 spi_reply_io                   = A50521AF
 
 # ---------------------------------------------------------------------

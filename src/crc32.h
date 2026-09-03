@@ -4,7 +4,11 @@
  *
  * gd32-bridge: CRC-32 (IEEE 802.3, reflected, init 0xFFFFFFFF, xorout
  * 0xFFFFFFFF).  Shared by the OTA state machine (src/ota.c) and the
- * bootloader (src/boot/boot_main.c).  Single-call use: seed with 0.
+ * bootloader (src/boot/boot_main.c).  Single-call use: seed with 0;
+ * streaming/chunked use chains the previous call's return value in as
+ * the next call's seed (src/ota.c's h_write does this) -- that contract
+ * is unchanged by the table-driven rewrite (#26 C2, #104).  See
+ * crc32.c for the table itself and tools/gen_crc32_table.py.
  *
  * Software-only, deliberately: the GD32G553's hardware CRC unit is a
  * single instance with no arbitration (no busy/lock/interrupt bit,
