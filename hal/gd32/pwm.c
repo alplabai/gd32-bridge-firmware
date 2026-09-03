@@ -228,13 +228,21 @@ int bridge_hw_pwm_set(uint8_t channel, uint32_t period_ns, uint32_t duty_ns)
 	 * state -- CEN is the one bit that still reflects how this call
 	 * found the timer.)
 	 *
-	 * Gating this couples to hal/gd32/pwm_capture.c: with the transfer
-	 * no longer forced on every call, a raw TIMER_CAR read there can be
-	 * one update event stale relative to what the counter is actually
-	 * comparing against -- see pwm_capture_sync_active_car. */
+	 * Gating this couples to hal/gd32/pwm_capture.c: it can no longer
+	 * infer promotion from a raw TIMER_CAR read (ambiguous once a
+	 * second write lands before the first is confirmed promoted, #82
+	 * review round 2), so this call hands the outcome over explicitly
+	 * via pwm_car_shadow_defer/_commit below rather than leaving
+	 * pwm_capture.c to reconstruct it after the fact. */
 	timer_autoreload_value_config(ch->periph, arr);
 	timer_channel_output_pulse_value_config(ch->periph, ch->channel, cmp);
-	if (!was_running) timer_event_software_generate(ch->periph, TIMER_EVENT_SRC_UPG);
+	if (was_running) {
+		pwm_car_shadow_defer(ch->periph, arr);
+	} else {
+		/* #89: on a sync-master timer this also fires TRGO0, glitching a slave synced off it. */
+		timer_event_software_generate(ch->periph, TIMER_EVENT_SRC_UPG);
+		pwm_car_shadow_commit(ch->periph, arr);
+	}
 	timer_enable(ch->periph); /* idempotent if already running; re-arms
 	                            * CEN after a prior single-pulse left it
 	                            * clear (#8) */
@@ -398,7 +406,12 @@ int bridge_hw_pwm_single_pulse(uint8_t channel, uint32_t pulse_ns)
 	 * by whatever ran on this timer before it, not the ones just
 	 * written.  Force the transfer now, before arming -- it also
 	 * re-seats CNT to 0, idempotent with the reset above. */
+	/* #89: on a sync-master timer this also fires TRGO0, glitching a slave synced off it. */
 	timer_event_software_generate(ch->periph, TIMER_EVENT_SRC_UPG);
+	/* This promotion is synchronous with the forced UPG above -- tell
+	 * pwm_capture.c's shadow mirror directly instead of leaving it to
+	 * infer promotion from TIMER_FLAG_UP (#82 review round 2). */
+	pwm_car_shadow_commit(ch->periph, (uint32_t)(pulse_us - 1u));
 	/* SPM is timer-wide (TIMERx_CTL0.SPM), not per-channel, so this
 	 * also arms every sibling channel on this timer for the same
 	 * one-shot halt -- a running sibling gets silently re-perioded and
