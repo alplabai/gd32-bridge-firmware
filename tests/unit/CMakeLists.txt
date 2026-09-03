@@ -20,6 +20,12 @@
 # value and the streaming/chunked seed contract src/ota.c's h_write depends
 # on.
 #
+# `crc16` (#26, #104) is the same proof for src/protocol.c's table-driven
+# crc16_ccitt_false() -- the FRAMING CRC, called twice per round trip.  It
+# links protocol.c itself (not a standalone crc16.c/.h -- see the comment
+# ahead of crc16_table[] in protocol.c for why) plus protocol.c's other
+# dependencies, the same set transport_spi/transport_i2c below link.
+#
 # `protocol` is the deliberate exception: it links tests/unit/fake/bridge_hw_fake.c
 # INSTEAD of the stub.  The stub answers BRIDGE_HW_ERR_NOTIMPL for nearly
 # everything, so only about two hardware opcodes can reach STATUS_OK through it,
@@ -80,6 +86,20 @@ target_include_directories(test_crc32 PRIVATE ${FW}/src ${FW}/hal)
 target_compile_options(test_crc32 PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_crc32 PRIVATE ztest_shim)
 add_test(NAME crc32 COMMAND test_crc32)
+
+# --- crc16: table-driven framing CRC-16 pinned bit-identical to bit-serial -
+add_executable(test_crc16
+    crc16/src/test_crc16.c
+    ${FW}/src/protocol.c
+    ${FW}/src/bootloader/bootloader.c
+    ${FW}/src/ota.c
+    ${FW}/src/crc32.c
+    ${FW}/hal/bridge_hw_stub.c
+)
+target_include_directories(test_crc16 PRIVATE ${FW}/src ${FW}/hal)
+target_compile_options(test_crc16 PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_crc16 PRIVATE ztest_shim)
+add_test(NAME crc16 COMMAND test_crc16)
 
 # --- transport_spi: transport + dispatcher over the stub HAL ---------------
 add_executable(test_transport_spi
