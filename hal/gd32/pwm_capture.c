@@ -132,7 +132,11 @@ static bool     pwm_capture_pending_valid[2];
 /* TIMER base -> pwm_capture_active_car / pending index. */
 static uint8_t pwm_capture_timer_index(uint32_t periph)
 {
-	return (periph == TIMER0) ? 0u : 1u;
+	/* Same shape as pwm.c's pwm_timer_index(): the ternary promotes to
+	 * unsigned int before the uint8_t return narrows it, and -Wconversion
+	 * can't see that only 0 or 1 ever comes out. Both fit; explicit cast
+	 * only to satisfy the warning. */
+	return (uint8_t)((periph == TIMER0) ? 0u : 1u);
 }
 
 /* Consume ONE outstanding update event for periph's timer, if
