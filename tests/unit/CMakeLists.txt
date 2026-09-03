@@ -154,3 +154,47 @@ target_include_directories(test_protocol PRIVATE ${FW}/src ${FW}/hal ${CMAKE_CUR
 target_compile_options(test_protocol PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_protocol PRIVATE ztest_shim)
 add_test(NAME protocol COMMAND test_protocol)
+
+# --- protocol_vectors: the firmware-side consumer of tests/protocol_vectors.txt
+#     CONTRIBUTING.md claims (#31 finding E5) -------------------------------
+#
+# Feeds the canonical vectors' own bytes through the REAL transport_spi.c /
+# transport_i2c.c -> protocol.c seams (same link set as test_transport_spi /
+# test_transport_i2c above: hal/bridge_hw_stub.c, unpartitioned OTA) and
+# asserts the emitted reply bytes.  Before this target, nothing under
+# tests/unit/ read tests/protocol_vectors.txt at all -- the only automation
+# touching the file was the generator's own regenerate-and-diff, a comparison
+# with itself (see issue #68's postmortem: that comparison stayed green
+# through a whole-file CRC byte-order inversion).
+#
+# The vectors are baked into a generated header (not parsed at test runtime)
+# by tests/gen_protocol_vectors_header.py, mirroring cmake/gen_build_id.cmake's
+# generate-don't-parse precedent -- see that script's docstring.  Regenerated
+# on every build; never committed.
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+set(PV_TXT ${FW}/tests/protocol_vectors.txt)
+set(PV_GEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/protocol_vectors_gen)
+set(PV_GEN_HEADER ${PV_GEN_DIR}/protocol_vectors_gen.h)
+add_custom_command(
+    OUTPUT ${PV_GEN_HEADER}
+    COMMAND ${Python3_EXECUTABLE} ${FW}/tests/gen_protocol_vectors_header.py
+            ${PV_TXT} ${PV_GEN_HEADER}
+    DEPENDS ${PV_TXT} ${FW}/tests/gen_protocol_vectors_header.py
+    COMMENT "Generating protocol_vectors_gen.h from tests/protocol_vectors.txt")
+add_custom_target(protocol-vectors-header DEPENDS ${PV_GEN_HEADER})
+
+add_executable(test_protocol_vectors
+    protocol_vectors/src/test_protocol_vectors.c
+    ${FW}/src/transport_spi.c
+    ${FW}/src/transport_i2c.c
+    ${FW}/src/protocol.c
+    ${FW}/src/bootloader/bootloader.c
+    ${FW}/src/ota.c
+    ${FW}/src/crc32.c
+    ${FW}/hal/bridge_hw_stub.c
+)
+add_dependencies(test_protocol_vectors protocol-vectors-header)
+target_include_directories(test_protocol_vectors PRIVATE ${FW}/src ${FW}/hal ${PV_GEN_DIR})
+target_compile_options(test_protocol_vectors PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_protocol_vectors PRIVATE ztest_shim)
+add_test(NAME protocol_vectors COMMAND test_protocol_vectors)
