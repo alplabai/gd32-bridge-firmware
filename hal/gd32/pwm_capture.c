@@ -92,6 +92,44 @@ static uint32_t pwm_capture_flag(uint16_t unit)
 	}
 }
 
+/* Per-timer confirmed-ACTIVE reload mirror.  Index 0 = TIMER0
+ * (PWM0..3), index 1 = TIMER7 (PWM4..7) -- same mapping as pwm.c's
+ * private pwm_timer_index, duplicated here rather than shared because
+ * this file only ever needs it for TIMER0/TIMER7 via pwm_channels.
+ *
+ * bridge_hw_pwm_set (#82 review) writes TIMERx_CAR through the ARSE
+ * shadow: the write lands in the PRELOAD register only, and a raw
+ * TIMER_CAR read always returns that preload content, never the
+ * separate, host-inaccessible active copy the counter is actually
+ * comparing against.  The two are only guaranteed equal right after
+ * an update event promotes preload -> active -- forced (bridge_hw_
+ * pwm_set's halted-by-single-pulse recovery path, or bridge_hw_pwm_
+ * single_pulse's own forced UPG) or natural (this timer's own next
+ * overflow, the common already-running PWM_SET case).  Track the
+ * value known to have actually transferred by watching that same
+ * event, TIMER_FLAG_UP, which fires either way -- see
+ * pwm_capture_sync_active_car.  Boot default matches pwm_timer_init's
+ * initial ARR (PWM_TIMER_ARR_MAX) before any PWM_SET has run. */
+static uint32_t pwm_capture_active_car[2] = { PWM_TIMER_ARR_MAX, PWM_TIMER_ARR_MAX };
+
+/* TIMER base -> pwm_capture_active_car index. */
+static uint8_t pwm_capture_timer_index(uint32_t periph)
+{
+	return (periph == TIMER0) ? 0u : 1u;
+}
+
+/* Refresh ch's timer's confirmed-active reload if an update event has
+ * landed since the last drain.  Nothing else in this backend reads or
+ * clears TIMER_FLAG_UP, so polling and clearing it here is safe --
+ * this file already owns the analogous per-channel CHx/MCHx capture
+ * flags the same way. */
+static void pwm_capture_sync_active_car(const gd32_pwm_ch_t *ch)
+{
+	if (RESET == timer_flag_get(ch->periph, TIMER_FLAG_UP)) return;
+	timer_flag_clear(ch->periph, TIMER_FLAG_UP);
+	pwm_capture_active_car[pwm_capture_timer_index(ch->periph)] = TIMER_CAR(ch->periph) & 0xFFFFu;
+}
+
 /* Drain any newly-latched capture from the timer's CCxVAL into the
  * per-channel state.  Polled from bridge_hw_pwm_capture_read; safe to
  * call when no edge has occurred (clears nothing, leaves state). */
@@ -106,6 +144,7 @@ static void pwm_capture_drain(uint8_t channel)
 
 	const uint32_t now = timer_channel_capture_value_register_read(ch->periph, unit);
 	timer_flag_clear(ch->periph, flag);
+	pwm_capture_sync_active_car(ch);
 
 	/* WRAP-AWARE edge delta.  The capture counter is the timer's own
      * up-counter (0..CAR), so consecutive edges straddle the wrap and a
@@ -126,8 +165,12 @@ static void pwm_capture_drain(uint8_t channel)
      * flags, CHxOF/MCHxOF, are not read in this revision).  Callers
      * must keep the captured signal's edge spacing under the timer
      * period; BEGIN inherits whatever CAR the last pwm_set programmed
-     * (boot default 65536 ticks = 65.5 ms at the 1 us tick). */
-	const uint32_t mod   = (TIMER_CAR(ch->periph) & 0xFFFFu) + 1u;
+     * (boot default 65536 ticks = 65.5 ms at the 1 us tick).
+     *
+     * The modulus comes from pwm_capture_active_car, not a raw
+     * TIMER_CAR read -- see the mirror's comment above pwm_capture_
+     * sync_active_car for why the two can differ (#82 review). */
+	const uint32_t mod   = pwm_capture_active_car[pwm_capture_timer_index(ch->periph)] + 1u;
 	const uint32_t delta = (now + mod - (s->last_tick % mod)) % mod;
 
 	if (s->edge == 2u) {

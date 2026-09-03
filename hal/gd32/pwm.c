@@ -154,6 +154,12 @@ int bridge_hw_pwm_set(uint8_t channel, uint32_t period_ns, uint32_t duty_ns)
 
 	const gd32_pwm_ch_t *ch = &pwm_channels[channel];
 
+	/* Snapshot CEN before the write block below decides whether to
+	 * force a software update event.  Read here, before anything in
+	 * this function touches CTL0, so it reflects the timer's state as
+	 * this call found it. */
+	const bool was_running = (TIMER_CTL0(ch->periph) & (uint32_t)TIMER_CTL0_CEN) != 0u;
+
 	/* Convert commanded period/duty to ARR + compare, honouring the
 	 * timer's configured alignment (bridge_hw_pwm_configure).  The
 	 * up-counter (edge) counts 0..ARR inclusive -> period == ARR+1
@@ -196,24 +202,39 @@ int bridge_hw_pwm_set(uint8_t channel, uint32_t period_ns, uint32_t duty_ns)
 	/* Updates ALL channels of the same timer -- the contract documents
 	 * this shared-ARR constraint.  CHxCOMSEN + ARSE are enabled
 	 * (pwm_channel_init / pwm_timer_init, #43) so the two writes below
-	 * land in the preload register only and would otherwise wait for
-	 * this timer's own next overflow to reach the live comparator --
-	 * fine for a channel already running cleanly, but PWM_SET is also
-	 * the documented recovery path after bridge_hw_pwm_single_pulse
-	 * (#8), which halts CEN at ITS OWN update event with the one-shot's
-	 * short-lived ARR/CHxCV still active and no future overflow pending
-	 * to ever transfer the shadow.  Force the transfer unconditionally
-	 * with a software update event so PWM_SET is correct on both the
-	 * running and the halted-by-single-pulse path; it also re-seats CNT
-	 * to 0, restarting the period rather than phase-preserving the
-	 * change (User Manual Rev1.2 p.575-576 Fig 23-5/23-7 auto-reload
-	 * shadow timing; p.649 CH0COMSEN) -- accepted here as the simplest
-	 * correct behaviour rather than only forcing it on the halted path,
-	 * since it also keeps pwm_capture.c's direct TIMER_CAR read always
-	 * in sync with the live counter with no separate fix needed there. */
+	 * land in the preload register only and transfer to the live
+	 * comparator at this timer's own next update event (User Manual
+	 * Rev1.2 p.575-576 Fig 23-5/23-7 auto-reload shadow timing; p.649
+	 * CH0COMSEN).  That is exactly the glitch-free behaviour #43 asked
+	 * for, and on a channel already running cleanly mid-period it is
+	 * also the ONLY acceptable behaviour: forcing a software update
+	 * event here resets CNT to 0 (p.645) and restarts the period on
+	 * every single PWM_SET call, and because ARR/CTL0/CEN are
+	 * timer-wide it re-phases every sibling channel on the timer too --
+	 * a guaranteed full-period glitch strictly worse than the rare
+	 * runt/stretch #43 set out to fix (PR #82 review).
+	 *
+	 * The one case that genuinely needs a forced transfer is #8's
+	 * recovery path: a prior bridge_hw_pwm_single_pulse leaves the
+	 * timer HALTED -- hardware clears CEN at the one-shot's own update
+	 * event (p.617-618) -- with no future overflow ever pending to
+	 * promote the shadow.  was_running (snapshotted above, before this
+	 * function's own SPM clear or these writes could change anything)
+	 * distinguishes the two: force UPG only when the timer was NOT
+	 * running, i.e. exactly the halted-by-single-pulse case.  (SPM
+	 * itself isn't checked here as a second signal: the SPM clear a few
+	 * lines above already runs unconditionally on every call, so by
+	 * this point SPM always reads REPETITIVE regardless of the prior
+	 * state -- CEN is the one bit that still reflects how this call
+	 * found the timer.)
+	 *
+	 * Gating this couples to hal/gd32/pwm_capture.c: with the transfer
+	 * no longer forced on every call, a raw TIMER_CAR read there can be
+	 * one update event stale relative to what the counter is actually
+	 * comparing against -- see pwm_capture_sync_active_car. */
 	timer_autoreload_value_config(ch->periph, arr);
 	timer_channel_output_pulse_value_config(ch->periph, ch->channel, cmp);
-	timer_event_software_generate(ch->periph, TIMER_EVENT_SRC_UPG);
+	if (!was_running) timer_event_software_generate(ch->periph, TIMER_EVENT_SRC_UPG);
 	timer_enable(ch->periph); /* idempotent if already running; re-arms
 	                            * CEN after a prior single-pulse left it
 	                            * clear (#8) */
@@ -378,6 +399,10 @@ int bridge_hw_pwm_single_pulse(uint8_t channel, uint32_t pulse_ns)
 	 * written.  Force the transfer now, before arming -- it also
 	 * re-seats CNT to 0, idempotent with the reset above. */
 	timer_event_software_generate(ch->periph, TIMER_EVENT_SRC_UPG);
+	/* SPM is timer-wide (TIMERx_CTL0.SPM), not per-channel, so this
+	 * also arms every sibling channel on this timer for the same
+	 * one-shot halt -- a running sibling gets silently re-perioded and
+	 * stopped.  Pre-existing, out of scope here; tracked as #87. */
 	timer_single_pulse_mode_config(ch->periph, TIMER_SP_MODE_SINGLE);
 	timer_enable(ch->periph);
 
