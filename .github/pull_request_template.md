@@ -6,8 +6,10 @@
 
 <!--
 REQUIRED for any change touching a transport, the OTA path, or a supervised
-output (rail, reset, PWM). CI builds the stub backend only -- it cannot tell you
-whether the link survives, and it certainly cannot tell you what a rail did.
+output (rail, reset, PWM). CI's `gd32 backend build` job compiles and links
+the real gd32 backend against the real GD32 firmware library, but that is
+compile-and-link only -- it cannot tell you whether the link survives on
+silicon, and it certainly cannot tell you what a rail did.
 
 Paste the actual console output, not a summary. Include BOTH sides where the
 change has two (host counters and firmware counters together).
@@ -36,6 +38,7 @@ change has two (host counters and firmware counters together).
 
 ## Checks
 
-- [ ] `cmake -DBRIDGE_HAL_BACKEND=stub` builds
+- [ ] `cmake -B build/stub -S . -DCMAKE_TOOLCHAIN_FILE=toolchain/arm-none-eabi.cmake -DBRIDGE_HAL_BACKEND=stub` builds
+- [ ] `ctest --test-dir build-tests --output-on-failure` passes
 - [ ] `python3 tests/gen_protocol_vectors.py` leaves no diff
 - [ ] `clang-format --dry-run --Werror` silent on changed C/H
