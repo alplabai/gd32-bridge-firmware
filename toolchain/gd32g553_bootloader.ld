@@ -11,8 +11,10 @@
  *   bootloader 0x08000000 (32 KB) | metadata 0x08008000 (8 KB) | slots ...
  *
  * Derived from gd32g553_flash.ld; only the FLASH window differs.
- * HIL-REQUIRED: not validated on silicon (a bad bootloader bricks the
- * part — no host-driven SWD reflash this HW rev; recover via bench SWD).
+ * Validated on silicon 2026-06-04 (bench, protocol v0.6): A→B update and
+ * rollback.  The B→A direction has NOT been exercised.  Still HIL-gated:
+ * a bug bricks the part — no host-driven SWD reflash this HW rev; recover
+ * via bench SWD.
  */
 
 MEMORY
