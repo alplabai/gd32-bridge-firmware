@@ -71,67 +71,71 @@
  * (via `gh issue view`) before writing this file, each of them left
  * deliberately UNCOVERED rather than pinned either way (a case asserting the
  * documented/corrected mapping would be red today; a case asserting today's
- * mapping would cement the bug and fight the eventual fix):
+ * mapping would cement the bug and fight the eventual fix).  #23's B2/B3/B4
+ * are now FIXED (see below); B5 is still open.
  *
- *   - #23 (open) -- several handlers flatten distinct HAL errors to
- *     STATUS_IO instead of running them through the central
- *     status_from_hw() mapper every other handler uses.  Specifically left
- *     untested here:
- *       * handle_adc_read (src/protocol.c:244-245): BRIDGE_HW_ERR_RANGE and
- *         BRIDGE_HW_ERR_BUSY both currently fall through to STATUS_IO
- *         (issue's B2).  Only BRIDGE_HW_ERR_INVAL -> STATUS_INVAL, and the
- *         generic BRIDGE_HW_ERR_IO -> STATUS_IO catch-all, are pinned below.
- *         The SAME handler also has no BRIDGE_HW_ERR_NOTIMPL branch at all
- *         (src/protocol.c:244-245), so an unimplemented ADC backend reports
- *         STATUS_IO, not STATUS_NOSUPPORT -- the identical defect this
- *         paragraph names for GPIO_READ/GPIO_WRITE/PWM_SET/PWM_GET below,
- *         but ADC_READ was missing from that list until now.
- *       * handle_pwm_get (src/protocol.c:213-214) vs handle_pwm_set
- *         (src/protocol.c:195): pwm_set maps BRIDGE_HW_ERR_RANGE to
- *         STATUS_OUT_OF_RANGE; pwm_get's ladder has no RANGE branch at all
- *         and falls through to STATUS_IO for the identical HAL error
- *         (issue's B3).  BRIDGE_HW_ERR_BUSY falls through the same way.
- *         pwm_get's RANGE and BUSY cases are left untested; INVAL and the
- *         generic IO catch-all are pinned.
- *       * handle_adc_stream_read (src/protocol.c:500): the `if (rv < 0)
- *         return STATUS_IO;` catch-all swallows the documented
- *         BRIDGE_HW_ERR_INVAL for a stream that was never begun (issue's
- *         B4), and also swallows BRIDGE_HW_ERR_RANGE the same way.
- *         NOTIMPL and BUSY (both explicitly branched, both correct)
- *         are pinned; INVAL and RANGE are not.
+ *   - #23 -- several handlers flattened distinct HAL errors to STATUS_IO
+ *     instead of running them through the central status_from_hw() mapper
+ *     every other handler uses.  B2/B3/B4 are fixed as of this change; B5
+ *     is a separate, still-open defect this suite continues to leave
+ *     uncovered:
+ *       * handle_adc_read (src/protocol.c) now routes its whole
+ *         BRIDGE_HW_ERR_* -> STATUS_* translation through status_from_hw()
+ *         (issue's B2, FIXED).  RANGE, BUSY, INVAL and the generic IO
+ *         catch-all are all pinned below.
+ *       * handle_pwm_set and handle_pwm_get (src/protocol.c) both now route
+ *         through status_from_hw() too (issue's B3, FIXED), so the two
+ *         handlers can no longer drift against each other on the shared
+ *         PWM_CHANNEL_COUNT range check.  RANGE, BUSY, INVAL, NOTIMPL and
+ *         IO are pinned for both.
+ *       * handle_adc_stream_read (src/protocol.c) keeps its explicit
+ *         NOTIMPL and BUSY rows (the BUSY row carries a load-bearing
+ *         "poll faster" comment referencing docs/gd32-bridge-protocol.md
+ *         §3.10) and now routes everything else -- including the
+ *         previously-swallowed INVAL and RANGE -- through status_from_hw()
+ *         (issue's B4, FIXED).  NOTIMPL, BUSY, INVAL and RANGE are all
+ *         pinned below.
  *       * handle_pwm_capture_read (src/protocol.c:691) routes through
  *         status_from_hw() -- correct plumbing -- but the HAL contract it
  *         is fed (hal/bridge_hw.h:279-281, hal/gd32/pwm_capture.c:248)
  *         overloads BRIDGE_HW_ERR_NOTIMPL to also mean "capture ring empty,
  *         poll again", the same code every OTHER opcode uses for "this HAL
- *         body doesn't exist" (issue's B5).  The issue points at
- *         STATUS_NOT_READY (already in gd32_bridge_status_t, currently used
- *         only by src/ota.c) as the likely eventual distinct code for the
- *         ring-empty case.  This suite pins pwm_capture_read's INVAL,
- *         RANGE, BUSY and IO rows (all unambiguous) and leaves its NOTIMPL
- *         row untested rather than assert today's NOTIMPL->STATUS_NOSUPPORT
- *         only for it to need to become something->STATUS_NOT_READY later.
+ *         body doesn't exist" (issue's B5, STILL OPEN).  The correct wire
+ *         code is STATUS_NOT_READY (0x02): <alp/pwm.h>'s
+ *         alp_pwm_capture_read() ALREADY documents "if no edge has been
+ *         seen since the last call, returns ALP_ERR_NOT_READY", which is
+ *         exactly the status_from_wire() mapping of wire STATUS_NOT_READY
+ *         -- so the host-side contract this firmware must satisfy is
+ *         already written down and is NOT STATUS_BUSY.  Fixing this needs
+ *         a HAL-side change (hal/gd32/pwm_capture.c:248's ring-empty return
+ *         must stop reusing BRIDGE_HW_ERR_NOTIMPL, which hal/bridge_hw_stub.c
+ *         also returns for "this build has no capture HAL at all" -- the
+ *         two meanings need two different BRIDGE_HW_ERR_* codes so a live,
+ *         merely-empty channel stays distinguishable on the wire from a
+ *         stub build) plus a hal/bridge_hw.h doc update, neither of which
+ *         is in scope for this change (hal/gd32/pwm_capture.c is owned by
+ *         another in-flight branch; hal/bridge_hw.h is owned by several).
+ *         This suite pins pwm_capture_read's INVAL, RANGE, BUSY and IO rows
+ *         (all unambiguous) and leaves its NOTIMPL row untested rather than
+ *         assert today's NOTIMPL->STATUS_NOSUPPORT only for it to need to
+ *         become something->STATUS_NOT_READY later.
  *
- *   - Unnumbered "stub/contract mismatch": CMD_GPIO_READ, CMD_GPIO_WRITE,
- *     CMD_PWM_SET and CMD_PWM_GET never special-case
- *     BRIDGE_HW_ERR_NOTIMPL (src/protocol.c:157, :175, :194-197, :213-214)
- *     the way every OTHER HAL-backed handler does.  Against
- *     hal/bridge_hw_stub.c -- which answers NOTIMPL unconditionally for
- *     everything -- a real host talking to an unimplemented GD32 GPIO/PWM
- *     backend gets STATUS_IO ("retry the framing") forever instead of
- *     STATUS_NOSUPPORT ("this capability doesn't exist"), on all four of
- *     these opcodes.  CMD_GPIO_READ and CMD_GPIO_WRITE go further: their
- *     bare `if (rv < 0) return STATUS_IO;` (src/protocol.c:157, :175) is
- *     not NOTIMPL-specific -- it flattens BRIDGE_HW_ERR_INVAL, _RANGE and
- *     _BUSY to STATUS_IO too, with no explicit branch for any of them (PWM_
- *     SET and PWM_GET at least special-case INVAL/RANGE; GPIO's two
- *     handlers special-case nothing).  This suite injects
- *     BRIDGE_HW_ERR_NOTIMPL nowhere for gpio_read, gpio_write, pwm_set or
- *     pwm_get; each gets only the unambiguous generic BRIDGE_HW_ERR_IO ->
- *     STATUS_IO row (pwm_set also gets its two explicit, correct
- *     RANGE/INVAL rows) -- GPIO's INVAL/RANGE/BUSY rows are left
- *     undeclared-by-omission until now: they are simply not pinned, same as
- *     NOTIMPL.
+ *   - Unnumbered "stub/contract mismatch": CMD_GPIO_READ and CMD_GPIO_WRITE
+ *     never special-case BRIDGE_HW_ERR_NOTIMPL (src/protocol.c:157, :175)
+ *     the way every OTHER HAL-backed handler does -- out of scope for #23
+ *     (the issue names four PWM/ADC handlers, not GPIO) and left unfixed
+ *     here.  Against hal/bridge_hw_stub.c -- which answers NOTIMPL
+ *     unconditionally for everything -- a real host talking to an
+ *     unimplemented GD32 GPIO backend gets STATUS_IO ("retry the framing")
+ *     forever instead of STATUS_NOSUPPORT ("this capability doesn't
+ *     exist").  Their bare `if (rv < 0) return STATUS_IO;` (src/protocol.c:
+ *     157, :175) is not NOTIMPL-specific either -- it flattens
+ *     BRIDGE_HW_ERR_INVAL, _RANGE and _BUSY to STATUS_IO too, with no
+ *     explicit branch for any of them.  This suite injects
+ *     BRIDGE_HW_ERR_NOTIMPL nowhere for gpio_read or gpio_write; each gets
+ *     only the unambiguous generic BRIDGE_HW_ERR_IO -> STATUS_IO row --
+ *     GPIO's INVAL/RANGE/BUSY/NOTIMPL rows are left undeclared-by-omission,
+ *     same as before this change.
  *
  *   - Unnumbered "flattened-to-IO" pair (no tracked issue; found while
  *     auditing the above): CMD_ADC_STREAM_END (src/protocol.c:583-584) and
@@ -587,22 +591,28 @@ static const hal_map_case_t HAL_MAP_CASES[] = {
 	{ "GPIO_READ/IO",  CMD_GPIO_READ,  req_gpio_read,  4u, FAKE_FN_GPIO_READ,  BRIDGE_HW_ERR_IO, STATUS_IO },
 	{ "GPIO_WRITE/IO", CMD_GPIO_WRITE, req_gpio_write, 8u, FAKE_FN_GPIO_WRITE, BRIDGE_HW_ERR_IO, STATUS_IO },
 
-	/* --- PWM_SET: RANGE/INVAL explicit + correct (per #23, unlike
-	 * PWM_GET below); NOTIMPL/BUSY fall through to IO (contract
-	 * mismatch bucket) and are not injected. */
-	{ "PWM_SET/RANGE", CMD_PWM_SET, req_pwm_set, 10u, FAKE_FN_PWM_SET, BRIDGE_HW_ERR_RANGE, STATUS_OUT_OF_RANGE },
-	{ "PWM_SET/INVAL", CMD_PWM_SET, req_pwm_set, 10u, FAKE_FN_PWM_SET, BRIDGE_HW_ERR_INVAL, STATUS_INVAL },
-	{ "PWM_SET/IO",    CMD_PWM_SET, req_pwm_set, 10u, FAKE_FN_PWM_SET, BRIDGE_HW_ERR_IO,    STATUS_IO },
+	/* --- PWM_SET / PWM_GET: both now route through status_from_hw()
+	 * (#23 B3, FIXED) so they can no longer disagree on the shared
+	 * PWM_CHANNEL_COUNT range check -- full INVAL/RANGE/NOTIMPL/BUSY/IO
+	 * coverage for both. */
+	{ "PWM_SET/RANGE",   CMD_PWM_SET, req_pwm_set, 10u, FAKE_FN_PWM_SET, BRIDGE_HW_ERR_RANGE,   STATUS_OUT_OF_RANGE },
+	{ "PWM_SET/INVAL",   CMD_PWM_SET, req_pwm_set, 10u, FAKE_FN_PWM_SET, BRIDGE_HW_ERR_INVAL,   STATUS_INVAL },
+	{ "PWM_SET/NOTIMPL", CMD_PWM_SET, req_pwm_set, 10u, FAKE_FN_PWM_SET, BRIDGE_HW_ERR_NOTIMPL, STATUS_NOSUPPORT },
+	{ "PWM_SET/BUSY",    CMD_PWM_SET, req_pwm_set, 10u, FAKE_FN_PWM_SET, BRIDGE_HW_ERR_BUSY,    STATUS_BUSY },
+	{ "PWM_SET/IO",      CMD_PWM_SET, req_pwm_set, 10u, FAKE_FN_PWM_SET, BRIDGE_HW_ERR_IO,      STATUS_IO },
+	{ "PWM_GET/RANGE",   CMD_PWM_GET, req_pwm_get, 1u, FAKE_FN_PWM_GET, BRIDGE_HW_ERR_RANGE,   STATUS_OUT_OF_RANGE },
+	{ "PWM_GET/INVAL",   CMD_PWM_GET, req_pwm_get, 1u, FAKE_FN_PWM_GET, BRIDGE_HW_ERR_INVAL,   STATUS_INVAL },
+	{ "PWM_GET/NOTIMPL", CMD_PWM_GET, req_pwm_get, 1u, FAKE_FN_PWM_GET, BRIDGE_HW_ERR_NOTIMPL, STATUS_NOSUPPORT },
+	{ "PWM_GET/BUSY",    CMD_PWM_GET, req_pwm_get, 1u, FAKE_FN_PWM_GET, BRIDGE_HW_ERR_BUSY,    STATUS_BUSY },
+	{ "PWM_GET/IO",      CMD_PWM_GET, req_pwm_get, 1u, FAKE_FN_PWM_GET, BRIDGE_HW_ERR_IO,      STATUS_IO },
 
-	/* --- PWM_GET: INVAL explicit + correct; RANGE (#23 B3) and
-	 * NOTIMPL (contract mismatch) not injected. */
-	{ "PWM_GET/INVAL", CMD_PWM_GET, req_pwm_get, 1u, FAKE_FN_PWM_GET, BRIDGE_HW_ERR_INVAL, STATUS_INVAL },
-	{ "PWM_GET/IO",    CMD_PWM_GET, req_pwm_get, 1u, FAKE_FN_PWM_GET, BRIDGE_HW_ERR_IO,    STATUS_IO },
-
-	/* --- ADC_READ: INVAL explicit + correct; RANGE and BUSY (#23 B2)
-	 * not injected. */
-	{ "ADC_READ/INVAL", CMD_ADC_READ, req_adc_read, 2u, FAKE_FN_ADC_READ, BRIDGE_HW_ERR_INVAL, STATUS_INVAL },
-	{ "ADC_READ/IO",    CMD_ADC_READ, req_adc_read, 2u, FAKE_FN_ADC_READ, BRIDGE_HW_ERR_IO,    STATUS_IO },
+	/* --- ADC_READ: now routes through status_from_hw() (#23 B2, FIXED)
+	 * -- full INVAL/RANGE/NOTIMPL/BUSY/IO coverage. */
+	{ "ADC_READ/RANGE",   CMD_ADC_READ, req_adc_read, 2u, FAKE_FN_ADC_READ, BRIDGE_HW_ERR_RANGE,   STATUS_OUT_OF_RANGE },
+	{ "ADC_READ/INVAL",   CMD_ADC_READ, req_adc_read, 2u, FAKE_FN_ADC_READ, BRIDGE_HW_ERR_INVAL,   STATUS_INVAL },
+	{ "ADC_READ/NOTIMPL", CMD_ADC_READ, req_adc_read, 2u, FAKE_FN_ADC_READ, BRIDGE_HW_ERR_NOTIMPL, STATUS_NOSUPPORT },
+	{ "ADC_READ/BUSY",    CMD_ADC_READ, req_adc_read, 2u, FAKE_FN_ADC_READ, BRIDGE_HW_ERR_BUSY,    STATUS_BUSY },
+	{ "ADC_READ/IO",      CMD_ADC_READ, req_adc_read, 2u, FAKE_FN_ADC_READ, BRIDGE_HW_ERR_IO,      STATUS_IO },
 
 	/* --- Full INVAL/RANGE/NOTIMPL triple: correctly and explicitly
 	 * branched, no known defect. */
@@ -700,10 +710,15 @@ static const hal_map_case_t HAL_MAP_CASES[] = {
 	{ "ADC_DSP_STAGE_PUSH/BUSY",    CMD_ADC_DSP_STAGE_PUSH, req_adc_dsp_stage_push, 8u, FAKE_FN_ADC_DSP_STAGE_PUSH, BRIDGE_HW_ERR_BUSY,    STATUS_BUSY },
 	{ "ADC_DSP_STAGE_PUSH/IO",      CMD_ADC_DSP_STAGE_PUSH, req_adc_dsp_stage_push, 8u, FAKE_FN_ADC_DSP_STAGE_PUSH, BRIDGE_HW_ERR_IO,      STATUS_IO },
 
-	/* --- ADC_STREAM_READ: NOTIMPL/BUSY explicit + correct; INVAL is
-	 * the #23 B4 swallow and is not injected. */
+	/* --- ADC_STREAM_READ: NOTIMPL/BUSY keep their explicit rows (BUSY's
+	 * carries the "ring overrun -- poll faster" contract, docs
+	 * §3.10); INVAL and RANGE, previously swallowed to STATUS_IO by the
+	 * `if (rv < 0) return STATUS_IO;` catch-all, now route through
+	 * status_from_hw() (#23 B4, FIXED). */
 	{ "ADC_STREAM_READ/NOTIMPL", CMD_ADC_STREAM_READ, req_adc_stream_read, 2u, FAKE_FN_ADC_STREAM_READ, BRIDGE_HW_ERR_NOTIMPL, STATUS_NOSUPPORT },
 	{ "ADC_STREAM_READ/BUSY",    CMD_ADC_STREAM_READ, req_adc_stream_read, 2u, FAKE_FN_ADC_STREAM_READ, BRIDGE_HW_ERR_BUSY,    STATUS_BUSY },
+	{ "ADC_STREAM_READ/INVAL",   CMD_ADC_STREAM_READ, req_adc_stream_read, 2u, FAKE_FN_ADC_STREAM_READ, BRIDGE_HW_ERR_INVAL,   STATUS_INVAL },
+	{ "ADC_STREAM_READ/RANGE",   CMD_ADC_STREAM_READ, req_adc_stream_read, 2u, FAKE_FN_ADC_STREAM_READ, BRIDGE_HW_ERR_RANGE,   STATUS_OUT_OF_RANGE },
 
 	/* --- ADC_SPECTRUM_READ: NOTIMPL explicit; IO is the documented
 	 * "no frame yet" -> STATUS_BUSY special-case (src/protocol.c:546),

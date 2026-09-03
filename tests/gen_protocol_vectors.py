@@ -166,9 +166,17 @@ FW_VERSION = _fw_version_from_header()
 HEADER = """\
 # gd32-bridge canonical wire-test vectors
 #
-# Both the host-side driver tests (tests/zephyr/chips/gd32g553/) and
-# the firmware-side unit tests (firmware/gd32-bridge/tests/) consume this file
-# so the two implementations cannot diverge.
+# Consumed by the host-side driver tests in alp-sdk, under
+# tests/zephyr/chips/gd32g553/, and by this repo's own firmware-side
+# consumer, tests/unit/protocol_vectors/ -- which drives MOST (not all) of
+# these vectors through the real transport_spi.c / transport_i2c.c ->
+# protocol.c, on the stub HAL backend, and asserts the emitted bytes.  See
+# tests/unit/protocol_vectors/src/test_protocol_vectors.c's file header for
+# exactly which vectors it reaches, and which it does not and why (five
+# armed-OTA reply vectors + one fake-HAL-only spectrum reply, all needing a
+# link target this suite deliberately does not stitch together); see
+# CONTRIBUTING.md's "The wire vectors are shared across repositories"
+# section for the two-repository picture.
 #
 # Format: one vector per non-comment line, `<name> = <hex>` where
 # <hex> is a sequence of byte values with no separators.  Whitespace
@@ -634,16 +642,19 @@ def build_vectors() -> list[tuple[str, str, str | None]]:
     # CMD_GET_BUILD_ID, CMD_RESET_REASON, CMD_GPIO_{READ,WRITE},
     # CMD_PWM_{SET,GET}, CMD_ADC_READ and CMD_DA9292_STATUS_FORWARD
     # predate the versioned §4+ additions above but had no wire vector
-    # until now.  GPIO_READ/WRITE, PWM_SET/GET and ADC_READ share one
-    # reply vector (spi_reply_io): their handlers
-    # (handle_gpio_read/write, handle_pwm_set/get, handle_adc_read in
-    # protocol.c) do NOT special-case BRIDGE_HW_ERR_NOTIMPL the way
-    # status_from_hw()-routed handlers do, so on the stub HAL backend
-    # (the only one CI compiles, #31 E1) they fall through to
-    # `if (rv < 0) return STATUS_IO;` -- STATUS_IO, not NOSUPPORT.
-    # Their real success-reply payloads carry live GPIO/PWM/ADC state
-    # and are not a wire-format constant, so only the request framing
-    # is vectorized here.
+    # until now.  GPIO_READ/WRITE still share one reply vector
+    # (spi_reply_io): handle_gpio_read/write (protocol.c) are out of
+    # scope for #23 and still fall through to
+    # `if (rv < 0) return STATUS_IO;` on any BRIDGE_HW_ERR, so on the
+    # stub HAL backend (the only one CI compiles, #31 E1) they answer
+    # STATUS_IO, not NOSUPPORT.  PWM_SET/GET and ADC_READ used to share
+    # that same STATUS_IO reply but were fixed under #23 to route
+    # through status_from_hw() like the rest of the v0.5+ handlers, so
+    # their stub-backend reply is spi_reply_nosupport instead (see
+    # §14's status_from_hw() note for the pattern).  Their real
+    # success-reply payloads carry live GPIO/PWM/ADC state and are not
+    # a wire-format constant, so only the request framing is
+    # vectorized here.
     out.append((
         "spi_get_build_id_request",
         spi_frame(SOF, CMD_GET_BUILD_ID).hex().upper(),
@@ -693,22 +704,24 @@ def build_vectors() -> list[tuple[str, str, str | None]]:
                   ])).hex().upper(),
         "SOF | CMD=0x20 | channel=0 | period_ns=1000000 (LE) |"
         " duty_ns=500000 (LE, 50%) | CRC -- empty-payload reply on"
-        " success; see spi_reply_io for what the stub backend answers"
-        " today",
+        " success; see spi_reply_nosupport for what the stub backend"
+        " answers today (status_from_hw(), #23)",
     ))
     out.append((
         "spi_pwm_get_ch0_request",
         spi_frame(SOF, CMD_PWM_GET, bytes([0x00])).hex().upper(),
         "SOF | CMD=0x21 | channel=0 | CRC -- reply (on the gd32 backend)"
-        " is period_ns:u32(LE) duty_ns:u32(LE); see spi_reply_io for"
-        " what the stub backend answers today",
+        " is period_ns:u32(LE) duty_ns:u32(LE); see spi_reply_nosupport"
+        " for what the stub backend answers today (status_from_hw(),"
+        " #23)",
     ))
     out.append((
         "spi_adc_read_ch0_4samples_request",
         spi_frame(SOF, CMD_ADC_READ, bytes([0x00, 0x04])).hex().upper(),
         "SOF | CMD=0x30 | channel=0 | samples=4 | CRC -- reply (on the"
         " gd32 backend) is samples:u8 (echoed) + samples*mv:u16(LE);"
-        " see spi_reply_io for what the stub backend answers today",
+        " see spi_reply_nosupport for what the stub backend answers"
+        " today (status_from_hw(), #23)",
     ))
     out.append((
         "spi_da9292_status_forward_request",
@@ -728,11 +741,14 @@ def build_vectors() -> list[tuple[str, str, str | None]]:
         "spi_reply_io",
         spi_frame(SOF, STATUS_IO).hex().upper(),
         "SOF | STATUS=0x05 (IO) | empty payload | CRC -- the reply"
-        " handle_gpio_read/write, handle_pwm_set/get and handle_adc_read"
-        " (protocol.c) give on the STUB HAL backend for any BRIDGE_HW_ERR"
-        " (they don't special-case BRIDGE_HW_ERR_NOTIMPL the way the"
-        " status_from_hw()-routed handlers do -- see spi_reply_nosupport"
-        " for that family's stub reply instead)",
+        " handle_gpio_read/write (protocol.c) give on the STUB HAL"
+        " backend for any BRIDGE_HW_ERR (they don't special-case"
+        " BRIDGE_HW_ERR_NOTIMPL the way the status_from_hw()-routed"
+        " handlers do -- see spi_reply_nosupport for that family's stub"
+        " reply instead).  handle_pwm_set/get and handle_adc_read used"
+        " to share this reply too until #23 routed them through"
+        " status_from_hw(); GPIO_READ/WRITE are out of scope for #23"
+        " and still land here",
     ))
 
     # ----- §14. v0.5 additions (§2B.2), continued (#31 E4) ------------

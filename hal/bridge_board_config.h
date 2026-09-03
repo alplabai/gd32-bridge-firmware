@@ -34,10 +34,8 @@
 /* Renesas master P76(MOSI)/P77(MISO)/P96(SCLK)/P97(CS) <-> GD32 below. */
 /* Mode 0 (CPOL=0,CPHA=0), MSB-first, 8-bit, hardware NSS.             */
 /* =================================================================== */
-#define BRIDGE_SPI_PERIPH      SPI1
-#define BRIDGE_SPI_RCU         RCU_SPI1
-#define BRIDGE_SPI_IRQN        SPI1_IRQn
-#define BRIDGE_SPI_IRQ_HANDLER SPI1_IRQHandler
+#define BRIDGE_SPI_PERIPH SPI1
+#define BRIDGE_SPI_RCU    RCU_SPI1
 
 /* SPI1 slave DMA (25 MHz link: one byte every 320 ns -- an interrupt per
  * byte cannot keep up even at the 216 MHz core, so RX and TX stream over
@@ -106,13 +104,52 @@
  * needs no static value here.  Slave timing only needs setup/hold +
  * prescaler; the 400 kHz bus rate is the master's SCLH/SCLL, not ours. */
 
-/* NVIC priorities (preemption, sub).  Transport ISRs sit above the
- * SysTick PMIC poll; SPI (point-to-point, latency-sensitive) above I2C. */
-#define BRIDGE_SPI_IRQ_PRIO    1u
-#define BRIDGE_SPI_IRQ_SUBPRIO 0u
+/* NVIC priorities (preemption, sub).  CS EXTI framing at
+ * BRIDGE_CS_IRQ_PRIO, I2C EV/ER at BRIDGE_I2C_IRQ_PRIO, ADC-stream DMA
+ * lap FTF at prio 3 (hal/gd32/adc_stream.c:27-28).  Periodic
+ * housekeeping runs at base level from the main WFI loop, not SysTick
+ * -- there is no SysTick handler in this firmware. */
 #define BRIDGE_CS_IRQ_PRIO     1u
 #define BRIDGE_CS_IRQ_SUBPRIO  1u
 #define BRIDGE_I2C_IRQ_PRIO    2u
 #define BRIDGE_I2C_IRQ_SUBPRIO 0u
+
+/* =================================================================== */
+/* RTC / wakeup-timer clock source -- LXTAL is not available on this   */
+/* SoM, so every timed wake the bridge offers is IRC32K-bound.         */
+/* =================================================================== */
+/* LXTAL needs OSC32IN/OSC32OUT, i.e. PC14/PC15 (GD32G553xx Datasheet
+ * Rev2.0, p.54, WLCSP81 balls C9/D9).  Both pads are already spent as
+ * host-addressable E1M IO24/IO25 (hal/gd32/gpio.c gpio_pad_map, bits
+ * 8/9) -- enabling the crystal would break the wire contract.  IRC32K
+ * is therefore the only legal RTC clock source (RCU_BDCTL RTCSRC =
+ * 0b10, GD32G553 User Manual Rev1.2 p.199; selected in
+ * hal/gd32/power.c rtc_wakeup_init_once()).
+ *
+ * IRC32K is NOT 32.768 kHz and is specified only as a range, never a
+ * fixed value.  GD32G553xx Datasheet Rev2.0, p.125, Table 4-23
+ * (identical in Rev1.6 and Rev1.5, p.125; Rev1.3, p.127, still
+ * carried "TBD" in the Min/Max cells at that point in the part's
+ * characterization -- the 28-36 kHz bound was not committed until
+ * Rev1.5/1.6):
+ *
+ *   fIRC32K, TA = -40 to 105 degC (grade-7 -- matches the
+ *   GD32G553MEY7TR on this SoM, Datasheet Rev2.0 p.175 Table 6-1):
+ *   Min 28 kHz, Max 36 kHz (no Typ given at this TA range).
+ *   At TA = 25 degC only: Min 30 kHz, Typ 32.0 kHz, Max 34 kHz.
+ *   Both Min/Max columns are footnoted "guaranteed by
+ *   characterization, not 100% tested in production".
+ *
+ * Over the part's full operating range the RTC wakeup-timer LSB
+ * (RTC/16 divider; POWER_WAKE_LSB_HZ in hal/gd32/power.c) is
+ * therefore accurate to about -11.1% / +14.3% of any requested
+ * wake_after_ms -- not the fixed 0.5 ms/tick that constant alone
+ * would suggest.  This cannot be trimmed away: the RCU has no
+ * IRC32K trim/calibration register (only IRC32KEN/IRC32KSTB enable
+ * and stability-flag bits, UM Rev1.2 p.201-202), and the RTC's own
+ * RTC_HRFC digital calibration (UM Rev1.2 p.543, range -487.1 to
+ * +488.5 ppm) corrects a fixed offset against a known reference --
+ * it has no temperature input and cannot track IRC32K's drift over
+ * -40..105 degC. */
 
 #endif /* GD32_BRIDGE_BOARD_CONFIG_H */
