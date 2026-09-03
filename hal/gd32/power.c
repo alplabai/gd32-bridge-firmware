@@ -53,10 +53,24 @@
 #define POWER_WAKE_MASK_SUPPORTED (POWER_WAKE_RTC | POWER_WAKE_GPIO | POWER_WAKE_TIMER)
 #define POWER_WAKE_MASK_HW_GATED  (POWER_WAKE_UART_RX | POWER_WAKE_USB | POWER_WAKE_ETH_LINK)
 
-/* RTC wakeup timer LSB: with IRC32K (~32 kHz internal) clock and
- * the /16 divider, the timer ticks at 32000/16 = 2000 Hz -- 0.5 ms
- * per tick.  Max wake = 65535 / 2000 = 32.7 s.  Longer waits would
- * need the CKSPRE_2EXP16 mode which sits in a future commit. */
+/* RTC wakeup timer LSB.  POWER_WAKE_LSB_HZ = 2000 Hz assumes an exact
+ * 32000 Hz IRC32K with the /16 divider -- 0.5 ms/tick nominal, max
+ * wake 65535/2000 = 32.7 s -- but IRC32K is NOT a fixed 32000 Hz.
+ * LXTAL is unavailable on this SoM (PC14/PC15 are spent as host
+ * E1M IO24/IO25) so IRC32K is the only legal RTC source, and it is
+ * specified only as 28-36 kHz over this grade-7 part's -40..105 degC
+ * range (GD32G553xx Datasheet Rev2.0 p.125 Table 4-23; full citation
+ * + why LXTAL is unavailable is in hal/bridge_board_config.h).  The
+ * real tick is therefore 444 us (36 kHz corner) to 571 us (28 kHz
+ * corner) against the 500 us this constant assumes -- about
+ * -11.1% / +14.3% on any requested wake_after_ms, and the 32.7 s
+ * ceiling can land anywhere from ~29.1 s to ~37.4 s.  No firmware
+ * change closes this: IRC32K has no trim register in the RCU, and
+ * the RTC's own RTC_HRFC digital calibration corrects a fixed
+ * offset against a reference clock, not IRC32K's drift over
+ * temperature (see hal/bridge_board_config.h).  Longer waits than
+ * the ceiling would need the CKSPRE_2EXP16 mode, which sits in a
+ * future commit. */
 #define POWER_WAKE_LSB_HZ       2000u
 #define POWER_WAKE_TIMER_MAX_MS (65535u * 1000u / POWER_WAKE_LSB_HZ)
 

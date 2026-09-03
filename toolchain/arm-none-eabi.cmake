@@ -8,6 +8,15 @@
 set(CMAKE_SYSTEM_NAME Generic)
 set(CMAKE_SYSTEM_PROCESSOR arm)
 
+# NOTE: CMAKE_EXECUTABLE_SUFFIX is deliberately NOT set here.  A value set
+# in a toolchain file does not survive into the project scope -- CMake
+# re-establishes the per-language suffix while processing project(), so the
+# targets still link to the bare <name>.  Verified on CMake 4.4.3: with the
+# set() here the generated link rule reads "Linking C executable
+# gd32-bridge"; moved below project() it reads "gd32-bridge.elf".  The
+# set() therefore lives in CMakeLists.txt, directly under project()
+# (#27 D9).  Setting it here looks correct and silently does nothing.
+
 set(CMAKE_C_COMPILER   arm-none-eabi-gcc)
 set(CMAKE_ASM_COMPILER arm-none-eabi-gcc)
 set(CMAKE_OBJCOPY      arm-none-eabi-objcopy CACHE INTERNAL "")
