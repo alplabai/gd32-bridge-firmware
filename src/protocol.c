@@ -86,6 +86,13 @@ static void put_le32(uint8_t *p, uint32_t v)
 /* Per-opcode handlers                                                */
 /* --------------------------------------------------------------- */
 
+/* Translate a BRIDGE_HW_ERR_* return into a STATUS_*.  Centralised so
+ * every handler below reports the same code for the same HAL error --
+ * forward-declared here (defined with the v0.5 handler set) so the
+ * legacy handlers earlier in this file can route through it instead
+ * of hand-rolling their own STATUS_IO-flattening ladder (#23). */
+static gd32_bridge_status_t status_from_hw(int rv);
+
 static gd32_bridge_status_t
 handle_ping(const uint8_t *req, size_t req_len, uint8_t *reply, size_t reply_cap, size_t *reply_len)
 {
@@ -192,9 +199,7 @@ static gd32_bridge_status_t handle_pwm_set(const uint8_t *req,
 	const uint32_t duty_ns   = get_le32(&req[6]);
 	if (duty_ns > period_ns) return STATUS_INVAL;
 	const int rv = bridge_hw_pwm_set(channel, period_ns, duty_ns);
-	if (rv == BRIDGE_HW_ERR_RANGE) return STATUS_OUT_OF_RANGE;
-	if (rv == BRIDGE_HW_ERR_INVAL) return STATUS_INVAL;
-	if (rv < 0) return STATUS_IO;
+	if (rv != BRIDGE_HW_OK) return status_from_hw(rv);
 	*reply_len = 0u;
 	return STATUS_OK;
 }
@@ -210,8 +215,7 @@ static gd32_bridge_status_t handle_pwm_get(const uint8_t *req,
 	uint32_t  period_ns = 0u;
 	uint32_t  duty_ns   = 0u;
 	const int rv        = bridge_hw_pwm_get(req[0], &period_ns, &duty_ns);
-	if (rv == BRIDGE_HW_ERR_INVAL) return STATUS_INVAL;
-	if (rv < 0) return STATUS_IO;
+	if (rv != BRIDGE_HW_OK) return status_from_hw(rv);
 	put_le32(&reply[0], period_ns);
 	put_le32(&reply[4], duty_ns);
 	*reply_len = 8u;
@@ -241,8 +245,7 @@ static gd32_bridge_status_t handle_adc_read(const uint8_t *req,
 	reply[0] = samples; /* echoes back the (validated) value */
 	uint16_t  mv[GD32_BRIDGE_ADC_MAX_SAMPLES];
 	const int rv = bridge_hw_adc_read(channel, samples, mv);
-	if (rv == BRIDGE_HW_ERR_INVAL) return STATUS_INVAL;
-	if (rv < 0) return STATUS_IO;
+	if (rv != BRIDGE_HW_OK) return status_from_hw(rv);
 	for (uint8_t i = 0u; i < samples; ++i) {
 		reply[1u + i * 2u]      = (uint8_t)(mv[i] & 0xFFu);
 		reply[1u + i * 2u + 1u] = (uint8_t)((mv[i] >> 8) & 0xFFu);
@@ -497,7 +500,7 @@ static gd32_bridge_status_t handle_adc_stream_read(const uint8_t *req,
      * already dropped the corrupt backlog and resynced its cursor,
      * so the next READ returns fresh samples. */
 	if (rv == BRIDGE_HW_ERR_BUSY) return STATUS_BUSY;
-	if (rv < 0) return STATUS_IO;
+	if (rv != BRIDGE_HW_OK) return status_from_hw(rv);
 	if (got > max_samples) return STATUS_IO; /* HAL contract violation */
 
 	const size_t need = 1u + (size_t)max_samples * 2u;
@@ -585,10 +588,6 @@ static gd32_bridge_status_t handle_adc_stream_end(const uint8_t *req,
 	*reply_len = 0u;
 	return STATUS_OK;
 }
-
-/* Defined with the v0.5 handler set below; the TRNG handler (v0.4)
- * shares the central mapping for its BUSY/IO discrimination. */
-static gd32_bridge_status_t status_from_hw(int rv);
 
 static gd32_bridge_status_t handle_trng_read(const uint8_t *req,
                                              size_t         req_len,
