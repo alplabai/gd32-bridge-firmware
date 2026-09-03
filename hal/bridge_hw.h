@@ -299,13 +299,18 @@ int bridge_hw_pwm_capture_end(uint8_t channel);
 int bridge_hw_pwm_single_pulse(uint8_t channel, uint32_t pulse_ns);
 
 /* Configure master-slave timer sync.  @p master and @p slave name two
- * of TIMER0 / TIMER7 / TIMER19 by integer id; @p mode selects the
- * slave-mode select field (SYSCFG_TIMERxCFG2 TSCFG15[4:0], GD32G553
- * User Manual Rev1.2 §1.7.23 p.83 -- TIMERx_SMCFG has no SMC/TRGS
- * field on this part; bits 6:4 and 2:0 are Reserved, p.634/p.636):
- * 0 = disabled, 1 = reset, 2 = gated, 3 = trigger, 4 = external-clock,
- * 5 = encoder-mode-1 etc.  Used to synchronise multi-channel PWM
- * outputs across the three advanced-timer groups.  The internal-
+ * of TIMER0 / TIMER7 / TIMER19 by integer id; @p mode selects one of
+ * several SYSCFG_TIMERxCFG0/1 TSCFGn slave-mode fields (GD32G553 User
+ * Manual Rev1.2 -- TIMERx_SMCFG has no SMC/TRGS field on this part;
+ * bits 6:4 and 2:0 are Reserved, p.634/p.636):
+ *   0 = disabled           no register write
+ *   1 = reset              TSCFG3, SYSCFG_TIMERxCFG0[20:16], §1.7.21 p.78
+ *   2 = gated              TSCFG4, SYSCFG_TIMERxCFG0[25:21], §1.7.21 p.78
+ *   3 = trigger            TSCFG5, SYSCFG_TIMERxCFG0[30:26], §1.7.21 p.77
+ *   4 = external-clock     TSCFG6, SYSCFG_TIMERxCFG1[4:0],   §1.7.22 p.82
+ *   5 = encoder-mode-1     TSCFG1, SYSCFG_TIMERxCFG0[9:5],   §1.7.21 p.79
+ * Used to synchronise multi-channel PWM outputs across the three
+ * advanced-timer groups.  The internal-
  * trigger route used for each (master, slave) pair is per GD32G553
  * User Manual Rev1.2 p.570 (TIMER0/TIMER7/TIMER19 are fully cross-
  * connected today); a pair the SYSCFG router cannot connect returns
