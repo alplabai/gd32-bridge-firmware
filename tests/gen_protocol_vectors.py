@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import pathlib
+import re
 import sys
 
 
@@ -135,9 +136,31 @@ STATUS_NOT_READY             = 0x02
 STATUS_IO                    = 0x05
 STATUS_NOSUPPORT             = 0x06
 
-# Firmware-declared version triple; bump when protocol.h's
-# PROTOCOL_VERSION_{MAJOR,MINOR,PATCH} change.
-FW_VERSION = (0, 9, 0)
+# Firmware-declared version triple. Parsed out of src/protocol.h at run
+# time -- not a private literal -- because a hard-coded copy is exactly
+# what let this drift from 0.9.0 to 0.8.0 unnoticed (#22): the
+# regenerate-and-diff gate compares this file against itself and stays
+# green even when the constant is stale. Do not "simplify" this back
+# into a tuple; that reopens #22.
+def _fw_version_from_header() -> tuple[int, int, int]:
+    header = pathlib.Path(__file__).resolve().parent.parent / "src" / "protocol.h"
+    try:
+        text = header.read_text()
+    except OSError as exc:
+        sys.exit(f"gen_protocol_vectors.py: cannot read {header}: {exc}")
+    parts = []
+    for field in ("MAJOR", "MINOR", "PATCH"):
+        m = re.search(rf"#define\s+PROTOCOL_VERSION_{field}\s+(\d+)[uU]?\b", text)
+        if m is None:
+            sys.exit(
+                f"gen_protocol_vectors.py: could not parse "
+                f"PROTOCOL_VERSION_{field} out of {header}"
+            )
+        parts.append(int(m.group(1)))
+    return (parts[0], parts[1], parts[2])
+
+
+FW_VERSION = _fw_version_from_header()
 
 
 HEADER = """\
