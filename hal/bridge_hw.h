@@ -303,7 +303,12 @@ int bridge_hw_pwm_single_pulse(uint8_t channel, uint32_t pulse_ns);
  * slave-mode select field (per GD32G553 §17.4.3 SMC bits):
  * 0 = disabled, 1 = reset, 2 = gated, 3 = trigger, 4 = external-clock,
  * 5 = encoder-mode-1 etc.  Used to synchronise multi-channel PWM
- * outputs across the three advanced-timer groups. */
+ * outputs across the three advanced-timer groups.  The internal-
+ * trigger route used for each (master, slave) pair is per GD32G553
+ * User Manual Rev1.2 p.570 (TIMER0/TIMER7/TIMER19 are fully cross-
+ * connected today); a pair the SYSCFG router cannot connect returns
+ * BRIDGE_HW_ERR_INVAL rather than wiring the slave to an unrelated
+ * timer. */
 int bridge_hw_timer_sync(uint8_t master, uint8_t slave, uint8_t mode);
 
 /* --------------------------------------------------------------- */
