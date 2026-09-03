@@ -4,7 +4,7 @@
  *
  * gd32-bridge firmware: SPI-slave transport.
  *
- * Wire framing (see ../docs/gd32-bridge-protocol.md §4):
+ * Wire framing (see alp-sdk docs/gd32-bridge-protocol.md §4):
  *
  *   REQ  : SOF | CMD    | PAYLOAD | CRC(SOF..PAYLOAD)
  *   REPLY: SOF | STATUS | PAYLOAD | CRC(SOF..PAYLOAD)

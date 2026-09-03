@@ -493,7 +493,7 @@ static gd32_bridge_status_t handle_adc_stream_read(const uint8_t *req,
 	if (rv == BRIDGE_HW_ERR_NOTIMPL) return STATUS_NOSUPPORT;
 	/* Ring overrun (the DMA writer lapped the host's read cursor):
      * the documented wire answer is STATUS_BUSY -- "host should poll
-     * faster" (docs/gd32-bridge-protocol.md §3.10).  The HAL has
+     * faster" (alp-sdk docs/gd32-bridge-protocol.md §3.10).  The HAL has
      * already dropped the corrupt backlog and resynced its cursor,
      * so the next READ returns fresh samples. */
 	if (rv == BRIDGE_HW_ERR_BUSY) return STATUS_BUSY;
@@ -640,14 +640,14 @@ static gd32_bridge_status_t handle_tmu_compute(const uint8_t *req,
 /* ----------------------------------------------------------------- */
 /* v0.5 (§2B.2) -- advanced timer extras                              */
 /*                                                                    */
-/* Wire frames per docs/gd32-bridge-protocol.md §3.y.  Every handler  */
-/* validates the request payload length, calls into the HAL hook,    */
-/* and maps the BRIDGE_HW_ERR_* return into the on-wire STATUS_*     */
-/* code.  On the stub backend (bridge_hw_stub.c) all of these return */
-/* BRIDGE_HW_ERR_NOTIMPL -- which protocol_dispatch maps to          */
-/* STATUS_NOSUPPORT on the wire -- so host code sees a precise       */
-/* NOSUPPORT contract; the gd32 backend's real bodies live in the    */
-/* per-peripheral TUs under hal/gd32/.                                */
+/* Wire frames per alp-sdk docs/gd32-bridge-protocol.md §3.y.  Every  */
+/* handler validates the request payload length, calls into the HAL  */
+/* hook, and maps the BRIDGE_HW_ERR_* return into the on-wire        */
+/* STATUS_* code.  On the stub backend (bridge_hw_stub.c) all of     */
+/* these return BRIDGE_HW_ERR_NOTIMPL -- which protocol_dispatch     */
+/* maps to STATUS_NOSUPPORT on the wire -- so host code sees a       */
+/* precise NOSUPPORT contract; the gd32 backend's real bodies live   */
+/* in the per-peripheral TUs under hal/gd32/.                        */
 /* ----------------------------------------------------------------- */
 
 /* Translate a BRIDGE_HW_ERR_* return into a STATUS_*.  Centralised so
@@ -770,7 +770,7 @@ static gd32_bridge_status_t handle_power_mode_set(const uint8_t *req,
 /* ----------------------------------------------------------------- */
 /* v0.5 (§2B wave-2) -- chunked DSP-chain upload                      */
 /*                                                                    */
-/* Wire frames per docs/gd32-bridge-protocol.md §3.x.                 */
+/* Wire frames per alp-sdk docs/gd32-bridge-protocol.md §3.x.         */
 /* ----------------------------------------------------------------- */
 
 static gd32_bridge_status_t handle_adc_dsp_chain_open(const uint8_t *req,
