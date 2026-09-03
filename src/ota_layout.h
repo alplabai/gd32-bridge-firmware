@@ -52,14 +52,17 @@
 
 enum { OTA_SLOT_A = 0u, OTA_SLOT_B = 1u };
 
-/* Image header — lives at the start of a slot, carried in the image body
- * (written via OTA_WRITE_CHUNK).  `signature` is reserved and UNVERIFIABLE
- * on this part as specified: the GD32G553's only crypto engine is the CAU,
- * which is symmetric-only (DES/TDES/AES) -- there is no PKA, HMAC, CMAC or
- * message-hash engine on this device (GD32G553 User Manual Rev1.2 p.350
- * §13.1; confirmed absent from the peripheral memory map, Datasheet
- * Rev2.0 p.19).  See SECURITY.md.  Only body_crc32 is enforced today;
- * nothing in this tree populates or checks `signature`. */
+/* RESERVED future image-container format.  It is NOT present in any
+ * image today and is parsed nowhere: the OTA image is a raw Cortex-M
+ * vector-table-first binary (initial MSP at +0, reset vector at +4),
+ * validated by the metadata-recorded length and CRC-32 plus
+ * ota_image_bootable() below.  A header-first image would present
+ * msp = OTA_IMG_MAGIC, which fails that check.  `signature` would also
+ * be UNVERIFIABLE on this part as specified: the GD32G553's only crypto
+ * engine is the CAU, which is symmetric-only (DES/TDES/AES) -- there is
+ * no PKA, HMAC, CMAC or message-hash engine on this device (GD32G553
+ * User Manual Rev1.2 p.350 §13.1; confirmed absent from the peripheral
+ * memory map, Datasheet Rev2.0 p.19).  See SECURITY.md. */
 #define OTA_IMG_MAGIC       0x4F544131u /* "OTA1" */
 #define OTA_IMG_FMT_VERSION 1u
 #define OTA_SIG_LEN         64u /* NOT ECDSA-P256-verifiable on this part; see comment above */

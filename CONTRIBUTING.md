@@ -67,9 +67,23 @@ commits die with the branch instead of becoming permanent history.
 # library from the pinned public mirror and compiles the gd32 backend too --
 # see .github/workflows/ci.yml -- but that coverage is CI-only unless you
 # have your own copy of vendors/gd32_firmware_library (e.g. an alp-sdk
-# checkout) to point BRIDGE_HAL_BACKEND=gd32 at.
-cmake -B build/stub -S . -DBRIDGE_HAL_BACKEND=stub
+# checkout) to point at with -DBRIDGE_HAL_BACKEND=gd32
+# -DGD32_VENDOR_DIR=<path> (see README.md).
+# CMAKE_TOOLCHAIN_FILE is not optional: this is Cortex-M33 firmware linked
+# against a device linker script. Without it CMake configures against the host
+# compiler and the build then dies on the first source file, which rejects
+# -mcpu=cortex-m33 -- the configure step itself still succeeds, so the failure
+# arrives later than you expect.
+cmake -B build/stub -S . -DCMAKE_TOOLCHAIN_FILE=toolchain/arm-none-eabi.cmake -DBRIDGE_HAL_BACKEND=stub
 cmake --build build/stub
+
+# host unit tests -- the same ones CI runs, against the real firmware sources
+# (ota.c, transport_spi.c, crc32.c, protocol.c, bootloader.c), not mocks, so
+# they cover the OTA bounds checks and the SPI CS-framing seams the device
+# actually runs.
+cmake -S tests/unit -B build-tests -DCMAKE_BUILD_TYPE=Debug
+cmake --build build-tests --parallel
+ctest --test-dir build-tests --output-on-failure
 
 # wire vectors -- must leave no diff
 python3 tests/gen_protocol_vectors.py && git diff --exit-code tests/protocol_vectors.txt
@@ -81,8 +95,19 @@ clang-format -i <your files> && clang-format --dry-run --Werror <your files>
 ### The wire vectors are shared across repositories
 
 `tests/gen_protocol_vectors.py` is the authoritative source for the canonical
-vectors, and they have **two** consumers: the firmware tests here, and the
-host-side driver tests in alp-sdk under `tests/zephyr/chips/gd32g553/`.
+vectors, and they have **two** consumers: `tests/unit/protocol_vectors/` here,
+and the host-side driver tests in alp-sdk under `tests/zephyr/chips/gd32g553/`.
+
+The firmware-side consumer drives the real `transport_spi.c` / `transport_i2c.c`
+-> `protocol.c`, on the stub HAL backend, and asserts the emitted bytes against
+the vector file — but not the WHOLE file. Five OTA reply vectors need an armed
+`-DBRIDGE_OTA_PARTITIONED` session against a real (or host-buffer-overridden)
+FMC, which is `tests/unit/ota/`'s own separate link target; one ADC-spectrum
+reply vector is explicitly commented as representative of the wired gd32 HAL
+body, not the stub's answer, and needs the fake HAL (`tests/unit/protocol/`'s
+own separate link target) instead. See
+`tests/unit/protocol_vectors/src/test_protocol_vectors.c`'s file header for the
+exact, itemized list of what is and is not covered and why.
 
 Nothing in this repo fails when the alp-sdk side drifts. So a wire change is not
 finished when CI here is green — it needs the matching alp-sdk change, and the
@@ -120,7 +145,8 @@ shipped image, and bump `firmware-version.txt` when you ship one.
 
 ## What not to commit
 
-Build output (`build/`), MSYS `*.stackdump` files, and anything from the GD32
+Build output (`build*/` — that covers `build/`, `build/stub` and `build-tests`
+alike), Python `__pycache__/`, MSYS `*.stackdump` files, and anything from the GD32
 firmware library. CI rejects tracked `.out`, `.map`, `.o`, `.elf`, `.bin` and
 `.hex` files — the sibling cc3501e repo had a 14 MB `.out` and several crash
 dumps swept in by a `git add -A` on the Windows bench.
