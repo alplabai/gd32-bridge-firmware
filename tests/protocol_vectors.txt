@@ -33,8 +33,8 @@ spi_ping_request               = A50084FF
 spi_ping_reply_ok              = A50084FF
 # SOF | CMD=0x01 (GET_VERSION) | CRC -- empty payload
 spi_get_version_request        = A501A5EF
-# SOF | STATUS=0x00 | major=0 | minor=9 | patch=0 | CRC
-spi_get_version_reply_v0_9_0   = A500000900A7A2
+# SOF | STATUS=0x00 | major=0 | minor=10 | patch=0 | CRC
+spi_get_version_reply_v0_10_0  = A500000A00F4F7
 
 # ---------------------------------------------------------------------
 # §3. I2C envelopes -- register-style framing

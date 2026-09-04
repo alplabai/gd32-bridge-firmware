@@ -118,3 +118,22 @@ target_include_directories(test_protocol PRIVATE ${FW}/src ${FW}/hal ${CMAKE_CUR
 target_compile_options(test_protocol PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_protocol PRIVATE ztest_shim)
 add_test(NAME protocol COMMAND test_protocol)
+
+# --- adc_dsp: chain pool + chain_bind capability validation (#69, #70) -----
+#
+# Links ONLY hal/gd32/adc_dsp_chain.c -- the chain pool + bind-time validator
+# split out of hal/gd32/adc_stream.c specifically because it touches ZERO
+# GD32 vendor symbols (no "gd32g5x3.h").  adc_stream.c itself is NOT linked
+# here: it pulls the vendor header for the FAC/FFT register-level pump, which
+# this suite cannot exercise on a host.  Instead this target supplies its own
+# definition of adc_streams[] (test_adc_dsp.c) so cases can drive `in_use` /
+# `dsp_bound` / `dsp_terminal` directly -- the same "fake state instead of a
+# real HAL" trade the `protocol` suite above makes, for the same reason.
+add_executable(test_adc_dsp
+    adc_dsp/src/test_adc_dsp.c
+    ${FW}/hal/gd32/adc_dsp_chain.c
+)
+target_include_directories(test_adc_dsp PRIVATE ${FW}/hal ${FW}/hal/gd32)
+target_compile_options(test_adc_dsp PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_adc_dsp PRIVATE ztest_shim)
+add_test(NAME adc_dsp COMMAND test_adc_dsp)
