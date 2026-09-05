@@ -14,6 +14,7 @@
 #include "bridge_hw.h"
 #include "gd32g5x3.h"
 
+#include "bridge_critical.h"
 #include "gd32_common.h"
 
 /* ----------------------------------------------------------------- */
@@ -134,6 +135,23 @@ adc_oversample_params(uint16_t ratio, bool *enable_out, uint16_t *ovsr_out, uint
 	*shift_out  = OVSCR_OVSS(log2); /* ADC_OVERSAMPLING_SHIFT_<log2>B */
 }
 
+/* The oversample ratio the HARDWARE actually runs for a channel: the
+ * cache floored to a power of two in [1, ADC_OVERSAMPLE_RATIO_MAX], which
+ * is what adc_oversample_params programs.  One helper so the residency
+ * budget (#135) and the EOC timeout bound cannot drift apart from each
+ * other or from the register value -- the EOC bound previously scaled by
+ * the CLAMPED cache rather than the floored one, so a ratio of 200 sized
+ * its bound for 200 while the converter ran 128. */
+static uint16_t adc_effective_ratio(uint8_t channel)
+{
+	bool     enable = false;
+	uint16_t ovsr   = 0u;
+	uint32_t shift  = 0u;
+
+	adc_oversample_params(adc_oversample_ratio_cache[channel], &enable, &ovsr, &shift);
+	return enable ? (uint16_t)(ovsr + 1u) : 1u;
+}
+
 /* Program a channel's cached resolution + oversample into its ADC.
  * The caller MUST have the converter disabled (DRES lives in CTL0 and
  * OVSAMPCTL only latches with ADCON==0 -- the vendor's own
@@ -215,6 +233,81 @@ bool adc_periph_init(uint32_t periph)
 	return adc_calibrate_bounded(periph);
 }
 
+/* ---- per-converter ownership interlock (#133) ------------------------ *
+ *
+ * Two bridge channels ride each ADC peripheral (0/1 -> ADC3, 2/3 -> ADC2,
+ * 4/5 -> ADC1, 6/7 -> ADC0), and both bridge_hw_adc_read and
+ * bridge_hw_adc_stream_begin reconfigure that shared converter -- from
+ * INTERRUPT context, at two different NVIC group priorities.  The only
+ * mutual exclusion either had was a scan of adc_streams[].in_use, which
+ * says nothing about a single-shot read in flight.
+ *
+ * So: an I2C-side CMD_ADC_READ(channel=6) passes the stream scan, does
+ * adc_disable(ADC0), points routine rank 0 at ADC_CHANNEL_2 / PA2, emits
+ * two of four samples -- and the SPI CS-EXTI handler pre-empts with
+ * CMD_ADC_READ(channel=7), passes the same scan, and re-points the same
+ * converter at PA3.  The I2C side resumes and reads its remaining samples
+ * from THE WRONG PAD, then answers STATUS_OK.  Nothing on the wire
+ * distinguishes that reading from a good one.
+ *
+ * The flag is claimed for the WHOLE disable/reconfigure/enable/convert
+ * sequence, but interrupts are masked only across the test-and-set --
+ * see bridge_critical.h on why the section must stay that short.  The
+ * loser is told BRIDGE_HW_ERR_BUSY and returns immediately; nothing here
+ * spins waiting for the flag, so there is no deadlock to construct even
+ * though the claim can be held for milliseconds (#135). */
+#define ADC_PERIPH_COUNT 4u
+
+/* Dense slot index for the four converters.  A switch rather than
+ * `channel >> 1` so the mapping does not silently follow a future
+ * re-ordering of adc_channels_map[]. */
+static uint8_t adc_periph_slot(uint32_t periph)
+{
+	switch (periph) {
+	case ADC0:
+		return 0u;
+	case ADC1:
+		return 1u;
+	case ADC2:
+		return 2u;
+	case ADC3:
+		return 3u;
+	default:
+		return ADC_PERIPH_COUNT; /* unreachable: adc_channels_map has no other */
+	}
+}
+
+/* `volatile` is load-bearing here, unlike most of this tree: the flag is
+ * written at one NVIC priority and read at another, and the compiler has
+ * no reason to reload it across the claim. */
+static volatile bool adc_periph_busy[ADC_PERIPH_COUNT];
+
+/* Test-and-set.  True = the caller now owns `periph` and MUST release it
+ * on every return path.  False = someone else holds it; answer BUSY. */
+bool adc_periph_claim(uint32_t periph)
+{
+	const uint8_t slot = adc_periph_slot(periph);
+
+	if (slot >= ADC_PERIPH_COUNT) return false;
+
+	const uint32_t st       = bridge_irq_lock();
+	const bool     free_now = !adc_periph_busy[slot];
+	if (free_now) {
+		adc_periph_busy[slot] = true;
+	}
+	bridge_irq_unlock(st);
+	return free_now;
+}
+
+void adc_periph_release(uint32_t periph)
+{
+	const uint8_t slot = adc_periph_slot(periph);
+
+	if (slot >= ADC_PERIPH_COUNT) return;
+	/* A single aligned store; no section needed to clear it. */
+	adc_periph_busy[slot] = false;
+}
+
 int bridge_hw_adc_read(uint8_t channel, uint8_t samples, uint16_t *mv)
 {
 	if (mv == 0) return BRIDGE_HW_ERR_INVAL;
@@ -240,6 +333,32 @@ int bridge_hw_adc_read(uint8_t channel, uint8_t samples, uint16_t *mv)
 			return BRIDGE_HW_ERR_BUSY;
 		}
 	}
+
+	/* Residency budget (#135).  Bound the PRODUCT of the two host-settable
+     * multipliers -- and the sample window they multiply -- against an
+     * explicit ceiling on how long this may hold a transport ISR, BEFORE
+     * touching the converter or claiming it.  See
+     * ADC_READ_ISR_BUDGET_US in gd32_common.h for the model, the numbers
+     * it is derived from, and what the current 1 ms ceiling permits.
+     *
+     * Rejecting here rather than capping a factor is deliberate: silently
+     * halving a requested oversample ratio would return a reading whose
+     * noise floor is not what the caller asked for, with STATUS_OK and no
+     * way to tell. */
+	const uint32_t half_cycles_per_conv =
+	    (uint32_t)(2u * adc_sample_cycles_cache[channel]) + ADC_READ_CONV_HALF_CYCLES_12B;
+	const uint32_t residency_half_cycles =
+	    (uint32_t)samples * (uint32_t)adc_effective_ratio(channel) * half_cycles_per_conv;
+	if (residency_half_cycles > ADC_READ_BUDGET_HALF_CYCLES) {
+		return BRIDGE_HW_ERR_RANGE;
+	}
+
+	/* Claim the shared converter for the whole sequence below (#133).
+     * The stream scan above only covers stream-vs-read; this is what
+     * covers read-vs-read and read-vs-stream_begin across the CS-EXTI
+     * pre-emption of I2C0_EV.  Every return path from here down must
+     * release. */
+	if (!adc_periph_claim(ch->periph)) return BRIDGE_HW_ERR_BUSY;
 
 	/* Configure the routine channel for this op (each call re-applies
      * because multiple bridge channels can share an ADC peripheral -- a
@@ -288,11 +407,12 @@ int bridge_hw_adc_read(uint8_t channel, uint8_t samples, uint16_t *mv)
      * ~ratio x longer than the ~6.3 us un-oversampled case.  A fixed
      * 100k bound would false-timeout every legal high-ratio read and
      * needlessly recalibrate.  The floored-to-pow2 ratio is what the
-     * hardware actually runs; clamp the raw cache to [1,256] to match. */
-	uint32_t ovs_ratio = adc_oversample_ratio_cache[channel];
-	if (ovs_ratio < 1u) ovs_ratio = 1u;
-	if (ovs_ratio > ADC_OVERSAMPLE_RATIO_MAX) ovs_ratio = ADC_OVERSAMPLE_RATIO_MAX;
-	const uint32_t eoc_bound = 100000u * ovs_ratio;
+     * hardware actually runs, and adc_effective_ratio() is the single
+     * source for it -- shared with the #135 residency budget above, so
+     * the two cannot drift apart.  It previously scaled by the CLAMPED
+     * cache instead, so a requested ratio of 200 sized this bound for
+     * 200 while the converter ran 128. */
+	const uint32_t eoc_bound = 100000u * (uint32_t)adc_effective_ratio(channel);
 	for (uint8_t i = 0; i < samples; ++i) {
 		adc_software_trigger_enable(ch->periph, ADC_ROUTINE_CHANNEL);
 		uint32_t to = eoc_bound;
@@ -303,8 +423,11 @@ int bridge_hw_adc_read(uint8_t channel, uint8_t samples, uint16_t *mv)
 			/* Self-heal is best-effort: the re-init's calibration is
              * itself bounded (a wedged converter must not convert a
              * read timeout into a link wedge), and this path already
-             * reports IO either way. */
+             * reports IO either way.  Release AFTER the re-init so no
+             * pre-empting claimant sees a half-reinitialised converter
+             * (#133). */
 			(void)adc_periph_init(ch->periph);
+			adc_periph_release(ch->periph);
 			return BRIDGE_HW_ERR_IO;
 		}
 		adc_flag_clear(ch->periph, ADC_FLAG_EOC);
@@ -316,6 +439,7 @@ int bridge_hw_adc_read(uint8_t channel, uint8_t samples, uint16_t *mv)
 		if (code > fs) code = fs;
 		mv[i] = (uint16_t)((code * ADC_VREF_MV) / fs);
 	}
+	adc_periph_release(ch->periph);
 	return BRIDGE_HW_OK;
 }
 

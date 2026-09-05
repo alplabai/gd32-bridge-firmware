@@ -31,6 +31,8 @@
 
 #include "gd32g5x3.h"
 
+#include "gd32/bridge_critical.h"
+
 #include "fmc_ota.h"
 #include "ota_layout.h"
 
@@ -154,12 +156,74 @@ OTA_RAMFUNC static fmc_state_enum erase_one_page(uint32_t addr)
 	return st;
 }
 
+/* ---- FMC funnel ownership (#147) ------------------------------------- *
+ *
+ * Every FMC operation in this file brackets its work in fmc_unlock() ...
+ * fmc_lock(), and the vendor's pair is NOT nesting-aware: fmc_unlock()
+ * early-returns when LK is already clear, and fmc_lock() unconditionally
+ * SETS LK.  So a second, nested operation's terminating fmc_lock()
+ * re-locks the register out from under the first one.
+ *
+ * That is reachable purely over the wire.  ota_erase_tick() runs at BASE
+ * level and walks the slot a page-region per tick; a transport ISR can
+ * dispatch an OTA opcode into meta_commit -> ota_fmc_erase_range /
+ * ota_fmc_program at any point inside that walk.  The ISR's fmc_lock()
+ * then leaves the base loop writing FMC_CTL_PER and FMC_CTL_START into a
+ * locked register.  Worse, there is a second collision in the same
+ * window that has nothing to do with LK: the ISR sets FMC_CTL_PG while
+ * the pre-empted erase still has FMC_CTL_PER set, and each side's
+ * `FMC_CTL &= ~...` read-modify-writes clobber what the other left.
+ *
+ * A depth-counting unlock/lock pair would fix the LK half and leave the
+ * PER-vs-PG half wide open, so this is an OWNERSHIP interlock instead:
+ * one operation at a time, full stop.  The loser is refused and reports
+ * failure rather than corrupting the winner.
+ *
+ * The claim is held for a whole erase-range or program call and released
+ * before returning; interrupts are masked only across the test-and-set
+ * (see hal/gd32/bridge_critical.h).  Nothing spins waiting, so there is
+ * no deadlock: an ISR that loses simply fails its FMC op.
+ *
+ * NOT RESOLVED, and it does not change this fix: whether a write to a
+ * LOCKED FMC_CTL is silently discarded or latches WPERR is a GD32G553
+ * User Manual lookup nobody has done.  The silent variant is materially
+ * worse -- ota_fmc_wait_ready() returns FMC_READY on its first poll and
+ * erase_one_page() reports SUCCESS for a page it did not erase, so
+ * ota_erase_tick() advances and flips the state to OTA_ST_READY over an
+ * un-erased tail, and the next h_write into it PGERRs.  But BOTH
+ * outcomes leave an un-erased page, so preventing the re-entry is right
+ * either way; the lookup only sizes how bad the un-fixed case was. */
+static volatile bool s_fmc_owned;
+
+/* True = the caller owns the funnel and MUST release before returning. */
+static bool fmc_funnel_claim(void)
+{
+	const uint32_t sect     = bridge_irq_lock();
+	const bool     free_now = !s_fmc_owned;
+
+	if (free_now) {
+		s_fmc_owned = true;
+	}
+	bridge_irq_unlock(sect);
+	return free_now;
+}
+
+static void fmc_funnel_release(void)
+{
+	s_fmc_owned = false; /* single aligned store; no section needed */
+}
+
 bool ota_fmc_erase_range(uint32_t base, uint32_t len)
 {
 	/* Layout regions stay OTA_PAGE_SIZE-granular (2 KB -- a multiple of
      * the real page in both bank modes); the erase loop walks the REAL
      * page size so dual-bank (1 KB pages) erases every page. */
 	if ((base % OTA_PAGE_SIZE) != 0u || (len % OTA_PAGE_SIZE) != 0u) {
+		return false;
+	}
+	/* One owner at a time (#147).  Refusing is the whole point: the
+     * caller that loses must NOT proceed into the funnel. */
+	if (!fmc_funnel_claim()) {
 		return false;
 	}
 	const uint32_t step =
@@ -173,6 +237,7 @@ bool ota_fmc_erase_range(uint32_t base, uint32_t len)
 		}
 	}
 	fmc_lock();
+	fmc_funnel_release();
 	return ok;
 }
 
@@ -203,6 +268,9 @@ bool ota_fmc_program(uint32_t addr, const uint8_t *data, size_t len)
 	if ((addr % 8u) != 0u) {
 		return false;
 	}
+	if (!fmc_funnel_claim()) {
+		return false; /* #147 -- see fmc_funnel_claim */
+	}
 	bool ok = true;
 	fmc_unlock();
 	for (size_t i = 0u; i < len; i += 8u) {
@@ -219,6 +287,7 @@ bool ota_fmc_program(uint32_t addr, const uint8_t *data, size_t len)
 		}
 	}
 	fmc_lock();
+	fmc_funnel_release();
 	return ok;
 }
 
