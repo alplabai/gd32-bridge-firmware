@@ -11,10 +11,20 @@
  * boot (bridge_hw_init), since the vendor SystemInit defaults VTOR to
  * 0x08000000.
  *
- * `.ramfunc` is folded into `.data` so the vendor Reset_Handler's .data
- * copy relocates it to RAM — required because the FMC erase/program loop
- * (hal/fmc_ota.c, OTA_RAMFUNC) cannot execute from the single flash bank
- * it is erasing.
+ * `.ramfunc` (hal/fmc_ota.c, OTA_RAMFUNC — the FMC erase/program loop,
+ * which cannot execute from the single flash bank it is erasing) gets its
+ * own output section, placed immediately after `.data` with no gap in
+ * either RAM or FLASH.  `_edata` is defined at the end of `.ramfunc`, not
+ * `.data`, so the pair still bounds one contiguous span; the vendor
+ * Reset_Handler's `_sdata`..`_edata` byte copy still relocates it to RAM
+ * unchanged.  Kept separate from `.data` (rather than folded into it, as
+ * before #27 build-hygiene-1) so `.ramfunc`'s CODE section flags don't
+ * leak onto `.data`'s DATA flags and so `arm-none-eabi-size`/objdump
+ * account the RAM-resident code as code, not initialised data.  The link
+ * still warns "LOAD segment with RWX permissions" for this image — that
+ * warning is inherent to RAM that is both writable and executable, not a
+ * section-identity defect, and splitting `.ramfunc` out does not remove
+ * it.
  *
  * Validated on silicon 2026-06-04 (bench, protocol v0.6): A→B update and
  * rollback.  The B→A direction has NOT been exercised.  Still HIL-gated:
@@ -104,8 +114,18 @@ SECTIONS
         _sdata = .;
         *(.data)
         *(.data*)
-        /* RAM-resident FMC routine (hal/fmc_ota.c) — copied to RAM with
-         * .data by the vendor Reset_Handler. */
+        . = ALIGN(4);
+    } > RAM AT > FLASH
+
+    /* RAM-resident FMC routine (hal/fmc_ota.c).  Own output section, kept
+     * immediately adjacent to .data (no gap) so it stays inside the
+     * _sdata.._edata span the vendor Reset_Handler copies byte-for-byte —
+     * _edata is defined at the end of THIS section.  Splitting it out of
+     * .data gives it its own CODE section flags (.data stays plain DATA)
+     * and correct size/objdump accounting; see the file header comment
+     * for the RWX-warning caveat this does not resolve. */
+    .ramfunc :
+    {
         . = ALIGN(4);
         *(.ramfunc)
         *(.ramfunc*)
