@@ -47,15 +47,18 @@
  * shim (tests/unit/ztest_shim.h) runs every case in one process with no
  * before/after hook (ZTEST_SUITE's five hook slots are unused everywhere in
  * this tree), so a fake left dirty by one case is a real hazard for the
- * next one.  protocol.c's OWN `static uint8_t link_features` (src/protocol.c)
- * is NOT part of the fake and has no reset seam this suite can reach --
- * but it does not need one here: no handler this file dispatches into ever
- * READS protocol_link_features() (only the SPI transport's reply-staging
- * path does, which this suite never calls), and handle_link_features's own
- * output (`link_features = req[0] & GD32_BRIDGE_LINK_FEAT_STATUS_SEQ;
- * reply[0] = link_features;`) depends only on the CURRENT request, not on
- * whatever a previous case left armed.  So CMD_LINK_FEATURES is safe to
- * fold into the same generic, order-independent table as everything else.
+ * next one.  protocol.c's OWN `link_features[]` (src/protocol.c) is NOT
+ * part of the fake and has no reset seam this suite can reach -- but it
+ * does not need one here: no handler this file dispatches into ever READS
+ * protocol_link_features() (only the SPI transport's reply-staging path
+ * does, which this suite never calls), and handle_link_features's own
+ * output depends only on the CURRENT request, not on whatever a previous
+ * case left armed.  So CMD_LINK_FEATURES is safe to fold into the same
+ * generic, order-independent table as everything else.
+ *
+ * Every dispatch below passes GD32_BRIDGE_LINK_SPI (#130): the link tag
+ * is consulted by exactly one handler, and the SPI link is the one whose
+ * armed features the accessor test then reads back.
  *
  * This suite links src/protocol.c, src/bootloader/bootloader.c, src/ota.c,
  * src/crc32.c and THIS suite's fake -- NOT hal/bridge_hw_stub.c (see the
@@ -521,8 +524,8 @@ ZTEST(protocol, test_fixed_opcode_ok_and_boundaries)
 		                            * ONLY thing that can catch a handler
 		                            * that never writes *reply_len (see this
 		                            * file's header, F1/F3). */
-		gd32_bridge_status_t st =
-		    protocol_dispatch(c->cmd, c->req, c->req_len, reply, c->reply_need, &reply_len);
+		gd32_bridge_status_t st        = protocol_dispatch(
+		    GD32_BRIDGE_LINK_SPI, c->cmd, c->req, c->req_len, reply, c->reply_need, &reply_len);
 		zassert_equal(st, STATUS_OK, "%s: canonical request", c->name);
 		zassert_equal(reply_len, c->reply_need, "%s: reply length", c->name);
 		if (c->expect) {
@@ -535,8 +538,13 @@ ZTEST(protocol, test_fixed_opcode_ok_and_boundaries)
 			bridge_hw_fake_reset();
 			if (c->prep) c->prep();
 			reply_len = 0u;
-			st        = protocol_dispatch(
-			    c->cmd, c->req, c->req_len - 1u, reply, REPLY_SCRATCH_CAP, &reply_len);
+			st        = protocol_dispatch(GD32_BRIDGE_LINK_SPI,
+			                              c->cmd,
+			                              c->req,
+			                              c->req_len - 1u,
+			                              reply,
+			                              REPLY_SCRATCH_CAP,
+			                              &reply_len);
 			zassert_equal(st, STATUS_INVAL, "%s: req_len-1", c->name);
 		}
 
@@ -548,8 +556,13 @@ ZTEST(protocol, test_fixed_opcode_ok_and_boundaries)
 		}
 		padded[c->req_len] = 0u; /* the stray extra byte; value is irrelevant */
 		reply_len          = 0u;
-		st                 = protocol_dispatch(
-		    c->cmd, padded, c->req_len + 1u, reply, REPLY_SCRATCH_CAP, &reply_len);
+		st                 = protocol_dispatch(GD32_BRIDGE_LINK_SPI,
+		                                       c->cmd,
+		                                       padded,
+		                                       c->req_len + 1u,
+		                                       reply,
+		                                       REPLY_SCRATCH_CAP,
+		                                       &reply_len);
 		zassert_equal(st, STATUS_INVAL, "%s: req_len+1", c->name);
 
 		/* --- reply_payload_cap one below the STATUS_OK need:
@@ -559,8 +572,13 @@ ZTEST(protocol, test_fixed_opcode_ok_and_boundaries)
 			bridge_hw_fake_reset();
 			if (c->prep) c->prep();
 			reply_len = 0u;
-			st        = protocol_dispatch(
-			    c->cmd, c->req, c->req_len, reply, c->reply_need - 1u, &reply_len);
+			st        = protocol_dispatch(GD32_BRIDGE_LINK_SPI,
+			                              c->cmd,
+			                              c->req,
+			                              c->req_len,
+			                              reply,
+			                              c->reply_need - 1u,
+			                              &reply_len);
 			zassert_equal(st, STATUS_NOMEM, "%s: reply_cap-1", c->name);
 		}
 	}
@@ -741,8 +759,8 @@ ZTEST(protocol, test_hal_error_mapping)
 		bridge_hw_fake_reset();
 		bridge_hw_fake_force(c->fn, c->inject);
 		size_t               reply_len = 0u;
-		gd32_bridge_status_t st =
-		    protocol_dispatch(c->cmd, c->req, c->req_len, reply, REPLY_SCRATCH_CAP, &reply_len);
+		gd32_bridge_status_t st        = protocol_dispatch(
+		    GD32_BRIDGE_LINK_SPI, c->cmd, c->req, c->req_len, reply, REPLY_SCRATCH_CAP, &reply_len);
 		zassert_equal(st, c->want, "%s", c->name);
 	}
 }
@@ -766,7 +784,8 @@ ZTEST(protocol, test_adc_read_variable_reply)
 	req[0]                         = 0x00u; /* channel */
 	req[1]                         = 0x03u; /* samples */
 	size_t               reply_len = 0u;
-	gd32_bridge_status_t st = protocol_dispatch(CMD_ADC_READ, req, 2u, reply, 7u, &reply_len);
+	gd32_bridge_status_t st =
+	    protocol_dispatch(GD32_BRIDGE_LINK_SPI, CMD_ADC_READ, req, 2u, reply, 7u, &reply_len);
 	zassert_equal(st, STATUS_OK, "3-sample read");
 	zassert_equal(reply_len, 7u, "1 + 3*2 reply bytes");
 	zassert_equal(reply[0], 3u, "echoes back the validated sample count");
@@ -782,7 +801,8 @@ ZTEST(protocol, test_adc_read_variable_reply)
 	req[0]    = 0x00u;
 	req[1]    = 0x00u;
 	reply_len = 0u;
-	st        = protocol_dispatch(CMD_ADC_READ, req, 2u, reply, REPLY_SCRATCH_CAP, &reply_len);
+	st        = protocol_dispatch(
+	    GD32_BRIDGE_LINK_SPI, CMD_ADC_READ, req, 2u, reply, REPLY_SCRATCH_CAP, &reply_len);
 	zassert_equal(st, STATUS_INVAL, "samples == 0");
 
 	/* samples > GD32_BRIDGE_ADC_MAX_SAMPLES -> STATUS_OUT_OF_RANGE. */
@@ -790,7 +810,8 @@ ZTEST(protocol, test_adc_read_variable_reply)
 	req[0]    = 0x00u;
 	req[1]    = (uint8_t)(GD32_BRIDGE_ADC_MAX_SAMPLES + 1u);
 	reply_len = 0u;
-	st        = protocol_dispatch(CMD_ADC_READ, req, 2u, reply, REPLY_SCRATCH_CAP, &reply_len);
+	st        = protocol_dispatch(
+	    GD32_BRIDGE_LINK_SPI, CMD_ADC_READ, req, 2u, reply, REPLY_SCRATCH_CAP, &reply_len);
 	zassert_equal(st, STATUS_OUT_OF_RANGE, "samples > GD32_BRIDGE_ADC_MAX_SAMPLES");
 
 	/* reply_cap one below the need for the 3-sample request. */
@@ -799,7 +820,7 @@ ZTEST(protocol, test_adc_read_variable_reply)
 	req[0]    = 0x00u;
 	req[1]    = 0x03u;
 	reply_len = 0u;
-	st        = protocol_dispatch(CMD_ADC_READ, req, 2u, reply, 6u, &reply_len);
+	st = protocol_dispatch(GD32_BRIDGE_LINK_SPI, CMD_ADC_READ, req, 2u, reply, 6u, &reply_len);
 	zassert_equal(st, STATUS_NOMEM, "reply_cap one short of 1 + 3*2");
 }
 
@@ -814,8 +835,8 @@ ZTEST(protocol, test_adc_stream_read_variable_reply)
 	bridge_hw_fake_adc_stream_queue_push(0u, 10u);
 	bridge_hw_fake_adc_stream_queue_push(0u, 20u);
 	size_t               reply_len = 0u;
-	gd32_bridge_status_t st =
-	    protocol_dispatch(CMD_ADC_STREAM_READ, req, 2u, reply, 7u, &reply_len);
+	gd32_bridge_status_t st        = protocol_dispatch(
+	    GD32_BRIDGE_LINK_SPI, CMD_ADC_STREAM_READ, req, 2u, reply, 7u, &reply_len);
 	zassert_equal(st, STATUS_OK, "drains what's queued, short of max_samples");
 	zassert_equal(reply_len, 7u, "1 + 3*2 reply bytes regardless of `got`");
 	zassert_equal(reply[0], 2u, "got == 2 (only 2 samples were queued)");
@@ -828,14 +849,16 @@ ZTEST(protocol, test_adc_stream_read_variable_reply)
 	req[0]    = 0x00u;
 	req[1]    = 0x00u;
 	reply_len = 0u;
-	st = protocol_dispatch(CMD_ADC_STREAM_READ, req, 2u, reply, REPLY_SCRATCH_CAP, &reply_len);
+	st        = protocol_dispatch(
+	    GD32_BRIDGE_LINK_SPI, CMD_ADC_STREAM_READ, req, 2u, reply, REPLY_SCRATCH_CAP, &reply_len);
 	zassert_equal(st, STATUS_INVAL, "max_samples == 0");
 
 	bridge_hw_fake_reset();
 	req[0]    = 0x00u;
 	req[1]    = (uint8_t)(GD32_BRIDGE_ADC_STREAM_READ_MAX + 1u);
 	reply_len = 0u;
-	st = protocol_dispatch(CMD_ADC_STREAM_READ, req, 2u, reply, REPLY_SCRATCH_CAP, &reply_len);
+	st        = protocol_dispatch(
+	    GD32_BRIDGE_LINK_SPI, CMD_ADC_STREAM_READ, req, 2u, reply, REPLY_SCRATCH_CAP, &reply_len);
 	zassert_equal(st, STATUS_OUT_OF_RANGE, "max_samples > GD32_BRIDGE_ADC_STREAM_READ_MAX");
 
 	/* stream_id >= GD32_BRIDGE_ADC_STREAM_COUNT -> STATUS_INVAL. */
@@ -843,7 +866,8 @@ ZTEST(protocol, test_adc_stream_read_variable_reply)
 	req[0]    = (uint8_t)GD32_BRIDGE_ADC_STREAM_COUNT;
 	req[1]    = 0x01u;
 	reply_len = 0u;
-	st = protocol_dispatch(CMD_ADC_STREAM_READ, req, 2u, reply, REPLY_SCRATCH_CAP, &reply_len);
+	st        = protocol_dispatch(
+	    GD32_BRIDGE_LINK_SPI, CMD_ADC_STREAM_READ, req, 2u, reply, REPLY_SCRATCH_CAP, &reply_len);
 	zassert_equal(st, STATUS_INVAL, "stream_id out of range");
 
 	/* HAL-contract violation: the fake reports got > max_samples --
@@ -853,7 +877,8 @@ ZTEST(protocol, test_adc_stream_read_variable_reply)
 	req[0]    = 0x00u;
 	req[1]    = 0x03u; /* max_samples = 3, HAL claims 5 */
 	reply_len = 0u;
-	st = protocol_dispatch(CMD_ADC_STREAM_READ, req, 2u, reply, REPLY_SCRATCH_CAP, &reply_len);
+	st        = protocol_dispatch(
+	    GD32_BRIDGE_LINK_SPI, CMD_ADC_STREAM_READ, req, 2u, reply, REPLY_SCRATCH_CAP, &reply_len);
 	zassert_equal(st, STATUS_IO, "got > max_samples is a HAL contract violation, not STATUS_OK");
 
 	/* reply_cap one below the need: STATUS_NOMEM -- but unlike
@@ -869,11 +894,13 @@ ZTEST(protocol, test_adc_stream_read_variable_reply)
 	req[0]    = 0x00u;
 	req[1]    = 0x03u;
 	reply_len = 0u;
-	st        = protocol_dispatch(CMD_ADC_STREAM_READ, req, 2u, reply, 6u, &reply_len);
+	st        = protocol_dispatch(
+	    GD32_BRIDGE_LINK_SPI, CMD_ADC_STREAM_READ, req, 2u, reply, 6u, &reply_len);
 	zassert_equal(st, STATUS_NOMEM, "reply_cap one short of 1 + 3*2");
 
 	reply_len = 0u;
-	st        = protocol_dispatch(CMD_ADC_STREAM_READ, req, 2u, reply, 7u, &reply_len);
+	st        = protocol_dispatch(
+	    GD32_BRIDGE_LINK_SPI, CMD_ADC_STREAM_READ, req, 2u, reply, 7u, &reply_len);
 	zassert_equal(st, STATUS_OK, "retry with enough room succeeds");
 	zassert_equal(reply[0],
 	              0u,
@@ -895,8 +922,8 @@ ZTEST(protocol, test_adc_spectrum_read_variable_reply)
 	put_le16(&req[1], 0u);                  /* bin_offset */
 	req[3]                         = 0x02u; /* max_bins */
 	size_t               reply_len = 0u;
-	gd32_bridge_status_t st =
-	    protocol_dispatch(CMD_ADC_SPECTRUM_READ, req, 4u, reply, 15u, &reply_len);
+	gd32_bridge_status_t st        = protocol_dispatch(
+	    GD32_BRIDGE_LINK_SPI, CMD_ADC_SPECTRUM_READ, req, 4u, reply, 15u, &reply_len);
 	zassert_equal(st, STATUS_OK, "2-bin spectrum read");
 	zassert_equal(reply_len, 15u, "7 + 2*4 reply bytes");
 	uint8_t expect[15];
@@ -916,7 +943,8 @@ ZTEST(protocol, test_adc_spectrum_read_variable_reply)
 	put_le16(&req[1], 0u);
 	req[3]    = 0x00u;
 	reply_len = 0u;
-	st = protocol_dispatch(CMD_ADC_SPECTRUM_READ, req, 4u, reply, REPLY_SCRATCH_CAP, &reply_len);
+	st        = protocol_dispatch(
+	    GD32_BRIDGE_LINK_SPI, CMD_ADC_SPECTRUM_READ, req, 4u, reply, REPLY_SCRATCH_CAP, &reply_len);
 	zassert_equal(st, STATUS_INVAL, "max_bins == 0");
 
 	bridge_hw_fake_reset();
@@ -924,7 +952,8 @@ ZTEST(protocol, test_adc_spectrum_read_variable_reply)
 	put_le16(&req[1], 0u);
 	req[3]    = (uint8_t)(GD32_BRIDGE_ADC_SPECTRUM_READ_MAX + 1u);
 	reply_len = 0u;
-	st = protocol_dispatch(CMD_ADC_SPECTRUM_READ, req, 4u, reply, REPLY_SCRATCH_CAP, &reply_len);
+	st        = protocol_dispatch(
+	    GD32_BRIDGE_LINK_SPI, CMD_ADC_SPECTRUM_READ, req, 4u, reply, REPLY_SCRATCH_CAP, &reply_len);
 	zassert_equal(st, STATUS_OUT_OF_RANGE, "max_bins > GD32_BRIDGE_ADC_SPECTRUM_READ_MAX");
 
 	/* HAL-contract violation: got > max_bins. */
@@ -934,7 +963,8 @@ ZTEST(protocol, test_adc_spectrum_read_variable_reply)
 	put_le16(&req[1], 0u);
 	req[3]    = 0x02u;
 	reply_len = 0u;
-	st = protocol_dispatch(CMD_ADC_SPECTRUM_READ, req, 4u, reply, REPLY_SCRATCH_CAP, &reply_len);
+	st        = protocol_dispatch(
+	    GD32_BRIDGE_LINK_SPI, CMD_ADC_SPECTRUM_READ, req, 4u, reply, REPLY_SCRATCH_CAP, &reply_len);
 	zassert_equal(st, STATUS_IO, "got > max_bins is a HAL contract violation");
 
 	/* reply_cap one below the need: STATUS_NOMEM -- runs AFTER the HAL
@@ -951,7 +981,8 @@ ZTEST(protocol, test_adc_spectrum_read_variable_reply)
 	put_le16(&req[1], 0u);
 	req[3]    = 0x02u;
 	reply_len = 0u;
-	st        = protocol_dispatch(CMD_ADC_SPECTRUM_READ, req, 4u, reply, 14u, &reply_len);
+	st        = protocol_dispatch(
+	    GD32_BRIDGE_LINK_SPI, CMD_ADC_SPECTRUM_READ, req, 4u, reply, 14u, &reply_len);
 	zassert_equal(st, STATUS_NOMEM, "reply_cap one short of 7 + 2*4");
 }
 
@@ -966,8 +997,13 @@ ZTEST(protocol, test_adc_dsp_stage_push_length_boundary)
 	/* Below the 7-byte header: STATUS_INVAL regardless of content. */
 	bridge_hw_fake_reset();
 	size_t               reply_len = 0u;
-	gd32_bridge_status_t st        = protocol_dispatch(
-	    CMD_ADC_DSP_STAGE_PUSH, req_adc_dsp_stage_push, 6u, reply, REPLY_SCRATCH_CAP, &reply_len);
+	gd32_bridge_status_t st        = protocol_dispatch(GD32_BRIDGE_LINK_SPI,
+	                                                   CMD_ADC_DSP_STAGE_PUSH,
+	                                                   req_adc_dsp_stage_push,
+	                                                   6u,
+	                                                   reply,
+	                                                   REPLY_SCRATCH_CAP,
+	                                                   &reply_len);
 	zassert_equal(st, STATUS_INVAL, "6 bytes is below the 7-byte header minimum");
 
 	/* Exactly the header, zero data bytes, chunk_total_size == 0:
@@ -976,8 +1012,13 @@ ZTEST(protocol, test_adc_dsp_stage_push_length_boundary)
 	bridge_hw_fake_reset();
 	uint8_t header_only[7] = { 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u };
 	reply_len              = 0u;
-	st                     = protocol_dispatch(
-	    CMD_ADC_DSP_STAGE_PUSH, header_only, 7u, reply, REPLY_SCRATCH_CAP, &reply_len);
+	st                     = protocol_dispatch(GD32_BRIDGE_LINK_SPI,
+	                                           CMD_ADC_DSP_STAGE_PUSH,
+	                                           header_only,
+	                                           7u,
+	                                           reply,
+	                                           REPLY_SCRATCH_CAP,
+	                                           &reply_len);
 	zassert_equal(st, STATUS_OK, "7-byte header with an empty chunk is a valid minimum request");
 
 	/* The canonical 8-byte request (header + 1 data byte, exactly
@@ -988,8 +1029,13 @@ ZTEST(protocol, test_adc_dsp_stage_push_length_boundary)
 	 * offset/length range check catches instead (src/protocol.c:820). */
 	bridge_hw_fake_reset();
 	reply_len = 0u;
-	st        = protocol_dispatch(
-	    CMD_ADC_DSP_STAGE_PUSH, req_adc_dsp_stage_push, 8u, reply, REPLY_SCRATCH_CAP, &reply_len);
+	st        = protocol_dispatch(GD32_BRIDGE_LINK_SPI,
+	                              CMD_ADC_DSP_STAGE_PUSH,
+	                              req_adc_dsp_stage_push,
+	                              8u,
+	                              reply,
+	                              REPLY_SCRATCH_CAP,
+	                              &reply_len);
 	zassert_equal(st, STATUS_OK, "8-byte canonical push (header + 1 in-bounds data byte)");
 
 	/* Argument-decode coverage (F4 item 11): chain_id, stage_index, kind,
@@ -1022,8 +1068,13 @@ ZTEST(protocol, test_adc_dsp_stage_push_length_boundary)
 	memcpy(overlong, req_adc_dsp_stage_push, 8u);
 	overlong[8] = 0xBBu;
 	reply_len   = 0u;
-	st          = protocol_dispatch(
-	    CMD_ADC_DSP_STAGE_PUSH, overlong, 9u, reply, REPLY_SCRATCH_CAP, &reply_len);
+	st          = protocol_dispatch(GD32_BRIDGE_LINK_SPI,
+	                                CMD_ADC_DSP_STAGE_PUSH,
+	                                overlong,
+	                                9u,
+	                                reply,
+	                                REPLY_SCRATCH_CAP,
+	                                &reply_len);
 	zassert_equal(st, STATUS_OUT_OF_RANGE, "chunk_offset + chunk_data_len > chunk_total_size");
 
 	/* kind > 3 (not one of FIR/IIR/WINDOW/FFT) -> STATUS_INVAL (local
@@ -1031,8 +1082,13 @@ ZTEST(protocol, test_adc_dsp_stage_push_length_boundary)
 	bridge_hw_fake_reset();
 	uint8_t bad_kind[7] = { 0x00u, 0x00u, 0x04u, 0x00u, 0x00u, 0x00u, 0x00u };
 	reply_len           = 0u;
-	st                  = protocol_dispatch(
-	    CMD_ADC_DSP_STAGE_PUSH, bad_kind, 7u, reply, REPLY_SCRATCH_CAP, &reply_len);
+	st                  = protocol_dispatch(GD32_BRIDGE_LINK_SPI,
+	                                        CMD_ADC_DSP_STAGE_PUSH,
+	                                        bad_kind,
+	                                        7u,
+	                                        reply,
+	                                        REPLY_SCRATCH_CAP,
+	                                        &reply_len);
 	zassert_equal(st, STATUS_INVAL, "kind > 3");
 }
 
@@ -1055,10 +1111,15 @@ ZTEST(protocol, test_local_value_validation)
 	put_le32(&bad_pwm_set[2], 1000u); /* period */
 	put_le32(&bad_pwm_set[6], 2000u); /* duty > period */
 	reply_len = 0u;
-	zassert_equal(
-	    protocol_dispatch(CMD_PWM_SET, bad_pwm_set, 10u, reply, REPLY_SCRATCH_CAP, &reply_len),
-	    STATUS_INVAL,
-	    "duty_ns > period_ns");
+	zassert_equal(protocol_dispatch(GD32_BRIDGE_LINK_SPI,
+	                                CMD_PWM_SET,
+	                                bad_pwm_set,
+	                                10u,
+	                                reply,
+	                                REPLY_SCRATCH_CAP,
+	                                &reply_len),
+	              STATUS_INVAL,
+	              "duty_ns > period_ns");
 
 	/* PWM_CONFIGURE: align_mode > 3 -> STATUS_INVAL. */
 	bridge_hw_fake_reset();
@@ -1066,17 +1127,27 @@ ZTEST(protocol, test_local_value_validation)
 	memcpy(bad_align, req_pwm_configure, sizeof(bad_align));
 	bad_align[1] = 0x04u;
 	reply_len    = 0u;
-	zassert_equal(
-	    protocol_dispatch(CMD_PWM_CONFIGURE, bad_align, 7u, reply, REPLY_SCRATCH_CAP, &reply_len),
-	    STATUS_INVAL,
-	    "align_mode > 3");
+	zassert_equal(protocol_dispatch(GD32_BRIDGE_LINK_SPI,
+	                                CMD_PWM_CONFIGURE,
+	                                bad_align,
+	                                7u,
+	                                reply,
+	                                REPLY_SCRATCH_CAP,
+	                                &reply_len),
+	              STATUS_INVAL,
+	              "align_mode > 3");
 
 	/* PWM_CAPTURE_BEGIN: edge > 2 -> STATUS_INVAL. */
 	bridge_hw_fake_reset();
 	uint8_t bad_edge[2] = { 0x00u, 0x03u };
 	reply_len           = 0u;
-	zassert_equal(protocol_dispatch(
-	                  CMD_PWM_CAPTURE_BEGIN, bad_edge, 2u, reply, REPLY_SCRATCH_CAP, &reply_len),
+	zassert_equal(protocol_dispatch(GD32_BRIDGE_LINK_SPI,
+	                                CMD_PWM_CAPTURE_BEGIN,
+	                                bad_edge,
+	                                2u,
+	                                reply,
+	                                REPLY_SCRATCH_CAP,
+	                                &reply_len),
 	              STATUS_INVAL,
 	              "edge > 2");
 
@@ -1084,8 +1155,13 @@ ZTEST(protocol, test_local_value_validation)
 	bridge_hw_fake_reset();
 	uint8_t zero_pulse[8] = { 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u };
 	reply_len             = 0u;
-	zassert_equal(protocol_dispatch(
-	                  CMD_PWM_SINGLE_PULSE, zero_pulse, 8u, reply, REPLY_SCRATCH_CAP, &reply_len),
+	zassert_equal(protocol_dispatch(GD32_BRIDGE_LINK_SPI,
+	                                CMD_PWM_SINGLE_PULSE,
+	                                zero_pulse,
+	                                8u,
+	                                reply,
+	                                REPLY_SCRATCH_CAP,
+	                                &reply_len),
 	              STATUS_INVAL,
 	              "pulse_ns == 0");
 
@@ -1099,10 +1175,15 @@ ZTEST(protocol, test_local_value_validation)
 	memcpy(bad_mode, req_power_mode_set, sizeof(bad_mode));
 	bad_mode[0] = 0x04u;
 	reply_len   = 0u;
-	zassert_equal(
-	    protocol_dispatch(CMD_POWER_MODE_SET, bad_mode, 10u, reply, REPLY_SCRATCH_CAP, &reply_len),
-	    STATUS_INVAL,
-	    "mode > 3");
+	zassert_equal(protocol_dispatch(GD32_BRIDGE_LINK_SPI,
+	                                CMD_POWER_MODE_SET,
+	                                bad_mode,
+	                                10u,
+	                                reply,
+	                                REPLY_SCRATCH_CAP,
+	                                &reply_len),
+	              STATUS_INVAL,
+	              "mode > 3");
 
 	/* ADC_CONFIGURE: resolution_bits not in {0,6,8,10,12,14,16} ->
 	 * STATUS_INVAL. */
@@ -1111,10 +1192,15 @@ ZTEST(protocol, test_local_value_validation)
 	memcpy(bad_res, req_adc_configure, sizeof(bad_res));
 	bad_res[6] = 0x07u;
 	reply_len  = 0u;
-	zassert_equal(
-	    protocol_dispatch(CMD_ADC_CONFIGURE, bad_res, 7u, reply, REPLY_SCRATCH_CAP, &reply_len),
-	    STATUS_INVAL,
-	    "resolution_bits == 7");
+	zassert_equal(protocol_dispatch(GD32_BRIDGE_LINK_SPI,
+	                                CMD_ADC_CONFIGURE,
+	                                bad_res,
+	                                7u,
+	                                reply,
+	                                REPLY_SCRATCH_CAP,
+	                                &reply_len),
+	              STATUS_INVAL,
+	              "resolution_bits == 7");
 
 	/* ADC_STREAM_BEGIN: stream_id out of range, and sample_rate_hz == 0
 	 * -> STATUS_INVAL. */
@@ -1123,19 +1209,28 @@ ZTEST(protocol, test_local_value_validation)
 	memcpy(bad_stream_id, req_adc_stream_begin, sizeof(bad_stream_id));
 	bad_stream_id[0] = (uint8_t)GD32_BRIDGE_ADC_STREAM_COUNT;
 	reply_len        = 0u;
-	zassert_equal(
-	    protocol_dispatch(
-	        CMD_ADC_STREAM_BEGIN, bad_stream_id, 7u, reply, REPLY_SCRATCH_CAP, &reply_len),
-	    STATUS_INVAL,
-	    "stream_id >= GD32_BRIDGE_ADC_STREAM_COUNT");
+	zassert_equal(protocol_dispatch(GD32_BRIDGE_LINK_SPI,
+	                                CMD_ADC_STREAM_BEGIN,
+	                                bad_stream_id,
+	                                7u,
+	                                reply,
+	                                REPLY_SCRATCH_CAP,
+	                                &reply_len),
+	              STATUS_INVAL,
+	              "stream_id >= GD32_BRIDGE_ADC_STREAM_COUNT");
 
 	bridge_hw_fake_reset();
 	uint8_t zero_rate[7];
 	memcpy(zero_rate, req_adc_stream_begin, sizeof(zero_rate));
 	put_le32(&zero_rate[3], 0u);
 	reply_len = 0u;
-	zassert_equal(protocol_dispatch(
-	                  CMD_ADC_STREAM_BEGIN, zero_rate, 7u, reply, REPLY_SCRATCH_CAP, &reply_len),
+	zassert_equal(protocol_dispatch(GD32_BRIDGE_LINK_SPI,
+	                                CMD_ADC_STREAM_BEGIN,
+	                                zero_rate,
+	                                7u,
+	                                reply,
+	                                REPLY_SCRATCH_CAP,
+	                                &reply_len),
 	              STATUS_INVAL,
 	              "sample_rate_hz == 0");
 
@@ -1143,17 +1238,27 @@ ZTEST(protocol, test_local_value_validation)
 	bridge_hw_fake_reset();
 	uint8_t bad_end[1] = { (uint8_t)GD32_BRIDGE_ADC_STREAM_COUNT };
 	reply_len          = 0u;
-	zassert_equal(
-	    protocol_dispatch(CMD_ADC_STREAM_END, bad_end, 1u, reply, REPLY_SCRATCH_CAP, &reply_len),
-	    STATUS_INVAL,
-	    "stream_id >= GD32_BRIDGE_ADC_STREAM_COUNT");
+	zassert_equal(protocol_dispatch(GD32_BRIDGE_LINK_SPI,
+	                                CMD_ADC_STREAM_END,
+	                                bad_end,
+	                                1u,
+	                                reply,
+	                                REPLY_SCRATCH_CAP,
+	                                &reply_len),
+	              STATUS_INVAL,
+	              "stream_id >= GD32_BRIDGE_ADC_STREAM_COUNT");
 
 	/* ADC_DSP_CHAIN_BIND: stream_id out of range -> STATUS_INVAL. */
 	bridge_hw_fake_reset();
 	uint8_t bad_bind[2] = { 0x00u, (uint8_t)GD32_BRIDGE_ADC_STREAM_COUNT };
 	reply_len           = 0u;
-	zassert_equal(protocol_dispatch(
-	                  CMD_ADC_DSP_CHAIN_BIND, bad_bind, 2u, reply, REPLY_SCRATCH_CAP, &reply_len),
+	zassert_equal(protocol_dispatch(GD32_BRIDGE_LINK_SPI,
+	                                CMD_ADC_DSP_CHAIN_BIND,
+	                                bad_bind,
+	                                2u,
+	                                reply,
+	                                REPLY_SCRATCH_CAP,
+	                                &reply_len),
 	              STATUS_INVAL,
 	              "stream_id >= GD32_BRIDGE_ADC_STREAM_COUNT");
 
@@ -1161,10 +1266,15 @@ ZTEST(protocol, test_local_value_validation)
 	bridge_hw_fake_reset();
 	uint8_t bad_assert[1] = { 0x02u };
 	reply_len             = 0u;
-	zassert_equal(
-	    protocol_dispatch(CMD_SE_RESET, bad_assert, 1u, reply, REPLY_SCRATCH_CAP, &reply_len),
-	    STATUS_INVAL,
-	    "assert > 1");
+	zassert_equal(protocol_dispatch(GD32_BRIDGE_LINK_SPI,
+	                                CMD_SE_RESET,
+	                                bad_assert,
+	                                1u,
+	                                reply,
+	                                REPLY_SCRATCH_CAP,
+	                                &reply_len),
+	              STATUS_INVAL,
+	              "assert > 1");
 
 	/* TMU_COMPUTE: function >= BRIDGE_TMU_FN__COUNT, and separately
 	 * format >= BRIDGE_TMU_FMT__COUNT -> STATUS_INVAL. */
@@ -1173,38 +1283,58 @@ ZTEST(protocol, test_local_value_validation)
 	memcpy(bad_fn, req_tmu_compute, sizeof(bad_fn));
 	bad_fn[0] = (uint8_t)BRIDGE_TMU_FN__COUNT;
 	reply_len = 0u;
-	zassert_equal(
-	    protocol_dispatch(CMD_TMU_COMPUTE, bad_fn, 12u, reply, REPLY_SCRATCH_CAP, &reply_len),
-	    STATUS_INVAL,
-	    "function >= BRIDGE_TMU_FN__COUNT");
+	zassert_equal(protocol_dispatch(GD32_BRIDGE_LINK_SPI,
+	                                CMD_TMU_COMPUTE,
+	                                bad_fn,
+	                                12u,
+	                                reply,
+	                                REPLY_SCRATCH_CAP,
+	                                &reply_len),
+	              STATUS_INVAL,
+	              "function >= BRIDGE_TMU_FN__COUNT");
 
 	bridge_hw_fake_reset();
 	uint8_t bad_fmt[12];
 	memcpy(bad_fmt, req_tmu_compute, sizeof(bad_fmt));
 	bad_fmt[1] = (uint8_t)BRIDGE_TMU_FMT__COUNT;
 	reply_len  = 0u;
-	zassert_equal(
-	    protocol_dispatch(CMD_TMU_COMPUTE, bad_fmt, 12u, reply, REPLY_SCRATCH_CAP, &reply_len),
-	    STATUS_INVAL,
-	    "format >= BRIDGE_TMU_FMT__COUNT");
+	zassert_equal(protocol_dispatch(GD32_BRIDGE_LINK_SPI,
+	                                CMD_TMU_COMPUTE,
+	                                bad_fmt,
+	                                12u,
+	                                reply,
+	                                REPLY_SCRATCH_CAP,
+	                                &reply_len),
+	              STATUS_INVAL,
+	              "format >= BRIDGE_TMU_FMT__COUNT");
 
 	/* TRNG_READ: want == 0 or want > 32 -> STATUS_INVAL (local gate,
 	 * src/protocol.c:601; previously uncovered in full -- F4 item 7). */
 	bridge_hw_fake_reset();
 	uint8_t zero_want[1] = { 0x00u };
 	reply_len            = 0u;
-	zassert_equal(
-	    protocol_dispatch(CMD_TRNG_READ, zero_want, 1u, reply, REPLY_SCRATCH_CAP, &reply_len),
-	    STATUS_INVAL,
-	    "want == 0");
+	zassert_equal(protocol_dispatch(GD32_BRIDGE_LINK_SPI,
+	                                CMD_TRNG_READ,
+	                                zero_want,
+	                                1u,
+	                                reply,
+	                                REPLY_SCRATCH_CAP,
+	                                &reply_len),
+	              STATUS_INVAL,
+	              "want == 0");
 
 	bridge_hw_fake_reset();
 	uint8_t over_want[1] = { 33u };
 	reply_len            = 0u;
-	zassert_equal(
-	    protocol_dispatch(CMD_TRNG_READ, over_want, 1u, reply, REPLY_SCRATCH_CAP, &reply_len),
-	    STATUS_INVAL,
-	    "want > 32");
+	zassert_equal(protocol_dispatch(GD32_BRIDGE_LINK_SPI,
+	                                CMD_TRNG_READ,
+	                                over_want,
+	                                1u,
+	                                reply,
+	                                REPLY_SCRATCH_CAP,
+	                                &reply_len),
+	              STATUS_INVAL,
+	              "want > 32");
 
 	/* ADC_SPECTRUM_READ: stream_id out of range -> STATUS_INVAL (mirrors
 	 * its ADC_STREAM_READ twin above; previously uncovered -- an
@@ -1214,11 +1344,15 @@ ZTEST(protocol, test_local_value_validation)
 	memcpy(bad_spectrum_stream, req_adc_spectrum_read, sizeof(bad_spectrum_stream));
 	bad_spectrum_stream[0] = (uint8_t)GD32_BRIDGE_ADC_STREAM_COUNT;
 	reply_len              = 0u;
-	zassert_equal(
-	    protocol_dispatch(
-	        CMD_ADC_SPECTRUM_READ, bad_spectrum_stream, 4u, reply, REPLY_SCRATCH_CAP, &reply_len),
-	    STATUS_INVAL,
-	    "stream_id >= GD32_BRIDGE_ADC_STREAM_COUNT");
+	zassert_equal(protocol_dispatch(GD32_BRIDGE_LINK_SPI,
+	                                CMD_ADC_SPECTRUM_READ,
+	                                bad_spectrum_stream,
+	                                4u,
+	                                reply,
+	                                REPLY_SCRATCH_CAP,
+	                                &reply_len),
+	              STATUS_INVAL,
+	              "stream_id >= GD32_BRIDGE_ADC_STREAM_COUNT");
 }
 
 /* ------------------------------------------------------------------ */
@@ -1237,14 +1371,19 @@ ZTEST(protocol, test_gpio_write_then_read_roundtrip)
 
 	bridge_hw_fake_reset();
 	size_t reply_len = 0u;
-	zassert_equal(
-	    protocol_dispatch(CMD_GPIO_WRITE, write_req, 8u, reply, REPLY_SCRATCH_CAP, &reply_len),
-	    STATUS_OK,
-	    "GPIO_WRITE succeeds");
+	zassert_equal(protocol_dispatch(GD32_BRIDGE_LINK_SPI,
+	                                CMD_GPIO_WRITE,
+	                                write_req,
+	                                8u,
+	                                reply,
+	                                REPLY_SCRATCH_CAP,
+	                                &reply_len),
+	              STATUS_OK,
+	              "GPIO_WRITE succeeds");
 
-	reply_len = 0u;
-	gd32_bridge_status_t st =
-	    protocol_dispatch(CMD_GPIO_READ, read_req, 4u, reply, REPLY_SCRATCH_CAP, &reply_len);
+	reply_len               = 0u;
+	gd32_bridge_status_t st = protocol_dispatch(
+	    GD32_BRIDGE_LINK_SPI, CMD_GPIO_READ, read_req, 4u, reply, REPLY_SCRATCH_CAP, &reply_len);
 	zassert_equal(st, STATUS_OK, "GPIO_READ succeeds");
 	zassert_equal(reply_len, 4u, "GPIO_READ reply is 4 bytes");
 	uint8_t expect[4] = { 0xA5, 0x00, 0x00, 0x00 };
@@ -1270,14 +1409,16 @@ ZTEST(protocol, test_reset_reason_destructive_read)
 	bridge_hw_fake_set_reset_reason(0x03u);
 	size_t reply_len = 0u;
 	zassert_equal(
-	    protocol_dispatch(CMD_RESET_REASON, NULL, 0u, reply, REPLY_SCRATCH_CAP, &reply_len),
+	    protocol_dispatch(
+	        GD32_BRIDGE_LINK_SPI, CMD_RESET_REASON, NULL, 0u, reply, REPLY_SCRATCH_CAP, &reply_len),
 	    STATUS_OK,
 	    "first read succeeds");
 	zassert_equal(reply[0], 0x03u, "first read reports the seeded cause");
 
 	reply_len = 0u;
 	zassert_equal(
-	    protocol_dispatch(CMD_RESET_REASON, NULL, 0u, reply, REPLY_SCRATCH_CAP, &reply_len),
+	    protocol_dispatch(
+	        GD32_BRIDGE_LINK_SPI, CMD_RESET_REASON, NULL, 0u, reply, REPLY_SCRATCH_CAP, &reply_len),
 	    STATUS_OK,
 	    "second read succeeds");
 	zassert_equal(
@@ -1317,7 +1458,8 @@ ZTEST(protocol, test_pwm_period_shared_per_timer)
 	/* channel=0, period=1,000,000 ns, duty=0 */
 	size_t reply_len = 0u;
 	zassert_equal(
-	    protocol_dispatch(CMD_PWM_SET, set_req, 10u, reply, REPLY_SCRATCH_CAP, &reply_len),
+	    protocol_dispatch(
+	        GD32_BRIDGE_LINK_SPI, CMD_PWM_SET, set_req, 10u, reply, REPLY_SCRATCH_CAP, &reply_len),
 	    STATUS_OK,
 	    "PWM_SET on channel 0 succeeds");
 
@@ -1325,10 +1467,15 @@ ZTEST(protocol, test_pwm_period_shared_per_timer)
 	 * apart) -- PWM_GET on it must report the SAME period, sight unseen. */
 	uint8_t get_sibling[1] = { 0x01u };
 	reply_len              = 0u;
-	zassert_equal(
-	    protocol_dispatch(CMD_PWM_GET, get_sibling, 1u, reply, REPLY_SCRATCH_CAP, &reply_len),
-	    STATUS_OK,
-	    "PWM_GET on channel 1 succeeds");
+	zassert_equal(protocol_dispatch(GD32_BRIDGE_LINK_SPI,
+	                                CMD_PWM_GET,
+	                                get_sibling,
+	                                1u,
+	                                reply,
+	                                REPLY_SCRATCH_CAP,
+	                                &reply_len),
+	              STATUS_OK,
+	              "PWM_GET on channel 1 succeeds");
 	zassert_equal(reply[0], 0x40u, "channel 1's period low byte reflects channel 0's PWM_SET");
 	zassert_equal(reply[1], 0x42u, "channel 1's period byte 1 reflects channel 0's PWM_SET");
 	zassert_equal(reply[2], 0x0Fu, "channel 1's period byte 2 reflects channel 0's PWM_SET");
@@ -1338,10 +1485,15 @@ ZTEST(protocol, test_pwm_period_shared_per_timer)
 	 * boot default (65.536 ms), untouched by channel 0's PWM_SET. */
 	uint8_t get_other_timer[1] = { 0x04u };
 	reply_len                  = 0u;
-	zassert_equal(
-	    protocol_dispatch(CMD_PWM_GET, get_other_timer, 1u, reply, REPLY_SCRATCH_CAP, &reply_len),
-	    STATUS_OK,
-	    "PWM_GET on channel 4 succeeds");
+	zassert_equal(protocol_dispatch(GD32_BRIDGE_LINK_SPI,
+	                                CMD_PWM_GET,
+	                                get_other_timer,
+	                                1u,
+	                                reply,
+	                                REPLY_SCRATCH_CAP,
+	                                &reply_len),
+	              STATUS_OK,
+	              "PWM_GET on channel 4 succeeds");
 	uint8_t expect_boot[4] = { 0x00, 0x00, 0xE8, 0x03 }; /* 65,536,000 ns LE */
 	zassert_mem_equal(reply,
 	                  expect_boot,
@@ -1364,25 +1516,142 @@ ZTEST(protocol, test_link_features_grant_then_disable)
 
 	bridge_hw_fake_reset();
 	size_t reply_len = 0u;
-	zassert_equal(
-	    protocol_dispatch(CMD_LINK_FEATURES, want_all, 1u, reply, REPLY_SCRATCH_CAP, &reply_len),
-	    STATUS_OK,
-	    "grant request succeeds");
+	zassert_equal(protocol_dispatch(GD32_BRIDGE_LINK_SPI,
+	                                CMD_LINK_FEATURES,
+	                                want_all,
+	                                1u,
+	                                reply,
+	                                REPLY_SCRATCH_CAP,
+	                                &reply_len),
+	              STATUS_OK,
+	              "grant request succeeds");
 	zassert_equal(reply_len, 1u, "1-byte granted-features reply");
 	zassert_equal(reply[0],
 	              GD32_BRIDGE_LINK_FEAT_STATUS_SEQ,
 	              "0xFF is masked down to the one bit this firmware implements");
-	zassert_equal(protocol_link_features(),
+	zassert_equal(protocol_link_features(GD32_BRIDGE_LINK_SPI),
 	              GD32_BRIDGE_LINK_FEAT_STATUS_SEQ,
 	              "armed immediately, observable via the accessor");
 
 	reply_len = 0u;
-	zassert_equal(
-	    protocol_dispatch(CMD_LINK_FEATURES, want_none, 1u, reply, REPLY_SCRATCH_CAP, &reply_len),
-	    STATUS_OK,
-	    "disable request succeeds");
+	zassert_equal(protocol_dispatch(GD32_BRIDGE_LINK_SPI,
+	                                CMD_LINK_FEATURES,
+	                                want_none,
+	                                1u,
+	                                reply,
+	                                REPLY_SCRATCH_CAP,
+	                                &reply_len),
+	              STATUS_OK,
+	              "disable request succeeds");
 	zassert_equal(reply[0], 0x00u, "nothing granted");
-	zassert_equal(protocol_link_features(), 0x00u, "disarmed immediately");
+	zassert_equal(protocol_link_features(GD32_BRIDGE_LINK_SPI), 0x00u, "disarmed immediately");
+}
+
+/* #130 -- CMD_LINK_FEATURES sits in the SHARED dispatch table and is
+ * therefore reachable from both transport ISRs, but STATUS_SEQ is
+ * declared SPI-only (src/protocol.h) and the SPI transport is its only
+ * consumer.  With one process-wide feature byte, an I2C-side driver
+ * open/close/reset issuing the documented idempotent `features = 0`
+ * disarmed a live SPI STATUS_SEQ session with nothing telling the SPI
+ * host -- switching off its ONLY detector for the stale-reply residual
+ * hazard fingerprinted on silicon 2026-06-06.  The reverse was equally
+ * reachable: an I2C-side `features = 1` re-framed the SPI wire for a
+ * host that never negotiated it.
+ *
+ * Both directions are asserted here.  Before the per-link split the
+ * first read-back below returned 0x00 and the second returned
+ * GD32_BRIDGE_LINK_FEAT_STATUS_SEQ. */
+ZTEST(protocol, test_link_features_are_per_transport)
+{
+	uint8_t reply[REPLY_SCRATCH_CAP];
+	uint8_t want_all[1]  = { 0xFFu };
+	uint8_t want_none[1] = { 0x00u };
+	size_t  reply_len    = 0u;
+
+	bridge_hw_fake_reset();
+
+	/* SPI host negotiates STATUS_SEQ and is relying on the stamp. */
+	zassert_equal(protocol_dispatch(GD32_BRIDGE_LINK_SPI,
+	                                CMD_LINK_FEATURES,
+	                                want_all,
+	                                1u,
+	                                reply,
+	                                REPLY_SCRATCH_CAP,
+	                                &reply_len),
+	              STATUS_OK,
+	              "SPI grant succeeds");
+	zassert_equal(protocol_link_features(GD32_BRIDGE_LINK_SPI),
+	              GD32_BRIDGE_LINK_FEAT_STATUS_SEQ,
+	              "SPI link armed");
+
+	/* An I2C-side open/close/reset path issues the idempotent zero. */
+	reply_len = 0u;
+	zassert_equal(protocol_dispatch(GD32_BRIDGE_LINK_I2C,
+	                                CMD_LINK_FEATURES,
+	                                want_none,
+	                                1u,
+	                                reply,
+	                                REPLY_SCRATCH_CAP,
+	                                &reply_len),
+	              STATUS_OK,
+	              "I2C disable is answered honestly, not NOSUPPORT -- the documented "
+	              "open/close path issues it unconditionally");
+	zassert_equal(reply[0], 0x00u, "I2C link reports nothing granted");
+	zassert_equal(protocol_link_features(GD32_BRIDGE_LINK_I2C), 0x00u, "I2C link disarmed");
+	zassert_equal(protocol_link_features(GD32_BRIDGE_LINK_SPI),
+	              GD32_BRIDGE_LINK_FEAT_STATUS_SEQ,
+	              "the SPI session MUST survive an I2C-side features=0");
+
+	/* And the reverse: an I2C-side grant must not re-frame the SPI wire
+	 * for a host that never negotiated it. */
+	reply_len = 0u;
+	zassert_equal(protocol_dispatch(GD32_BRIDGE_LINK_SPI,
+	                                CMD_LINK_FEATURES,
+	                                want_none,
+	                                1u,
+	                                reply,
+	                                REPLY_SCRATCH_CAP,
+	                                &reply_len),
+	              STATUS_OK,
+	              "SPI disarms itself");
+	reply_len = 0u;
+	zassert_equal(protocol_dispatch(GD32_BRIDGE_LINK_I2C,
+	                                CMD_LINK_FEATURES,
+	                                want_all,
+	                                1u,
+	                                reply,
+	                                REPLY_SCRATCH_CAP,
+	                                &reply_len),
+	              STATUS_OK,
+	              "I2C grant succeeds");
+	zassert_equal(protocol_link_features(GD32_BRIDGE_LINK_I2C),
+	              GD32_BRIDGE_LINK_FEAT_STATUS_SEQ,
+	              "I2C link armed for its own host");
+	zassert_equal(protocol_link_features(GD32_BRIDGE_LINK_SPI),
+	              0x00u,
+	              "the SPI wire MUST NOT be re-framed by an I2C-side grant");
+}
+
+/* An out-of-range link tag must not index the feature array. */
+ZTEST(protocol, test_link_features_rejects_unknown_link)
+{
+	uint8_t reply[REPLY_SCRATCH_CAP];
+	uint8_t want_all[1] = { 0xFFu };
+	size_t  reply_len   = 0u;
+
+	bridge_hw_fake_reset();
+	zassert_equal(protocol_dispatch((gd32_bridge_link_t)GD32_BRIDGE_LINK_COUNT,
+	                                CMD_LINK_FEATURES,
+	                                want_all,
+	                                1u,
+	                                reply,
+	                                REPLY_SCRATCH_CAP,
+	                                &reply_len),
+	              STATUS_INVAL,
+	              "an unknown link tag is refused, not used as an array index");
+	zassert_equal(protocol_link_features((gd32_bridge_link_t)GD32_BRIDGE_LINK_COUNT),
+	              0u,
+	              "the accessor answers 0 for an unknown link");
 }
 
 /* ------------------------------------------------------------------ */
@@ -1399,8 +1668,8 @@ ZTEST(protocol, test_unknown_opcode_default)
 	/* 0x99 is unassigned in gd32_bridge_cmd_t and below CMD_OTA_BEGIN
 	 * (0xF0), so it must fall through to the plain STATUS_NOSUPPORT
 	 * default rather than the OTA range. */
-	gd32_bridge_status_t st =
-	    protocol_dispatch(0x99u, NULL, 0u, reply, REPLY_SCRATCH_CAP, &reply_len);
+	gd32_bridge_status_t st = protocol_dispatch(
+	    GD32_BRIDGE_LINK_SPI, 0x99u, NULL, 0u, reply, REPLY_SCRATCH_CAP, &reply_len);
 	zassert_equal(st, STATUS_NOSUPPORT, "unassigned opcode");
 	zassert_equal(reply_len, 0u, "no reply payload");
 }
@@ -1416,8 +1685,13 @@ ZTEST(protocol, test_reserved_0x36_tombstone)
 	 * -- the chunked CMD_ADC_DSP_CHAIN_* path replaced it before this
 	 * opcode ever shipped. It must fall through to the same default as
 	 * any other unassigned opcode. */
-	gd32_bridge_status_t st = protocol_dispatch(
-	    CMD_ADC_STREAM_CONFIGURE_DSP, NULL, 0u, reply, REPLY_SCRATCH_CAP, &reply_len);
+	gd32_bridge_status_t st = protocol_dispatch(GD32_BRIDGE_LINK_SPI,
+	                                            CMD_ADC_STREAM_CONFIGURE_DSP,
+	                                            NULL,
+	                                            0u,
+	                                            reply,
+	                                            REPLY_SCRATCH_CAP,
+	                                            &reply_len);
 	zassert_equal(st, STATUS_NOSUPPORT, "0x36 tombstone");
 	zassert_equal(reply_len, 0u, "no reply payload");
 }
@@ -1436,8 +1710,8 @@ ZTEST(protocol, test_ota_range_is_inert_without_partitioning)
 	for (unsigned cmd = CMD_OTA_BEGIN; cmd <= 0xFFu; cmd++) {
 		bridge_hw_fake_reset();
 		size_t               reply_len = 0xDEADu; /* poisoned; must become 0 */
-		gd32_bridge_status_t st =
-		    protocol_dispatch((uint8_t)cmd, NULL, 0u, reply, REPLY_SCRATCH_CAP, &reply_len);
+		gd32_bridge_status_t st        = protocol_dispatch(
+		    GD32_BRIDGE_LINK_SPI, (uint8_t)cmd, NULL, 0u, reply, REPLY_SCRATCH_CAP, &reply_len);
 		zassert_equal(st, STATUS_NOSUPPORT, "opcode 0x%02X inert without partitioning", cmd);
 		zassert_equal(reply_len, 0u, "opcode 0x%02X: no reply payload", cmd);
 	}

@@ -287,11 +287,30 @@ typedef enum {
 /* Dispatcher                                                         */
 /* --------------------------------------------------------------- */
 
+/* Which transport a request arrived on.  protocol_dispatch() takes this
+ * so a handler whose effect is scoped to ONE link cannot reach across to
+ * the other: the command table is shared by design, but state armed by a
+ * command is not always shareable.  CMD_LINK_FEATURES is the first such
+ * command (#130) -- STATUS_SEQ is declared SPI-only above, and the SPI
+ * transport is its only consumer.
+ *
+ * Values are a dense index into protocol.c's per-link feature array; do
+ * not renumber without updating it. */
+typedef enum {
+	GD32_BRIDGE_LINK_SPI = 0,
+	GD32_BRIDGE_LINK_I2C = 1,
+	GD32_BRIDGE_LINK_COUNT
+} gd32_bridge_link_t;
+
 /*
  * protocol_dispatch -- called by either transport when a complete
  * request envelope has been validated (CRC OK, framing OK).
  *
  * Inputs:
+ *   link           -- the transport this request arrived on
+ *                     (GD32_BRIDGE_LINK_SPI / _I2C).  Only link-scoped
+ *                     handlers consult it; the shared command table is
+ *                     otherwise identical on both links.
  *   cmd            -- opcode (one of CMD_*).
  *   req_payload    -- pointer to N request payload bytes (may be
  *                     NULL when req_payload_len == 0).
@@ -308,17 +327,25 @@ typedef enum {
  *          downstream peripheral errors (e.g. an ADC or timer
  *          peripheral fault).
  */
-gd32_bridge_status_t protocol_dispatch(uint8_t        cmd,
-                                       const uint8_t *req_payload,
-                                       size_t         req_payload_len,
-                                       uint8_t       *reply_payload,
-                                       size_t         reply_payload_cap,
-                                       size_t        *reply_payload_len);
+gd32_bridge_status_t protocol_dispatch(gd32_bridge_link_t link,
+                                       uint8_t            cmd,
+                                       const uint8_t     *req_payload,
+                                       size_t             req_payload_len,
+                                       uint8_t           *reply_payload,
+                                       size_t             reply_payload_cap,
+                                       size_t            *reply_payload_len);
 
-/* Currently armed link features (GD32_BRIDGE_LINK_FEAT_* bits, set by
- * CMD_LINK_FEATURES).  Consulted by the SPI transport when staging
- * replies; 0 = legacy framing. */
-uint8_t protocol_link_features(void);
+/* Link features currently armed ON `link` (GD32_BRIDGE_LINK_FEAT_* bits,
+ * set by a CMD_LINK_FEATURES that arrived on that same link).  Consulted
+ * by the SPI transport when staging replies; 0 = legacy framing.
+ *
+ * Per-link since #132's sibling #130: the feature set used to be one
+ * process-wide byte, so an I2C-side negotiation re-framed the SPI wire
+ * for a host that never asked -- and an I2C-side `features = 0` silently
+ * disarmed an active SPI STATUS_SEQ session mid-flight, switching off the
+ * SPI host's ONLY detector for the stale-reply residual hazard
+ * fingerprinted on silicon 2026-06-06. */
+uint8_t protocol_link_features(gd32_bridge_link_t link);
 
 /* --------------------------------------------------------------- */
 /* CRC-16 / CCITT-FALSE -- shared between transports.                */
