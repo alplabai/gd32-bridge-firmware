@@ -173,6 +173,23 @@ typedef struct {
  * sample + 12.5 ADCCK conversion ~= 7.0 us). */
 #define ADC_DEFAULT_SAMPLE_CYCLES 240u
 
+/* #127 -- the one-suffix trap.  The vendor's clock selector in
+ * system_gd32g5x3.c is
+ *     #if !(defined(GD32G553XXX3) || defined(GD32G533XXX3))
+ * and defining EITHER of those legitimate part-variant macros silently
+ * flips SYSCLK to 170000000 while every 216000000u literal below stays
+ * put: 27 % wrong PWM periods, ADC pacing and DWT timing, with no
+ * diagnostic anywhere.  The asymmetry makes it worse than it sounds --
+ * hal/transport_hw_gd32.c derives I2C timing at RUNTIME from
+ * rcu_clock_freq_get(CK_APB1), so I2C keeps working while everything
+ * else drifts, which is the shape that reads as "a timer bug" rather
+ * than "a clock bug".  Refuse to build instead.  Lifting this needs the
+ * literals below to move with it, not just the #error to be deleted. */
+#if defined(GD32G553XXX3) || defined(GD32G533XXX3)
+#error \
+    "GD32G553XXX3/GD32G533XXX3 select the vendor's 170 MHz clock tree, but PWM_TIMER_CLK_HZ and BRIDGE_ADC_PACE_CLK_HZ below are hardcoded 216000000u. Re-derive both (and PWM_TIMER_PRESCALER) before defining either macro -- see #127."
+#endif
+
 /* TIMER core clock.  This SoM's SystemInit override runs SYSCLK at
  * 216 MHz (216M-PLL-IRC8M -- see vendors/gd32_firmware_library/
  * overrides/system_gd32g5x3.c) with APB1/APB2 at DIV1, so CK_TIMER =
@@ -190,6 +207,45 @@ typedef struct {
 #define PWM_TIMER_PRESCALER (216u - 1u) /* 216 MHz -> 1 MHz tick    */
 #define PWM_TIMER_TICK_NS   1000u       /* 1 us per timer tick      */
 #define PWM_TIMER_ARR_MAX   0xFFFFu     /* 16-bit auto-reload limit */
+
+/* #127 -- pin the two invariants that are checkable at COMPILE time.
+ *
+ * The first: BRIDGE_ADC_PACE_CLK_HZ above and PWM_TIMER_CLK_HZ here are
+ * two independent spellings of the same fact (both timer groups run off
+ * the core clock with APB1/APB2 at DIV1).  Two copies of a number drift;
+ * one of them drifting is invisible until a bench measurement catches it.
+ *
+ * The second: PWM_TIMER_TICK_NS claims a 1 us tick and PWM_TIMER_PRESCALER
+ * is what actually produces it.  This is exactly the shape of the defect
+ * that shipped through v0.2.3 -- the clock was coded as 240 MHz while the
+ * prescaler stayed (216 - 1), so every commanded 1 kHz physically ran
+ * ~900 Hz.  A compile-time check makes that class of edit un-shippable.
+ *
+ * Neither of these can check the clock is REALLY 216 MHz -- that is a
+ * runtime fact established by a SystemInit() this repo does not own.  See
+ * bridge_core_clock_hz below and #127 for that half. */
+_Static_assert(PWM_TIMER_CLK_HZ == BRIDGE_ADC_PACE_CLK_HZ,
+               "the PWM and ADC-pacing timer bases must be the same core clock (#127)");
+_Static_assert(PWM_TIMER_CLK_HZ / (PWM_TIMER_PRESCALER + 1u) == 1000000000u / PWM_TIMER_TICK_NS,
+               "PWM_TIMER_PRESCALER does not produce the tick PWM_TIMER_TICK_NS claims (#127)");
+
+/* The core clock as the vendor's SystemInit() ACTUALLY left it, sampled
+ * by SystemCoreClockUpdate() at the head of bridge_hw_init() (#127).
+ * Before that call this repo never referenced SystemCoreClock at all --
+ * every timing constant above was asserted against a number no code
+ * checked.
+ *
+ * `bridge_core_clock_matches` is false when the running clock disagrees
+ * with PWM_TIMER_CLK_HZ, i.e. when every PWM period, ADC pacing interval
+ * and DWT timestamp this firmware produces is wrong by that ratio.
+ * Both are non-static so a bench SWD read can see them without a wire
+ * change.  ACTING on the mismatch -- refusing supervised outputs, or
+ * deriving PWM_TIMER_PRESCALER from SystemCoreClock at runtime so the
+ * timer math self-corrects -- lands in hal/gd32/pwm.c, which open PR #82
+ * is rewriting; it is deliberately left to a follow-up rather than
+ * conflicting with that work.  Tracked on #127. */
+extern uint32_t bridge_core_clock_hz;      /* init.c */
+extern bool     bridge_core_clock_matches; /* init.c */
 
 /* ----------------------------------------------------------------- */
 /* Shared tables (defined in the TU named per line).                  */
