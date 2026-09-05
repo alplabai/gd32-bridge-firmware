@@ -14,6 +14,7 @@
 #include "bridge_hw.h"
 #include "gd32g5x3.h"
 
+#include "bridge_critical.h"
 #include "gd32_common.h"
 
 /* ----------------------------------------------------------------- */
@@ -215,6 +216,81 @@ bool adc_periph_init(uint32_t periph)
 	return adc_calibrate_bounded(periph);
 }
 
+/* ---- per-converter ownership interlock (#133) ------------------------ *
+ *
+ * Two bridge channels ride each ADC peripheral (0/1 -> ADC3, 2/3 -> ADC2,
+ * 4/5 -> ADC1, 6/7 -> ADC0), and both bridge_hw_adc_read and
+ * bridge_hw_adc_stream_begin reconfigure that shared converter -- from
+ * INTERRUPT context, at two different NVIC group priorities.  The only
+ * mutual exclusion either had was a scan of adc_streams[].in_use, which
+ * says nothing about a single-shot read in flight.
+ *
+ * So: an I2C-side CMD_ADC_READ(channel=6) passes the stream scan, does
+ * adc_disable(ADC0), points routine rank 0 at ADC_CHANNEL_2 / PA2, emits
+ * two of four samples -- and the SPI CS-EXTI handler pre-empts with
+ * CMD_ADC_READ(channel=7), passes the same scan, and re-points the same
+ * converter at PA3.  The I2C side resumes and reads its remaining samples
+ * from THE WRONG PAD, then answers STATUS_OK.  Nothing on the wire
+ * distinguishes that reading from a good one.
+ *
+ * The flag is claimed for the WHOLE disable/reconfigure/enable/convert
+ * sequence, but interrupts are masked only across the test-and-set --
+ * see bridge_critical.h on why the section must stay that short.  The
+ * loser is told BRIDGE_HW_ERR_BUSY and returns immediately; nothing here
+ * spins waiting for the flag, so there is no deadlock to construct even
+ * though the claim can be held for milliseconds (#135). */
+#define ADC_PERIPH_COUNT 4u
+
+/* Dense slot index for the four converters.  A switch rather than
+ * `channel >> 1` so the mapping does not silently follow a future
+ * re-ordering of adc_channels_map[]. */
+static uint8_t adc_periph_slot(uint32_t periph)
+{
+	switch (periph) {
+	case ADC0:
+		return 0u;
+	case ADC1:
+		return 1u;
+	case ADC2:
+		return 2u;
+	case ADC3:
+		return 3u;
+	default:
+		return ADC_PERIPH_COUNT; /* unreachable: adc_channels_map has no other */
+	}
+}
+
+/* `volatile` is load-bearing here, unlike most of this tree: the flag is
+ * written at one NVIC priority and read at another, and the compiler has
+ * no reason to reload it across the claim. */
+static volatile bool adc_periph_busy[ADC_PERIPH_COUNT];
+
+/* Test-and-set.  True = the caller now owns `periph` and MUST release it
+ * on every return path.  False = someone else holds it; answer BUSY. */
+bool adc_periph_claim(uint32_t periph)
+{
+	const uint8_t slot = adc_periph_slot(periph);
+
+	if (slot >= ADC_PERIPH_COUNT) return false;
+
+	const uint32_t st       = bridge_irq_lock();
+	const bool     free_now = !adc_periph_busy[slot];
+	if (free_now) {
+		adc_periph_busy[slot] = true;
+	}
+	bridge_irq_unlock(st);
+	return free_now;
+}
+
+void adc_periph_release(uint32_t periph)
+{
+	const uint8_t slot = adc_periph_slot(periph);
+
+	if (slot >= ADC_PERIPH_COUNT) return;
+	/* A single aligned store; no section needed to clear it. */
+	adc_periph_busy[slot] = false;
+}
+
 int bridge_hw_adc_read(uint8_t channel, uint8_t samples, uint16_t *mv)
 {
 	if (mv == 0) return BRIDGE_HW_ERR_INVAL;
@@ -240,6 +316,13 @@ int bridge_hw_adc_read(uint8_t channel, uint8_t samples, uint16_t *mv)
 			return BRIDGE_HW_ERR_BUSY;
 		}
 	}
+
+	/* Claim the shared converter for the whole sequence below (#133).
+     * The stream scan above only covers stream-vs-read; this is what
+     * covers read-vs-read and read-vs-stream_begin across the CS-EXTI
+     * pre-emption of I2C0_EV.  Every return path from here down must
+     * release. */
+	if (!adc_periph_claim(ch->periph)) return BRIDGE_HW_ERR_BUSY;
 
 	/* Configure the routine channel for this op (each call re-applies
      * because multiple bridge channels can share an ADC peripheral -- a
@@ -303,8 +386,11 @@ int bridge_hw_adc_read(uint8_t channel, uint8_t samples, uint16_t *mv)
 			/* Self-heal is best-effort: the re-init's calibration is
              * itself bounded (a wedged converter must not convert a
              * read timeout into a link wedge), and this path already
-             * reports IO either way. */
+             * reports IO either way.  Release AFTER the re-init so no
+             * pre-empting claimant sees a half-reinitialised converter
+             * (#133). */
 			(void)adc_periph_init(ch->periph);
+			adc_periph_release(ch->periph);
 			return BRIDGE_HW_ERR_IO;
 		}
 		adc_flag_clear(ch->periph, ADC_FLAG_EOC);
@@ -316,6 +402,7 @@ int bridge_hw_adc_read(uint8_t channel, uint8_t samples, uint16_t *mv)
 		if (code > fs) code = fs;
 		mv[i] = (uint16_t)((code * ADC_VREF_MV) / fs);
 	}
+	adc_periph_release(ch->periph);
 	return BRIDGE_HW_OK;
 }
 

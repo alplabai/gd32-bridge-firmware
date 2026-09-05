@@ -150,6 +150,16 @@ int bridge_hw_adc_stream_begin(uint8_t stream_id, uint8_t channel, uint32_t samp
      * Calibration is NOT redone here: an ADCON toggle preserves the
      * boot calibration from adc_periph_init, and recalibrating would
      * be an unbounded vendor spin inside the CS-EXTI handler. */
+	/* Claim the shared converter for the reconfigure below (#133).  The
+     * stream-vs-stream scan above says nothing about a single-shot
+     * bridge_hw_adc_read in flight on the sibling bridge channel, and
+     * that read holds this same flag for its whole convert loop -- so a
+     * BEGIN that lands mid-read is told BUSY instead of re-pointing
+     * routine rank 0 out from under it.  Long-term ownership stays with
+     * the in_use publication; this flag only covers the window in which
+     * the converter is being reprogrammed. */
+	if (!adc_periph_claim(ch->periph)) return BRIDGE_HW_ERR_BUSY;
+
 	adc_disable(ch->periph);
 	/* Apply the channel's cached resolution + oversample while the
 	 * converter is disabled (DRES/OVSAMPCTL only latch with ADCON==0).
@@ -237,6 +247,11 @@ int bridge_hw_adc_stream_begin(uint8_t stream_id, uint8_t channel, uint32_t samp
 	s->total_read   = 0u; /* lap_count zeroed above, pre-arm */
 	s->dsp_chain_id = 0u;
 	s->dsp_bound    = false;
+	/* Reconfigure done and in_use published: hand the converter's
+     * short-term claim back (#133).  From here the in_use scan in
+     * bridge_hw_adc_read is what keeps single-shot reads off this
+     * converter, for as long as the stream runs. */
+	adc_periph_release(ch->periph);
 	return BRIDGE_HW_OK;
 }
 

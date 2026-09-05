@@ -255,15 +255,26 @@ extern const gd32_gpio_pad_t gpio_pad_map[GPIO_PAD_MAP_COUNT];        /* gpio.c 
 extern bool                  gpio_is_output[GPIO_PAD_MAP_COUNT];      /* gpio.c */
 extern const gd32_adc_ch_t   adc_channels_map[ADC_CHANNEL_MAP_COUNT]; /* adc.c */
 extern uint16_t              adc_sample_cycles_cache[8];              /* adc.c */
-extern uint8_t               adc_resolution_bits_cache[8];            /* adc.c */
-extern uint16_t              adc_oversample_ratio_cache[8];           /* adc.c */
-extern const gd32_qenc_t     qenc_map[QENC_CHANNEL_COUNT];            /* qenc.c */
-extern const gd32_pwm_ch_t   pwm_channels[PWM_CHANNEL_COUNT];         /* pwm.c */
-extern const gd32_dac_ch_t   dac_channels[DAC_CHANNEL_COUNT];         /* dac.c */
-extern adc_stream_state_t    adc_streams[BRIDGE_ADC_STREAM_COUNT];    /* adc_stream.c */
-extern bool                  trng_started;                            /* trng.c */
-extern bool                  trng_ready;                              /* trng.c */
-extern bool                  vref_ok;                                 /* vref.c */
+
+/* Per-converter ownership interlock (#133) -- adc.c owns the flags; the
+ * streaming path in adc_stream.c claims the same converter around its own
+ * reconfigure.  claim() is a test-and-set with interrupts masked and
+ * returns false when another context already holds `periph`; the loser
+ * must answer BRIDGE_HW_ERR_BUSY rather than proceed.  Every path that
+ * claimed must release, including error returns.  `periph` is an ADC base
+ * address (ADC0..ADC3), passed as uint32_t so this header stays free of
+ * the vendor device header. */
+bool                       adc_periph_claim(uint32_t periph);    /* adc.c */
+void                       adc_periph_release(uint32_t periph);  /* adc.c */
+extern uint8_t             adc_resolution_bits_cache[8];         /* adc.c */
+extern uint16_t            adc_oversample_ratio_cache[8];        /* adc.c */
+extern const gd32_qenc_t   qenc_map[QENC_CHANNEL_COUNT];         /* qenc.c */
+extern const gd32_pwm_ch_t pwm_channels[PWM_CHANNEL_COUNT];      /* pwm.c */
+extern const gd32_dac_ch_t dac_channels[DAC_CHANNEL_COUNT];      /* dac.c */
+extern adc_stream_state_t  adc_streams[BRIDGE_ADC_STREAM_COUNT]; /* adc_stream.c */
+extern bool                trng_started;                         /* trng.c */
+extern bool                trng_ready;                           /* trng.c */
+extern bool                vref_ok;                              /* vref.c */
 
 /* ----------------------------------------------------------------- */
 /* Shared helpers (defined in the TU named per line).                 */
