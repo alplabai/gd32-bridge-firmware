@@ -14,6 +14,7 @@
 #include "bridge_hw.h"
 #include "gd32g5x3.h"
 
+#include "bridge_critical.h"
 #include "gd32_common.h"
 
 /* ----------------------------------------------------------------- */
@@ -109,7 +110,7 @@ void pwm_timer_init(uint32_t periph)
  * pulse width. */
 #define PWM_ONE_SHOT_DELAY_TICKS 1u
 
-static bool pwm_one_shot[PWM_CHANNEL_COUNT];
+static volatile bool pwm_one_shot[PWM_CHANNEL_COUNT];
 
 /* Per-channel init.  Sets PWM mode 0 (output high while counter <
  * compare) and 0 duty -- HW pad sits low until the host issues a
@@ -159,7 +160,12 @@ void pwm_channel_init(const gd32_pwm_ch_t *ch)
  * period/duty and the ARR/compare ticks, because a center-aligned
  * counter runs 0->ARR->0 (period == 2*ARR ticks) where an edge-aligned
  * counter runs 0->ARR (period == ARR+1 ticks). */
-static uint8_t pwm_align_mode[2];
+/* `volatile` on both shadows (#134): each is written from one transport
+ * ISR and read from the other, at NVIC group priorities 1 and 2, so the
+ * compiler has no reason to reload either across a call.  Today nothing
+ * exposes the miss because the build sets no -O at all (#26) -- that is
+ * luck, not design, and PR #106 pins -Os. */
+static volatile uint8_t pwm_align_mode[2];
 
 /* TIMER base -> pwm_align_mode index. */
 static uint8_t pwm_timer_index(uint32_t periph)
@@ -337,15 +343,51 @@ int bridge_hw_pwm_configure(uint8_t  channel,
 		TIMER_COUNTER_CENTER_DOWN, /* 2: center-down   */
 		TIMER_COUNTER_CENTER_BOTH, /* 3: center-both   */
 	};
-	const bool was_running = (TIMER_CTL0(ch->periph) & (uint32_t)TIMER_CTL0_CEN) != 0u;
+	/* #134: this whole block is one critical section, and the shadow is
+     * published INSIDE it.
+     *
+     * The read-modify-write below touches the WHOLE of TIMER_CTL0 to edit
+     * one field, and CEN (bit 0) and SPM (bit 3) live in that same
+     * register -- written by bridge_hw_pwm_set and
+     * bridge_hw_pwm_single_pulse, which reach this timer from the OTHER
+     * transport's ISR.  Unprotected, this happened: I2C0_EV (priority 2)
+     * snapshots `ctl0` with CEN = 0 and SPM = 0; the SPI CS-EXTI handler
+     * (priority 1) pre-empts and runs a single-pulse, setting SPM and
+     * CEN; this side resumes and writes its stale word back, clearing
+     * BOTH -- the one-shot never fires and its caller was told
+     * BRIDGE_HW_OK.
+     *
+     * Publishing pwm_align_mode[] inside the section closes the second
+     * half: it used to be written AFTER the hardware it describes, so a
+     * pre-empting single_pulse could read a shadow saying "edge-aligned"
+     * off a timer already switched to center-aligned and pass a guard it
+     * should have failed.  Inside the section a pre-empting caller sees
+     * either the old alignment consistently or the new one, never a
+     * disagreement.
+     *
+     * The section covers a disable, one RMW, an enable and a store --
+     * short enough for the CS-EXTI handler's deadline (bridge_critical.h).
+     *
+     * RESIDUAL, deliberately not fixed here: the REVERSE direction is
+     * still open.  If bridge_hw_pwm_configure is the one reached from
+     * CS-EXTI (priority 1) and bridge_hw_pwm_single_pulse from I2C0_EV
+     * (priority 2), configure pre-empts single_pulse mid-sequence --
+     * between its SPM write and its timer_enable -- and single_pulse then
+     * resumes and enables a one-shot whose alignment guard was checked
+     * against the alignment configure has since changed.  Closing that
+     * needs single_pulse's own register sequence to become a section too,
+     * which lands squarely in open PR #82's rewrite of that function.
+     * Tracked under #19. */
+	const uint32_t sect        = bridge_irq_lock();
+	const bool     was_running = (TIMER_CTL0(ch->periph) & (uint32_t)TIMER_CTL0_CEN) != 0u;
 	timer_disable(ch->periph);
 	uint32_t ctl0 = TIMER_CTL0(ch->periph);
 	ctl0 &= ~(uint32_t)TIMER_CTL0_CAM;
 	ctl0 |= cam_map[align_mode];
 	TIMER_CTL0(ch->periph) = ctl0;
 	if (was_running) timer_enable(ch->periph);
-
 	pwm_align_mode[idx] = align_mode;
+	bridge_irq_unlock(sect);
 	return BRIDGE_HW_OK;
 }
 
