@@ -181,6 +181,25 @@ static void reset_model(void)
 	g_program_calls = 0u;
 	g_program_fail  = false;
 	g_erase_fail    = false;
+
+	/* Reset src/ota.c's OWN state machine too, not just the flash model.
+	 * Its statics (s_state, s_erasing, s_img_len, ...) are file-scope with
+	 * no seam this suite can reach directly, ZTEST_SUITE's hook slots are
+	 * unused throughout this tree, and every case runs in one process --
+	 * so before this, a case that called begin_session() left the machine
+	 * in OTA_ST_READY for whichever case ran next.  Nothing depended on
+	 * that until h_rollback gained a state guard (#147), at which point
+	 * two rollback cases that issue no BEGIN of their own started failing
+	 * on inherited state.  CMD_OTA_ABORT is the documented exit from any
+	 * in-flight session and is exactly this seam: it clears s_erasing,
+	 * sets OTA_ST_IDLE and zeroes s_err.
+	 *
+	 * The return value is ignored on purpose: OTA_ABORT answers
+	 * STATUS_NOSUPPORT in a build where ota_fmc_supported() is false, and
+	 * that is not this fixture's business. */
+	uint8_t abort_reply[8];
+	size_t  abort_rlen = 0u;
+	(void)ota_dispatch(CMD_OTA_ABORT, NULL, 0u, abort_reply, sizeof(abort_reply), &abort_rlen);
 }
 
 /* Write a CRC-valid metadata record directly into the flash model (#3
@@ -1215,4 +1234,67 @@ ZTEST(gd32_bridge_ota, test_rejected_begin_does_not_overwrite_expected_crc)
 	zassert_equal(ota_dispatch(CMD_OTA_VERIFY, NULL, 0u, reply, sizeof(reply), &rlen), STATUS_OK);
 	zassert_equal(
 	    reply[4], 1u, "the rejected BEGIN's 0xDEADBEEF must not have replaced the expected CRC");
+}
+
+/* ===================================================================== *
+ * #147 -- h_rollback was the only OTA handler with no s_state guard, so
+ * it could dispatch from a transport ISR into meta_commit -> the FMC
+ * funnel while the BASE-level erase pump held the FMC unlocked mid-page-
+ * walk.  The funnel now refuses that re-entry outright
+ * (hal/fmc_ota.c's ownership interlock, not reachable from this host
+ * suite); this is the other half, at the state machine, so the host gets
+ * an accurate STATUS_BUSY instead of a STATUS_IO that reads like a flash
+ * fault.
+ *
+ * ROLLBACK is allowed from IDLE and from ERROR (the recovery case) and
+ * refused from BUSY / READY / VERIFIED.  CMD_OTA_ABORT is the documented
+ * exit from an in-flight session.
+ * ===================================================================== */
+ZTEST(gd32_bridge_ota, test_rollback_refused_while_a_session_is_in_flight)
+{
+	reset_model();
+
+	/* A valid fallback slot so the only thing that can refuse ROLLBACK
+	 * below is the new state guard, not the metadata checks. */
+	const uint32_t len[2] = { 4096u, 4096u };
+	write_meta_record(OTA_META_REC0, 1u, TEST_OTHER_SLOT, 0x03u, len);
+
+	uint8_t req[8];
+	uint8_t reply[8] = { 0 };
+	size_t  rlen     = 0u;
+
+	/* Open a session: BEGIN arms the background erase and leaves BUSY. */
+	wr_u32(&req[0], 4096u);
+	wr_u32(&req[4], 0u);
+	zassert_equal(ota_dispatch(CMD_OTA_BEGIN, req, sizeof(req), reply, sizeof(reply), &rlen),
+	              STATUS_OK,
+	              "BEGIN must open the session");
+
+	/* Mid-erase: exactly the window in which an ISR-dispatched ROLLBACK
+	 * used to re-enter the FMC underneath the base-level pump. */
+	ota_erase_tick();
+	rlen = 0u;
+	zassert_equal(ota_dispatch(CMD_OTA_ROLLBACK, NULL, 0u, reply, sizeof(reply), &rlen),
+	              STATUS_BUSY,
+	              "ROLLBACK must be refused while an erase is in flight");
+
+	/* And still refused once the erase drains to READY -- the session is
+	 * open until the host closes it, not just while the FMC is hot. */
+	for (unsigned i = 0u; i < (OTA_SLOT_SIZE / OTA_PAGE_SIZE) + 4u; ++i) {
+		ota_erase_tick();
+	}
+	rlen = 0u;
+	zassert_equal(ota_dispatch(CMD_OTA_ROLLBACK, NULL, 0u, reply, sizeof(reply), &rlen),
+	              STATUS_BUSY,
+	              "ROLLBACK must still be refused with the session open at READY");
+
+	/* ABORT is the documented way out; ROLLBACK then works. */
+	rlen = 0u;
+	zassert_equal(ota_dispatch(CMD_OTA_ABORT, NULL, 0u, reply, sizeof(reply), &rlen),
+	              STATUS_OK,
+	              "ABORT closes the session");
+	rlen = 0u;
+	zassert_equal(ota_dispatch(CMD_OTA_ROLLBACK, NULL, 0u, reply, sizeof(reply), &rlen),
+	              STATUS_OK,
+	              "ROLLBACK must succeed once the session is closed");
 }
