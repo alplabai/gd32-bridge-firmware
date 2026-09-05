@@ -146,6 +146,13 @@ elseif(BRIDGE_HAL_BACKEND STREQUAL "gd32")
     # gd32g5x3_libopt.h, and the vendor library's compile units
     # don't have `hal/` on their include path otherwise.
     target_include_directories(gd32_firmware_library PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/hal)
+    # -Os here too (#26): the vendor library gets no compile-option
+    # override anywhere else in its own CMakeLists.txt, so without this
+    # it links at gcc's implicit -O0 even once the firmware targets
+    # below are pinned to -Os -- confirmed against a vendor object's
+    # `Tag_ABI_optimization_goals` build attribute, which read "Aggressive
+    # Debug" before this line existed.
+    target_compile_options(gd32_firmware_library PRIVATE -Os)
 else()
     message(FATAL_ERROR "Unknown BRIDGE_HAL_BACKEND='${BRIDGE_HAL_BACKEND}' (expected: stub | gd32).")
 endif()
@@ -187,8 +194,21 @@ function(gd32_firmware_target tgt linker_script)
     # deleted; the version rides inside the build-id.
     target_compile_definitions(${tgt} PRIVATE GD32_BRIDGE_HAVE_BUILD_ID_HEADER)
     add_dependencies(${tgt} gd32-build-id)
+    # -Os pinned directly here (not via CMAKE_BUILD_TYPE) so it applies
+    # unconditionally to every target and can't be silently lost by an
+    # invocation that sets no build type -- which is exactly what both
+    # the documented command and CI's stub-build job do (#26).  -Os beats
+    # -O0 (56 vs 20 instructions on the crc16_ccitt_false framing hot
+    # path, #26/#104) on both size and speed for this codebase: -O2 comes
+    # out bigger AND slower on that same function on this target/gcc
+    # combination (24 instructions), so there is no size/speed trade-off
+    # being made here. Placed in target_compile_options (not
+    # CMAKE_C_FLAGS) so it wins over any -O a caller passes via
+    # CMAKE_C_FLAGS: CMake places target_compile_options after
+    # CMAKE_<LANG>_FLAGS on the command line, and gcc honours the last -O
+    # given.
     target_compile_options(${tgt} PRIVATE
-        -mcpu=cortex-m33 -mthumb -mfloat-abi=soft
+        -mcpu=cortex-m33 -mthumb -mfloat-abi=soft -Os
         -ffunction-sections -fdata-sections
         -Wall -Wextra -Wshadow -Wpedantic -Wconversion -Werror)
     target_link_options(${tgt} PRIVATE
