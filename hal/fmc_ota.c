@@ -32,6 +32,7 @@
 #include "gd32g5x3.h"
 
 #include "fmc_ota.h"
+#include "fmc_ota_guard.h"
 #include "ota_layout.h"
 
 #if defined(BRIDGE_OTA_PARTITIONED)
@@ -62,6 +63,57 @@
 #define OTA_FMC_STAT_ERR_MASK \
 	(FMC_STAT_WPERR | FMC_STAT_PGERR | FMC_STAT_PGSERR | FMC_STAT_PGAERR | FMC_STAT_RPERR | \
 	 FMC_STAT_PGMERR | FMC_STAT_OBERR)
+
+/* Masked-window poll budgets (blocker fix on top of #5).  FMC_TIMEOUT_COUNT
+ * (vendor gd32g5x3_fmc.h) is 0xFFFFFFFF -- a raw decrement count, not a time
+ * bound.  Fine when the poll runs with interrupts enabled (any other caller
+ * of ota_fmc_wait_ready in this file): a stuck FMC just leaves the ISRs
+ * still servicing SPI/I2C.  Deadly inside the two PRIMASK-masked windows
+ * added for #5 (erase_one_page's START..BUSY span, program_one_dword's
+ * PG..BUSY span): a genuine flash-controller fault would spin the full
+ * ~4.295e9 iterations with every interrupt off, on the order of minutes at
+ * 216 MHz, with no watchdog anywhere in the tree (#54) to recover it.
+ *
+ * These two constants replace FMC_TIMEOUT_COUNT at ONLY the masked call
+ * sites (erase_one_page's second wait, program_one_dword's second wait);
+ * the pre-mask waits stay on FMC_TIMEOUT_COUNT because interrupts are still
+ * live there.
+ *
+ * Derivation (no -O level is pinned in CMakeLists.txt -- #26 -- so this has
+ * to hold at both ends of the range actually built; verified against
+ * -O0 and -Os disassembly of this exact loop):
+ *
+ *   ota_fmc_wait_ready()'s busy-poll loop body (ota_fmc_state_now() inlined
+ *   + the decrement/branch) disassembles, per `arm-none-eabi-objdump -d`
+ *   on gd32-bridge-slot-a, to:
+ *     -O0: 17 Thumb instructions/iteration
+ *     -Os: 5 Thumb instructions/iteration (register-resident, no frame)
+ *   Assume <= 4 cycles/instruction -- deliberately generous for Cortex-M33
+ *   single-cycle ALU/compare ops, covering a taken branch's pipeline
+ *   refill and any AHB wait state on the FMC_STAT read while the
+ *   controller is busy, neither of which this file can measure without a
+ *   bench trace.
+ *     -O0: 17 * 4 = 68 cycles/iter -> 68 / 216e6 Hz  = 314.8 ns/iter
+ *     -Os:  5 * 4 = 20 cycles/iter -> 20 / 216e6 Hz  =  92.6 ns/iter
+ *
+ *   Target budget = datasheet max x10 margin (GD32G553xx Datasheet Rev2.0
+ *   p.126, Table 4-25 non-volatile-memory characteristics):
+ *     tERASE (page erase time) max = 20 ms  -> budget 200 ms
+ *     tPROG  (doubleword program time) max = 80 us -> budget 800 us
+ *
+ *   Iteration count is sized off the FASTER build (-Os, fewer cycles per
+ *   iteration) so a legitimate near-max-spec op is never cut off early in
+ *   an -Os build: iterations = budget / time_per_iter(-Os).
+ *     erase:   200e-3 s / 92.6e-9 s  ~= 2,159,827  -> OTA_FMC_ERASE_TIMEOUT_ITERS  = 2,200,000
+ *     program: 800e-6 s / 92.6e-9 s  ~=     8,639  -> OTA_FMC_PROGRAM_TIMEOUT_ITERS =     9,000
+ *
+ *   Checked against the SLOWER build (-O0, more cycles per iteration) to
+ *   confirm the fault-case bound stays far short of the current ~minutes:
+ *     erase:   2,200,000 * 314.8 ns ~= 693 ms
+ *     program:     9,000 * 314.8 ns ~=   2.8 ms
+ */
+#define OTA_FMC_ERASE_TIMEOUT_ITERS   2200000u
+#define OTA_FMC_PROGRAM_TIMEOUT_ITERS 9000u
 
 bool ota_fmc_supported(void)
 {
@@ -144,9 +196,36 @@ OTA_RAMFUNC static fmc_state_enum erase_one_page(uint32_t addr)
 	FMC_CTL &= ~FMC_CTL_PNSEL;
 	FMC_CTL |= page << OTA_FMC_CTL_PNSEL_OFFSET;
 	FMC_CTL |= FMC_CTL_PER;
-	FMC_CTL |= FMC_CTL_START;
 
-	st = ota_fmc_wait_ready(FMC_TIMEOUT_COUNT);
+	/* #5: mask interrupts for exactly the busy window (START set ->
+     * BUSY clear).  A vector fetch taken while this page's bank is busy
+     * is undefined per the vendor manual (UM Rev1.2 p.97, 2.3.6: "the
+     * software may run out of control ... The FMC will not provide any
+     * notification when it occurs") and unflagged (p.115-116 FMC_STAT
+     * has no busy-read-during-op bit).  Both this function and
+     * program_one_dword must stay in lockstep -- masking only one path
+     * leaves the other exposed.  Save/restore rather than a bare
+     * enable/disable pair so a caller that is itself already inside a
+     * masked section is not silently unmasked on return.
+     *
+     * Transport-blackout consequence (Major, PR #92 review): SPI's
+     * CS-rising EXTI runs protocol_dispatch() synchronously (#19) and
+     * arms the DMA reply buffer.  A CS edge that lands anywhere in this
+     * masked window merely pends -- the master clocks out whatever stale
+     * DMA content is already staged.  I2C is hardware-stretched instead
+     * (i2c_stretch_scl_low_enable(), transport_hw_gd32.c) so it degrades
+     * to added latency rather than corrupt content, up to the master's
+     * own bus-timeout budget.  Not fixable here; #19 owns it.
+     *
+     * OTA_FMC_ERASE_TIMEOUT_ITERS (not FMC_TIMEOUT_COUNT) bounds this
+     * wait -- see the derivation comment above OTA_FMC_ERASE_TIMEOUT_ITERS.
+     * FMC_TIMEOUT_COUNT is fine on every OTHER ota_fmc_wait_ready() call in
+     * this file: those run with interrupts still enabled. */
+	const uint32_t pm = __get_PRIMASK();
+	__disable_irq();
+	FMC_CTL |= FMC_CTL_START;
+	st = ota_fmc_wait_ready(OTA_FMC_ERASE_TIMEOUT_ITERS);
+	__set_PRIMASK(pm);
 
 	FMC_CTL &= ~FMC_CTL_PER;
 	FMC_CTL &= ~FMC_CTL_PNSEL;
@@ -161,6 +240,9 @@ bool ota_fmc_erase_range(uint32_t base, uint32_t len)
      * page size so dual-bank (1 KB pages) erases every page. */
 	if ((base % OTA_PAGE_SIZE) != 0u || (len % OTA_PAGE_SIZE) != 0u) {
 		return false;
+	}
+	if (ota_fmc_range_forbidden(base, len)) {
+		return false; /* #79: bootloader / running-slot -- refused, not erased */
 	}
 	const uint32_t step =
 	    ((FMC_OBCTL & FMC_OBCTL_DBS) != 0u) ? OTA_FMC_PAGE_SIZE_DBANK : OTA_FMC_PAGE_SIZE_SBANK;
@@ -184,12 +266,18 @@ OTA_RAMFUNC static fmc_state_enum program_one_dword(uint32_t addr, uint64_t dw)
 	if (st != FMC_READY) {
 		return st;
 	}
+	/* #5: same masked busy window as erase_one_page, PG set -> BUSY
+     * clear.  Both sites move in lockstep -- see the comment there,
+     * including the transport-blackout note (#19) and why this uses
+     * OTA_FMC_PROGRAM_TIMEOUT_ITERS rather than FMC_TIMEOUT_COUNT. */
+	const uint32_t pm = __get_PRIMASK();
+	__disable_irq();
 	FMC_CTL |= FMC_CTL_PG;
 	REG32(addr) = (uint32_t)(dw & 0xFFFFFFFFu);
 	__ISB();
 	REG32(addr + 4u) = (uint32_t)(dw >> 32);
-
-	st = ota_fmc_wait_ready(FMC_TIMEOUT_COUNT);
+	st               = ota_fmc_wait_ready(OTA_FMC_PROGRAM_TIMEOUT_ITERS);
+	__set_PRIMASK(pm);
 
 	FMC_CTL &= ~FMC_CTL_PG;
 	return st;
@@ -202,6 +290,9 @@ bool ota_fmc_program(uint32_t addr, const uint8_t *data, size_t len)
      * with 0xFF (erased state). */
 	if ((addr % 8u) != 0u) {
 		return false;
+	}
+	if (ota_fmc_range_forbidden(addr, (uint32_t)len)) {
+		return false; /* #79: bootloader / running-slot -- refused, not programmed */
 	}
 	bool ok = true;
 	fmc_unlock();
