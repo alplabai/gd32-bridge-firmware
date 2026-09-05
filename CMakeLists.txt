@@ -135,6 +135,55 @@ elseif(BRIDGE_HAL_BACKEND STREQUAL "gd32")
             "vendors/gd32_firmware_library/ tree (the wrapper README "
             "documents the manual SDK drop).")
     endif()
+    # #127: refuse to produce an image that hangs before main().
+    #
+    # The STOCK vendor system_gd32g5x3.c selects __SYSTEM_CLOCK_216M_PLL_HXTAL,
+    # and its system_clock_216m_hxtal() body is
+    #     if(0U == (RCU_CTL & RCU_CTL_HXTALSTB)){ while(1){ } }
+    # -- no timeout escape, no fallback, with HXTAL_STARTUP_TIMEOUT only
+    # 0x0FFFF.  On this SoM HXTALSTB never sets, so the part spins there
+    # forever and never reaches main(): SPI and I2C never come up, and the
+    # flashed image looks bricked with no diagnostic.  alp-sdk's wrapper
+    # substitutes overrides/system_gd32g5x3.c, which selects
+    # __SYSTEM_CLOCK_216M_PLL_IRC8M and boots.
+    #
+    # Before this check, a standalone clone pointed at a vendor tree with no
+    # overrides/ configured, compiled, linked and produced a .bin with no
+    # #error, no warning and no runtime check anywhere -- the failure only
+    # showed up as a dead board on a bench.  Fail at CONFIGURE time instead.
+    #
+    # The opt-out exists for compile-and-link jobs (CI's `gd32 backend build`
+    # stages ci/gd32_vendor_wrapper/CMakeLists.txt, which deliberately omits
+    # the override because that job never runs on silicon).  Its name is the
+    # documentation: anything built with it on must not be flashed.
+    option(BRIDGE_ALLOW_STOCK_SYSTEM_INIT
+        "Build against the vendor's STOCK SystemInit(). The resulting image HANGS before main() on this SoM -- compile/link checks only, never flash it."
+        OFF)
+    if(NOT EXISTS ${_GD32_VENDOR_DIR}/overrides/system_gd32g5x3.c)
+        if(BRIDGE_ALLOW_STOCK_SYSTEM_INIT)
+            message(WARNING
+                "BRIDGE_ALLOW_STOCK_SYSTEM_INIT=ON and no clock override found at\n"
+                "  ${_GD32_VENDOR_DIR}/overrides/system_gd32g5x3.c\n"
+                "Building against the STOCK vendor SystemInit(). The image this "
+                "produces HANGS in system_clock_216m_hxtal() waiting for HXTALSTB "
+                "and never reaches main() on this SoM. NOT FLASHABLE -- "
+                "compile-and-link verification only (#127).")
+        else()
+            message(FATAL_ERROR
+                "No clock override found at\n"
+                "  ${_GD32_VENDOR_DIR}/overrides/system_gd32g5x3.c\n"
+                "The stock vendor SystemInit() selects __SYSTEM_CLOCK_216M_PLL_HXTAL, "
+                "whose system_clock_216m_hxtal() spins `while(1){}` forever when "
+                "HXTALSTB never sets -- which is what this SoM does. The resulting "
+                "image is flashable and hangs before main(), with SPI and I2C never "
+                "coming up.\n"
+                "Point -DGD32_VENDOR_DIR at an alp-sdk vendors/gd32_firmware_library "
+                "tree that carries overrides/system_gd32g5x3.c, or pass "
+                "-DBRIDGE_ALLOW_STOCK_SYSTEM_INIT=ON if you are only compiling and "
+                "linking and will NOT flash the result (#127).")
+        endif()
+    endif()
+
     add_subdirectory(${_GD32_VENDOR_DIR} ${CMAKE_BINARY_DIR}/vendors/gd32_firmware_library)
     # gd32g5x3.h #error-guards on the device-family macro; pick
     # GD32G553 since the V2N's supervisor is the GD32G553MEY7TR.

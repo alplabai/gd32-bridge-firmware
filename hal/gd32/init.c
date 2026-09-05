@@ -164,6 +164,14 @@
  * the bridge uses (TMU, ADC0..ADC3, DAC, TIMER0/7/19, SysTick, etc.).
  * NOTE: no DA9292 wiring exists on this SoM rev -- the fault nets
  * reach only the Renesas (P37/P36); see bridge_hw_da9292_status_cached. */
+/* Sampled at the head of bridge_hw_init (#127); see gd32_common.h for
+ * what reads them and why nothing acts on a mismatch yet.  Initialised to
+ * the value the constants ASSUME so a debugger attaching before
+ * bridge_hw_init has run does not read a spurious 0 and conclude the
+ * clock tree is broken. */
+uint32_t bridge_core_clock_hz      = PWM_TIMER_CLK_HZ;
+bool     bridge_core_clock_matches = true;
+
 void bridge_hw_init(void)
 {
 #if defined(BRIDGE_OTA_PARTITIONED) && defined(BRIDGE_APP_SLOT_BASE)
@@ -183,6 +191,28 @@ void bridge_hw_init(void)
      * boot PRIMASK is already clear and this is a no-op. */
 	__enable_irq();
 #endif
+
+	/* #127: sample the clock the vendor's SystemInit() ACTUALLY left
+     * running, before anything derived from it is programmed.  Until this
+     * call the repo never referenced SystemCoreClock at all: every timing
+     * constant in gd32_common.h -- PWM_TIMER_CLK_HZ, PWM_TIMER_PRESCALER,
+     * BRIDGE_ADC_PACE_CLK_HZ, and the DWT "~4.63 ns LSB" claim in
+     * counter.c -- was asserted against a number no code checked, set by a
+     * SystemInit() that lives in another repository and whose variant is
+     * chosen by a wrapper this repo does not own.
+     *
+     * SystemCoreClockUpdate() re-derives the value from the live RCU
+     * registers rather than trusting the compile-time initialiser, so this
+     * is the one place the firmware can find out it is running on the
+     * wrong clock tree.  It is a pure register read plus arithmetic: no
+     * side effects, safe this early.
+     *
+     * The result is recorded, not acted on.  See the declarations in
+     * gd32_common.h for why refusing supervised outputs on a mismatch is
+     * a follow-up rather than part of this change. */
+	SystemCoreClockUpdate();
+	bridge_core_clock_hz      = SystemCoreClock;
+	bridge_core_clock_matches = (SystemCoreClock == PWM_TIMER_CLK_HZ);
 
 	/* Enable AHB2 clocks for every GPIO port the pad map references.
      * The chip's RCU keeps unused GPIO ports clock-gated to save
