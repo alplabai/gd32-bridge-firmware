@@ -608,3 +608,101 @@ ZTEST(gd32_bridge_adc_dsp, test_reject_fir_before_bare_fft)
 	              "FIR ahead of a BARE FFT terminal must be refused as NOTIMPL, got %d",
 	              rv);
 }
+
+/* ===================================================================== *
+ * #132 -- adc_dsp_chain_p1_capable() is the ONLY guard the pump-side
+ * config functions in adc_stream.c run.  It used to judge chain SHAPE
+ * alone; the per-kind PAYLOAD check lived in chain_bind's separate
+ * adc_dsp_stage_blob_valid() loop, which the pump never reaches.  So a
+ * malformed payload that bind refuses was still waved through by the
+ * predicate the pump asks -- and adc_dsp_fac_config decodes the FIR tap
+ * count from that payload into a BRIDGE_DSP_MAX_FIR_TAPS-sized stack
+ * array without a bound of its own.
+ *
+ * These cases assert the predicate itself, not bind's return code: bind
+ * already rejected these blobs before the fix, so a bind-only assertion
+ * passes either way and pins nothing.
+ * ===================================================================== */
+
+/* Build a stage in place, bypassing stage_push's chunk accounting, so a
+ * declared total_size can disagree with the payload the way a wire peer
+ * (or a future pump-reachable path) could present it. */
+static void
+force_stage(uint8_t chain_id, uint8_t idx, uint8_t kind, const uint8_t *data, uint16_t total_size)
+{
+	adc_dsp_stage_t *st = &adc_dsp_chains[chain_id].stages[idx];
+
+	memcpy(st->data, data, total_size <= BRIDGE_DSP_MAX_STAGE_BYTES ? total_size : 4u);
+	st->kind           = kind;
+	st->total_size     = total_size;
+	st->bytes_received = total_size;
+	st->complete       = true;
+}
+
+/* A FIR stage declaring 200 taps -- more than triple
+ * BRIDGE_DSP_MAX_FIR_TAPS (64), which is what sizes adc_dsp_fac_config's
+ * `int16_t taps[]`.  That array sits on the single 2 KB stack shared with
+ * the I2C ISR's protocol_dispatch() and a nested CS-EXTI ISR, and MSPLIM
+ * is never written, so the overwrite would be silent. */
+ZTEST(gd32_bridge_adc_dsp, test_p1_capable_rejects_overlong_fir_taps)
+{
+	reset_all();
+	stream_running(0u);
+
+	uint8_t chain_id = open_chain();
+	uint8_t fir[8];
+	(void)fir_blob(fir, 1u);
+	fir[1] = 200u; /* declared taps, wildly past BRIDGE_DSP_MAX_FIR_TAPS */
+	force_stage(chain_id, 0u, 0u /* FIR */, fir, 8u);
+
+	zassert_false(adc_dsp_chain_p1_capable(&adc_dsp_chains[chain_id]),
+	              "p1_capable -- the pump's only guard -- must refuse a 200-tap FIR blob");
+	zassert_equal(bridge_hw_adc_dsp_chain_bind(chain_id, 0u),
+	              BRIDGE_HW_ERR_INVAL,
+	              "bind must still refuse it as a malformed blob");
+}
+
+/* The same hole on the other two payload fields the pump decodes: the
+ * FFT stage's out_fmt (adc_dsp_fft_config switches on it) and the IIR
+ * section count. */
+ZTEST(gd32_bridge_adc_dsp, test_p1_capable_rejects_malformed_fft_and_iir_payloads)
+{
+	reset_all();
+	stream_running(0u);
+
+	uint8_t c_fft = open_chain();
+	uint8_t fft[4];
+	(void)fft_blob(fft, 64u, 0u);
+	fft[2] = 9u; /* out_fmt past BRIDGE_DSP_FFT_OUT_FMT_MAX */
+	force_stage(c_fft, 0u, 3u /* FFT */, fft, 4u);
+	zassert_false(adc_dsp_chain_p1_capable(&adc_dsp_chains[c_fft]),
+	              "p1_capable must refuse an out-of-range FFT out_fmt");
+
+	uint8_t c_iir = open_chain();
+	uint8_t iir[24];
+	(void)iir_blob(iir, 1u);
+	iir[0] = 7u; /* coeff format past BRIDGE_DSP_COEFF_FMT_MAX */
+	force_stage(c_iir, 0u, 1u /* IIR */, iir, 24u);
+	zassert_false(adc_dsp_chain_p1_capable(&adc_dsp_chains[c_iir]),
+	              "p1_capable must refuse an out-of-range IIR coeff format");
+}
+
+/* Guard against over-correcting: the fold must not start refusing chains
+ * that are legitimately realisable.  A single well-formed 64-tap FIR is
+ * exactly at BRIDGE_DSP_MAX_FIR_TAPS and must still pass both gates. */
+ZTEST(gd32_bridge_adc_dsp, test_p1_capable_still_accepts_max_tap_fir)
+{
+	reset_all();
+	stream_running(0u);
+
+	uint8_t  chain_id = open_chain();
+	uint8_t  fir[4u + BRIDGE_DSP_MAX_FIR_TAPS * 4u];
+	uint16_t len = fir_blob(fir, (uint8_t)BRIDGE_DSP_MAX_FIR_TAPS);
+	push_stage(chain_id, 0u, 0u /* FIR */, fir, len);
+
+	zassert_true(adc_dsp_chain_p1_capable(&adc_dsp_chains[chain_id]),
+	             "a well-formed 64-tap FIR must still be realisable");
+	zassert_equal(bridge_hw_adc_dsp_chain_bind(chain_id, 0u),
+	              BRIDGE_HW_OK,
+	              "a well-formed 64-tap FIR must still bind");
+}

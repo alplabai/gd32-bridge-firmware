@@ -253,6 +253,29 @@ bool adc_dsp_chain_p1_capable(const adc_dsp_chain_t *chain)
 		if (st->kind == 3u /* FFT */) fft_index = i;
 	}
 
+	/* #132: the payload check belongs HERE, not only in chain_bind.
+     * adc_stream.c's pump-side config functions (adc_dsp_fac_config,
+     * adc_dsp_fft_config) re-check ONLY this predicate as their
+     * defence-in-depth guard, so a per-kind payload field they then
+     * decode -- the FIR tap count above all -- was never re-validated
+     * on that path.  adc_dsp_fac_config sizes `taps[]` from
+     * BRIDGE_DSP_MAX_FIR_TAPS but indexes it with the raw `n_taps`
+     * byte; with the bound living only in chain_bind's separate
+     * blob_valid loop, any future path that reaches the pump without
+     * having gone through THIS predicate's caller overflows a 2 KB
+     * stack shared with two ISRs' reply buffers, silently (no MSPLIM,
+     * no painting, no linker ASSERT).  Folding blob_valid in makes
+     * "re-checking this predicate" actually mean what adc_stream.c's
+     * comment already claims it means -- and it closes the IIR
+     * `data[1]` and FFT `out_fmt` reads on the same path for free.
+     *
+     * Cheap and idempotent: chain_bind runs this a second time after
+     * its own blob_valid loop, over at most 4 populated stages. */
+	for (uint8_t i = 0u; i < BRIDGE_DSP_MAX_STAGES; ++i) {
+		if (chain->stages[i].total_size == 0u) continue;
+		if (!adc_dsp_stage_blob_valid(&chain->stages[i])) return false;
+	}
+
 	if (fft_index != BRIDGE_DSP_MAX_STAGES) {
 		/* FFT-terminal chain: P1's FFT block has no upstream filter --
          * only WINDOW may sit ahead of the transform (mirrors the old

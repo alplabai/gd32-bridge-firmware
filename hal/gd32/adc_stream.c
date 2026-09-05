@@ -478,7 +478,11 @@ static bool adc_dsp_fac_config(const adc_stream_state_t *s)
 	/* Defence in depth: chain_bind already refused any chain P1 can't
 	 * realise via this SAME predicate -- re-checking it here means a
 	 * future capability lift landing on only one side can't silently
-	 * reopen the #69 hang. */
+	 * reopen the #69 hang.  Since #132 the predicate also re-runs
+	 * adc_dsp_stage_blob_valid() over every populated stage, so it
+	 * covers the PAYLOAD fields decoded below (the FIR tap count, the
+	 * IIR section count, the FFT out_fmt) and not just the chain's
+	 * shape -- which is what this comment always claimed. */
 	if (!adc_dsp_chain_p1_capable(chain)) return false;
 
 	/* P1 handles exactly one populated non-FFT stage (guaranteed by
@@ -502,7 +506,19 @@ static bool adc_dsp_fac_config(const adc_stream_state_t *s)
 	if (st->kind == 0u) { /* FIR: format:u8 n_taps:u8 rsvd:u16 taps[] */
 		const uint8_t fmt = st->data[0];
 		const uint8_t nt  = st->data[1];
-		int16_t       taps[BRIDGE_DSP_MAX_FIR_TAPS];
+		/* Hard bound at the point of use (#132).  The predicate above
+		 * already rejects nt == 0 or nt > BRIDGE_DSP_MAX_FIR_TAPS, so
+		 * this cannot fire today -- it is here so the array index below
+		 * is provably in range from THIS function alone, without the
+		 * reader (or a future editor of adc_dsp_chain.c) having to
+		 * carry the bound across a translation-unit boundary.  `taps`
+		 * lives on the single 2 KB stack that also carries the I2C
+		 * ISR's protocol_dispatch() and a nested CS-EXTI ISR, with no
+		 * MSPLIM and no stack painting: an overflow here is silent. */
+		if (nt == 0u || nt > BRIDGE_DSP_MAX_FIR_TAPS) return false;
+		if (st->total_size != (uint16_t)(BRIDGE_DSP_STAGE_HDR_BYTES + (uint16_t)nt * 4u))
+			return false;
+		int16_t taps[BRIDGE_DSP_MAX_FIR_TAPS];
 		for (uint8_t k = 0u; k < nt; ++k) {
 			taps[k] =
 			    adc_dsp_coeff_q15(fmt, &st->data[BRIDGE_DSP_STAGE_HDR_BYTES + (uint16_t)k * 4u]);
