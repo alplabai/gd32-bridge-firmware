@@ -135,7 +135,7 @@ spi_adc_dsp_chain_bind_probe_request = A5390000C789
 spi_ota_begin_request          = A5F0F8A30000EFBEADDEA850
 # SOF | CMD=0xF0 | size=41976 (LE) | expected_crc32=0xDEADBEEF (LE) | fw_major=0 | fw_minor=2 | fw_patch=9 | CRC -- the v0.7 ADDITIVE form: the triple lands in the A/B metadata at COMMIT (fw_version[slot], 0 = unknown); pre-v0.7 firmware ignores the 3 trailing bytes, and the 8-byte legacy form stays valid
 spi_ota_begin_request_v0_7     = A5F0F8A30000EFBEADDE000209523D
-# SOF | STATUS=0x00 | chunk_max=60 (LE 0x003C) | target_slot=B(1) | CRC -- 60 = MAX_PAYLOAD(65) - offset:u32 - len:u8 header
+# SOF | STATUS=0x00 | chunk_max=60 (LE 0x003C) | target_slot=B(1) | CRC -- 60 = MAX_PAYLOAD(65) - offset:u32 - len:u8 header. target_slot is ota.c's compile-time OTA_RUNNING_SLOT complement (#3), a BUILD property: this vector's value B is only what a slot-A-resident build replies (its own non-running slot); a slot-B-resident build replies A for the identical request
 spi_ota_begin_reply_slot_b     = A5003C0001DAB8
 # SOF | CMD=0xF1 | offset=0 (LE) | len=8 | data=01..08 (one FMC doubleword) | CRC -- the len byte rejects transaction-merged zero-extended captures that survive the span CRC via the palindromic-CRC self-consumption hole; offsets pace on 8-byte boundaries
 spi_ota_write_chunk_off0_8b_request = A5F10000000008010203040506070840B1
@@ -151,7 +151,7 @@ spi_ota_commit_request         = A5F3F820
 spi_ota_rollback_request       = A5F41F50
 # SOF | CMD=0xF5 | (no payload) | CRC
 spi_ota_get_state_request      = A5F53E40
-# SOF | STATUS=0x00 | state=READY(1) | active=A(0) | pending=B(1) | boot_count=1 (LE, metadata generation) | CRC -- pending=0xFF when no session is open
+# SOF | STATUS=0x00 | state=READY(1) | active=A(0) | pending=B(1) | boot_count=1 (LE, metadata generation) | CRC -- pending=0xFF when no session is open. active is ota.c's compile-time OTA_RUNNING_SLOT (#3), a BUILD property reporting the slot THIS firmware executes from -- NOT metadata's active_slot field.  The two normally agree, but diverge across the bootloader's newest-first fallback (boot_main.c), where metadata can legitimately name a slot that is not running; this byte is what lets the host observe that divergence.  This example value (A) is a slot-A-resident build
 spi_ota_get_state_reply_ready  = A500010001010036E3
 # SOF | CMD=0xF6 | (no payload) | CRC
 spi_ota_abort_request          = A5F65D70

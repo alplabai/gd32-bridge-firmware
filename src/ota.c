@@ -63,8 +63,41 @@ enum {
 	OTA_ST_ERROR    = 4u
 };
 
+/* Compile-time derivation of the slot THIS BUILD runs from (#3).
+ * BRIDGE_APP_SLOT_BASE is the same -D that hal/gd32/init.c uses to
+ * relocate VTOR at boot; comparing it against the flash-layout constants
+ * turns "which slot may h_begin erase" into a BUILD invariant instead of
+ * a runtime metadata read -- it cannot go stale and needs no flash read
+ * or CRC.  That matters because metadata's `active_slot` CAN legitimately
+ * diverge from what's executing: the bootloader's newest-first fallback
+ * (boot_main.c:117-124, #754, intentional) boots an OLDER record when the
+ * newest record's slot fails validation, and once that happens the
+ * newest metadata names a slot that is not running.
+ *
+ * The #error below is the point, not a formality: if issue #2's dual-bank
+ * boundary fix ever relocates OTA_SLOT_A_BASE/OTA_SLOT_B_BASE without a
+ * matching CMakeLists.txt update (or vice versa), the build fails loudly
+ * here instead of this guard silently going dead or resolving to the
+ * wrong slot. */
+#if !defined(BRIDGE_APP_SLOT_BASE)
+#error \
+    "BRIDGE_OTA_PARTITIONED requires BRIDGE_APP_SLOT_BASE (see CMakeLists.txt: gd32-bridge-slot-a / gd32-bridge-slot-b)"
+#elif (BRIDGE_APP_SLOT_BASE) == OTA_SLOT_A_BASE
+#define OTA_RUNNING_SLOT OTA_SLOT_A
+#elif (BRIDGE_APP_SLOT_BASE) == OTA_SLOT_B_BASE
+#define OTA_RUNNING_SLOT OTA_SLOT_B
+#else
+#error \
+    "BRIDGE_APP_SLOT_BASE matches neither OTA_SLOT_A_BASE nor OTA_SLOT_B_BASE (ota_layout.h) -- slot geometry has diverged from the build"
+#endif
+
+/* [base, base+size) of the slot this build runs from, for the P3
+ * interval-intersection guard in h_begin (defence in depth, see there). */
+#define OTA_RUNNING_SLOT_BASE ((uint32_t)(BRIDGE_APP_SLOT_BASE))
+#define OTA_RUNNING_SLOT_END  (OTA_RUNNING_SLOT_BASE + OTA_SLOT_SIZE)
+
 static uint8_t  s_state    = OTA_ST_IDLE;
-static uint8_t  s_inactive = OTA_SLOT_B;
+static uint8_t  s_inactive = (OTA_RUNNING_SLOT == OTA_SLOT_A) ? OTA_SLOT_B : OTA_SLOT_A;
 static uint32_t s_img_len;
 static uint32_t s_last_off;
 static uint32_t s_expected_crc; /* from OTA_BEGIN (host supplies CRC up front) */
@@ -181,13 +214,6 @@ static bool meta_commit(uint8_t  active_slot,
 	return ota_fmc_program(target, (const uint8_t *)&rec, sizeof rec);
 }
 
-static uint8_t active_slot_now(void)
-{
-	ota_meta_record_t cur;
-	uint32_t          which;
-	return meta_current(&cur, &which) ? cur.active_slot : OTA_SLOT_A;
-}
-
 /* Flash base of the in-flight (inactive) slot.  s_inactive is set to
  * OTA_SLOT_A/B at BEGIN (the trusted internal boundary), so the checked
  * derivation (#741) never fails here; validate anyway for defence. */
@@ -225,16 +251,54 @@ h_begin(const uint8_t *req, size_t len, uint8_t *reply, size_t cap, size_t *rlen
 		s_err   = 1u;
 		return STATUS_OUT_OF_RANGE;
 	}
-	s_inactive = (active_slot_now() == OTA_SLOT_A) ? OTA_SLOT_B : OTA_SLOT_A;
-	s_last_off = 0u;
+	/* The slot to erase is "the one I am NOT executing from", answered by
+     * OTA_RUNNING_SLOT (build-derived, see its definition above) -- NOT by
+     * inverting metadata's active_slot (#3).  Metadata can legitimately
+     * name the slot that IS running (the bootloader's newest-first
+     * fallback, boot_main.c:117-124/#754), and inverting a stale answer
+     * used to arm the erase against the live image, vector table first.
+     * OTA_RUNNING_SLOT needs no flash read and cannot go stale, so this
+     * self-heals the divergence instead of propagating it. */
+	s_inactive               = (OTA_RUNNING_SLOT == OTA_SLOT_A) ? OTA_SLOT_B : OTA_SLOT_A;
+	s_last_off               = 0u;
+	const uint32_t erase_at  = ota_inactive_base();
+	const uint32_t erase_end = erase_at + OTA_SLOT_SIZE;
+	/* P3 (#3): defence in depth, NOT the primary guard -- P1 above already
+     * makes s_inactive always the OTHER slot from OTA_RUNNING_SLOT by
+     * construction, so this branch is UNREACHABLE today: no production
+     * path drives s_inactive to anything but what P1 just computed, so
+     * this is UNTESTED (a test would need a seam into s_inactive that
+     * production code has no reason to have).  Checked as INTERVAL
+     * INTERSECTION rather than base equality because intersection is the
+     * actual safety property ("will this erase touch what I execute") and
+     * would still catch a future geometry bug that makes the erase range
+     * and the running range overlap without their bases changing.  This
+     * is an ADDRESS-RANGE check ONLY -- it does NOT catch flash-BANK
+     * aliasing.  Issue #2's hazard is exactly that: slot A's tail
+     * (0x08040000..0x08045000) shares bank 1 with slot B while the two
+     * slot RANGES stay adjacent and disjoint (A ends where B begins), so
+     * this intersection test reads false and does not fire for #2's
+     * situation; a bank-overlap guard belongs to #2's (and #37's) fix,
+     * not this one.  If this ever trips, refuse: the erase has not been
+     * armed yet at this point, so refusing here costs nothing new.  Note
+     * s_err=7u on trip is currently UNREADABLE by the host: s_err is
+     * written at several sites in this file but read nowhere in this
+     * repo, so a tripped guard looks on the wire like any other
+     * OTA_ST_ERROR; surfacing s_err is a protocol change, tracked
+     * separately. */
+	if (erase_at < OTA_RUNNING_SLOT_END && OTA_RUNNING_SLOT_BASE < erase_end) {
+		s_state = OTA_ST_ERROR;
+		s_err   = 7u;
+		return STATUS_INVAL;
+	}
 	/* Arm the background erase and ack NOW -- do NOT erase inline (#770).
      * ota_erase_tick() walks the slot a page-region per main-loop tick;
      * state stays BUSY until it finishes, then flips to READY.  The host
      * gets this reply immediately and polls GET_STATE for READY before it
      * streams the first chunk (h_write rejects anything but READY). */
 	s_erasing   = true;
-	s_erase_at  = ota_inactive_base();
-	s_erase_end = ota_inactive_base() + OTA_SLOT_SIZE;
+	s_erase_at  = erase_at;
+	s_erase_end = erase_end;
 	s_state     = OTA_ST_BUSY;
 	/* Host OTA_BEGIN reply: chunk_max:u16 (LE), target_slot:u8.
      * chunk_max accounts for the offset:u32 + len:u8 header (v0.6). */
@@ -380,6 +444,19 @@ static gd32_bridge_status_t h_rollback(void)
 	if (!meta_current(&cur, &which)) {
 		return STATUS_INVAL;
 	}
+	/* Deliberately METADATA's cur.active_slot -- already read above by the
+     * meta_current() guard this function returns on -- not OTA_RUNNING_SLOT
+     * (#3).  ROLLBACK is an operation ON the metadata state machine ("flip
+     * active_slot to the other slot"), so it must read the same source of
+     * truth it is about to write, from the SAME snapshot the slot_valid /
+     * img_len checks just below use (a second, independent metadata read
+     * here could race an ISR-dispatched OTA command and validate one
+     * snapshot while flipping based on another). In the divergent state
+     * (metadata names a slot the bootloader did not boot), this converges
+     * metadata back toward what the bootloader actually chose; using the
+     * build-derived running slot here instead would commit the part to the
+     * slot that just failed validation and re-manufacture the exact
+     * divergence P1/h_begin now self-heals. */
 	const uint8_t other = (cur.active_slot == OTA_SLOT_A) ? OTA_SLOT_B : OTA_SLOT_A;
 	if ((cur.slot_valid & (uint8_t)(1u << other)) == 0u || cur.img_len[other] == 0u ||
 	    cur.img_len[other] > OTA_SLOT_SIZE) {
@@ -398,20 +475,28 @@ static gd32_bridge_status_t h_rollback(void)
 static gd32_bridge_status_t h_get_state(uint8_t *reply, size_t cap, size_t *rlen)
 {
 	/* Host OTA_GET_STATE reply: state:u8, active:u8, pending:u8, boot_count:u16 (LE).
-     * `boot_count` is mapped to the metadata update counter (generation). */
+     * `boot_count` is mapped to the metadata update counter (generation).
+     *
+     * `active` reports OTA_RUNNING_SLOT (build-derived), NOT metadata's
+     * active_slot (#3).  The two agree except in the divergent window the
+     * bootloader's newest-first fallback can create (boot_main.c:117-124,
+     * #754): there, metadata's answer is a LIE about what is executing,
+     * while OTA_RUNNING_SLOT is a build-time fact.  This is what preserves
+     * host observability of the divergence now that h_begin self-heals
+     * around it instead of refusing outright -- without this the host
+     * would see a comforting but false `active`, same wire byte, same
+     * format, only the source changes. */
 	ota_meta_record_t cur;
 	uint32_t          which;
-	uint8_t           active = OTA_SLOT_A;
-	uint16_t          gen    = 0u;
+	uint16_t          gen = 0u;
 	if (meta_current(&cur, &which)) {
-		active = cur.active_slot;
-		gen    = (uint16_t)cur.counter;
+		gen = (uint16_t)cur.counter;
 	}
 	const bool in_progress =
 	    (s_state == OTA_ST_READY || s_state == OTA_ST_BUSY || s_state == OTA_ST_VERIFIED);
 	if (cap >= 5u) {
 		reply[0] = s_state;
-		reply[1] = active;
+		reply[1] = OTA_RUNNING_SLOT;
 		reply[2] = in_progress ? s_inactive : 0xFFu; /* 0xFF = none pending */
 		reply[3] = (uint8_t)(gen & 0xFFu);
 		reply[4] = (uint8_t)(gen >> 8);

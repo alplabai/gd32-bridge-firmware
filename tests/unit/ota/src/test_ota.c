@@ -21,6 +21,26 @@
 #include "crc32.h"
 #include "bootloader/bootloader.h" /* CMD_OTA_* */
 
+/* This suite is built TWICE (tests/unit/CMakeLists.txt: test_ota_slot_a,
+ * test_ota_slot_b), each with a different -DBRIDGE_APP_SLOT_BASE, so the
+ * #3 divergence tests below exercise ota.c's compile-time OTA_RUNNING_SLOT
+ * derivation for BOTH values instead of just one.  TEST_RUNNING_SLOT /
+ * TEST_OTHER_SLOT mirror that same derivation independently (this file
+ * cannot see ota.c's static OTA_RUNNING_SLOT), so the tests can assert
+ * against "the slot this binary runs from" without hardcoding which of
+ * the two builds is currently running. */
+#if !defined(BRIDGE_APP_SLOT_BASE)
+#error "test_ota needs -DBRIDGE_APP_SLOT_BASE (see tests/unit/CMakeLists.txt)"
+#elif (BRIDGE_APP_SLOT_BASE) == OTA_SLOT_A_BASE
+#define TEST_RUNNING_SLOT OTA_SLOT_A
+#define TEST_OTHER_SLOT   OTA_SLOT_B
+#elif (BRIDGE_APP_SLOT_BASE) == OTA_SLOT_B_BASE
+#define TEST_RUNNING_SLOT OTA_SLOT_B
+#define TEST_OTHER_SLOT   OTA_SLOT_A
+#else
+#error "BRIDGE_APP_SLOT_BASE matches neither OTA_SLOT_A_BASE nor OTA_SLOT_B_BASE"
+#endif
+
 /* ---- Host flash model: mirror the whole device flash into a buffer ---- */
 
 #define FL_BASE OTA_BOOTLOADER_BASE
@@ -115,6 +135,30 @@ static void reset_model(void)
 {
 	memset(g_flash, 0, sizeof(g_flash)); /* zeroed meta -> no valid record */
 	g_program_calls = 0u;
+}
+
+/* Write a CRC-valid metadata record directly into the flash model (#3
+ * tests below): bypasses ota.c's meta_commit entirely so a test can plant
+ * an arbitrary (including divergent) metadata state in one step, the way
+ * an aborted BEGIN + ROLLBACK + a bootloader fallback would leave one
+ * behind. img_len[] is indexed OTA_SLOT_A/OTA_SLOT_B, same as the struct. */
+static void write_meta_record(uint32_t       addr,
+                              uint32_t       counter,
+                              uint8_t        active_slot,
+                              uint8_t        slot_valid,
+                              const uint32_t img_len[2])
+{
+	ota_meta_record_t rec;
+	memset(&rec, 0, sizeof(rec));
+	rec.magic          = OTA_META_MAGIC;
+	rec.struct_version = OTA_META_STRUCT_VER;
+	rec.counter        = counter;
+	rec.active_slot    = active_slot;
+	rec.slot_valid     = slot_valid;
+	rec.img_len[0]     = img_len[0];
+	rec.img_len[1]     = img_len[1];
+	rec.rec_crc32 = ota_crc32(0u, (const uint8_t *)&rec, offsetof(ota_meta_record_t, rec_crc32));
+	memcpy(_host_ptr(addr), &rec, sizeof(rec));
 }
 
 ZTEST_SUITE(gd32_bridge_ota, NULL, NULL, NULL, NULL, NULL);
@@ -347,4 +391,220 @@ ZTEST(gd32_bridge_ota, test_meta_record_layout_bytes)
 	/* The CRC span the bootloader/app compute is everything up to
 	 * rec_crc32; the offset is the documented span length. */
 	zassert_equal(offsetof(ota_meta_record_t, rec_crc32), 40u, "CRC span = 40 bytes");
+}
+
+/* ---- #3: OTA_BEGIN must not erase the running slot on metadata/boot
+ * divergence; GET_STATE must report the build-derived running slot;
+ * ROLLBACK must keep using metadata -------------------------------- */
+
+/* The five-step brick sequence from the issue, reproduced end-to-end:
+ * BEGIN -> abort mid-erase -> ROLLBACK -> the bootloader's newest-first
+ * fallback (#754, modelled by the metadata state ROLLBACK leaves behind,
+ * NOT by re-running boot_main.c -- that file is out of scope) -> BEGIN
+ * again.  Before the fix, the second BEGIN inverted metadata's
+ * (divergent) active_slot and armed the erase against TEST_RUNNING_SLOT
+ * -- the live image, vector table first. */
+ZTEST(gd32_bridge_ota, test_divergence_second_begin_targets_non_running_slot)
+{
+	reset_model();
+
+	uint32_t running_base = 0u, other_base = 0u;
+	zassert_true(ota_slot_base_checked(TEST_RUNNING_SLOT, &running_base));
+	zassert_true(ota_slot_base_checked(TEST_OTHER_SLOT, &other_base));
+
+	/* Canary: stands in for the live vector table at the head of the
+	 * slot THIS build runs from.  If BEGIN's erase ever reaches it, the
+	 * test fails here -- the exact mechanism from #3. */
+	uint8_t canary[16];
+	memset(canary, 0xAAu, sizeof(canary));
+	memcpy(_host_ptr(running_base), canary, sizeof(canary));
+
+	/* Step 1: initial metadata, no divergence yet -- newest (only) record
+	 * names the slot THIS build actually runs from. */
+	const uint32_t len0[2] = { 4096u, 4096u };
+	write_meta_record(OTA_META_REC0, 5u, TEST_RUNNING_SLOT, 0x03u, len0);
+
+	/* Step 2: BEGIN (correctly targets the non-running slot -- sanity
+	 * check on the harness, no divergence yet), then abandoned mid-erase
+	 * (power loss / host abort).  slot_valid is left set: the erase-time
+	 * clearing path is a separate, deferred slice (see the task notes;
+	 * it would add a bank0 write per BEGIN and #37's read-while-write
+	 * hazard is unmitigated), so this precondition is exactly what a
+	 * real aborted BEGIN leaves behind today. */
+	uint8_t req[8];
+	uint8_t reply[8];
+	size_t  rlen = 0u;
+	wr_u32(&req[0], 4096u);
+	wr_u32(&req[4], 0u);
+	zassert_equal(ota_dispatch(CMD_OTA_BEGIN, req, sizeof(req), reply, sizeof(reply), &rlen),
+	              STATUS_OK);
+	zassert_equal(
+	    reply[2], TEST_OTHER_SLOT, "pre-divergence BEGIN must target the non-running slot");
+	ota_erase_tick();
+	ota_erase_tick(); /* mid-erase, not drained to completion */
+	zassert_equal(ota_dispatch(CMD_OTA_ABORT, NULL, 0u, reply, sizeof(reply), &rlen), STATUS_OK);
+
+	/* Step 3: ROLLBACK succeeds (slot_valid/img_len for the other slot
+	 * still assert valid) and commits a NEW highest-counter record with
+	 * active_slot = TEST_OTHER_SLOT. */
+	zassert_equal(ota_dispatch(CMD_OTA_ROLLBACK, NULL, 0u, reply, sizeof(reply), &rlen), STATUS_OK);
+
+	/* Step 4: models the bootloader's fallback (boot_main.c:117-124,
+	 * #754) rejecting TEST_OTHER_SLOT's (erased/invalid) image and
+	 * booting the older record's slot instead -- i.e. this build,
+	 * TEST_RUNNING_SLOT, keeps running while the newest valid metadata
+	 * (committed in step 3) still names TEST_OTHER_SLOT.  That divergence
+	 * is already in place; no further setup is needed. */
+
+	/* Step 5: the assertion that matters.  Pre-fix, this inverted
+	 * metadata's active_slot (TEST_OTHER_SLOT) to get TEST_RUNNING_SLOT
+	 * -- the live slot -- as the erase target. */
+	wr_u32(&req[0], 4096u);
+	wr_u32(&req[4], 0u);
+	zassert_equal(ota_dispatch(CMD_OTA_BEGIN, req, sizeof(req), reply, sizeof(reply), &rlen),
+	              STATUS_OK);
+	zassert_equal(
+	    reply[2], TEST_OTHER_SLOT, "post-divergence BEGIN must still target the non-running slot");
+	zassert_false(reply[2] == TEST_RUNNING_SLOT, "BEGIN must never target the running slot");
+
+	/* Drain the erase and prove the running slot's canary was never
+	 * touched, while the OTHER slot really was erased (0xFF) -- proving
+	 * the erase ran, and against the correct target. */
+	for (unsigned i = 0u; i < (OTA_SLOT_SIZE / OTA_PAGE_SIZE) + 4u; ++i) {
+		ota_erase_tick();
+	}
+	zassert_mem_equal(_host_ptr(running_base),
+	                  canary,
+	                  sizeof(canary),
+	                  "erase touched the running slot's live bytes");
+	zassert_equal(((const uint8_t *)_host_ptr(other_base))[0],
+	              0xFFu,
+	              "erase must actually run, against the non-running slot");
+}
+
+/* Same setup as the divergence test above (metadata names TEST_OTHER_SLOT
+ * active while this build runs TEST_RUNNING_SLOT), but proves a NARROWER
+ * property than the name alone suggests -- correct that claim rather than
+ * just re-stating it (#3 review).  The `reply[2]` equality below is what
+ * actually kills the headline P1-reversion mutation (deleting
+ * OTA_RUNNING_SLOT and going back to inverting active_slot_now()): that
+ * mutation makes `reply[2]` wrong and the test dies there, so the canary
+ * below is NEVER evaluated for it.  The `zassert_mem_equal` canary check
+ * is load-bearing only for a NARROWER defect class where the erase range
+ * (s_erase_at / s_erase_end) gets decoupled from the reported
+ * `target_slot` -- e.g. a mutation that forces s_erase_at to the running
+ * slot's base while leaving reply[2] correct (mutation m6) -- which is
+ * the shape that would actually walk the running slot's flash while
+ * telling the host it targeted the other one. */
+ZTEST(gd32_bridge_ota, test_erase_range_never_intersects_running_slot)
+{
+	reset_model();
+
+	uint32_t running_base = 0u;
+	zassert_true(ota_slot_base_checked(TEST_RUNNING_SLOT, &running_base));
+	uint8_t canary[16];
+	memset(canary, 0x55u, sizeof(canary));
+	memcpy(_host_ptr(running_base), canary, sizeof(canary));
+
+	/* Highest-counter (only) record names TEST_OTHER_SLOT active -- the
+	 * shape that, inverted, used to select TEST_RUNNING_SLOT. */
+	const uint32_t len[2] = { 4096u, 4096u };
+	write_meta_record(OTA_META_REC0, 9u, TEST_OTHER_SLOT, 0x03u, len);
+
+	uint8_t req[8];
+	uint8_t reply[8];
+	size_t  rlen = 0u;
+	wr_u32(&req[0], 4096u);
+	wr_u32(&req[4], 0u);
+	zassert_equal(ota_dispatch(CMD_OTA_BEGIN, req, sizeof(req), reply, sizeof(reply), &rlen),
+	              STATUS_OK);
+	zassert_equal(reply[2], TEST_OTHER_SLOT);
+
+	for (unsigned i = 0u; i < (OTA_SLOT_SIZE / OTA_PAGE_SIZE) + 4u; ++i) {
+		ota_erase_tick();
+	}
+	zassert_mem_equal(_host_ptr(running_base),
+	                  canary,
+	                  sizeof(canary),
+	                  "s_erasing's range intersected the running slot");
+}
+
+/* #3: with NO metadata planted at all (factory-fresh / fully-erased
+ * flash), meta_current() returns false.  Pre-fix, active_slot_now() fell
+ * back to its silent OTA_SLOT_A default on that failure, so the old
+ * `s_inactive = (active_slot_now() == OTA_SLOT_A) ? OTA_SLOT_B : OTA_SLOT_A`
+ * resolved to OTA_SLOT_B unconditionally -- in a slot-B-resident build
+ * that IS the running slot, with no abort/rollback/bootloader-fallback
+ * narrative needed to reach it: a factory-fresh slot-B board bricks
+ * itself on its very first OTA_BEGIN.  Mutation m2 (restoring that
+ * pre-fix path) leaves every other zero-metadata case in this suite
+ * green while this one targets the running slot. */
+ZTEST(gd32_bridge_ota, test_begin_with_no_metadata_targets_non_running_slot)
+{
+	reset_model(); /* zeroed flash: meta_current() has nothing valid to read */
+
+	uint8_t req[8];
+	uint8_t reply[8];
+	size_t  rlen = 0u;
+	wr_u32(&req[0], 4096u);
+	wr_u32(&req[4], 0u);
+	zassert_equal(ota_dispatch(CMD_OTA_BEGIN, req, sizeof(req), reply, sizeof(reply), &rlen),
+	              STATUS_OK);
+	zassert_equal(reply[2],
+	              TEST_OTHER_SLOT,
+	              "BEGIN with no metadata at all must still target the non-running slot");
+}
+
+/* h_get_state's `active` byte must report the build-derived running slot
+ * (OTA_RUNNING_SLOT), NOT metadata's active_slot, once metadata and the
+ * running slot diverge -- this is what lets the host OBSERVE the
+ * divergence instead of being told a comforting falsehood. */
+ZTEST(gd32_bridge_ota, test_get_state_active_reports_running_slot_not_metadata)
+{
+	reset_model();
+
+	const uint32_t len[2] = { 4096u, 4096u };
+	write_meta_record(OTA_META_REC0, 3u, TEST_OTHER_SLOT, 0x03u, len);
+
+	uint8_t reply[8] = { 0 };
+	size_t  rlen     = 0u;
+	zassert_equal(ota_dispatch(CMD_OTA_GET_STATE, NULL, 0u, reply, sizeof(reply), &rlen),
+	              STATUS_OK);
+	zassert_equal(reply[1],
+	              TEST_RUNNING_SLOT,
+	              "GET_STATE.active must report the build-derived running slot, not metadata's");
+}
+
+/* h_rollback must NOT be broken by the P1/P2 split: it must keep using
+ * the METADATA answer for "which slot is active", not the build-derived
+ * OTA_RUNNING_SLOT -- ROLLBACK operates on the metadata state machine
+ * itself and must read the source of truth it is about to write. */
+ZTEST(gd32_bridge_ota, test_rollback_still_uses_metadata_active_slot)
+{
+	reset_model();
+
+	/* Metadata names TEST_OTHER_SLOT active -- independent of which slot
+	 * this build runs from.  If ROLLBACK had been switched to
+	 * OTA_RUNNING_SLOT it would flip to TEST_OTHER_SLOT here (the SAME
+	 * slot, a no-op / wrong target); reading metadata correctly flips to
+	 * TEST_RUNNING_SLOT (metadata's "other" slot). */
+	const uint32_t len[2] = { 4096u, 4096u };
+	write_meta_record(OTA_META_REC0, 1u, TEST_OTHER_SLOT, 0x03u, len);
+
+	uint8_t reply[8] = { 0 };
+	size_t  rlen     = 0u;
+	zassert_equal(ota_dispatch(CMD_OTA_ROLLBACK, NULL, 0u, reply, sizeof(reply), &rlen), STATUS_OK);
+
+	/* meta_commit alternates pages; REC0 was pre-populated directly above
+	 * (bypassing meta_commit), so the committed record lands on REC1.
+	 * Read it back off the flash model directly -- NOT via GET_STATE,
+	 * which (per P2, this same change) now reports OTA_RUNNING_SLOT and
+	 * would test the wrong thing here. */
+	ota_meta_record_t rec1;
+	memcpy(&rec1, _host_ptr(OTA_META_REC1), sizeof(rec1));
+	zassert_equal(rec1.magic, OTA_META_MAGIC, "ROLLBACK must commit to REC1");
+	zassert_equal(rec1.counter, 2u);
+	zassert_equal(rec1.active_slot,
+	              TEST_RUNNING_SLOT,
+	              "ROLLBACK must flip metadata's active_slot, not OTA_RUNNING_SLOT's");
 }
