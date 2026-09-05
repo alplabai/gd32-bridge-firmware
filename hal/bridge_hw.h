@@ -80,11 +80,25 @@ uint8_t bridge_hw_reset_reason(void);
 /* --------------------------------------------------------------- */
 
 /* Read the GD32's pad levels under @p mask.  Output @p levels has
- * bit i set iff (mask bit i set) and (pad reads high). */
+ * bit i set iff (mask bit i set) and (pad reads high).  This is
+ * always the MEASURED pad level (the input path stays live in
+ * output mode), never the level a prior bridge_hw_gpio_write()
+ * commanded (gh#62).  For a pad the caller has promoted to output,
+ * this means a shorted, contended, or open net now reads back
+ * whatever the pad is actually doing rather than an echo of the
+ * last write -- a genuine disagreement is a real fault, not a
+ * transport error. */
 int bridge_hw_gpio_read(uint32_t mask, uint32_t *levels);
 
 /* Atomically set/clear the pad outputs selected by @p mask to the
- * corresponding bit in @p levels. */
+ * corresponding bit in @p levels.  IO24/IO25 (GD32 PC14/PC15) share a
+ * backup-domain power switch with SE_RST (PC13, see
+ * bridge_hw_se_reset()) budgeted at 3 mA / 2 MHz / 30 pF (GD32G553xx
+ * Datasheet Rev2.0 p.130 Table 4-29 footnote 2; UM Rev1.2 p.133
+ * §3.3.1).  Nothing on this line enforces that budget -- the HOST
+ * must not command those two pads faster than 2 MHz or load them
+ * beyond 30 pF, and current drawn through them competes with the
+ * milliamps holding SE_RST released (gh#60). */
 int bridge_hw_gpio_write(uint32_t mask, uint32_t levels);
 
 /* --------------------------------------------------------------- */
@@ -264,7 +278,12 @@ uint8_t bridge_hw_da9292_status_cached(void);
  * Returns BRIDGE_HW_ERR_INVAL for an out-of-range @p assert.  The
  * recovery for a BRD_I2C bus the SE has clock-stretched low is a pulse
  * -- assert, wait, release -- sequenced by the host (the OPTIGA needs
- * ~15 ms after release before it answers I2C again). */
+ * ~15 ms after release before it answers I2C again).  PC13 is also a
+ * backup-domain power-switch pad, sharing the same 3 mA / 2 MHz / 30 pF
+ * budget as IO24/IO25 (see bridge_hw_gpio_write()) -- pulsing this line
+ * faster than 2 MHz is off the datasheet's characterisation and
+ * competes with the current the switch is using to hold the other two
+ * pads at their commanded level (gh#60). */
 int bridge_hw_se_reset(uint8_t assert);
 
 /* --------------------------------------------------------------- */
