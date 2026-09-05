@@ -4,21 +4,24 @@
  *
  * GD32G5x3 backend for the bridge HAL.  Selected by setting
  * BRIDGE_HAL_BACKEND=gd32 in firmware/gd32-bridge/CMakeLists.txt.  Links
- * against the GigaDevice firmware-library wrapper at
- * vendors/gd32_firmware_library/ (git submodule pointing at
- * https://github.com/alplabai/gd32g5x3-firmware-library, a verbatim
- * mirror of GD's v1.5.0 release).
+ * against the GigaDevice firmware-library wrapper.  This repo does NOT
+ * vendor that tree: pass -DGD32_VENDOR_DIR=<path> pointing at a checkout
+ * of alp-sdk's vendors/gd32_firmware_library/ (a verbatim mirror of GD's
+ * v1.5.0 release).  Left unset, the build falls back to
+ * ../../vendors/gd32_firmware_library resolved against this source tree
+ * -- the pre-split layout, when this tree was nested at
+ * <alp-sdk>/firmware/gd32-bridge/.  See README.md "Build".
  *
- * Status (this commit):
- *   The file exists and compiles against the GigaDevice library so
- *   the `BRIDGE_HAL_BACKEND=gd32` build path is exercisable end-to-
- *   end without any peripheral I/O.  Every hook below is a STUB
- *   returning BRIDGE_HW_ERR_NOTIMPL -- identical wire behaviour to
- *   the bridge_hw_stub.c default backend, but routed through this
- *   file when `gd32` is selected so subsequent commits can replace
- *   stubs with real bodies one peripheral at a time.
+ * Status:
+ *   The hooks below have real bodies -- selecting this backend drives
+ *   silicon.  The per-hook record that follows is the state AS LANDED,
+ *   not a plan: DONE, PARTIAL (defaults accepted, the rest refused) or
+ *   an unconditional sentinel where the SoM revision has no HW path.
+ *   Whatever a hook refuses returns BRIDGE_HW_ERR_NOTIMPL, which
+ *   reaches the wire as STATUS_NOSUPPORT (status_from_hw() in
+ *   src/protocol.c).
  *
- * Implementation order (planned, in increasing risk):
+ * Per-hook state, in the order the bodies landed (increasing risk):
  *
  *   1. RESET_REASON          -- DONE: RCU_RSTSCK decode + RSTFC clear.
  *   2. GPIO_READ / WRITE     -- DONE: 18-pad map (E1M IO8..IO35),
@@ -116,19 +119,18 @@
  *                               + one FFT block -> one filter + one FFT
  *                               stream at a time.
  *
- * Each follow-up commit replaces ONE hook's stub body with a real
- * implementation and updates this header comment + the CHANGELOG.
- * The HIL turn-on cadence is determined by maintainer access to the
- * V2N EVK; the structural skeleton landing today lets the rest of the
- * tree (host-side ZTESTs, the alp_*_* portable surfaces, the
- * docs/test-plan rows) gate against the real backend as soon as the
- * first hook flips from stub to real.
+ * A change that moves a hook between the states above updates this
+ * header comment in the same commit.  Bench cadence is bounded by
+ * maintainer access to the V2N EVK, so a hook can be code-complete
+ * here and still carry the `needs-silicon` label until validated --
+ * see docs/BENCH.md.
  *
  * Build assumptions:
  *   - arm-none-eabi-gcc on PATH (toolchain file
  *     firmware/gd32-bridge/toolchain/arm-none-eabi.cmake handles the rest).
- *   - vendors/gd32_firmware_library/upstream/ submodule initialised
- *     (`git submodule update --init --recursive` from the repo root).
+ *   - the GigaDevice firmware-library tree reachable, either via
+ *     -DGD32_VENDOR_DIR=<path> or the ../../vendors/gd32_firmware_library
+ *     fallback (see the note at the top of this file).
  *   - Cortex-M33 + Thumb + soft-float ABI (matches the GigaDevice
  *     library's compile flags).
  *

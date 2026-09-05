@@ -10,13 +10,20 @@
  * file's protocol_dispatch().
  *
  * Handlers that need actual hardware (PWM channel programming, ADC
- * sampling, GPIO output, DA9292 INT/TW pin sampling) currently call
- * into the `bridge_hw_*` HAL shims declared in hal/.  The HAL is a
- * separate compile unit and will be implemented against the GigaDevice
- * firmware library in a follow-up commit.  Today those shims return
- * STATUS_NOSUPPORT so the protocol round-trip is exercisable
- * end-to-end (PING + GET_VERSION + GET_BUILD_ID work without any
- * peripheral I/O).
+ * sampling, GPIO output, DA9292 INT/TW pin sampling) call into the
+ * `bridge_hw_*` HAL shims declared in hal/bridge_hw.h.  The HAL is a
+ * separate compile unit; which implementation links is the build-time
+ * BRIDGE_HAL_BACKEND choice (CMakeLists.txt):
+ *
+ *   stub -- hal/bridge_hw_stub.c: every shim returns
+ *           BRIDGE_HW_ERR_NOTIMPL, which status_from_hw() below maps to
+ *           STATUS_NOSUPPORT on the wire, so the protocol round-trip is
+ *           exercisable host-side with no silicon.
+ *   gd32 -- the per-peripheral translation units under hal/gd32/,
+ *           implemented against the GigaDevice firmware library.
+ *
+ * PING + GET_VERSION + GET_BUILD_ID answer identically under both:
+ * they need no peripheral I/O.
  */
 
 #include <string.h>
