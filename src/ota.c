@@ -146,57 +146,166 @@ static bool meta_read(uint32_t addr, ota_meta_record_t *r)
 	return true;
 }
 
-/* Returns true + the winning record (highest valid counter) and which page
- * holds it; false if neither record is valid (factory / corrupt). */
-static bool meta_current(ota_meta_record_t *out, uint32_t *which_addr)
+/* Pick the newer of two candidate metadata records (REC0 wins on a tie).
+ * `a`/`b` are the result of meta_read() on OTA_META_REC0/REC1; `va`/`vb`
+ * their validity.  Returns true + the winning record and which page holds
+ * it; false if neither is valid (factory / corrupt) -- `*out` is left
+ * untouched in that case, so callers that pre-zero it get a defined
+ * zeroed record rather than an indeterminate one.
+ *
+ * Shared by meta_current() (below -- its signature and selection rule are
+ * a settled public surface, see its own comment) and meta_commit(), which
+ * needs the identical rule to seed its working record without a second,
+ * redundant pair of flash reads through meta_current() itself. */
+static bool meta_pick_newest(const ota_meta_record_t *a,
+                             bool                     va,
+                             const ota_meta_record_t *b,
+                             bool                     vb,
+                             ota_meta_record_t       *out,
+                             uint32_t                *which_addr)
 {
-	ota_meta_record_t a, b;
-	const bool        va = meta_read(OTA_META_REC0, &a);
-	const bool        vb = meta_read(OTA_META_REC1, &b);
 	if (va && vb) {
-		if (a.counter >= b.counter) {
-			*out        = a;
+		if (a->counter >= b->counter) {
+			*out        = *a;
 			*which_addr = OTA_META_REC0;
 		} else {
-			*out        = b;
+			*out        = *b;
 			*which_addr = OTA_META_REC1;
 		}
 		return true;
 	}
 	if (va) {
-		*out        = a;
+		*out        = *a;
 		*which_addr = OTA_META_REC0;
 		return true;
 	}
 	if (vb) {
-		*out        = b;
+		*out        = *b;
 		*which_addr = OTA_META_REC1;
 		return true;
 	}
 	return false;
 }
 
-/* Write a fresh record to the *other* meta page (alternating), so a
- * power-fail mid-write leaves the previous record intact.  The per-slot
- * image descriptors carry forward from the current record; only the new
- * active slot's entry is rewritten (and only when `update_entry` -- a
- * ROLLBACK flips `active_slot` without touching the descriptors, so the
- * rolled-to slot keeps the len/CRC recorded when it was last written). */
+/* Returns true + the winning record (highest valid counter) and which page
+ * holds it; false if neither record is valid (factory / corrupt).  This
+ * signature and selection rule are a settled public surface (PR #73):
+ * h_get_state and h_rollback both call it and must keep seeing exactly
+ * this contract. */
+static bool meta_current(ota_meta_record_t *out, uint32_t *which_addr)
+{
+	ota_meta_record_t a, b;
+	const bool        va = meta_read(OTA_META_REC0, &a);
+	const bool        vb = meta_read(OTA_META_REC1, &b);
+	return meta_pick_newest(&a, va, &b, vb, out, which_addr);
+}
+
+/* Rank a metadata page for meta_commit's erase-target choice (#74) --
+ * see the block comment above meta_commit for the full rationale.
+ * `valid`/`r` are the result of meta_read() on that page.  A page that
+ * failed validation (blank / torn / wrong magic or struct_version) ranks
+ * lowest, so it is always the erase target when the other page holds
+ * anything usable at all. */
+static uint8_t meta_page_rank(bool valid, const ota_meta_record_t *r)
+{
+	if (!valid) {
+		return 0u;
+	}
+	return (r->active_slot == OTA_RUNNING_SLOT) ? 2u : 1u;
+}
+
+/* Choose which of the two meta pages to erase + overwrite (#74).  It is
+ * NOT simply "the other page from the current record" (alternating) --
+ * that rule preserves the HIGHEST COUNTER, and the counter is not always
+ * what keeps the part alive.  The bootloader boots newest-first with
+ * fallback (boot_main.c:117-124, #754): when the newest record's slot
+ * fails validation, it boots the OLDER record instead -- so in that
+ * window the older record is the only thing naming a slot the bootloader
+ * will actually boot, and the old "erase the non-newest page" rule erased
+ * precisely that page.  A power cut inside the erase-then-program window
+ * then left one CRC-valid record naming a dead slot, with no over-the-
+ * wire recovery.
+ *
+ * Fix: rank each page (meta_page_rank() above) and erase the LOWER-ranked
+ * one.  Rank 0 = no CRC-valid record on the page; rank 1 = a valid record
+ * whose active_slot is not OTA_RUNNING_SLOT; rank 2 = a valid record
+ * whose active_slot IS OTA_RUNNING_SLOT.  Read that as a contrapositive,
+ * not a promise: a record that does NOT name OTA_RUNNING_SLOT is
+ * definitely not what the bootloader booted THIS boot, so rank 1 is a
+ * safe erase target; a record that DOES name it is merely a CANDIDATE.
+ * OTA_RUNNING_SLOT is a build-time fact (see its derivation above), so
+ * rank 2 is a cheap NECESSARY condition for "this is the record keeping
+ * the part alive" -- it is not a re-validation of the record itself.
+ * active_slot_valid() (boot_main.c) validates a record against its OWN
+ * slot_valid / img_len[slot] / img_crc32[slot], not slot identity, so two
+ * rank-2 records naming the same slot with different descriptors are not
+ * interchangeable; no reachable path constructs that pair today, but rank
+ * 2 does not rule it out by itself.  Real re-validation would mean
+ * recomputing the bootloader's whole-slot CRC here, which is #49's
+ * territory and deliberately not done in this rank.
+ *
+ * Rank 2's meaning assumes the bootloader in flash implements #754's
+ * newest-first-WITH-FALLBACK.  That assumption is worth stating because
+ * the bootloader at OTA_BOOTLOADER_BASE is never OTA-updated: a fielded
+ * part keeps whatever was bench-flashed into it, so the next change to
+ * this selection rule will be reasoned against the in-tree bootloader and
+ * run against an older one.  It is safe in the one direction that
+ * matters -- under a hypothetical newest-only bootloader a running part's
+ * newest record necessarily names the running slot (or a different build
+ * would be executing), so the ranks tie and this rule collapses to the
+ * old alternation.
+ *
+ * On a tie (equal rank, both pages valid) the LOWER-COUNTER page is
+ * erased, i.e. the newest record is preserved -- identical to the pre-#74
+ * alternation rule, so behaviour outside the divergent window is
+ * unchanged.  When NEITHER page is valid (rank 0 on both) there is no
+ * counter to compare: the target is unconditionally OTA_META_REC0
+ * (today's factory-init behaviour, see the inline comment below).
+ *
+ * The per-slot image descriptors still carry forward from the current
+ * (newest) record regardless of which page that turns out to be; only
+ * the new active slot's entry is rewritten (and only when `update_entry`
+ * -- a ROLLBACK flips `active_slot` without touching the descriptors, so
+ * the rolled-to slot keeps the len/CRC recorded when it was last
+ * written). */
 static bool meta_commit(uint8_t  active_slot,
                         bool     update_entry,
                         uint32_t fw_ver,
                         uint32_t img_len,
                         uint32_t img_crc)
 {
+	ota_meta_record_t a, b;
+	const bool        va = meta_read(OTA_META_REC0, &a);
+	const bool        vb = meta_read(OTA_META_REC1, &b);
+
 	ota_meta_record_t rec;
-	ota_meta_record_t cur;
-	uint32_t          which  = 0u;
-	uint32_t          target = OTA_META_REC0;
+	uint32_t          newest_addr = 0u;
 	memset(&rec, 0, sizeof rec);
-	if (meta_current(&cur, &which)) {
-		rec    = cur; /* counter + slot_valid + per-slot table */
-		target = (which == OTA_META_REC0) ? OTA_META_REC1 : OTA_META_REC0;
+	(void)meta_pick_newest(&a, va, &b, vb, &rec, &newest_addr);
+	/* rec now holds the NEWEST record's counter + slot_valid + per-slot
+	 * table (or stays the zeroed record above if neither page validated)
+	 * -- carried forward regardless of which page the ranking below
+	 * targets for erase (#74): `a`/`b` were read into RAM before either
+	 * page is touched, and rec.counter += 1u below keeps the new record
+	 * strictly above whatever page survives the erase. */
+
+	const uint8_t rank_a = meta_page_rank(va, &a);
+	const uint8_t rank_b = meta_page_rank(vb, &b);
+	uint32_t      target;
+	if (rank_a != rank_b) {
+		target = (rank_a < rank_b) ? OTA_META_REC0 : OTA_META_REC1;
+	} else if (rank_a != 0u) {
+		/* Same rank, both valid: tie-break by counter, preserving the
+		 * newest -- reproduces meta_pick_newest()'s own REC0-on-tie
+		 * pick, so this matches meta_commit's pre-#74 selection bit for
+		 * bit whenever the ranks agree. */
+		target = (a.counter >= b.counter) ? OTA_META_REC1 : OTA_META_REC0;
+	} else {
+		/* Neither page holds a CRC-valid record: no counter to compare,
+		 * so target the first page (today's factory-init behaviour). */
+		target = OTA_META_REC0;
 	}
+
 	if (!ota_fmc_erase_range(target, OTA_PAGE_SIZE)) {
 		return false;
 	}
