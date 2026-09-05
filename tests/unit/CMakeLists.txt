@@ -116,6 +116,22 @@ target_compile_options(test_transport_spi PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_transport_spi PRIVATE ztest_shim)
 add_test(NAME transport_spi COMMAND test_transport_spi)
 
+# --- timer_sync_iti: (slave, master) -> SYSCFG ITIx router code (gh#42) ----
+#
+# hal/gd32/timer_sync.c itself needs the Cortex-M33 vendor register headers
+# and is compiled by no CI job (issue #77).  The lookup table has no such
+# dependency, so it lives in its own translation unit (hal/gd32/
+# timer_sync_iti.c, no gd32g5x3.h include) purely so it can be linked and
+# tested here.
+add_executable(test_timer_sync_iti
+    timer_sync_iti/src/test_timer_sync_iti.c
+    ${FW}/hal/gd32/timer_sync_iti.c
+)
+target_include_directories(test_timer_sync_iti PRIVATE ${FW}/hal/gd32)
+target_compile_options(test_timer_sync_iti PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_timer_sync_iti PRIVATE ztest_shim)
+add_test(NAME timer_sync_iti COMMAND test_timer_sync_iti)
+
 # --- transport_i2c: transport + dispatcher over the stub HAL ---------------
 add_executable(test_transport_i2c
     transport_i2c/src/test_transport_i2c.c
