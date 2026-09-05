@@ -365,10 +365,39 @@ int bridge_hw_adc_dsp_stage_push(uint8_t        chain_id,
 /* Attach a fully-populated chain to a streaming ADC source previously
  * opened with bridge_hw_adc_stream_begin.  After bind, the stream's
  * samples flow through the chain instead of being delivered raw to
- * subsequent bridge_hw_adc_stream_read calls.  Binding fails
- * (BRIDGE_HW_ERR_INVAL) if the chain has unfinished stages or
- * violates the chain-ordering rules (FFT must be terminal; WINDOW
- * must immediately precede FFT). */
+ * subsequent bridge_hw_adc_stream_read calls.  Binding fails with
+ * BRIDGE_HW_ERR_INVAL for any of: the target stream_id doesn't name a
+ * running stream, or that stream already has a chain bound; the
+ * chain_id doesn't name an open chain, or that chain is already bound
+ * to some stream; the chain has unfinished (mid-upload) stages; a populated stage's reassembled
+ * blob fails its per-kind validity check (bad tap/section count,
+ * out-of-range FFT point count, a header/length mismatch -- see
+ * adc_dsp_chain.c's adc_dsp_stage_blob_valid); a gap in the populated
+ * stage list (a populated stage after an empty one); or the chain
+ * violates the ordering rules -- FFT must be the terminal stage,
+ * WINDOW must immediately precede FFT if present, and a bare WINDOW
+ * with no terminating FFT is rejected (undefined in the filtered-
+ * samples data plane).
+ *
+ * Binding also fails (BRIDGE_HW_ERR_NOTIMPL, wire STATUS_NOSUPPORT) if
+ * the chain is well-formed but beyond what the P1 runtime can realise
+ * (#69) -- more than one populated stage on a non-FFT terminal, an IIR
+ * stage with more than one biquad section, or a FIR/IIR stage ahead of
+ * an FFT terminal (bare, or WINDOW+FFT -- P1's FFT block has no
+ * upstream filter path either way) -- or if the stream's target HW
+ * block is already serving another bound stream: the single FAC block
+ * for a non-FFT terminal, or the single FFT block for an FFT terminal
+ * (#70).  Both classes used to bind cleanly and fail silently later,
+ * in the pump; they are refused here instead.
+ *
+ * The two NOTIMPL classes differ in what happens to chain_id
+ * afterwards (see adc_dsp_chain.h's lifecycle note next to
+ * adc_dsp_chain_release): a capability refusal releases the chain
+ * back to the pool -- it can never become realisable by retrying, so
+ * chain_id is no longer valid and a HOST MUST NOT reuse it (open a new
+ * chain instead).  A busy refusal leaves the chain OPEN -- it is
+ * realisable, just contended -- so retrying the SAME chain_id (typically
+ * after the contending stream's STREAM_END) is the supported recovery. */
 int bridge_hw_adc_dsp_chain_bind(uint8_t chain_id, uint8_t stream_id);
 
 #endif /* GD32_BRIDGE_HAL_BRIDGE_HW_H */

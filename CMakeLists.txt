@@ -84,6 +84,7 @@ elseif(BRIDGE_HAL_BACKEND STREQUAL "gd32")
     list(APPEND GD32_BRIDGE_SOURCES
         hal/gd32/init.c
         hal/gd32/adc.c
+        hal/gd32/adc_dsp_chain.c
         hal/gd32/adc_stream.c
         hal/gd32/counter.c
         hal/gd32/dac.c
