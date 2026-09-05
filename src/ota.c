@@ -350,12 +350,26 @@ h_begin(const uint8_t *req, size_t len, uint8_t *reply, size_t cap, size_t *rlen
 	if (len < 8u) {
 		return STATUS_INVAL;
 	}
-	s_img_len      = rd_u32(&req[0]);
-	s_expected_crc = rd_u32(&req[4]);
-	s_fw_version   = (len >= 11u)
-	                     ? (((uint32_t)req[8] << 16) | ((uint32_t)req[9] << 8) | (uint32_t)req[10])
-	                     : 0u;
-	if (s_img_len == 0u || s_img_len > OTA_SLOT_SIZE) {
+	/* Read the wire fields into LOCALS and validate them there; the
+     * session statics are committed only once every check below has
+     * passed (#131).  Assigning first and range-checking afterwards left
+     * a rejected BEGIN's length live in s_img_len: the reject sets
+     * OTA_ST_ERROR, but a background erase armed by an EARLIER, valid
+     * BEGIN is still draining, and its completion writeback below
+     * overwrites that ERROR with OTA_ST_READY.  h_verify's only guard is
+     * `s_state != OTA_ST_READY`, so it then handed the rejected length
+     * to ota_crc32 -- which has no bound of its own (src/crc32.c) --
+     * walking past OTA_FLASH_END into reserved space, and for a large
+     * enough value across SRAM and the 0x40000000 peripheral aperture
+     * where reads have side effects.  No fault handlers are installed
+     * (#36) and there is no watchdog (#54), so the resulting BusFault
+     * escalates to HardFault and parks in the vendor Default_Handler. */
+	const uint32_t img_len      = rd_u32(&req[0]);
+	const uint32_t expected_crc = rd_u32(&req[4]);
+	const uint32_t fw_version =
+	    (len >= 11u) ? (((uint32_t)req[8] << 16) | ((uint32_t)req[9] << 8) | (uint32_t)req[10])
+	                 : 0u;
+	if (img_len == 0u || img_len > OTA_SLOT_SIZE) {
 		s_state = OTA_ST_ERROR;
 		s_err   = 1u;
 		return STATUS_OUT_OF_RANGE;
@@ -400,6 +414,24 @@ h_begin(const uint8_t *req, size_t len, uint8_t *reply, size_t cap, size_t *rlen
 		s_err   = 7u;
 		return STATUS_INVAL;
 	}
+	/* Every check has passed: NOW commit the wire fields to the session
+     * (#131).  Nothing above this line may write s_img_len,
+     * s_expected_crc or s_fw_version -- that ordering is the invariant
+     * h_verify and h_commit re-assert at their heads.
+     *
+     * Deliberately NOT disarming a previously-armed erase on the reject
+     * paths above.  All of them return before `s_erasing = true` below,
+     * so a rejected BEGIN can never arm one -- it could only CANCEL an
+     * erase armed by an earlier, valid BEGIN.  CMD_OTA_ABORT is the
+     * explicit host-driven cancel; letting a truncated or out-of-range
+     * frame do the same silently would add a remote erase-cancel
+     * surface.  The ERROR-then-READY writeback those rejects can still
+     * produce is #9's mechanism (the pump clobbering a state the
+     * dispatcher set), and belongs to #9's fix. */
+	s_img_len      = img_len;
+	s_expected_crc = expected_crc;
+	s_fw_version   = fw_version;
+
 	/* Arm the background erase and ack NOW -- do NOT erase inline (#770).
      * ota_erase_tick() walks the slot a page-region per main-loop tick;
      * state stays BUSY until it finishes, then flips to READY.  The host
@@ -506,6 +538,19 @@ static gd32_bridge_status_t h_verify(uint8_t *reply, size_t cap, size_t *rlen)
          * protocol-misuse brick.  Refuse instead. */
 		return STATUS_NOT_READY;
 	}
+	/* Re-assert the length invariant at the POINT OF USE (#131).  A state
+     * enum is not a length bound: OTA_ST_READY says "the slot is erased
+     * and writable", not "s_img_len is in range".  Unreachable today --
+     * h_begin commits s_img_len only after range-checking it -- but this
+     * is the guard that has to hold if any future path writes
+     * OTA_ST_READY without having gone through h_begin's validation,
+     * which is exactly the shape the erase pump's unconditional
+     * writeback already has (#9). */
+	if (s_img_len == 0u || s_img_len > OTA_SLOT_SIZE) {
+		s_state = OTA_ST_ERROR;
+		s_err   = 1u;
+		return STATUS_INVAL;
+	}
 	s_img_crc = ota_crc32(0u, (const uint8_t *)ota_fmc_flash_ptr(ota_inactive_base()), s_img_len);
 	const bool ok = (s_img_crc == s_expected_crc);
 	s_state       = ok ? OTA_ST_VERIFIED : OTA_ST_ERROR;
@@ -524,6 +569,14 @@ static gd32_bridge_status_t h_commit(void)
 {
 	if (s_state != OTA_ST_VERIFIED) {
 		return STATUS_NOT_READY;
+	}
+	/* Same re-assertion as h_verify (#131): s_img_len is handed to
+     * ota_image_bootable() and written into the meta record below, so the
+     * bound is re-checked here rather than inherited from a state enum. */
+	if (s_img_len == 0u || s_img_len > OTA_SLOT_SIZE) {
+		s_state = OTA_ST_ERROR;
+		s_err   = 1u;
+		return STATUS_INVAL;
 	}
 	/* A verified (CRC-matching) image can still be unbootable -- a
 	 * one-byte or truncated image with a matching host CRC (#755).

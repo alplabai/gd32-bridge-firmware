@@ -1090,3 +1090,129 @@ ZTEST(gd32_bridge_ota, test_meta_commit_erase_fail_preserves_both_records)
 
 	g_erase_fail = false; /* hygiene: no before-hook clears this (#6) */
 }
+
+/* ===================================================================== *
+ * #131 -- a REJECTED OTA_BEGIN must not leave its unvalidated length in
+ * the session.
+ *
+ * h_begin used to assign s_img_len / s_expected_crc / s_fw_version from
+ * the wire and range-check afterwards, so a rejected BEGIN left the bad
+ * length live.  The reject sets OTA_ST_ERROR -- but a background erase
+ * armed by an EARLIER, valid BEGIN is still draining, and ota_erase_tick's
+ * completion writeback overwrites that ERROR with OTA_ST_READY (#9's
+ * mechanism).  h_verify's only guard is `s_state != OTA_ST_READY`, so it
+ * then handed the rejected length to ota_crc32, which has no bound of its
+ * own, and walked past the end of the slot.
+ *
+ * The bad length here is OTA_SLOT_SIZE + 1 rather than the 0xFFFFFFFF or
+ * 0x00040000 of the report.  It is the smallest value h_begin rejects, so
+ * it pins exactly the same defect while keeping the UNFIXED run's overread
+ * to one byte past g_flash[] -- a host harness reading 20 KB or 4 GB past
+ * a .bss array to prove a point is not a test, it is a crash.
+ * ===================================================================== */
+ZTEST(gd32_bridge_ota, test_rejected_begin_does_not_overwrite_session_length)
+{
+	reset_model();
+
+	/* A valid 8-byte image, and the CRC the host would have supplied. */
+	uint8_t img[8];
+	put32(&img[0], 0x20010000u);
+	put32(&img[4], 0x08000001u);
+	const uint32_t img_len  = (uint32_t)sizeof(img);
+	const uint32_t good_crc = ota_crc32(0u, img, img_len);
+
+	uint8_t req[8];
+	uint8_t reply[8];
+	size_t  rlen = 0u;
+
+	/* 1. A valid BEGIN arms the background erase; state is BUSY. */
+	wr_u32(&req[0], img_len);
+	wr_u32(&req[4], good_crc);
+	zassert_equal(ota_dispatch(CMD_OTA_BEGIN, req, sizeof(req), reply, sizeof(reply), &rlen),
+	              STATUS_OK,
+	              "the first BEGIN must be accepted");
+
+	/* 2. Two ticks only: the erase is mid-flight, exactly the multi-second
+	 *    window the second BEGIN lands in on silicon. */
+	ota_erase_tick();
+	ota_erase_tick();
+
+	/* 3. A second BEGIN with an out-of-range size is rejected on the wire. */
+	wr_u32(&req[0], (uint32_t)(OTA_SLOT_SIZE + 1u));
+	wr_u32(&req[4], 0xDEADBEEFu);
+	rlen = 0u;
+	zassert_equal(ota_dispatch(CMD_OTA_BEGIN, req, sizeof(req), reply, sizeof(reply), &rlen),
+	              STATUS_OUT_OF_RANGE,
+	              "an out-of-range BEGIN must be refused");
+
+	/* 4. The armed erase drains and writes OTA_ST_READY over the ERROR the
+	 *    reject just set.  This writeback is #9's mechanism and is NOT
+	 *    fixed here -- it is the vehicle that makes the stale length
+	 *    reachable, which is why it is reproduced rather than avoided. */
+	for (unsigned i = 0u; i < (OTA_SLOT_SIZE / OTA_PAGE_SIZE) + 4u; ++i) {
+		ota_erase_tick();
+	}
+
+	uint8_t wr[8];
+	size_t  wrl = 0u;
+	zassert_equal(write_chunk(0u, img, (uint8_t)img_len, wr, &wrl),
+	              STATUS_OK,
+	              "the erase writeback leaves the session writable");
+
+	/* 5. VERIFY must walk the FIRST BEGIN's 8 bytes, not the rejected
+	 *    length.  Before the fix this returns the CRC of OTA_SLOT_SIZE + 1
+	 *    bytes -- one past the end of the slot -- and does not match. */
+	rlen = 0u;
+	zassert_equal(ota_dispatch(CMD_OTA_VERIFY, NULL, 0u, reply, sizeof(reply), &rlen),
+	              STATUS_OK,
+	              "VERIFY dispatches");
+	zassert_equal(rd_u32(&reply[0]),
+	              good_crc,
+	              "the rejected BEGIN's length must not have replaced the session's");
+	zassert_equal(reply[4], 1u, "the image must still verify against the first BEGIN's CRC");
+}
+
+/* The rejected BEGIN must not have replaced the expected CRC either --
+ * a separate field, a separate assignment, and a mismatch there would
+ * fail the session in the opposite direction (a good image reported
+ * unverified) rather than overreading. */
+ZTEST(gd32_bridge_ota, test_rejected_begin_does_not_overwrite_expected_crc)
+{
+	reset_model();
+
+	uint8_t img[8];
+	put32(&img[0], 0x20010000u);
+	put32(&img[4], 0x08000001u);
+	const uint32_t img_len  = (uint32_t)sizeof(img);
+	const uint32_t good_crc = ota_crc32(0u, img, img_len);
+
+	uint8_t req[8];
+	uint8_t reply[8];
+	size_t  rlen = 0u;
+
+	wr_u32(&req[0], img_len);
+	wr_u32(&req[4], good_crc);
+	zassert_equal(ota_dispatch(CMD_OTA_BEGIN, req, sizeof(req), reply, sizeof(reply), &rlen),
+	              STATUS_OK);
+	ota_erase_tick();
+
+	/* Zero size is the other rejected shape h_begin checks. */
+	wr_u32(&req[0], 0u);
+	wr_u32(&req[4], 0xDEADBEEFu);
+	rlen = 0u;
+	zassert_equal(ota_dispatch(CMD_OTA_BEGIN, req, sizeof(req), reply, sizeof(reply), &rlen),
+	              STATUS_OUT_OF_RANGE,
+	              "a zero-size BEGIN must be refused");
+
+	for (unsigned i = 0u; i < (OTA_SLOT_SIZE / OTA_PAGE_SIZE) + 4u; ++i) {
+		ota_erase_tick();
+	}
+	uint8_t wr[8];
+	size_t  wrl = 0u;
+	zassert_equal(write_chunk(0u, img, (uint8_t)img_len, wr, &wrl), STATUS_OK);
+
+	rlen = 0u;
+	zassert_equal(ota_dispatch(CMD_OTA_VERIFY, NULL, 0u, reply, sizeof(reply), &rlen), STATUS_OK);
+	zassert_equal(
+	    reply[4], 1u, "the rejected BEGIN's 0xDEADBEEF must not have replaced the expected CRC");
+}
