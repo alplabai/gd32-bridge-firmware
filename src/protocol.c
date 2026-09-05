@@ -933,35 +933,73 @@ static gd32_bridge_status_t handle_adc_dsp_chain_bind(const uint8_t *req,
 /* v0.7 -- link-feature negotiation                                  */
 /* --------------------------------------------------------------- */
 
-/* Armed link features (GD32_BRIDGE_LINK_FEAT_*).  Lives here rather
- * than in a transport because the negotiation command can arrive over
- * either transport; the SPI transport consults the accessor when it
- * stages replies (the I2C transport never stamps -- STATUS_NO_PENDING
- * owns bit 7 there).  Reset default: everything off = the pre-v0.7
- * wire, so an un-negotiated link is byte-identical to older firmware. */
-static uint8_t link_features;
+/* Armed link features (GD32_BRIDGE_LINK_FEAT_*), ONE ENTRY PER LINK.
+ * The negotiation command can arrive over either transport; the SPI
+ * transport consults the accessor when it stages replies (the I2C
+ * transport never stamps -- STATUS_NO_PENDING owns bit 7 there).  Reset
+ * default: everything off = the pre-v0.7 wire, so an un-negotiated link
+ * is byte-identical to older firmware.
+ *
+ * #130: this was a single process-wide byte.  CMD_LINK_FEATURES sits in
+ * the shared dispatch table and is therefore reachable from BOTH
+ * transport ISRs, but only the SPI transport consumes the result -- so
+ * an I2C-side driver open/close/reset issuing the documented idempotent
+ * `features = 0` disarmed an active SPI STATUS_SEQ session with nothing
+ * telling the SPI host, switching off its only detector for the
+ * stale-reply residual hazard (src/transport_spi.c stale-reply note,
+ * silicon 2026-06-06).  The reverse was equally reachable: an I2C-side
+ * `features = 1` re-framed the SPI wire for a host that never
+ * negotiated it.
+ *
+ * `volatile` because the two writers run at different NVIC preemption
+ * levels -- CS-EXTI at BRIDGE_CS_IRQ_PRIO (1) can preempt I2C0_EV at
+ * BRIDGE_I2C_IRQ_PRIO (2) mid-handler (hal/bridge_board_config.h).
+ * Indexing by link means the two levels no longer touch the same byte,
+ * so the qualifier is now belt-and-braces rather than load-bearing --
+ * but the array is still read from one level and written from another
+ * for its own link, and this build sets no -O at all (#26), which is
+ * the only reason the pre-#130 miss was not already observable. */
+static volatile uint8_t link_features[GD32_BRIDGE_LINK_COUNT];
 
-uint8_t protocol_link_features(void)
+uint8_t protocol_link_features(gd32_bridge_link_t link)
 {
-	return link_features;
+	if ((unsigned)link >= (unsigned)GD32_BRIDGE_LINK_COUNT) return 0u;
+	return link_features[link];
 }
 
-static gd32_bridge_status_t handle_link_features(const uint8_t *req,
-                                                 size_t         req_len,
-                                                 uint8_t       *reply,
-                                                 size_t         reply_cap,
-                                                 size_t        *reply_len)
+/* The one link-SCOPED handler, so it does not match cmd_handler_t and is
+ * called directly from protocol_dispatch's switch instead of going
+ * through the table (#130).  Passing the tag as an argument -- rather
+ * than parking a "current link" in a file-scope variable the whole table
+ * could read -- is deliberate: CS-EXTI at priority 1 preempts I2C0_EV at
+ * priority 2, so any such variable would need save/restore discipline at
+ * every dispatch to survive nesting.  An argument needs none. */
+static gd32_bridge_status_t handle_link_features(gd32_bridge_link_t link,
+                                                 const uint8_t     *req,
+                                                 size_t             req_len,
+                                                 uint8_t           *reply,
+                                                 size_t             reply_cap,
+                                                 size_t            *reply_len)
 {
 	if (req_len != 1u) return STATUS_INVAL;
 	if (reply_cap < 1u) return STATUS_NOMEM;
+	if ((unsigned)link >= (unsigned)GD32_BRIDGE_LINK_COUNT) return STATUS_INVAL;
 	/* Grant the intersection of the request with what this firmware
      * implements, and arm it IMMEDIATELY -- the reply to this very
      * command already rides the new framing (the host treats its
      * stamp as the sequence baseline).  A request of 0 disables
-     * everything; idempotent in both directions. */
-	link_features = (uint8_t)(req[0] & GD32_BRIDGE_LINK_FEAT_STATUS_SEQ);
-	reply[0]      = link_features;
-	*reply_len    = 1u;
+     * everything; idempotent in both directions.
+     *
+     * Armed for THIS link only.  A host negotiating on I2C gets an
+     * honest echo of what it asked for and a working per-link record,
+     * but cannot reach the SPI link's framing.  STATUS_SEQ has no
+     * effect on the I2C wire either way (that transport never stamps),
+     * so the I2C answer stays truthful rather than STATUS_NOSUPPORT --
+     * which would break the documented idempotent open/close path that
+     * issues `features = 0` unconditionally. */
+	link_features[link] = (uint8_t)(req[0] & GD32_BRIDGE_LINK_FEAT_STATUS_SEQ);
+	reply[0]            = link_features[link];
+	*reply_len          = 1u;
 	return STATUS_OK;
 }
 
@@ -974,12 +1012,13 @@ typedef gd32_bridge_status_t (*cmd_handler_t)(const uint8_t *, size_t, uint8_t *
 /* Two-tier dispatch: a sparse switch on opcode keeps the table size
  * small (vs a dense 256-entry array) without losing the "one handler
  * table" property. */
-gd32_bridge_status_t protocol_dispatch(uint8_t        cmd,
-                                       const uint8_t *req_payload,
-                                       size_t         req_payload_len,
-                                       uint8_t       *reply_payload,
-                                       size_t         reply_payload_cap,
-                                       size_t        *reply_payload_len)
+gd32_bridge_status_t protocol_dispatch(gd32_bridge_link_t link,
+                                       uint8_t            cmd,
+                                       const uint8_t     *req_payload,
+                                       size_t             req_payload_len,
+                                       uint8_t           *reply_payload,
+                                       size_t             reply_payload_cap,
+                                       size_t            *reply_payload_len)
 {
 	cmd_handler_t h = NULL;
 	switch (cmd) {
@@ -1077,8 +1116,13 @@ gd32_bridge_status_t protocol_dispatch(uint8_t        cmd,
 		h = handle_power_mode_set;
 		break;
 	case CMD_LINK_FEATURES:
-		h = handle_link_features;
-		break;
+		/* Link-scoped: called directly, not through the table (#130). */
+		return handle_link_features(link,
+		                            req_payload,
+		                            req_payload_len,
+		                            reply_payload,
+		                            reply_payload_cap,
+		                            reply_payload_len);
 	/* v0.5 (§2B wave-2) chunked DSP-chain upload (CHAIN_OPEN /
      * STAGE_PUSH / CHAIN_BIND).  The 0x36 tombstone stays in the
      * default branch -- host code SHOULD NOT call it, and any
