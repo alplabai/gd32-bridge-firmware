@@ -79,6 +79,12 @@ void pwm_timer_init(uint32_t periph)
 	ip.repetitioncounter = 0u;
 	timer_deinit(periph);
 	timer_init(periph, &ip);
+	/* Auto-reload shadow: TIMERx_CAR writes land in the preload register
+	 * only and transfer to the active reload at the next update event
+	 * (User Manual Rev1.2 p.575-576, Fig 23-5 / 23-7) instead of hitting
+	 * the live comparator mid-period -- see bridge_hw_pwm_set for the
+	 * glitch this prevents. */
+	timer_auto_reload_shadow_enable(periph);
 	timer_primary_output_config(periph, ENABLE);
 	timer_enable(periph);
 }
@@ -104,7 +110,12 @@ void pwm_channel_init(const gd32_pwm_ch_t *ch)
 	timer_channel_output_config(ch->periph, ch->channel, &oc);
 	timer_channel_output_pulse_value_config(ch->periph, ch->channel, 0u);
 	timer_channel_output_mode_config(ch->periph, ch->channel, TIMER_OC_MODE_PWM0);
-	timer_channel_output_shadow_config(ch->periph, ch->channel, TIMER_OC_SHADOW_DISABLE);
+	/* Compare shadow: TIMERx_CHxCV writes land in the preload register
+	 * only and transfer to the active compare at the next update event
+	 * (User Manual Rev1.2 p.649, CH0COMSEN) instead of the live
+	 * comparator -- the manual permits leaving this disabled only in
+	 * single-pulse mode, and this channel also runs continuous PWM. */
+	timer_channel_output_shadow_config(ch->periph, ch->channel, TIMER_OC_SHADOW_ENABLE);
 }
 
 /* Sticky per-TIMER counter-alignment mode set by bridge_hw_pwm_configure.
@@ -122,7 +133,13 @@ static uint8_t pwm_align_mode[2];
 /* TIMER base -> pwm_align_mode index. */
 static uint8_t pwm_timer_index(uint32_t periph)
 {
-	return (periph == TIMER0) ? 0u : 1u;
+	/* The ternary's operands are the unsigned-int constants 0u/1u
+	 * (usual arithmetic conversions promote the whole expression to
+	 * unsigned int before the narrowing return), so -Wconversion can't
+	 * see that only 0 or 1 ever reaches this uint8_t return. Both fit;
+	 * the cast is a no-op at runtime, added only to satisfy the warning
+	 * (#109 TODO). */
+	return (uint8_t)((periph == TIMER0) ? 0u : 1u);
 }
 
 int bridge_hw_pwm_set(uint8_t channel, uint32_t period_ns, uint32_t duty_ns)
@@ -142,6 +159,12 @@ int bridge_hw_pwm_set(uint8_t channel, uint32_t period_ns, uint32_t duty_ns)
 	if (period_us == 0u) return BRIDGE_HW_ERR_RANGE;
 
 	const gd32_pwm_ch_t *ch = &pwm_channels[channel];
+
+	/* Snapshot CEN before the write block below decides whether to
+	 * force a software update event.  Read here, before anything in
+	 * this function touches CTL0, so it reflects the timer's state as
+	 * this call found it. */
+	const bool was_running = (TIMER_CTL0(ch->periph) & (uint32_t)TIMER_CTL0_CEN) != 0u;
 
 	/* Convert commanded period/duty to ARR + compare, honouring the
 	 * timer's configured alignment (bridge_hw_pwm_configure).  The
@@ -168,10 +191,67 @@ int bridge_hw_pwm_set(uint8_t channel, uint32_t period_ns, uint32_t duty_ns)
 		cmp = half_duty;
 	}
 
+	/* cmp must fit the 16-bit CHxCV.  The edge-aligned branch above
+	 * clamps period_us but not the resulting compare, so a 100 %-duty
+	 * request at the clamped max period (cmp == PWM_TIMER_ARR_MAX + 1,
+	 * i.e. 65536) would otherwise truncate to 0 in CHxCV and park the
+	 * pad at the complementary rail while still answering STATUS_OK
+	 * (#16).  Reject rather than silently honour a different duty than
+	 * commanded -- bridge_hw_pwm_get reads the live registers back for a
+	 * host that wants to poll what IS running instead. The
+	 * centre-aligned branch above already keeps half_duty <=
+	 * PWM_TIMER_ARR_MAX so this never trips there; the guard lives at
+	 * this single write site so neither branch can reintroduce the
+	 * truncation. */
+	if (cmp > PWM_TIMER_ARR_MAX) return BRIDGE_HW_ERR_RANGE;
+
 	/* Updates ALL channels of the same timer -- the contract documents
-	 * this shared-ARR constraint. */
+	 * this shared-ARR constraint.  CHxCOMSEN + ARSE are enabled
+	 * (pwm_channel_init / pwm_timer_init, #43) so the two writes below
+	 * land in the preload register only and transfer to the live
+	 * comparator at this timer's own next update event (User Manual
+	 * Rev1.2 p.575-576 Fig 23-5/23-7 auto-reload shadow timing; p.649
+	 * CH0COMSEN).  That is exactly the glitch-free behaviour #43 asked
+	 * for, and on a channel already running cleanly mid-period it is
+	 * also the ONLY acceptable behaviour: forcing a software update
+	 * event here resets CNT to 0 (p.645) and restarts the period on
+	 * every single PWM_SET call, and because ARR/CTL0/CEN are
+	 * timer-wide it re-phases every sibling channel on the timer too --
+	 * a guaranteed full-period glitch strictly worse than the rare
+	 * runt/stretch #43 set out to fix (PR #82 review).
+	 *
+	 * The one case that genuinely needs a forced transfer is #8's
+	 * recovery path: a prior bridge_hw_pwm_single_pulse leaves the
+	 * timer HALTED -- hardware clears CEN at the one-shot's own update
+	 * event (p.617-618) -- with no future overflow ever pending to
+	 * promote the shadow.  was_running (snapshotted above, before this
+	 * function's own SPM clear or these writes could change anything)
+	 * distinguishes the two: force UPG only when the timer was NOT
+	 * running, i.e. exactly the halted-by-single-pulse case.  (SPM
+	 * itself isn't checked here as a second signal: the SPM clear a few
+	 * lines above already runs unconditionally on every call, so by
+	 * this point SPM always reads REPETITIVE regardless of the prior
+	 * state -- CEN is the one bit that still reflects how this call
+	 * found the timer.)
+	 *
+	 * Gating this couples to hal/gd32/pwm_capture.c: it can no longer
+	 * infer promotion from a raw TIMER_CAR read (ambiguous once a
+	 * second write lands before the first is confirmed promoted, #82
+	 * review round 2), so this call hands the outcome over explicitly
+	 * via pwm_car_shadow_defer/_commit below rather than leaving
+	 * pwm_capture.c to reconstruct it after the fact. */
 	timer_autoreload_value_config(ch->periph, arr);
 	timer_channel_output_pulse_value_config(ch->periph, ch->channel, cmp);
+	if (was_running) {
+		pwm_car_shadow_defer(ch->periph, arr);
+	} else {
+		/* #89: on a sync-master timer this also fires TRGO0, glitching a slave synced off it. */
+		timer_event_software_generate(ch->periph, TIMER_EVENT_SRC_UPG);
+		pwm_car_shadow_commit(ch->periph, arr);
+	}
+	timer_enable(ch->periph); /* idempotent if already running; re-arms
+	                            * CEN after a prior single-pulse left it
+	                            * clear (#8) */
 	return BRIDGE_HW_OK;
 }
 
@@ -302,10 +382,16 @@ int bridge_hw_pwm_single_pulse(uint8_t channel, uint32_t pulse_ns)
 
 	uint32_t pulse_us = pulse_ns / PWM_TIMER_TICK_NS;
 	if (pulse_us == 0u) return BRIDGE_HW_ERR_RANGE;
-	if (pulse_us > PWM_TIMER_ARR_MAX + 1u) pulse_us = PWM_TIMER_ARR_MAX + 1u;
+	/* pulse_us is written verbatim into the 16-bit CHxCV below (compare
+	 * = ARR + 1, see the comment there), so 65536 truncates to 0 and
+	 * parks the pad at the complementary rail while still answering
+	 * STATUS_OK -- the widest one-shot the timer can produce is 65535 us
+	 * (#16).  Reject rather than silently honour a shorter pulse than
+	 * commanded. */
+	if (pulse_us > PWM_TIMER_ARR_MAX) return BRIDGE_HW_ERR_RANGE;
 
 	/* Reset the timer counter so the pulse starts from t=0 then
-     * program ARR = pulse_us (counts up; the channel output stays
+     * program ARR = pulse_us - 1 (counts up; the channel output stays
      * high until the counter reaches the compare value).  Setting
      * compare = ARR + 1 keeps the output high through the entire
      * period so the pulse width matches `pulse_us`.  After ARR the
@@ -314,6 +400,28 @@ int bridge_hw_pwm_single_pulse(uint8_t channel, uint32_t pulse_ns)
 	timer_counter_value_config(ch->periph, 0u);
 	timer_autoreload_value_config(ch->periph, (uint32_t)(pulse_us - 1u));
 	timer_channel_output_pulse_value_config(ch->periph, ch->channel, pulse_us);
+
+	/* CHxCOMSEN + ARSE are enabled for every channel/timer
+	 * (pwm_channel_init / pwm_timer_init, #43) so the two writes above
+	 * land in the preload register only -- the counter still compares
+	 * against whatever was active before this call until an update
+	 * event transfers them (User Manual Rev1.2 p.575-576, Fig 23-5 /
+	 * 23-7).  Single-pulse mode's OWN "next update event" is the one
+	 * that halts CEN at the END of the pulse (p.617-618), so without
+	 * forcing one here the pulse would fire using the STALE values left
+	 * by whatever ran on this timer before it, not the ones just
+	 * written.  Force the transfer now, before arming -- it also
+	 * re-seats CNT to 0, idempotent with the reset above. */
+	/* #89: on a sync-master timer this also fires TRGO0, glitching a slave synced off it. */
+	timer_event_software_generate(ch->periph, TIMER_EVENT_SRC_UPG);
+	/* This promotion is synchronous with the forced UPG above -- tell
+	 * pwm_capture.c's shadow mirror directly instead of leaving it to
+	 * infer promotion from TIMER_FLAG_UP (#82 review round 2). */
+	pwm_car_shadow_commit(ch->periph, (uint32_t)(pulse_us - 1u));
+	/* SPM is timer-wide (TIMERx_CTL0.SPM), not per-channel, so this
+	 * also arms every sibling channel on this timer for the same
+	 * one-shot halt -- a running sibling gets silently re-perioded and
+	 * stopped.  Pre-existing, out of scope here; tracked as #87. */
 	timer_single_pulse_mode_config(ch->periph, TIMER_SP_MODE_SINGLE);
 	timer_enable(ch->periph);
 

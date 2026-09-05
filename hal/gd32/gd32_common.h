@@ -230,4 +230,19 @@ void     pwm_timer_init(uint32_t periph);                         /* pwm.c */
 void     pwm_channel_init(const gd32_pwm_ch_t *ch);               /* pwm.c */
 void     se_reset_init(void);                                     /* se_reset.c */
 
+/* Per-timer CAR shadow-promotion tracking (pwm_capture.c owns the
+ * state; see the comment above pwm_capture_active_car).  pwm.c calls
+ * these instead of re-deriving promotion from a raw TIMER_CAR read,
+ * which is ambiguous once a second write lands before the first one
+ * is confirmed promoted (#82 review, the pwm_capture.c major).
+ *   - defer:  a write left in the ARSE preload only (no forced UPG,
+ *             the common already-running PWM_SET case) -- becomes
+ *             active at the timer's own next update event.
+ *   - commit: a write whose promotion THIS call forces synchronously
+ *             (bridge_hw_pwm_set's halted-recovery path, or
+ *             bridge_hw_pwm_single_pulse's forced UPG) -- becomes
+ *             active immediately, no defer needed. */
+void pwm_car_shadow_defer(uint32_t periph, uint32_t car);  /* pwm_capture.c */
+void pwm_car_shadow_commit(uint32_t periph, uint32_t car); /* pwm_capture.c */
+
 #endif /* GD32_BRIDGE_HAL_GD32_COMMON_H */
