@@ -601,6 +601,32 @@ static gd32_bridge_status_t h_commit(void)
 static gd32_bridge_status_t h_rollback(void)
 {
 	/* Host OTA_ROLLBACK: no payload either direction (status only). */
+
+	/* #147: the state guard every sibling handler has and this one did
+     * not (compare h_write, h_verify, h_commit).  Without it, ROLLBACK
+     * dispatched from a transport ISR straight into meta_commit -> the
+     * FMC funnel while the BASE-level erase pump was mid-page-walk with
+     * the FMC unlocked -- the collision hal/fmc_ota.c's funnel interlock
+     * now refuses outright.  This guard is the other half: refuse the
+     * command at the state machine rather than let it reach the funnel
+     * and fail there, so the host gets an accurate STATUS_BUSY instead
+     * of a STATUS_IO that reads like a flash fault.
+     *
+     * ROLLBACK is only meaningful with no update in flight, so it is
+     * allowed from IDLE and from ERROR (the recovery case) and refused
+     * from BUSY / READY / VERIFIED.  CMD_OTA_ABORT is the documented way
+     * out of an in-flight session and already cancels the erase, so a
+     * host that genuinely wants to abandon an update and roll back
+     * issues ABORT then ROLLBACK.
+     *
+     * Behaviour change, deliberate: ROLLBACK previously succeeded from
+     * any state.  It ends in ota_system_reset(), so the in-flight
+     * session died with the reset anyway -- what it did NOT do was
+     * survive the FMC collision on the way there. */
+	if (s_state != OTA_ST_IDLE && s_state != OTA_ST_ERROR) {
+		return STATUS_BUSY;
+	}
+
 	ota_meta_record_t cur;
 	uint32_t          which;
 	if (!meta_current(&cur, &which)) {
