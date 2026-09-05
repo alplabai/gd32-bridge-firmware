@@ -31,6 +31,8 @@
 
 #include "gd32g5x3.h"
 
+#include "gd32/bridge_critical.h"
+
 #include "fmc_ota.h"
 #include "fmc_ota_guard.h"
 #include "ota_layout.h"
@@ -221,6 +223,19 @@ OTA_RAMFUNC static fmc_state_enum erase_one_page(uint32_t addr)
      * wait -- see the derivation comment above OTA_FMC_ERASE_TIMEOUT_ITERS.
      * FMC_TIMEOUT_COUNT is fine on every OTHER ota_fmc_wait_ready() call in
      * this file: those run with interrupts still enabled. */
+	/* RAW CMSIS intrinsics here, deliberately NOT bridge_irq_lock() /
+     * bridge_irq_unlock() from hal/gd32/bridge_critical.h, even though
+     * they do exactly this.  Those are `static inline`, and this build
+     * pins no -O level at all (#26): at -O0 GCC does not inline a
+     * `static inline` -- it emits an out-of-line copy in .text, i.e. in
+     * FLASH.  A call from this OTA_RAMFUNC into flash while the bank is
+     * busy is precisely the undefined fetch this masked window exists to
+     * prevent.  __get_PRIMASK / __disable_irq / __set_PRIMASK compile to
+     * single MRS / CPSID / MSR instructions with no call, at every -O
+     * level.  Do not "unify" these with the shared helper.
+     *
+     * fmc_funnel_claim() below DOES use the shared helper, and that is
+     * fine: it runs before fmc_unlock(), with the flash idle. */
 	const uint32_t pm = __get_PRIMASK();
 	__disable_irq();
 	FMC_CTL |= FMC_CTL_START;
@@ -231,6 +246,63 @@ OTA_RAMFUNC static fmc_state_enum erase_one_page(uint32_t addr)
 	FMC_CTL &= ~FMC_CTL_PNSEL;
 	FMC_CTL &= ~FMC_CTL_BKSEL;
 	return st;
+}
+
+/* ---- FMC funnel ownership (#147) ------------------------------------- *
+ *
+ * Every FMC operation in this file brackets its work in fmc_unlock() ...
+ * fmc_lock(), and the vendor's pair is NOT nesting-aware: fmc_unlock()
+ * early-returns when LK is already clear, and fmc_lock() unconditionally
+ * SETS LK.  So a second, nested operation's terminating fmc_lock()
+ * re-locks the register out from under the first one.
+ *
+ * That is reachable purely over the wire.  ota_erase_tick() runs at BASE
+ * level and walks the slot a page-region per tick; a transport ISR can
+ * dispatch an OTA opcode into meta_commit -> ota_fmc_erase_range /
+ * ota_fmc_program at any point inside that walk.  The ISR's fmc_lock()
+ * then leaves the base loop writing FMC_CTL_PER and FMC_CTL_START into a
+ * locked register.  Worse, there is a second collision in the same
+ * window that has nothing to do with LK: the ISR sets FMC_CTL_PG while
+ * the pre-empted erase still has FMC_CTL_PER set, and each side's
+ * `FMC_CTL &= ~...` read-modify-writes clobber what the other left.
+ *
+ * A depth-counting unlock/lock pair would fix the LK half and leave the
+ * PER-vs-PG half wide open, so this is an OWNERSHIP interlock instead:
+ * one operation at a time, full stop.  The loser is refused and reports
+ * failure rather than corrupting the winner.
+ *
+ * The claim is held for a whole erase-range or program call and released
+ * before returning; interrupts are masked only across the test-and-set
+ * (see hal/gd32/bridge_critical.h).  Nothing spins waiting, so there is
+ * no deadlock: an ISR that loses simply fails its FMC op.
+ *
+ * NOT RESOLVED, and it does not change this fix: whether a write to a
+ * LOCKED FMC_CTL is silently discarded or latches WPERR is a GD32G553
+ * User Manual lookup nobody has done.  The silent variant is materially
+ * worse -- ota_fmc_wait_ready() returns FMC_READY on its first poll and
+ * erase_one_page() reports SUCCESS for a page it did not erase, so
+ * ota_erase_tick() advances and flips the state to OTA_ST_READY over an
+ * un-erased tail, and the next h_write into it PGERRs.  But BOTH
+ * outcomes leave an un-erased page, so preventing the re-entry is right
+ * either way; the lookup only sizes how bad the un-fixed case was. */
+static volatile bool s_fmc_owned;
+
+/* True = the caller owns the funnel and MUST release before returning. */
+static bool fmc_funnel_claim(void)
+{
+	const uint32_t sect     = bridge_irq_lock();
+	const bool     free_now = !s_fmc_owned;
+
+	if (free_now) {
+		s_fmc_owned = true;
+	}
+	bridge_irq_unlock(sect);
+	return free_now;
+}
+
+static void fmc_funnel_release(void)
+{
+	s_fmc_owned = false; /* single aligned store; no section needed */
 }
 
 bool ota_fmc_erase_range(uint32_t base, uint32_t len)
@@ -244,6 +316,16 @@ bool ota_fmc_erase_range(uint32_t base, uint32_t len)
 	if (ota_fmc_range_forbidden(base, len)) {
 		return false; /* #79: bootloader / running-slot -- refused, not erased */
 	}
+	/* One owner at a time (#147).  Refusing is the whole point: the
+     * caller that loses must NOT proceed into the funnel.
+     *
+     * Ordered AFTER the #79 range guard on purpose: a request aimed at
+     * the bootloader or the running slot is refused on its own merits and
+     * must never take the funnel, so it cannot make a concurrent, LEGAL
+     * erase fail by holding ownership while it gets rejected anyway. */
+	if (!fmc_funnel_claim()) {
+		return false;
+	}
 	const uint32_t step =
 	    ((FMC_OBCTL & FMC_OBCTL_DBS) != 0u) ? OTA_FMC_PAGE_SIZE_DBANK : OTA_FMC_PAGE_SIZE_SBANK;
 	bool ok = true;
@@ -255,6 +337,7 @@ bool ota_fmc_erase_range(uint32_t base, uint32_t len)
 		}
 	}
 	fmc_lock();
+	fmc_funnel_release();
 	return ok;
 }
 
@@ -270,6 +353,8 @@ OTA_RAMFUNC static fmc_state_enum program_one_dword(uint32_t addr, uint64_t dw)
      * clear.  Both sites move in lockstep -- see the comment there,
      * including the transport-blackout note (#19) and why this uses
      * OTA_FMC_PROGRAM_TIMEOUT_ITERS rather than FMC_TIMEOUT_COUNT. */
+	/* Raw intrinsics, not bridge_irq_lock() -- same RAMFUNC-must-not-call-
+     * flash argument as in erase_one_page. */
 	const uint32_t pm = __get_PRIMASK();
 	__disable_irq();
 	FMC_CTL |= FMC_CTL_PG;
@@ -294,6 +379,11 @@ bool ota_fmc_program(uint32_t addr, const uint8_t *data, size_t len)
 	if (ota_fmc_range_forbidden(addr, (uint32_t)len)) {
 		return false; /* #79: bootloader / running-slot -- refused, not programmed */
 	}
+	/* Range guard first, then ownership -- same ordering argument as in
+     * ota_fmc_erase_range above. */
+	if (!fmc_funnel_claim()) {
+		return false; /* #147 -- see fmc_funnel_claim */
+	}
 	bool ok = true;
 	fmc_unlock();
 	for (size_t i = 0u; i < len; i += 8u) {
@@ -310,6 +400,7 @@ bool ota_fmc_program(uint32_t addr, const uint8_t *data, size_t len)
 		}
 	}
 	fmc_lock();
+	fmc_funnel_release();
 	return ok;
 }
 

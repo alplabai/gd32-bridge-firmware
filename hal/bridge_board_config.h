@@ -34,10 +34,8 @@
 /* Renesas master P76(MOSI)/P77(MISO)/P96(SCLK)/P97(CS) <-> GD32 below. */
 /* Mode 0 (CPOL=0,CPHA=0), MSB-first, 8-bit, hardware NSS.             */
 /* =================================================================== */
-#define BRIDGE_SPI_PERIPH      SPI1
-#define BRIDGE_SPI_RCU         RCU_SPI1
-#define BRIDGE_SPI_IRQN        SPI1_IRQn
-#define BRIDGE_SPI_IRQ_HANDLER SPI1_IRQHandler
+#define BRIDGE_SPI_PERIPH SPI1
+#define BRIDGE_SPI_RCU    RCU_SPI1
 
 /* SPI1 slave DMA (25 MHz link: one byte every 320 ns -- an interrupt per
  * byte cannot keep up even at the 216 MHz core, so RX and TX stream over
@@ -106,10 +104,11 @@
  * needs no static value here.  Slave timing only needs setup/hold +
  * prescaler; the 400 kHz bus rate is the master's SCLH/SCLL, not ours. */
 
-/* NVIC priorities (preemption, sub).  Transport ISRs sit above the
- * SysTick PMIC poll; SPI (point-to-point, latency-sensitive) above I2C. */
-#define BRIDGE_SPI_IRQ_PRIO    1u
-#define BRIDGE_SPI_IRQ_SUBPRIO 0u
+/* NVIC priorities (preemption, sub).  CS EXTI framing at
+ * BRIDGE_CS_IRQ_PRIO, I2C EV/ER at BRIDGE_I2C_IRQ_PRIO, ADC-stream DMA
+ * lap FTF at prio 3 (hal/gd32/adc_stream.c:27-28).  Periodic
+ * housekeeping runs at base level from the main WFI loop, not SysTick
+ * -- there is no SysTick handler in this firmware. */
 #define BRIDGE_CS_IRQ_PRIO     1u
 #define BRIDGE_CS_IRQ_SUBPRIO  1u
 #define BRIDGE_I2C_IRQ_PRIO    2u

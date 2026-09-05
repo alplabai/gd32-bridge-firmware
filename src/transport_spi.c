@@ -10,11 +10,12 @@
  *   REPLY: SOF | STATUS | PAYLOAD | CRC(SOF..PAYLOAD)
  *
  * On the V2N module the GD32 sits as the slave on SPI1
- * (PA8/PA9/PA10/PB15).  The slave-side ISR feeds bytes into a
- * staging buffer; once the CRC for a complete request envelope
- * checks out, the ISR calls protocol_dispatch() to compute the
- * reply, stages the reply envelope, and (re-)enables the TX FIFO
- * so the host's next-transaction reads get the reply bytes.
+ * (PA8/PA9/PA10/PB15).  The gd32 backend moves SPI data by DMA; there
+ * are no SPI data interrupts.  The CS EXTI carries the framing: on the
+ * trailing edge the ISR feeds the captured bytes through the seams
+ * below, and once the CRC for a complete request envelope checks out,
+ * calls protocol_dispatch() to compute the reply and stages the reply
+ * envelope for the next transaction's DMA burst.
  *
  * THIS FILE is SILICON-FREE: framing, CRC, staging and the
  * protocol_dispatch() hand-off only.  The byte-level GigaDevice
@@ -80,7 +81,7 @@ static uint8_t spi_seq;
 
 static void stage_reply(uint8_t status, const uint8_t *payload, size_t payload_len)
 {
-	if ((protocol_link_features() & GD32_BRIDGE_LINK_FEAT_STATUS_SEQ) != 0u) {
+	if ((protocol_link_features(GD32_BRIDGE_LINK_SPI) & GD32_BRIDGE_LINK_FEAT_STATUS_SEQ) != 0u) {
 		spi_seq = (uint8_t)((spi_seq + 1u) & 0x0Fu);
 		status  = (uint8_t)(status | (uint8_t)(spi_seq << GD32_BRIDGE_STATUS_SEQ_SHIFT));
 	}
@@ -199,7 +200,8 @@ static void decode_and_dispatch(void)
 	const uint8_t              cmd = spi_rx_buf[1];
 	uint8_t                    reply_pl[GD32_BRIDGE_MAX_PAYLOAD_BYTES];
 	size_t                     reply_pl_len = 0u;
-	const gd32_bridge_status_t st = protocol_dispatch(cmd,
+	const gd32_bridge_status_t st = protocol_dispatch(GD32_BRIDGE_LINK_SPI,
+	                                                  cmd,
 	                                                  payload_len > 0u ? &spi_rx_buf[2] : NULL,
 	                                                  payload_len,
 	                                                  reply_pl,
@@ -234,10 +236,10 @@ void spi_slave_cs_high(void)
 	decode_and_dispatch();
 }
 
-/* Called by the SPI TX FIFO-empty ISR when the host clocks bytes
- * during the reply transaction.  Returns the next byte to clock out;
- * after the reply is exhausted, returns 0xFF so the host sees the
- * idle pattern. */
+/* Returns the next staged reply byte.  On the gd32 backend the drain
+ * loop is gated on spi_slave_tx_pending(), so the 0xFF tail below is
+ * reachable only from the stub backend and the unit tests -- hosts
+ * must not use 0xFF as an end-of-reply marker. */
 uint8_t spi_slave_tx_next_byte(void)
 {
 	if (spi_tx_cursor < spi_tx_len) {

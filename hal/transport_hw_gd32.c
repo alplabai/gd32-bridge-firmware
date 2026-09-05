@@ -372,10 +372,31 @@ void bridge_transport_i2c_hw_init(void)
 	    BRIDGE_I2C_PERIPH, (uint32_t)GD32_BRIDGE_DEFAULT_I2C_ADDR << 1, I2C_ADDFORMAT_7BITS);
 	i2c_stretch_scl_low_enable(BRIDGE_I2C_PERIPH);
 
-	/* Address-match, receive, stop, NACK and error always on; the
-     * transmit interrupt is enabled only while serving a read. */
+	/* Address-match, receive, stop and error always on; the transmit
+     * interrupt is enabled only while serving a read.
+     *
+     * I2C_INT_NACK is deliberately NOT in this mask (#128).  On this IP
+     * NACK is gated by its own CTL0.NACKIE, which makes it an EVENT-line
+     * source -- it raises I2C0_EV, not I2C0_ER.  The EV handler below has
+     * no NACK arm, so the terminating NACK the master sends before STOP at
+     * the end of EVERY read latched, was never cleared, and re-entered
+     * BRIDGE_I2C_EV_HANDLER immediately and permanently at group priority
+     * 2.  Base level never ran again: bridge_hw_dsp_pump() and
+     * ota_erase_tick() (hal/gd32/init.c) both stall there, so a bound DSP
+     * chain stops producing and an armed OTA erase stops advancing.
+     *
+     * The clear site that looked like it covered this is in
+     * BRIDGE_I2C_ER_HANDLER, on a vector NACK never raises -- see the
+     * comment there.
+     *
+     * A slave has nothing to do with a master's end-of-read NACK: it is
+     * the normal, correct end of every read, not an error, and every
+     * vendor slave example leaves it masked.  NACKF still SETS in I2C_STAT
+     * with NACKIE clear, it just raises no interrupt; it is cleared at the
+     * end of the transaction in the STPDET arm below so it cannot
+     * accumulate across transfers. */
 	i2c_interrupt_enable(BRIDGE_I2C_PERIPH,
-	                     I2C_INT_ADDM | I2C_INT_RBNE | I2C_INT_STPDET | I2C_INT_NACK | I2C_INT_ERR);
+	                     I2C_INT_ADDM | I2C_INT_RBNE | I2C_INT_STPDET | I2C_INT_ERR);
 	nvic_irq_enable(BRIDGE_I2C_EV_IRQN, BRIDGE_I2C_IRQ_PRIO, BRIDGE_I2C_IRQ_SUBPRIO);
 	nvic_irq_enable(BRIDGE_I2C_ER_IRQN, BRIDGE_I2C_IRQ_PRIO, BRIDGE_I2C_IRQ_SUBPRIO);
 
@@ -403,14 +424,52 @@ void BRIDGE_I2C_EV_HANDLER(void)
 		i2c_data_transmit(BRIDGE_I2C_PERIPH, i2c_slave_tx_next_byte());
 	} else if (RESET != i2c_interrupt_flag_get(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_STPDET)) {
 		i2c_interrupt_flag_clear(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_STPDET);
+		/* The master NACKs the last byte of every read before STOP, so
+         * NACKF is routinely set here.  It raises no interrupt now that
+         * NACKIE is masked (#128), but clear it at the transaction
+         * boundary anyway so it never carries into the next transfer and
+         * cannot be observed as a stale error by anything that starts
+         * polling I2C_STAT later. */
+		i2c_interrupt_flag_clear(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_NACK);
 		i2c_interrupt_disable(BRIDGE_I2C_PERIPH, I2C_INT_TI);
 		/* STOP after a write with no read: stage the reply so a later
          * separate read transaction can fetch it. */
 		(void)i2c_slave_write_end();
+	} else {
+		/* Terminating arm (#128).  An ISR that can return having cleared
+         * NOTHING is a latent permanent lockup regardless of which flag
+         * caused it: the NVIC line stays asserted and the handler is
+         * re-entered immediately, forever, at a priority that starves
+         * base level.  That is exactly how the unmasked NACK above
+         * behaved, and nothing about the shape was specific to NACK.
+         *
+         * ADDSEND and STPDET cannot reach here -- the arms above test
+         * them first -- and RBNE/TI are cleared by the data-register
+         * access, not by a status write.  So the only software-clearable
+         * flag that can land here today is NACK, and only if a future
+         * change puts I2C_INT_NACK back in the enable mask.  Clearing it
+         * unconditionally costs one register write on a path that should
+         * never execute, and turns "someone re-enabled NACK" from a dead
+         * bridge into a no-op. */
+		i2c_interrupt_flag_clear(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_NACK);
 	}
 }
 
-/* I2C0 error ISR: clear NACK + bus errors so the slave re-syncs. */
+/* I2C0 error ISR.
+ *
+ * The NACK arm below is NOT what clears a NACK (#128).  NACK is gated by
+ * its own CTL0.NACKIE and is an EVENT-line source, so it raises
+ * BRIDGE_I2C_EV_HANDLER and never this vector -- this arm has never once
+ * executed for a NACK, which is why "the NACK is cleared somewhere" read
+ * as true on inspection and was false in execution.  It is kept as a
+ * cheap safety net in case a future part or vendor-header revision routes
+ * NACKF differently, but the real handling is in the EV handler above and
+ * in the enable mask in bridge_transport_i2c_hw_init().
+ *
+ * BERR / LOSTARB / OUERR -- the flags I2C_INT_ERR actually raises here --
+ * are still not cleared, so they latch and storm this vector.  That is
+ * #7, deliberately left alone: it is a different defect with its own fix
+ * in flight (PR #83). */
 void BRIDGE_I2C_ER_HANDLER(void)
 {
 	if (RESET != i2c_interrupt_flag_get(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_NACK)) {
