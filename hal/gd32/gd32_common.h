@@ -149,9 +149,13 @@ typedef struct {
 /* ----------------------------------------------------------------- */
 
 /* VREF for the ADC's right-aligned code -> millivolt conversion.
- * V2N's analog supply is 1.8 V (maintainer-confirmed the same rail
- * used by DAC_VREF_MV).  ADC_FULL_SCALE is the 12-bit default; when a
- * channel is reconfigured to a lower resolution via
+ * V2N's analog supply is 1.8 V (maintainer-confirmed against the
+ * schematic).  This is the SOLE definition of that figure -- dac.c's
+ * DAC_VREF_MV is `#define`d from this macro rather than repeating the
+ * literal, so the ADC and DAC sides of the bridge cannot drift apart
+ * on the reference voltage (they did once; alp-sdk-internal
+ * gd32-bridge-firmware#59).  ADC_FULL_SCALE is the 12-bit default;
+ * when a channel is reconfigured to a lower resolution via
  * bridge_hw_adc_configure the code range shrinks (10b -> 1023, 8b ->
  * 255, 6b -> 63), so the read paths divide by adc_full_scale_for_bits()
  * of the channel's cached resolution rather than this constant.
