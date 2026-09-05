@@ -116,6 +116,34 @@ target_compile_options(test_transport_spi PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_transport_spi PRIVATE ztest_shim)
 add_test(NAME transport_spi COMMAND test_transport_spi)
 
+# --- adc_seq: GD32 ADC register-sequence gate -------------------------------
+#
+# #77 means no CI job compiles hal/gd32/*.c -- the stub build above links
+# only hal/bridge_hw_stub.c.  This target links the REAL hal/gd32/adc.c +
+# hal/gd32/adc_stream.c, unmodified, against a hand-written mock of the GD32
+# vendor header (adc_seq/mock/gd32g5x3.h) so the two register sequences
+# PR #80's review asked for by name -- ROVF cleared before adc_enable, and
+# calibration run after every adc_enable on the request path -- are pinned
+# by a real assertion instead of a diff read.  See adc_seq/mock/gd32g5x3.h's
+# top comment for exactly what the mock does and does not model.
+add_executable(test_adc_seq
+    adc_seq/src/test_adc_seq.c
+    adc_seq/mock/mock_gd32.c
+    ${FW}/hal/gd32/adc.c
+    ${FW}/hal/gd32/adc_stream.c
+)
+target_include_directories(test_adc_seq PRIVATE
+    ${FW}/hal
+    ${FW}/hal/gd32
+    ${CMAKE_CURRENT_SOURCE_DIR}/adc_seq/mock
+)
+target_compile_options(test_adc_seq PRIVATE ${TEST_FLAGS})
+# adc_stream.c's FFT-window math (__builtin_cosf/sqrtf) lowers to real libm
+# calls on a host compiler with no -ffreestanding; the M33 build never needs
+# this because CMSIS-DSP/arm-none-eabi's libm supplies them implicitly.
+target_link_libraries(test_adc_seq PRIVATE ztest_shim m)
+add_test(NAME adc_seq COMMAND test_adc_seq)
+
 # --- transport_i2c: transport + dispatcher over the stub HAL ---------------
 add_executable(test_transport_i2c
     transport_i2c/src/test_transport_i2c.c

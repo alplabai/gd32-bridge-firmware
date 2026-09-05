@@ -144,9 +144,13 @@ int bridge_hw_adc_stream_begin(uint8_t stream_id, uint8_t channel, uint32_t samp
      * with_DMA): mode + trigger + DMA controls all land BEFORE the
      * enable.  Programming CTL1 on an already-running converter is
      * exactly how the v0.2.3 stream silently produced zero samples.
-     * Calibration is NOT redone here: an ADCON toggle preserves the
-     * boot calibration from adc_periph_init, and recalibrating would
-     * be an unbounded vendor spin inside the CS-EXTI handler. */
+     * Calibration IS redone below, after ADCON re-enables: an ADCON
+     * toggle does NOT preserve the boot calibration from
+     * adc_periph_init (UM Rev1.2 p.424: the factor is applied only
+     * "until the next ADC power-off", and clearing ADCON IS that
+     * power-off, p.447) -- and the recalibration is bounded
+     * (adc_calibrate_bounded), so it is not the unbounded vendor spin
+     * this comment used to worry about (#34). */
 	adc_disable(ch->periph);
 	/* Apply the channel's cached resolution + oversample while the
 	 * converter is disabled (DRES/OVSAMPCTL only latch with ADCON==0).
@@ -174,12 +178,32 @@ int bridge_hw_adc_stream_begin(uint8_t stream_id, uint8_t channel, uint32_t samp
      * bridge_hw_adc_read on this peripheral BEFORE the converter
      * re-enables -- a stale EOC otherwise fires one spurious DMA
      * beat the moment the request unmasks, depositing a phantom
-     * zeroth sample and desynchronising the ring cursor. */
+     * zeroth sample and desynchronising the ring cursor.  ROVF gets
+     * the same treatment: overflow detection is live the instant
+     * ADCON sets (DMA is already enabled above), and a session-stale
+     * ROVF left set would stall conversion before the first sample
+     * (UM Rev1.2 17.4.12, p.431-432; #44). */
 	adc_flag_clear(ch->periph, ADC_FLAG_EOC);
+	adc_flag_clear(ch->periph, ADC_FLAG_ROVF);
 	adc_enable(ch->periph);
 	for (volatile uint32_t stab = 0u; stab < 4096u; ++stab) {
 		/* tSTAB dwell after ADCON, same bound adc_periph_init uses */
 	}
+	/* Recalibrate after the ADCON toggle above -- see the disable/
+     * enable comment at the top of this bracket (#34).  Bounded, cost
+     * ~25 us (adc.c's bridge_hw_adc_read carries the full derivation);
+     * a false return means the calibration FSM never finished, so
+     * fail the begin rather than arm a stream on an unproven
+     * converter -- the DMA channel + lap ISR are not armed yet at
+     * this point, so there is no live stream state to unwind.
+     *
+     * DISCLOSURE (#34 review): this is one of three request-path call
+     * sites (the others: bridge_hw_adc_read in adc.c, and
+     * adc_stream_recover_rovf below) that now pay calibration's
+     * ~200000-iteration wedged-FSM worst case on every invocation,
+     * not just once at boot -- see adc.c's bridge_hw_adc_read for the
+     * full disclosure and the decision not to shorten the bound. */
+	if (!adc_calibrate_bounded(ch->periph)) return BRIDGE_HW_ERR_IO;
 
 	/* Arm the lap counter BEFORE the channel starts: clear any stale
 	 * full-transfer flag from a prior session on this controller, then
@@ -237,6 +261,62 @@ int bridge_hw_adc_stream_begin(uint8_t stream_id, uint8_t channel, uint32_t samp
 	return BRIDGE_HW_OK;
 }
 
+/* Recover the ADC from a routine-data overflow (#44) -- the 9-step
+ * sequence UM Rev1.2 17.4.12 (p.431-432) documents.  Steps 2 and 7
+ * toggle ADCON, which invalidates the calibration factor the same way
+ * stream_begin's disable/enable does (#34): recalibrate before
+ * returning so the stream resumes on a proven converter, not merely
+ * an unstalled one.  DDM (request-after-last) and the external-
+ * trigger routine config are untouched by this sequence and the
+ * pacing timer never stopped, so step 9 ("start conversion") needs no
+ * explicit call here -- the next TRGO edge resumes conversion once
+ * ADCON is back.  Returns false only if the recalibration's bounded
+ * spin never completes (the converter itself stayed wedged).
+ *
+ * DISCLOSURE (#34 review): this is the third of three request-path
+ * call sites that now pay adc_calibrate_bounded's ~200000-iteration
+ * wedged-FSM worst case on every invocation rather than once at boot
+ * -- see adc.c's bridge_hw_adc_read for the full disclosure and the
+ * decision not to shorten the bound.
+ *
+ * The DMA full-transfer-finish (FTF) interrupt flag is cleared as
+ * part of step 3's "reinit DMA module": ROVF and a ring-wrap FTF can
+ * land in the same window (this handler runs at CS-EXTI priority 1,
+ * which blocks the priority-3 lap ISR -- DMA0/1_Channel0_IRQHandler
+ * above -- from running until this function returns), and a FTF left
+ * pending here fires the instant this handler returns, bumping
+ * lap_count against a total_read the caller is about to re-anchor to
+ * "0 new samples since recovery" -- the next poll would then
+ * misreport a full-ring loss it didn't actually see (the #18 phantom-
+ * loss class).  UM Rev1.2 §8.4.8 (p.295): the flag lives in DMA_INTF,
+ * cleared via the dedicated bit in DMA_INTC (FTFIFC) -- disabling
+ * CHEN does not clear it, so it needs its own clear here. */
+static bool adc_stream_recover_rovf(adc_stream_state_t *s, const gd32_adc_ch_t *ch)
+{
+	adc_dma_mode_disable(ch->periph); /* 1. Clear DMA bit of ADC_CTL1. */
+	adc_disable(ch->periph);          /* 2. Clear ADCON bit of ADC_CTL1. */
+
+	/* 3. Clear CHEN bit of DMA_CHxCTL, reinit the DMA module.  The
+	 * count register is reloaded to the full ring length explicitly:
+	 * an overflow almost certainly caught the channel mid-ring rather
+	 * than exactly at a circular-reload boundary.  A stale FTF (see
+	 * the function comment above) is cleared here too, alongside the
+	 * rest of the reinit, before the channel comes back up. */
+	dma_channel_disable(s->dma_periph, (dma_channel_enum)s->dma_channel);
+	dma_transfer_number_config(
+	    s->dma_periph, (dma_channel_enum)s->dma_channel, BRIDGE_ADC_STREAM_RING_SAMPLES);
+	dma_interrupt_flag_clear(s->dma_periph, (dma_channel_enum)s->dma_channel, DMA_INT_FLAG_FTF);
+
+	adc_flag_clear(ch->periph, ADC_FLAG_ROVF); /* 4. Clear ROVF bit of ADC_STAT. */
+	dma_channel_enable(s->dma_periph, (dma_channel_enum)s->dma_channel); /* 5. Set CHEN. */
+	adc_dma_mode_enable(ch->periph); /* 6. Set DMA bit of ADC_CTL1. */
+	adc_enable(ch->periph);          /* 7. Set ADCON bit of ADC_CTL1. */
+	for (volatile uint32_t stab = 0u; stab < 4096u; ++stab) {
+		/* 8. Wait T(setup) -- same bound stream_begin/adc_periph_init use. */
+	}
+	return adc_calibrate_bounded(ch->periph); /* ADCON edge above invalidated calibration. */
+}
+
 int bridge_hw_adc_stream_read(uint8_t   stream_id,
                               uint8_t   max_samples,
                               uint8_t  *got_samples,
@@ -249,6 +329,28 @@ int bridge_hw_adc_stream_read(uint8_t   stream_id,
 
 	adc_stream_state_t *s = &adc_streams[stream_id];
 	if (!s->in_use) return BRIDGE_HW_ERR_INVAL;
+
+	/* ROVF (routine-data overflow) recovery (#44) -- checked before
+	 * EITHER data plane below, raw or DSP-filtered: both draw from
+	 * this stream's DMA ring, and UM Rev1.2 17.4.12 (p.431-432) is
+	 * explicit that "[t]he ADC conversion will be stalled until the
+	 * ROVF bit is cleared" -- unrecovered, the write index freezes and
+	 * every subsequent poll answers STATUS_OK with zero samples,
+	 * forever, on both planes. */
+	const gd32_adc_ch_t *ch = &adc_channels_map[s->channel];
+	if (SET == adc_flag_get(ch->periph, ADC_FLAG_ROVF)) {
+		const bool     recal_ok = adc_stream_recover_rovf(s, ch);
+		const uint16_t w        = adc_stream_write_index(s);
+		s->read_idx             = w;
+		s->total_read           = s->lap_count * BRIDGE_ADC_STREAM_RING_SAMPLES + (uint32_t)w;
+		s->pump_raw_read        = s->total_read;
+		/* Same wire contract as the ring-overrun branch below
+		 * (docs/gd32-bridge-protocol.md §3.10): STATUS_BUSY, "poll
+		 * faster".  A failed recalibration is the harder failure --
+		 * report IO so the host doesn't keep polling a converter left
+		 * in an unproven state. */
+		return recal_ok ? BRIDGE_HW_ERR_BUSY : BRIDGE_HW_ERR_IO;
+	}
 
 	/* DSP data plane (#496): a bound FIR/IIR chain means the host reads
 	 * FILTERED samples the base-level pump produced in proc_ring -- NOT
