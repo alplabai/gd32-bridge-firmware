@@ -173,6 +173,63 @@ typedef struct {
  * sample + 12.5 ADCCK conversion ~= 7.0 us). */
 #define ADC_DEFAULT_SAMPLE_CYCLES 240u
 
+/* Handler-residency budget for one CMD_ADC_READ (#135).
+ *
+ * bridge_hw_adc_read serialises `samples x oversample_ratio` hardware
+ * conversions inside a transport ISR, and BOTH multipliers are settable
+ * over the wire.  On the HEALTHY path -- no timeout, STATUS_OK -- the
+ * wire-legal pair
+ *     CMD_ADC_CONFIGURE(channel=0, oversample_ratio=256, sample_cycles=638)
+ *     CMD_ADC_READ(channel=0, samples=8)
+ * occupied the SPI CS-EXTI handler at NVIC group priority 1 for ~37 ms.
+ * For that whole window I2C0_EV/I2C0_ER (group priority 2) cannot run;
+ * if the I2C side was addressed the bridge holds SCL low the entire time
+ * (clock stretching is enabled in bridge_transport_i2c_hw_init and no
+ * I2C timeout is configured anywhere), stalling the SHARED BRD_I2C bus
+ * and not just this bridge; and base level -- bridge_hw_dsp_pump() and
+ * ota_erase_tick() -- does not run at all.
+ *
+ * #17 bounds the FAULT path, where the converter is wedged.  This is the
+ * NOMINAL path: the operation completes correctly and #17's bound never
+ * fires, because it is roughly two orders of magnitude too loose to.
+ *
+ * The residency model, all of it sourced in this tree:
+ *   ADCCK   = HCLK / 6 = 216 MHz / 6 = 36 MHz (ADC_CLK_SYNC_HCLK_DIV6,
+ *             adc_periph_init)
+ *   one conversion = sample_cycles + 12.5 ADCCK  (the 12-bit figure this
+ *             header already quotes above: 240 + 12.5 at 36 MHz ~= 7.0 us)
+ *   one triggered sample with oversampling = ratio x that
+ *   total  = samples x floored_ratio x (sample_cycles + 12.5) / ADCCK
+ * Checked against the report: 8 x 256 x (638 + 12.5) / 36 MHz = 37.0 ms.
+ *
+ * Arithmetic is done in HALF ADCCK cycles so the 12.5 stays exact in
+ * integers: ADC_READ_CONV_HALF_CYCLES_12B is 25, and the budget converts
+ * to 2 x ADCCK x us / 1e6 half-cycles.
+ *
+ * 12.5 is used for EVERY resolution.  Lower widths convert in fewer
+ * cycles, so this over-estimates them -- deliberately: over-estimating
+ * can only reject a marginal read that would have fit, while
+ * under-estimating admits one that overruns, and 12.5 is the only
+ * conversion figure this tree actually sources.
+ *
+ * What 1 ms permits, given GD32_BRIDGE_ADC_MAX_SAMPLES == 8:
+ *   sample_cycles = 240 (default) -> oversample ratio up to 16
+ *   sample_cycles = 638 (max)     -> oversample ratio up to 4
+ *   sample_cycles = 2   (min)     -> the full 256, with room to spare
+ * So the budget constrains the PRODUCT, not either factor: 256x
+ * oversampling stays reachable, just not stacked on a 638-cycle window.
+ *
+ * The better fix is asynchronous reads -- trigger in the ISR, collect on
+ * a later poll, the shape ota_erase_tick() already uses -- but that lets
+ * CMD_ADC_READ answer STATUS_BUSY, which is a wire-contract change
+ * needing a matching alp-sdk host update.  This bound is the part that
+ * can land without one. */
+#define ADC_READ_ISR_BUDGET_US        1000u
+#define ADC_READ_CONV_HALF_CYCLES_12B 25u               /* 12.5 ADCCK, doubled */
+#define ADC_READ_ADCCK_HZ             (216000000u / 6u) /* ADC_CLK_SYNC_HCLK_DIV6 */
+#define ADC_READ_BUDGET_HALF_CYCLES \
+	((uint32_t)((2ull * ADC_READ_ADCCK_HZ * ADC_READ_ISR_BUDGET_US) / 1000000ull))
+
 /* #127 -- the one-suffix trap.  The vendor's clock selector in
  * system_gd32g5x3.c is
  *     #if !(defined(GD32G553XXX3) || defined(GD32G533XXX3))

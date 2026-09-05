@@ -135,6 +135,23 @@ adc_oversample_params(uint16_t ratio, bool *enable_out, uint16_t *ovsr_out, uint
 	*shift_out  = OVSCR_OVSS(log2); /* ADC_OVERSAMPLING_SHIFT_<log2>B */
 }
 
+/* The oversample ratio the HARDWARE actually runs for a channel: the
+ * cache floored to a power of two in [1, ADC_OVERSAMPLE_RATIO_MAX], which
+ * is what adc_oversample_params programs.  One helper so the residency
+ * budget (#135) and the EOC timeout bound cannot drift apart from each
+ * other or from the register value -- the EOC bound previously scaled by
+ * the CLAMPED cache rather than the floored one, so a ratio of 200 sized
+ * its bound for 200 while the converter ran 128. */
+static uint16_t adc_effective_ratio(uint8_t channel)
+{
+	bool     enable = false;
+	uint16_t ovsr   = 0u;
+	uint32_t shift  = 0u;
+
+	adc_oversample_params(adc_oversample_ratio_cache[channel], &enable, &ovsr, &shift);
+	return enable ? (uint16_t)(ovsr + 1u) : 1u;
+}
+
 /* Program a channel's cached resolution + oversample into its ADC.
  * The caller MUST have the converter disabled (DRES lives in CTL0 and
  * OVSAMPCTL only latches with ADCON==0 -- the vendor's own
@@ -317,6 +334,25 @@ int bridge_hw_adc_read(uint8_t channel, uint8_t samples, uint16_t *mv)
 		}
 	}
 
+	/* Residency budget (#135).  Bound the PRODUCT of the two host-settable
+     * multipliers -- and the sample window they multiply -- against an
+     * explicit ceiling on how long this may hold a transport ISR, BEFORE
+     * touching the converter or claiming it.  See
+     * ADC_READ_ISR_BUDGET_US in gd32_common.h for the model, the numbers
+     * it is derived from, and what the current 1 ms ceiling permits.
+     *
+     * Rejecting here rather than capping a factor is deliberate: silently
+     * halving a requested oversample ratio would return a reading whose
+     * noise floor is not what the caller asked for, with STATUS_OK and no
+     * way to tell. */
+	const uint32_t half_cycles_per_conv =
+	    (uint32_t)(2u * adc_sample_cycles_cache[channel]) + ADC_READ_CONV_HALF_CYCLES_12B;
+	const uint32_t residency_half_cycles =
+	    (uint32_t)samples * (uint32_t)adc_effective_ratio(channel) * half_cycles_per_conv;
+	if (residency_half_cycles > ADC_READ_BUDGET_HALF_CYCLES) {
+		return BRIDGE_HW_ERR_RANGE;
+	}
+
 	/* Claim the shared converter for the whole sequence below (#133).
      * The stream scan above only covers stream-vs-read; this is what
      * covers read-vs-read and read-vs-stream_begin across the CS-EXTI
@@ -371,11 +407,12 @@ int bridge_hw_adc_read(uint8_t channel, uint8_t samples, uint16_t *mv)
      * ~ratio x longer than the ~6.3 us un-oversampled case.  A fixed
      * 100k bound would false-timeout every legal high-ratio read and
      * needlessly recalibrate.  The floored-to-pow2 ratio is what the
-     * hardware actually runs; clamp the raw cache to [1,256] to match. */
-	uint32_t ovs_ratio = adc_oversample_ratio_cache[channel];
-	if (ovs_ratio < 1u) ovs_ratio = 1u;
-	if (ovs_ratio > ADC_OVERSAMPLE_RATIO_MAX) ovs_ratio = ADC_OVERSAMPLE_RATIO_MAX;
-	const uint32_t eoc_bound = 100000u * ovs_ratio;
+     * hardware actually runs, and adc_effective_ratio() is the single
+     * source for it -- shared with the #135 residency budget above, so
+     * the two cannot drift apart.  It previously scaled by the CLAMPED
+     * cache instead, so a requested ratio of 200 sized this bound for
+     * 200 while the converter ran 128. */
+	const uint32_t eoc_bound = 100000u * (uint32_t)adc_effective_ratio(channel);
 	for (uint8_t i = 0; i < samples; ++i) {
 		adc_software_trigger_enable(ch->periph, ADC_ROUTINE_CHANNEL);
 		uint32_t to = eoc_bound;
