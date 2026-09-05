@@ -45,6 +45,10 @@ typedef struct {
 	uint32_t gpio_y_port;
 	uint32_t gpio_y_pin;
 	uint32_t gpio_af;
+	bool     wide; /* true: 32-bit counter (TIMER1, TIMER4).
+	                * false: 16-bit counter (TIMER2, TIMER3) --
+	                * bridge_hw_qenc_read() must sign-extend from
+	                * int16_t instead of casting the raw uint32_t. */
 } gd32_qenc_t;
 
 /* PWM channel map element (table lives in pwm.c). */
