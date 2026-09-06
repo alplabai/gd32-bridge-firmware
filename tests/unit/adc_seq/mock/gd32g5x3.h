@@ -357,4 +357,36 @@ void       fft_init(fft_parameter_struct *fft_parameter);
 void       fft_calculation_start(void);
 FlagStatus fft_flag_get(uint32_t flag);
 
+/* ---- CMSIS core intrinsics -------------------------------------------- *
+ *
+ * hal/gd32/bridge_critical.h pulls "gd32g5x3.h" purely to reach these
+ * three, and hal/gd32/adc.c includes it for the #133 per-converter
+ * ownership interlock's test-and-set.  On the real part they lower to
+ * single MRS / CPSID i / MSR instructions; the vendor header gets them
+ * from core_cm33.h, which this mock does not model.
+ *
+ * Modelled as a no-op mask that always reads "interrupts were enabled".
+ * That is honest for this suite rather than a shortcut: the host test is
+ * single-threaded with no interrupt to mask, so what the interlock's
+ * critical section protects against cannot occur here.  What the suite
+ * DOES still exercise is the claim/release bookkeeping around it -- that
+ * every path which claims a converter also releases it, which is exactly
+ * the defect the #80 x #133 merge introduced and this file's build caught.
+ *
+ * If a future case needs to observe masking, give g_primask a real
+ * setter/getter here and assert on it; do not weaken bridge_critical.h. */
+static inline uint32_t __get_PRIMASK(void)
+{
+	return 0u;
+}
+
+static inline void __disable_irq(void)
+{
+}
+
+static inline void __set_PRIMASK(uint32_t primask)
+{
+	(void)primask;
+}
+
 #endif /* GD32_BRIDGE_MOCK_GD32G5X3_H */
