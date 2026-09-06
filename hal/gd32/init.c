@@ -4,21 +4,24 @@
  *
  * GD32G5x3 backend for the bridge HAL.  Selected by setting
  * BRIDGE_HAL_BACKEND=gd32 in firmware/gd32-bridge/CMakeLists.txt.  Links
- * against the GigaDevice firmware-library wrapper at
- * vendors/gd32_firmware_library/ (git submodule pointing at
- * https://github.com/alplabai/gd32g5x3-firmware-library, a verbatim
- * mirror of GD's v1.5.0 release).
+ * against the GigaDevice firmware-library wrapper.  This repo does NOT
+ * vendor that tree: pass -DGD32_VENDOR_DIR=<path> pointing at a checkout
+ * of alp-sdk's vendors/gd32_firmware_library/ (a verbatim mirror of GD's
+ * v1.5.0 release).  Left unset, the build falls back to
+ * ../../vendors/gd32_firmware_library resolved against this source tree
+ * -- the pre-split layout, when this tree was nested at
+ * <alp-sdk>/firmware/gd32-bridge/.  See README.md "Build".
  *
- * Status (this commit):
- *   The file exists and compiles against the GigaDevice library so
- *   the `BRIDGE_HAL_BACKEND=gd32` build path is exercisable end-to-
- *   end without any peripheral I/O.  Every hook below is a STUB
- *   returning BRIDGE_HW_ERR_NOTIMPL -- identical wire behaviour to
- *   the bridge_hw_stub.c default backend, but routed through this
- *   file when `gd32` is selected so subsequent commits can replace
- *   stubs with real bodies one peripheral at a time.
+ * Status:
+ *   The hooks below have real bodies -- selecting this backend drives
+ *   silicon.  The per-hook record that follows is the state AS LANDED,
+ *   not a plan: DONE, PARTIAL (defaults accepted, the rest refused) or
+ *   an unconditional sentinel where the SoM revision has no HW path.
+ *   Whatever a hook refuses returns BRIDGE_HW_ERR_NOTIMPL, which
+ *   reaches the wire as STATUS_NOSUPPORT (status_from_hw() in
+ *   src/protocol.c).
  *
- * Implementation order (planned, in increasing risk):
+ * Per-hook state, in the order the bodies landed (increasing risk):
  *
  *   1. RESET_REASON          -- DONE: RCU_RSTSCK decode + RSTFC clear.
  *   2. GPIO_READ / WRITE     -- DONE: 18-pad map (E1M IO8..IO35),
@@ -116,19 +119,18 @@
  *                               + one FFT block -> one filter + one FFT
  *                               stream at a time.
  *
- * Each follow-up commit replaces ONE hook's stub body with a real
- * implementation and updates this header comment + the CHANGELOG.
- * The HIL turn-on cadence is determined by maintainer access to the
- * V2N EVK; the structural skeleton landing today lets the rest of the
- * tree (host-side ZTESTs, the alp_*_* portable surfaces, the
- * docs/test-plan rows) gate against the real backend as soon as the
- * first hook flips from stub to real.
+ * A change that moves a hook between the states above updates this
+ * header comment in the same commit.  Bench cadence is bounded by
+ * maintainer access to the V2N EVK, so a hook can be code-complete
+ * here and still carry the `needs-silicon` label until validated --
+ * see docs/BENCH.md.
  *
  * Build assumptions:
  *   - arm-none-eabi-gcc on PATH (toolchain file
  *     firmware/gd32-bridge/toolchain/arm-none-eabi.cmake handles the rest).
- *   - vendors/gd32_firmware_library/upstream/ submodule initialised
- *     (`git submodule update --init --recursive` from the repo root).
+ *   - the GigaDevice firmware-library tree reachable, either via
+ *     -DGD32_VENDOR_DIR=<path> or the ../../vendors/gd32_firmware_library
+ *     fallback (see the note at the top of this file).
  *   - Cortex-M33 + Thumb + soft-float ABI (matches the GigaDevice
  *     library's compile flags).
  *
@@ -162,6 +164,14 @@
  * the bridge uses (TMU, ADC0..ADC3, DAC, TIMER0/7/19, SysTick, etc.).
  * NOTE: no DA9292 wiring exists on this SoM rev -- the fault nets
  * reach only the Renesas (P37/P36); see bridge_hw_da9292_status_cached. */
+/* Sampled at the head of bridge_hw_init (#127); see gd32_common.h for
+ * what reads them and why nothing acts on a mismatch yet.  Initialised to
+ * the value the constants ASSUME so a debugger attaching before
+ * bridge_hw_init has run does not read a spurious 0 and conclude the
+ * clock tree is broken. */
+uint32_t bridge_core_clock_hz      = PWM_TIMER_CLK_HZ;
+bool     bridge_core_clock_matches = true;
+
 void bridge_hw_init(void)
 {
 #if defined(BRIDGE_OTA_PARTITIONED) && defined(BRIDGE_APP_SLOT_BASE)
@@ -182,6 +192,15 @@ void bridge_hw_init(void)
 	__enable_irq();
 #endif
 
+	/* ORDERING (merge of #61's se_reset_init and #127's clock sample):
+     * se_reset_init() goes FIRST and that is load-bearing -- see its
+     * comment below on PC13 floating in ANALOG mode from reset.  The
+     * clock sample that follows is a pure register read with no side
+     * effects and derives nothing se_reset_init() needs (the SE reset is
+     * a GPIO push-pull level, with no clock-derived timing anywhere in
+     * hal/gd32/se_reset.c), so putting it second costs the #127 check
+     * nothing: nothing between these two statements consumes
+     * SystemCoreClock either. */
 	/* Secure-element reset (SE_RST = PC13): promote it to a released-
      * level push-pull output FIRST, ahead of every other peripheral
      * bring-up below.  PC13 has no entry in `gpio_pad_map` (see
@@ -204,6 +223,28 @@ void bridge_hw_init(void)
      * re-enables it harmlessly for the rest of port C's pads. */
 	rcu_periph_clock_enable(RCU_GPIOC);
 	se_reset_init();
+
+	/* #127: sample the clock the vendor's SystemInit() ACTUALLY left
+     * running, before anything derived from it is programmed.  Until this
+     * call the repo never referenced SystemCoreClock at all: every timing
+     * constant in gd32_common.h -- PWM_TIMER_CLK_HZ, PWM_TIMER_PRESCALER,
+     * BRIDGE_ADC_PACE_CLK_HZ, and the DWT "~4.63 ns LSB" claim in
+     * counter.c -- was asserted against a number no code checked, set by a
+     * SystemInit() that lives in another repository and whose variant is
+     * chosen by a wrapper this repo does not own.
+     *
+     * SystemCoreClockUpdate() re-derives the value from the live RCU
+     * registers rather than trusting the compile-time initialiser, so this
+     * is the one place the firmware can find out it is running on the
+     * wrong clock tree.  It is a pure register read plus arithmetic: no
+     * side effects, safe this early.
+     *
+     * The result is recorded, not acted on.  See the declarations in
+     * gd32_common.h for why refusing supervised outputs on a mismatch is
+     * a follow-up rather than part of this change. */
+	SystemCoreClockUpdate();
+	bridge_core_clock_hz      = SystemCoreClock;
+	bridge_core_clock_matches = (SystemCoreClock == PWM_TIMER_CLK_HZ);
 
 	/* Enable AHB2 clocks for every GPIO port the pad map references.
      * The chip's RCU keeps unused GPIO ports clock-gated to save
