@@ -45,9 +45,24 @@ message(STATUS "vendors/gd32_firmware_library/upstream: found GD32G5x3 firmware 
 file(GLOB _GD32_STDPER_SOURCES
     ${_GD32_STDPER}/Source/gd32g5x3_*.c)
 
-# No E1M-V2M101 HXTAL clock override here (alp-sdk's overrides/system_gd32g5x3.c):
-# this job compiles and links only, never runs on silicon, so the stock
-# vendor SystemInit() is fine.
+# No E1M-V2M101 clock override here (alp-sdk's overrides/system_gd32g5x3.c).
+#
+# THE ARTIFACT THIS WRAPPER PRODUCES IS NOT FLASHABLE (#127).  The stock
+# vendor system_gd32g5x3.c selects __SYSTEM_CLOCK_216M_PLL_HXTAL, and its
+# system_clock_216m_hxtal() body is
+#     if(0U == (RCU_CTL & RCU_CTL_HXTALSTB)){ while(1){ } }
+# -- no timeout escape, no fallback, HXTAL_STARTUP_TIMEOUT only 0x0FFFF.
+# HXTALSTB never sets on this SoM, so an image built this way spins there
+# forever and never reaches main(): SPI and I2C never come up and the board
+# looks bricked.  alp-sdk's override selects __SYSTEM_CLOCK_216M_PLL_IRC8M
+# instead, which is what the bench-flashed image actually runs on.
+#
+# That is acceptable HERE and only here: this job compiles and links, never
+# runs on silicon, and it exists to prove a register name, a bit width or a
+# type is right enough to build.  The consuming configure must therefore
+# pass -DBRIDGE_ALLOW_STOCK_SYSTEM_INIT=ON; without it CMakeLists.txt
+# fatal-errors rather than emit a hanging image, which is the whole point of
+# that guard.  Do not copy this omission into anything that gets flashed.
 set(_GD32_SYSTEM_SOURCES
     ${_GD32_CMSIS}/GD/GD32G5x3/Source/system_gd32g5x3.c
     ${_GD32_CMSIS}/GD/GD32G5x3/Source/GCC/startup_gd32g5x3.S)

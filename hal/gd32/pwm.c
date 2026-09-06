@@ -14,6 +14,7 @@
 #include "bridge_hw.h"
 #include "gd32g5x3.h"
 
+#include "bridge_critical.h"
 #include "gd32_common.h"
 
 /* ----------------------------------------------------------------- */
@@ -79,9 +80,43 @@ void pwm_timer_init(uint32_t periph)
 	ip.repetitioncounter = 0u;
 	timer_deinit(periph);
 	timer_init(periph, &ip);
+	/* Auto-reload shadow: TIMERx_CAR writes land in the preload register
+	 * only and transfer to the active reload at the next update event
+	 * (User Manual Rev1.2 p.575-576, Fig 23-5 / 23-7) instead of hitting
+	 * the live comparator mid-period -- see bridge_hw_pwm_set for the
+	 * glitch this prevents. */
+	timer_auto_reload_shadow_enable(periph);
 	timer_primary_output_config(periph, ENABLE);
 	timer_enable(periph);
 }
+
+/* #129: how a one-shot is armed, and why it needs tracking.
+ *
+ * Single-pulse mode halts the counter at the next update event, and that
+ * update RELOADS CNT to 0.  In PWM0 (output active while CNT < CHxCV)
+ * every CHxCV >= 1 therefore reads as active at CNT == 0, so the halted
+ * one-shot parks its pad at the ACTIVE level and stays there until some
+ * later bridge_hw_pwm_set -- the exact failure a one-shot exists to
+ * prevent.  No choice of ARR/CHxCV fixes that in PWM0: CHxCV == 0 emits
+ * no pulse at all, and any other value is active at CNT == 0.
+ *
+ * PWM1 inverts the comparison (inactive while CNT < CHxCV), so the same
+ * halt-at-CNT-0 leaves the pad INACTIVE.  The pulse is then the window
+ * between the compare match and the reload:
+ *     delay  = CHxCV ticks (pad inactive)
+ *     pulse  = ARR - CHxCV + 1 ticks (pad active)
+ * With CHxCV fixed at PWM_ONE_SHOT_DELAY_TICKS and ARR = pulse_us, that
+ * is a 1 us lead-in followed by exactly pulse_us of active output, then a
+ * clean return to idle.
+ *
+ * The mode is per-channel state that outlives the call, so it is tracked:
+ * bridge_hw_pwm_set restores PWM0 (alongside the SPM clear it already
+ * does) and bridge_hw_pwm_get has to invert its duty arithmetic while a
+ * channel is still in the one-shot mode, or it reports the lead-in as the
+ * pulse width. */
+#define PWM_ONE_SHOT_DELAY_TICKS 1u
+
+static volatile bool pwm_one_shot[PWM_CHANNEL_COUNT];
 
 /* Per-channel init.  Sets PWM mode 0 (output high while counter <
  * compare) and 0 duty -- HW pad sits low until the host issues a
@@ -104,7 +139,30 @@ void pwm_channel_init(const gd32_pwm_ch_t *ch)
 	timer_channel_output_config(ch->periph, ch->channel, &oc);
 	timer_channel_output_pulse_value_config(ch->periph, ch->channel, 0u);
 	timer_channel_output_mode_config(ch->periph, ch->channel, TIMER_OC_MODE_PWM0);
-	timer_channel_output_shadow_config(ch->periph, ch->channel, TIMER_OC_SHADOW_DISABLE);
+	/* Compare shadow: TIMERx_CHxCV writes land in the preload register
+	 * only and transfer to the active compare at the next update event
+	 * (User Manual Rev1.2 p.649, CH0COMSEN) instead of the live
+	 * comparator -- the manual permits leaving this disabled only in
+	 * single-pulse mode, and this channel also runs continuous PWM. */
+	timer_channel_output_shadow_config(ch->periph, ch->channel, TIMER_OC_SHADOW_ENABLE);
+	/* This function is the one place PWM0 is (re-)asserted from scratch,
+     * so it owns clearing the one-shot mode shadow (#129).  Both callers
+     * -- bridge_hw_init at boot and pwm_capture.c's full output-stage
+     * restore at capture end -- pass &pwm_channels[i], so recovering the
+     * index by pointer arithmetic keeps the invariant "hardware is in
+     * PWM0 <=> pwm_one_shot[] is false" true without either caller having
+     * to know the shadow exists.  Without this, a one-shot followed by a
+     * capture session would leave the flag set while the hardware was
+     * back in PWM0, and bridge_hw_pwm_get would invert its arithmetic
+     * against a channel that is no longer inverted.
+     *
+     * Note the mode write above is NOT affected by the compare preload
+     * just enabled: CHxCOMSEN preloads the compare VALUE only, and this
+     * tree sets no CTL1.CCPC anywhere, so OCxM takes effect immediately. */
+	const size_t idx = (size_t)(ch - pwm_channels);
+	if (idx < PWM_CHANNEL_COUNT) {
+		pwm_one_shot[idx] = false;
+	}
 }
 
 /* Sticky per-TIMER counter-alignment mode set by bridge_hw_pwm_configure.
@@ -117,12 +175,23 @@ void pwm_channel_init(const gd32_pwm_ch_t *ch)
  * period/duty and the ARR/compare ticks, because a center-aligned
  * counter runs 0->ARR->0 (period == 2*ARR ticks) where an edge-aligned
  * counter runs 0->ARR (period == ARR+1 ticks). */
-static uint8_t pwm_align_mode[2];
+/* `volatile` on both shadows (#134): each is written from one transport
+ * ISR and read from the other, at NVIC group priorities 1 and 2, so the
+ * compiler has no reason to reload either across a call.  Today nothing
+ * exposes the miss because the build sets no -O at all (#26) -- that is
+ * luck, not design, and PR #106 pins -Os. */
+static volatile uint8_t pwm_align_mode[2];
 
 /* TIMER base -> pwm_align_mode index. */
 static uint8_t pwm_timer_index(uint32_t periph)
 {
-	return (periph == TIMER0) ? 0u : 1u;
+	/* The ternary's operands are the unsigned-int constants 0u/1u
+	 * (usual arithmetic conversions promote the whole expression to
+	 * unsigned int before the narrowing return), so -Wconversion can't
+	 * see that only 0 or 1 ever reaches this uint8_t return. Both fit;
+	 * the cast is a no-op at runtime, added only to satisfy the warning
+	 * (#109 TODO). */
+	return (uint8_t)((periph == TIMER0) ? 0u : 1u);
 }
 
 int bridge_hw_pwm_set(uint8_t channel, uint32_t period_ns, uint32_t duty_ns)
@@ -135,6 +204,17 @@ int bridge_hw_pwm_set(uint8_t channel, uint32_t period_ns, uint32_t duty_ns)
      * returns the channel (and any other channels on the same timer)
      * to continuous output. */
 	timer_single_pulse_mode_config(pwm_channels[channel].periph, TIMER_SP_MODE_REPETITIVE);
+	/* ...and restore PWM0 if that one-shot also left the channel in the
+     * inverted compare mode it needs to return the pad to idle (#129).
+     * Same contract clause as the SPM clear above: a PWM_SET returns the
+     * channel to continuous output, which has to include the sense of the
+     * comparison, not just the halt behaviour.  Unconditional rather than
+     * guarded on pwm_one_shot[]: re-asserting the mode a channel is
+     * already in is a plain register write with no edge, and it also
+     * repairs a channel left in PWM1 by anything this array did not see. */
+	timer_channel_output_mode_config(
+	    pwm_channels[channel].periph, pwm_channels[channel].channel, TIMER_OC_MODE_PWM0);
+	pwm_one_shot[channel] = false;
 
 	/* Round period + duty to whole microseconds (the timer tick). */
 	uint32_t period_us = period_ns / PWM_TIMER_TICK_NS;
@@ -142,6 +222,12 @@ int bridge_hw_pwm_set(uint8_t channel, uint32_t period_ns, uint32_t duty_ns)
 	if (period_us == 0u) return BRIDGE_HW_ERR_RANGE;
 
 	const gd32_pwm_ch_t *ch = &pwm_channels[channel];
+
+	/* Snapshot CEN before the write block below decides whether to
+	 * force a software update event.  Read here, before anything in
+	 * this function touches CTL0, so it reflects the timer's state as
+	 * this call found it. */
+	const bool was_running = (TIMER_CTL0(ch->periph) & (uint32_t)TIMER_CTL0_CEN) != 0u;
 
 	/* Convert commanded period/duty to ARR + compare, honouring the
 	 * timer's configured alignment (bridge_hw_pwm_configure).  The
@@ -168,10 +254,67 @@ int bridge_hw_pwm_set(uint8_t channel, uint32_t period_ns, uint32_t duty_ns)
 		cmp = half_duty;
 	}
 
+	/* cmp must fit the 16-bit CHxCV.  The edge-aligned branch above
+	 * clamps period_us but not the resulting compare, so a 100 %-duty
+	 * request at the clamped max period (cmp == PWM_TIMER_ARR_MAX + 1,
+	 * i.e. 65536) would otherwise truncate to 0 in CHxCV and park the
+	 * pad at the complementary rail while still answering STATUS_OK
+	 * (#16).  Reject rather than silently honour a different duty than
+	 * commanded -- bridge_hw_pwm_get reads the live registers back for a
+	 * host that wants to poll what IS running instead. The
+	 * centre-aligned branch above already keeps half_duty <=
+	 * PWM_TIMER_ARR_MAX so this never trips there; the guard lives at
+	 * this single write site so neither branch can reintroduce the
+	 * truncation. */
+	if (cmp > PWM_TIMER_ARR_MAX) return BRIDGE_HW_ERR_RANGE;
+
 	/* Updates ALL channels of the same timer -- the contract documents
-	 * this shared-ARR constraint. */
+	 * this shared-ARR constraint.  CHxCOMSEN + ARSE are enabled
+	 * (pwm_channel_init / pwm_timer_init, #43) so the two writes below
+	 * land in the preload register only and transfer to the live
+	 * comparator at this timer's own next update event (User Manual
+	 * Rev1.2 p.575-576 Fig 23-5/23-7 auto-reload shadow timing; p.649
+	 * CH0COMSEN).  That is exactly the glitch-free behaviour #43 asked
+	 * for, and on a channel already running cleanly mid-period it is
+	 * also the ONLY acceptable behaviour: forcing a software update
+	 * event here resets CNT to 0 (p.645) and restarts the period on
+	 * every single PWM_SET call, and because ARR/CTL0/CEN are
+	 * timer-wide it re-phases every sibling channel on the timer too --
+	 * a guaranteed full-period glitch strictly worse than the rare
+	 * runt/stretch #43 set out to fix (PR #82 review).
+	 *
+	 * The one case that genuinely needs a forced transfer is #8's
+	 * recovery path: a prior bridge_hw_pwm_single_pulse leaves the
+	 * timer HALTED -- hardware clears CEN at the one-shot's own update
+	 * event (p.617-618) -- with no future overflow ever pending to
+	 * promote the shadow.  was_running (snapshotted above, before this
+	 * function's own SPM clear or these writes could change anything)
+	 * distinguishes the two: force UPG only when the timer was NOT
+	 * running, i.e. exactly the halted-by-single-pulse case.  (SPM
+	 * itself isn't checked here as a second signal: the SPM clear a few
+	 * lines above already runs unconditionally on every call, so by
+	 * this point SPM always reads REPETITIVE regardless of the prior
+	 * state -- CEN is the one bit that still reflects how this call
+	 * found the timer.)
+	 *
+	 * Gating this couples to hal/gd32/pwm_capture.c: it can no longer
+	 * infer promotion from a raw TIMER_CAR read (ambiguous once a
+	 * second write lands before the first is confirmed promoted, #82
+	 * review round 2), so this call hands the outcome over explicitly
+	 * via pwm_car_shadow_defer/_commit below rather than leaving
+	 * pwm_capture.c to reconstruct it after the fact. */
 	timer_autoreload_value_config(ch->periph, arr);
 	timer_channel_output_pulse_value_config(ch->periph, ch->channel, cmp);
+	if (was_running) {
+		pwm_car_shadow_defer(ch->periph, arr);
+	} else {
+		/* #89: on a sync-master timer this also fires TRGO0, glitching a slave synced off it. */
+		timer_event_software_generate(ch->periph, TIMER_EVENT_SRC_UPG);
+		pwm_car_shadow_commit(ch->periph, arr);
+	}
+	timer_enable(ch->periph); /* idempotent if already running; re-arms
+	                            * CEN after a prior single-pulse left it
+	                            * clear (#8) */
 	return BRIDGE_HW_OK;
 }
 
@@ -190,8 +333,8 @@ int bridge_hw_pwm_get(uint8_t channel, uint32_t *period_ns, uint32_t *duty_ns)
      * timer: a PWM_SET on a sibling channel moves this channel's
      * reported period too) and the boot default (65.536 ms period,
      * 0 duty) before the first PWM_SET.  CHxCV can legitimately read
-     * ARR + 1 (single-pulse programs compare past the period for a
-     * full-width pulse); clamp so duty never reports > period.
+     * ARR + 1 (a pre-#129 single-pulse programmed compare past the
+     * period); clamp so duty never reports > period.
      *
      * The tick->ns conversion mirrors bridge_hw_pwm_set's alignment
      * math: edge-aligned period is CAR+1 ticks, center-aligned is
@@ -201,6 +344,18 @@ int bridge_hw_pwm_get(uint8_t channel, uint32_t *period_ns, uint32_t *duty_ns)
 	const uint32_t car = TIMER_CAR(ch->periph) & PWM_TIMER_ARR_MAX;
 	uint32_t       cv  = timer_channel_capture_value_register_read(ch->periph, ch->channel);
 	if (cv > car + 1u) cv = car + 1u;
+	if (pwm_one_shot[channel]) {
+		/* One-shot channels sit in PWM1, where CHxCV is the INACTIVE
+         * lead-in and the active width is CAR - CHxCV + 1 (#129).
+         * Reading CHxCV as high-time here would report a 1 us pulse for
+         * every one-shot regardless of what was commanded.  One-shots are
+         * always edge-aligned -- bridge_hw_pwm_single_pulse refuses a
+         * center-aligned timer outright -- so there is no center variant
+         * to handle. */
+		*period_ns = (car + 1u) * PWM_TIMER_TICK_NS;
+		*duty_ns   = (car - cv + 1u) * PWM_TIMER_TICK_NS;
+		return BRIDGE_HW_OK;
+	}
 	if (pwm_align_mode[pwm_timer_index(ch->periph)] == 0u) {
 		*period_ns = (car + 1u) * PWM_TIMER_TICK_NS;
 		*duty_ns   = cv * PWM_TIMER_TICK_NS;
@@ -272,15 +427,51 @@ int bridge_hw_pwm_configure(uint8_t  channel,
 		TIMER_COUNTER_CENTER_DOWN, /* 2: center-down   */
 		TIMER_COUNTER_CENTER_BOTH, /* 3: center-both   */
 	};
-	const bool was_running = (TIMER_CTL0(ch->periph) & (uint32_t)TIMER_CTL0_CEN) != 0u;
+	/* #134: this whole block is one critical section, and the shadow is
+     * published INSIDE it.
+     *
+     * The read-modify-write below touches the WHOLE of TIMER_CTL0 to edit
+     * one field, and CEN (bit 0) and SPM (bit 3) live in that same
+     * register -- written by bridge_hw_pwm_set and
+     * bridge_hw_pwm_single_pulse, which reach this timer from the OTHER
+     * transport's ISR.  Unprotected, this happened: I2C0_EV (priority 2)
+     * snapshots `ctl0` with CEN = 0 and SPM = 0; the SPI CS-EXTI handler
+     * (priority 1) pre-empts and runs a single-pulse, setting SPM and
+     * CEN; this side resumes and writes its stale word back, clearing
+     * BOTH -- the one-shot never fires and its caller was told
+     * BRIDGE_HW_OK.
+     *
+     * Publishing pwm_align_mode[] inside the section closes the second
+     * half: it used to be written AFTER the hardware it describes, so a
+     * pre-empting single_pulse could read a shadow saying "edge-aligned"
+     * off a timer already switched to center-aligned and pass a guard it
+     * should have failed.  Inside the section a pre-empting caller sees
+     * either the old alignment consistently or the new one, never a
+     * disagreement.
+     *
+     * The section covers a disable, one RMW, an enable and a store --
+     * short enough for the CS-EXTI handler's deadline (bridge_critical.h).
+     *
+     * RESIDUAL, deliberately not fixed here: the REVERSE direction is
+     * still open.  If bridge_hw_pwm_configure is the one reached from
+     * CS-EXTI (priority 1) and bridge_hw_pwm_single_pulse from I2C0_EV
+     * (priority 2), configure pre-empts single_pulse mid-sequence --
+     * between its SPM write and its timer_enable -- and single_pulse then
+     * resumes and enables a one-shot whose alignment guard was checked
+     * against the alignment configure has since changed.  Closing that
+     * needs single_pulse's own register sequence to become a section too,
+     * which lands squarely in open PR #82's rewrite of that function.
+     * Tracked under #19. */
+	const uint32_t sect        = bridge_irq_lock();
+	const bool     was_running = (TIMER_CTL0(ch->periph) & (uint32_t)TIMER_CTL0_CEN) != 0u;
 	timer_disable(ch->periph);
 	uint32_t ctl0 = TIMER_CTL0(ch->periph);
 	ctl0 &= ~(uint32_t)TIMER_CTL0_CAM;
 	ctl0 |= cam_map[align_mode];
 	TIMER_CTL0(ch->periph) = ctl0;
 	if (was_running) timer_enable(ch->periph);
-
 	pwm_align_mode[idx] = align_mode;
+	bridge_irq_unlock(sect);
 	return BRIDGE_HW_OK;
 }
 
@@ -300,25 +491,73 @@ int bridge_hw_pwm_single_pulse(uint8_t channel, uint32_t pulse_ns)
 	 * the host must set align_mode back to edge (0) first. */
 	if (pwm_align_mode[pwm_timer_index(ch->periph)] != 0u) return BRIDGE_HW_ERR_NOTIMPL;
 
-	uint32_t pulse_us = pulse_ns / PWM_TIMER_TICK_NS;
+	const uint32_t pulse_us = pulse_ns / PWM_TIMER_TICK_NS;
 	if (pulse_us == 0u) return BRIDGE_HW_ERR_RANGE;
-	if (pulse_us > PWM_TIMER_ARR_MAX + 1u) pulse_us = PWM_TIMER_ARR_MAX + 1u;
+	/* ARR is the FULL one-shot window (lead-in + pulse) and it is a
+     * 16-bit register, so pulse_us itself must fit: the widest one-shot
+     * this timer can emit is PWM_TIMER_ARR_MAX us.  The old code clamped
+     * silently to PWM_TIMER_ARR_MAX + 1 and still answered STATUS_OK --
+     * success for a pulse it did not emit (#16).  Refuse instead: a
+     * caller asking for 70 ms needs to be told, not to find out on a
+     * scope. */
+	if (pulse_us > PWM_TIMER_ARR_MAX) return BRIDGE_HW_ERR_RANGE;
 
-	/* Reset the timer counter so the pulse starts from t=0 then
-     * program ARR = pulse_us (counts up; the channel output stays
-     * high until the counter reaches the compare value).  Setting
-     * compare = ARR + 1 keeps the output high through the entire
-     * period so the pulse width matches `pulse_us`.  After ARR the
-     * SP=SINGLE bit halts the timer until the next bridge_hw_pwm_set
-     * or another bridge_hw_pwm_single_pulse re-arms it. */
+	/* Halt the counter before reprogramming.  A prior one-shot already
+     * left CEN clear, but a running continuous PWM has not, and
+     * rewriting OCxM/ARR/CHxCV underneath a live counter can emit a runt
+     * edge on the pad on the way into the one-shot. */
+	timer_disable(ch->periph);
+
+	/* PWM1 -- inactive while CNT < CHxCV -- is what makes this a PULSE
+     * rather than a latch (#129); see the PWM_ONE_SHOT_DELAY_TICKS
+     * comment above for the full argument.  Order is load-bearing: mode
+     * and values are programmed while the counter is stopped, the
+     * preload is transferred, SPM is armed, and only then is the counter
+     * released. */
+	timer_channel_output_mode_config(ch->periph, ch->channel, TIMER_OC_MODE_PWM1);
 	timer_counter_value_config(ch->periph, 0u);
-	timer_autoreload_value_config(ch->periph, (uint32_t)(pulse_us - 1u));
-	timer_channel_output_pulse_value_config(ch->periph, ch->channel, pulse_us);
+	timer_autoreload_value_config(ch->periph, pulse_us);
+	timer_channel_output_pulse_value_config(ch->periph, ch->channel, PWM_ONE_SHOT_DELAY_TICKS);
+	pwm_one_shot[channel] = true;
+
+	/* CHxCOMSEN + ARSE are enabled for every channel/timer
+	 * (pwm_channel_init / pwm_timer_init, #43) so the two writes above
+	 * land in the preload register only -- the counter still compares
+	 * against whatever was active before this call until an update
+	 * event transfers them (User Manual Rev1.2 p.575-576, Fig 23-5 /
+	 * 23-7).  Single-pulse mode's OWN "next update event" is the one
+	 * that halts CEN at the END of the pulse (p.617-618), so without
+	 * forcing one here the pulse would fire using the STALE values left
+	 * by whatever ran on this timer before it, not the ones just
+	 * written.  Force the transfer now, before arming -- it also
+	 * re-seats CNT to 0, idempotent with the reset above.
+	 *
+	 * This is what makes the #129 PWM1 rewrite above WORK on this
+	 * branch: on the pre-merge dev the compare/auto-reload preload was
+	 * disabled, so those writes were immediate and needed no UPG.  The
+	 * preload this branch enables is exactly why the UPG is mandatory
+	 * now -- the two changes are not independent. */
+	/* #89: on a sync-master timer this also fires TRGO0, glitching a slave synced off it. */
+	timer_event_software_generate(ch->periph, TIMER_EVENT_SRC_UPG);
+	/* This promotion is synchronous with the forced UPG above -- tell
+	 * pwm_capture.c's shadow mirror directly instead of leaving it to
+	 * infer promotion from TIMER_FLAG_UP (#82 review round 2).
+	 *
+	 * The mirrored CAR is `pulse_us`, NOT `pulse_us - 1`: the #129
+	 * rewrite changed ARR from `pulse_us - 1` (PWM0, compare past the
+	 * period) to `pulse_us` (PWM1, lead-in + pulse).  Mirroring the old
+	 * value here would leave pwm_capture.c's shadow one tick short of
+	 * the live auto-reload after every one-shot. */
+	pwm_car_shadow_commit(ch->periph, pulse_us);
+	/* SPM is timer-wide (TIMERx_CTL0.SPM), not per-channel, so this also
+     * arms every sibling channel on this timer for the same one-shot
+     * halt -- a running sibling gets silently re-perioded and stopped.
+     * Pre-existing, out of scope here; tracked as #87. */
 	timer_single_pulse_mode_config(ch->periph, TIMER_SP_MODE_SINGLE);
 	timer_enable(ch->periph);
 
-	/* A follow-up bridge_hw_pwm_get reads CAR/CHxCV directly and
-     * reports duty == period for the one-shot (compare sits past the
-     * period so the pulse spans the full window). */
+	/* A follow-up bridge_hw_pwm_get reports the PULSE width, not the
+     * lead-in: it inverts its duty arithmetic while pwm_one_shot[] is set
+     * for the channel. */
 	return BRIDGE_HW_OK;
 }

@@ -66,16 +66,51 @@ set(TEST_FLAGS -std=c11 -Wall -Wextra -Werror)
 # The flash read/program seams are redirected into a host buffer by the weak
 # ota_fmc_* overrides inside the test source, so no raw 32-bit flash address is
 # ever dereferenced on a 64-bit host.
-add_executable(test_ota
-    ota/src/test_ota.c
-    ${FW}/src/ota.c
-    ${FW}/src/crc32.c
-)
-target_include_directories(test_ota PRIVATE ${FW}/src ${FW}/hal)
-target_compile_definitions(test_ota PRIVATE BRIDGE_OTA_PARTITIONED)
-target_compile_options(test_ota PRIVATE ${TEST_FLAGS})
-target_link_libraries(test_ota PRIVATE ztest_shim)
-add_test(NAME ota COMMAND test_ota)
+#
+# Built TWICE off the same source (#3): ota.c derives the compile-time
+# OTA_RUNNING_SLOT from -DBRIDGE_APP_SLOT_BASE (see ota.c), and that
+# derivation is only exercised for the value it is actually built with --
+# an A-resident-only test build would never compile the OTA_SLOT_B_BASE
+# arm of the #elif chain.
+#
+# The two bases below are PARSED out of src/ota_layout.h -- the same
+# header ota.c includes -- rather than hand-copied, so this copy cannot
+# drift silently against it.  Two other independent copies of the same
+# numbers remain and are NOT derived here: the top-level CMakeLists.txt's
+# gd32-bridge-slot-a / gd32-bridge-slot-b BRIDGE_APP_SLOT_BASE compile
+# defines (:197,202) and APP_SLOT_BASE linker-script sets (:187,190) --
+# out of scope for this fix, and that file is explicitly not to be edited
+# here -- and OTA_SLOT_SIZE's separate copy in tools/gen_ota_metadata.py:34.
+# A mismatch in either of those still fails loudly: ota.c's own #error
+# chain rejects any BRIDGE_APP_SLOT_BASE that doesn't equal
+# OTA_SLOT_A_BASE/OTA_SLOT_B_BASE from the header.
+set(_OTA_LAYOUT_H ${FW}/src/ota_layout.h)
+file(STRINGS ${_OTA_LAYOUT_H} _OTA_SLOT_A_BASE_LINE
+     REGEX "^#define[ \t]+OTA_SLOT_A_BASE[ \t]+0x[0-9A-Fa-f]+u")
+file(STRINGS ${_OTA_LAYOUT_H} _OTA_SLOT_B_BASE_LINE
+     REGEX "^#define[ \t]+OTA_SLOT_B_BASE[ \t]+0x[0-9A-Fa-f]+u")
+string(REGEX MATCH "0x[0-9A-Fa-f]+u" _OTA_SLOT_A_BASE "${_OTA_SLOT_A_BASE_LINE}")
+string(REGEX MATCH "0x[0-9A-Fa-f]+u" _OTA_SLOT_B_BASE "${_OTA_SLOT_B_BASE_LINE}")
+if(NOT _OTA_SLOT_A_BASE OR NOT _OTA_SLOT_B_BASE)
+    message(FATAL_ERROR
+        "tests/unit/CMakeLists.txt: could not parse OTA_SLOT_A_BASE / "
+        "OTA_SLOT_B_BASE out of ${_OTA_LAYOUT_H} -- has the #define layout changed?")
+endif()
+foreach(_slot A B)
+    string(TOLOWER "${_slot}" _slot_lc)
+    set(_tgt test_ota_slot_${_slot_lc})
+    add_executable(${_tgt}
+        ota/src/test_ota.c
+        ${FW}/src/ota.c
+        ${FW}/src/crc32.c
+    )
+    target_include_directories(${_tgt} PRIVATE ${FW}/src ${FW}/hal)
+    target_compile_definitions(${_tgt} PRIVATE
+        BRIDGE_OTA_PARTITIONED BRIDGE_APP_SLOT_BASE=${_OTA_SLOT_${_slot}_BASE})
+    target_compile_options(${_tgt} PRIVATE ${TEST_FLAGS})
+    target_link_libraries(${_tgt} PRIVATE ztest_shim)
+    add_test(NAME ota_slot_${_slot_lc} COMMAND ${_tgt})
+endforeach()
 
 # --- crc32: table-driven CRC-32 pinned bit-identical to bit-serial ---------
 add_executable(test_crc32
@@ -130,6 +165,16 @@ target_compile_options(test_fault_diag PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_fault_diag PRIVATE ztest_shim)
 add_test(NAME fault_diag COMMAND test_fault_diag)
 
+# --- fmc_ota_guard: the #79 address guard, header-only, no GD32 register
+# dependency (see hal/fmc_ota_guard.h) -------------------------------------
+add_executable(test_fmc_ota_guard fmc_ota_guard/src/test_fmc_ota_guard.c)
+target_include_directories(test_fmc_ota_guard PRIVATE ${FW}/src ${FW}/hal)
+target_compile_definitions(test_fmc_ota_guard PRIVATE
+    BRIDGE_OTA_PARTITIONED BRIDGE_APP_SLOT_BASE=0x0800A000u)
+target_compile_options(test_fmc_ota_guard PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_fmc_ota_guard PRIVATE ztest_shim)
+add_test(NAME fmc_ota_guard COMMAND test_fmc_ota_guard)
+
 # --- transport_i2c: transport + dispatcher over the stub HAL ---------------
 add_executable(test_transport_i2c
     transport_i2c/src/test_transport_i2c.c
@@ -168,6 +213,25 @@ target_include_directories(test_protocol PRIVATE ${FW}/src ${FW}/hal ${CMAKE_CUR
 target_compile_options(test_protocol PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_protocol PRIVATE ztest_shim)
 add_test(NAME protocol COMMAND test_protocol)
+
+# --- adc_dsp: chain pool + chain_bind capability validation (#69, #70) -----
+#
+# Links ONLY hal/gd32/adc_dsp_chain.c -- the chain pool + bind-time validator
+# split out of hal/gd32/adc_stream.c specifically because it touches ZERO
+# GD32 vendor symbols (no "gd32g5x3.h").  adc_stream.c itself is NOT linked
+# here: it pulls the vendor header for the FAC/FFT register-level pump, which
+# this suite cannot exercise on a host.  Instead this target supplies its own
+# definition of adc_streams[] (test_adc_dsp.c) so cases can drive `in_use` /
+# `dsp_bound` / `dsp_terminal` directly -- the same "fake state instead of a
+# real HAL" trade the `protocol` suite above makes, for the same reason.
+add_executable(test_adc_dsp
+    adc_dsp/src/test_adc_dsp.c
+    ${FW}/hal/gd32/adc_dsp_chain.c
+)
+target_include_directories(test_adc_dsp PRIVATE ${FW}/hal ${FW}/hal/gd32)
+target_compile_options(test_adc_dsp PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_adc_dsp PRIVATE ztest_shim)
+add_test(NAME adc_dsp COMMAND test_adc_dsp)
 
 # --- protocol_vectors: the firmware-side consumer of tests/protocol_vectors.txt
 #     CONTRIBUTING.md claims (#31 finding E5) -------------------------------
