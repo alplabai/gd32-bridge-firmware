@@ -165,6 +165,72 @@ target_compile_options(test_fault_diag PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_fault_diag PRIVATE ztest_shim)
 add_test(NAME fault_diag COMMAND test_fault_diag)
 
+# --- timer_sync_iti: (slave, master) -> SYSCFG ITIx router code (gh#42) ----
+#
+# hal/gd32/timer_sync.c itself needs the Cortex-M33 vendor register headers
+# and is compiled by no CI job (issue #77).  The lookup table has no such
+# dependency, so it lives in its own translation unit (hal/gd32/
+# timer_sync_iti.c, no gd32g5x3.h include) purely so it can be linked and
+# tested here.
+add_executable(test_timer_sync_iti
+    timer_sync_iti/src/test_timer_sync_iti.c
+    ${FW}/hal/gd32/timer_sync_iti.c
+)
+target_include_directories(test_timer_sync_iti PRIVATE ${FW}/hal/gd32)
+target_compile_options(test_timer_sync_iti PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_timer_sync_iti PRIVATE ztest_shim)
+add_test(NAME timer_sync_iti COMMAND test_timer_sync_iti)
+
+# --- tmu_q31_scale: Q31 FACTOR band-selection logic (gd32-bridge#46) -------
+#
+# hal/gd32/tmu.c itself needs the Cortex-M33 vendor register headers and is
+# compiled by no CI job (issue #77).  The FACTOR band arithmetic has no such
+# dependency, so it lives in its own translation unit (hal/gd32/tmu_q31_scale.c,
+# no gd32g5x3.h include) purely so it can be linked and tested here.
+add_executable(test_tmu_q31_scale
+    tmu_q31_scale/src/test_tmu_q31_scale.c
+    ${FW}/hal/gd32/tmu_q31_scale.c
+)
+target_include_directories(test_tmu_q31_scale PRIVATE ${FW}/hal/gd32)
+target_compile_options(test_tmu_q31_scale PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_tmu_q31_scale PRIVATE ztest_shim)
+add_test(NAME tmu_q31_scale COMMAND test_tmu_q31_scale)
+
+# --- adc_seq: GD32 ADC register-sequence gate -------------------------------
+#
+# #77 means no CI job compiles hal/gd32/*.c -- the stub build above links
+# only hal/bridge_hw_stub.c.  This target links the REAL hal/gd32/adc.c +
+# hal/gd32/adc_stream.c, unmodified, against a hand-written mock of the GD32
+# vendor header (adc_seq/mock/gd32g5x3.h) so the two register sequences
+# PR #80's review asked for by name -- ROVF cleared before adc_enable, and
+# calibration run after every adc_enable on the request path -- are pinned
+# by a real assertion instead of a diff read.  See adc_seq/mock/gd32g5x3.h's
+# top comment for exactly what the mock does and does not model.
+add_executable(test_adc_seq
+    adc_seq/src/test_adc_seq.c
+    adc_seq/mock/mock_gd32.c
+    ${FW}/hal/gd32/adc.c
+    ${FW}/hal/gd32/adc_stream.c
+    # adc_dsp_chain.c carries the chain pool + adc_dsp_chain_p1_capable()
+    # that adc_stream.c's pump-side config functions call.  It was split
+    # out of adc_stream.c by #69/#70 AFTER this target was written, so the
+    # original two-file list left adc_dsp_chains / adc_dsp_chain_release /
+    # adc_dsp_chain_p1_capable undefined at link once this branch merged
+    # dev.  Vendor-header-free by design, so it needs no mock.
+    ${FW}/hal/gd32/adc_dsp_chain.c
+)
+target_include_directories(test_adc_seq PRIVATE
+    ${FW}/hal
+    ${FW}/hal/gd32
+    ${CMAKE_CURRENT_SOURCE_DIR}/adc_seq/mock
+)
+target_compile_options(test_adc_seq PRIVATE ${TEST_FLAGS})
+# adc_stream.c's FFT-window math (__builtin_cosf/sqrtf) lowers to real libm
+# calls on a host compiler with no -ffreestanding; the M33 build never needs
+# this because CMSIS-DSP/arm-none-eabi's libm supplies them implicitly.
+target_link_libraries(test_adc_seq PRIVATE ztest_shim m)
+add_test(NAME adc_seq COMMAND test_adc_seq)
+
 # --- fmc_ota_guard: the #79 address guard, header-only, no GD32 register
 # dependency (see hal/fmc_ota_guard.h) -------------------------------------
 add_executable(test_fmc_ota_guard fmc_ota_guard/src/test_fmc_ota_guard.c)
