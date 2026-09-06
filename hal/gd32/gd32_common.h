@@ -173,6 +173,80 @@ typedef struct {
  * sample + 12.5 ADCCK conversion ~= 7.0 us). */
 #define ADC_DEFAULT_SAMPLE_CYCLES 240u
 
+/* Handler-residency budget for one CMD_ADC_READ (#135).
+ *
+ * bridge_hw_adc_read serialises `samples x oversample_ratio` hardware
+ * conversions inside a transport ISR, and BOTH multipliers are settable
+ * over the wire.  On the HEALTHY path -- no timeout, STATUS_OK -- the
+ * wire-legal pair
+ *     CMD_ADC_CONFIGURE(channel=0, oversample_ratio=256, sample_cycles=638)
+ *     CMD_ADC_READ(channel=0, samples=8)
+ * occupied the SPI CS-EXTI handler at NVIC group priority 1 for ~37 ms.
+ * For that whole window I2C0_EV/I2C0_ER (group priority 2) cannot run;
+ * if the I2C side was addressed the bridge holds SCL low the entire time
+ * (clock stretching is enabled in bridge_transport_i2c_hw_init and no
+ * I2C timeout is configured anywhere), stalling the SHARED BRD_I2C bus
+ * and not just this bridge; and base level -- bridge_hw_dsp_pump() and
+ * ota_erase_tick() -- does not run at all.
+ *
+ * #17 bounds the FAULT path, where the converter is wedged.  This is the
+ * NOMINAL path: the operation completes correctly and #17's bound never
+ * fires, because it is roughly two orders of magnitude too loose to.
+ *
+ * The residency model, all of it sourced in this tree:
+ *   ADCCK   = HCLK / 6 = 216 MHz / 6 = 36 MHz (ADC_CLK_SYNC_HCLK_DIV6,
+ *             adc_periph_init)
+ *   one conversion = sample_cycles + 12.5 ADCCK  (the 12-bit figure this
+ *             header already quotes above: 240 + 12.5 at 36 MHz ~= 7.0 us)
+ *   one triggered sample with oversampling = ratio x that
+ *   total  = samples x floored_ratio x (sample_cycles + 12.5) / ADCCK
+ * Checked against the report: 8 x 256 x (638 + 12.5) / 36 MHz = 37.0 ms.
+ *
+ * Arithmetic is done in HALF ADCCK cycles so the 12.5 stays exact in
+ * integers: ADC_READ_CONV_HALF_CYCLES_12B is 25, and the budget converts
+ * to 2 x ADCCK x us / 1e6 half-cycles.
+ *
+ * 12.5 is used for EVERY resolution.  Lower widths convert in fewer
+ * cycles, so this over-estimates them -- deliberately: over-estimating
+ * can only reject a marginal read that would have fit, while
+ * under-estimating admits one that overruns, and 12.5 is the only
+ * conversion figure this tree actually sources.
+ *
+ * What 1 ms permits, given GD32_BRIDGE_ADC_MAX_SAMPLES == 8:
+ *   sample_cycles = 240 (default) -> oversample ratio up to 16
+ *   sample_cycles = 638 (max)     -> oversample ratio up to 4
+ *   sample_cycles = 2   (min)     -> the full 256, with room to spare
+ * So the budget constrains the PRODUCT, not either factor: 256x
+ * oversampling stays reachable, just not stacked on a 638-cycle window.
+ *
+ * The better fix is asynchronous reads -- trigger in the ISR, collect on
+ * a later poll, the shape ota_erase_tick() already uses -- but that lets
+ * CMD_ADC_READ answer STATUS_BUSY, which is a wire-contract change
+ * needing a matching alp-sdk host update.  This bound is the part that
+ * can land without one. */
+#define ADC_READ_ISR_BUDGET_US        1000u
+#define ADC_READ_CONV_HALF_CYCLES_12B 25u               /* 12.5 ADCCK, doubled */
+#define ADC_READ_ADCCK_HZ             (216000000u / 6u) /* ADC_CLK_SYNC_HCLK_DIV6 */
+#define ADC_READ_BUDGET_HALF_CYCLES \
+	((uint32_t)((2ull * ADC_READ_ADCCK_HZ * ADC_READ_ISR_BUDGET_US) / 1000000ull))
+
+/* #127 -- the one-suffix trap.  The vendor's clock selector in
+ * system_gd32g5x3.c is
+ *     #if !(defined(GD32G553XXX3) || defined(GD32G533XXX3))
+ * and defining EITHER of those legitimate part-variant macros silently
+ * flips SYSCLK to 170000000 while every 216000000u literal below stays
+ * put: 27 % wrong PWM periods, ADC pacing and DWT timing, with no
+ * diagnostic anywhere.  The asymmetry makes it worse than it sounds --
+ * hal/transport_hw_gd32.c derives I2C timing at RUNTIME from
+ * rcu_clock_freq_get(CK_APB1), so I2C keeps working while everything
+ * else drifts, which is the shape that reads as "a timer bug" rather
+ * than "a clock bug".  Refuse to build instead.  Lifting this needs the
+ * literals below to move with it, not just the #error to be deleted. */
+#if defined(GD32G553XXX3) || defined(GD32G533XXX3)
+#error \
+    "GD32G553XXX3/GD32G533XXX3 select the vendor's 170 MHz clock tree, but PWM_TIMER_CLK_HZ and BRIDGE_ADC_PACE_CLK_HZ below are hardcoded 216000000u. Re-derive both (and PWM_TIMER_PRESCALER) before defining either macro -- see #127."
+#endif
+
 /* TIMER core clock.  This SoM's SystemInit override runs SYSCLK at
  * 216 MHz (216M-PLL-IRC8M -- see vendors/gd32_firmware_library/
  * overrides/system_gd32g5x3.c) with APB1/APB2 at DIV1, so CK_TIMER =
@@ -191,6 +265,45 @@ typedef struct {
 #define PWM_TIMER_TICK_NS   1000u       /* 1 us per timer tick      */
 #define PWM_TIMER_ARR_MAX   0xFFFFu     /* 16-bit auto-reload limit */
 
+/* #127 -- pin the two invariants that are checkable at COMPILE time.
+ *
+ * The first: BRIDGE_ADC_PACE_CLK_HZ above and PWM_TIMER_CLK_HZ here are
+ * two independent spellings of the same fact (both timer groups run off
+ * the core clock with APB1/APB2 at DIV1).  Two copies of a number drift;
+ * one of them drifting is invisible until a bench measurement catches it.
+ *
+ * The second: PWM_TIMER_TICK_NS claims a 1 us tick and PWM_TIMER_PRESCALER
+ * is what actually produces it.  This is exactly the shape of the defect
+ * that shipped through v0.2.3 -- the clock was coded as 240 MHz while the
+ * prescaler stayed (216 - 1), so every commanded 1 kHz physically ran
+ * ~900 Hz.  A compile-time check makes that class of edit un-shippable.
+ *
+ * Neither of these can check the clock is REALLY 216 MHz -- that is a
+ * runtime fact established by a SystemInit() this repo does not own.  See
+ * bridge_core_clock_hz below and #127 for that half. */
+_Static_assert(PWM_TIMER_CLK_HZ == BRIDGE_ADC_PACE_CLK_HZ,
+               "the PWM and ADC-pacing timer bases must be the same core clock (#127)");
+_Static_assert(PWM_TIMER_CLK_HZ / (PWM_TIMER_PRESCALER + 1u) == 1000000000u / PWM_TIMER_TICK_NS,
+               "PWM_TIMER_PRESCALER does not produce the tick PWM_TIMER_TICK_NS claims (#127)");
+
+/* The core clock as the vendor's SystemInit() ACTUALLY left it, sampled
+ * by SystemCoreClockUpdate() at the head of bridge_hw_init() (#127).
+ * Before that call this repo never referenced SystemCoreClock at all --
+ * every timing constant above was asserted against a number no code
+ * checked.
+ *
+ * `bridge_core_clock_matches` is false when the running clock disagrees
+ * with PWM_TIMER_CLK_HZ, i.e. when every PWM period, ADC pacing interval
+ * and DWT timestamp this firmware produces is wrong by that ratio.
+ * Both are non-static so a bench SWD read can see them without a wire
+ * change.  ACTING on the mismatch -- refusing supervised outputs, or
+ * deriving PWM_TIMER_PRESCALER from SystemCoreClock at runtime so the
+ * timer math self-corrects -- lands in hal/gd32/pwm.c, which open PR #82
+ * is rewriting; it is deliberately left to a follow-up rather than
+ * conflicting with that work.  Tracked on #127. */
+extern uint32_t bridge_core_clock_hz;      /* init.c */
+extern bool     bridge_core_clock_matches; /* init.c */
+
 /* ----------------------------------------------------------------- */
 /* Shared tables (defined in the TU named per line).                  */
 /* ----------------------------------------------------------------- */
@@ -199,15 +312,26 @@ extern const gd32_gpio_pad_t gpio_pad_map[GPIO_PAD_MAP_COUNT];        /* gpio.c 
 extern bool                  gpio_is_output[GPIO_PAD_MAP_COUNT];      /* gpio.c */
 extern const gd32_adc_ch_t   adc_channels_map[ADC_CHANNEL_MAP_COUNT]; /* adc.c */
 extern uint16_t              adc_sample_cycles_cache[8];              /* adc.c */
-extern uint8_t               adc_resolution_bits_cache[8];            /* adc.c */
-extern uint16_t              adc_oversample_ratio_cache[8];           /* adc.c */
-extern const gd32_qenc_t     qenc_map[QENC_CHANNEL_COUNT];            /* qenc.c */
-extern const gd32_pwm_ch_t   pwm_channels[PWM_CHANNEL_COUNT];         /* pwm.c */
-extern const gd32_dac_ch_t   dac_channels[DAC_CHANNEL_COUNT];         /* dac.c */
-extern adc_stream_state_t    adc_streams[BRIDGE_ADC_STREAM_COUNT];    /* adc_stream.c */
-extern bool                  trng_started;                            /* trng.c */
-extern bool                  trng_ready;                              /* trng.c */
-extern bool                  vref_ok;                                 /* vref.c */
+
+/* Per-converter ownership interlock (#133) -- adc.c owns the flags; the
+ * streaming path in adc_stream.c claims the same converter around its own
+ * reconfigure.  claim() is a test-and-set with interrupts masked and
+ * returns false when another context already holds `periph`; the loser
+ * must answer BRIDGE_HW_ERR_BUSY rather than proceed.  Every path that
+ * claimed must release, including error returns.  `periph` is an ADC base
+ * address (ADC0..ADC3), passed as uint32_t so this header stays free of
+ * the vendor device header. */
+bool                       adc_periph_claim(uint32_t periph);    /* adc.c */
+void                       adc_periph_release(uint32_t periph);  /* adc.c */
+extern uint8_t             adc_resolution_bits_cache[8];         /* adc.c */
+extern uint16_t            adc_oversample_ratio_cache[8];        /* adc.c */
+extern const gd32_qenc_t   qenc_map[QENC_CHANNEL_COUNT];         /* qenc.c */
+extern const gd32_pwm_ch_t pwm_channels[PWM_CHANNEL_COUNT];      /* pwm.c */
+extern const gd32_dac_ch_t dac_channels[DAC_CHANNEL_COUNT];      /* dac.c */
+extern adc_stream_state_t  adc_streams[BRIDGE_ADC_STREAM_COUNT]; /* adc_stream.c */
+extern bool                trng_started;                         /* trng.c */
+extern bool                trng_ready;                           /* trng.c */
+extern bool                vref_ok;                              /* vref.c */
 
 /* ----------------------------------------------------------------- */
 /* Shared helpers (defined in the TU named per line).                 */
@@ -229,5 +353,20 @@ void     qenc_channel_init(const gd32_qenc_t *e);                 /* qenc.c */
 void     pwm_timer_init(uint32_t periph);                         /* pwm.c */
 void     pwm_channel_init(const gd32_pwm_ch_t *ch);               /* pwm.c */
 void     se_reset_init(void);                                     /* se_reset.c */
+
+/* Per-timer CAR shadow-promotion tracking (pwm_capture.c owns the
+ * state; see the comment above pwm_capture_active_car).  pwm.c calls
+ * these instead of re-deriving promotion from a raw TIMER_CAR read,
+ * which is ambiguous once a second write lands before the first one
+ * is confirmed promoted (#82 review, the pwm_capture.c major).
+ *   - defer:  a write left in the ARSE preload only (no forced UPG,
+ *             the common already-running PWM_SET case) -- becomes
+ *             active at the timer's own next update event.
+ *   - commit: a write whose promotion THIS call forces synchronously
+ *             (bridge_hw_pwm_set's halted-recovery path, or
+ *             bridge_hw_pwm_single_pulse's forced UPG) -- becomes
+ *             active immediately, no defer needed. */
+void pwm_car_shadow_defer(uint32_t periph, uint32_t car);  /* pwm_capture.c */
+void pwm_car_shadow_commit(uint32_t periph, uint32_t car); /* pwm_capture.c */
 
 #endif /* GD32_BRIDGE_HAL_GD32_COMMON_H */
