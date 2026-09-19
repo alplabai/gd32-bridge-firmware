@@ -768,11 +768,11 @@ concern, not a flash/boot hazard.
 
 ## Phase 8 — TMU Q31 band representability (#85 / issue #46)
 
-**Proves:** Q31 `SQRT` now always answers (previously refused wholesale by
-an earlier, over-corrected draft of this PR); Q31 `SINH`/`LN` answer within
-their representable input bands and reject with `STATUS_OUT_OF_RANGE`
-outside them; Q31 `COSH` remains correctly refused (`cosh(x) >= 1` for
-every `x`, so no Q31 input is ever representable).
+**Proves:** Q31 `SQRT` answers inside the GD32 manual's documented
+`0.027 < x` band and rejects the lower interval with
+`STATUS_OUT_OF_RANGE`; Q31 `SINH`/`LN` answer within their representable
+input bands and reject outside them; Q31 `COSH` remains correctly refused
+(`cosh(x) >= 1` for every `x`, so no Q31 input is ever representable).
 
 **Procedure (per the PR's own bench section — all inputs/outputs are exact
 Q31 hex values computed independently in the PR, reproduced here
@@ -780,17 +780,18 @@ verbatim):**
 
 | # | Opcode / mode | format | in_a | Expect |
 |---|---|---|---|---|
-| 1 | `CMD_TMU_COMPUTE`, SQRT(5) | Q31(0) | `0x20000000` (0.25) | `STATUS_OK`, reply ≈ `0x40000000` (0.5) |
-| 2 | `CMD_TMU_COMPUTE`, SQRT(5) | Q31(0) | `0x73333333` (0.9) | `STATUS_OK`, reply ≈ `0x796E744E` |
-| 3 | `CMD_TMU_COMPUTE`, SINH(8) | Q31(0) | `0x40000000` (0.5) | `STATUS_OK`, reply ≈ `0x42B34040` |
-| 4 | `CMD_TMU_COMPUTE`, SINH(8) | Q31(0) | `0x70D0D986` (asinh(1) boundary) | `STATUS_OUT_OF_RANGE` (`0x08`) |
-| 5 | `CMD_TMU_COMPUTE`, LOG(6) | Q31(0) | `0x40000000` (0.5) | `STATUS_OK`, reply ≈ `0xA746F404` |
-| 6 | `CMD_TMU_COMPUTE`, LOG(6) | Q31(0) | `0x1999999A` (0.2) | `STATUS_OUT_OF_RANGE` |
-| 7 | `CMD_TMU_COMPUTE`, COSH(9) | Q31(0) | any | `STATUS_NOSUPPORT` (`0x06`), unchanged |
-| 8 | `CMD_TMU_COMPUTE`, SQRT(5) | F32(1) | `4.0f` (`0x40800000`) | `STATUS_OK`, reply `2.0f` — regression check, confirms F32 untouched |
+| 1 | `CMD_TMU_COMPUTE`, SQRT(5) | Q31(0) | `0x0374BC6A` (largest word not greater than 0.027) | `STATUS_OUT_OF_RANGE` (`0x08`) |
+| 2 | `CMD_TMU_COMPUTE`, SQRT(5) | Q31(0) | `0x20000000` (0.25) | `STATUS_OK`, reply ≈ `0x40000000` (0.5) |
+| 3 | `CMD_TMU_COMPUTE`, SQRT(5) | Q31(0) | `0x73333333` (0.9) | `STATUS_OK`, reply ≈ `0x796E744E` |
+| 4 | `CMD_TMU_COMPUTE`, SINH(8) | Q31(0) | `0x40000000` (0.5) | `STATUS_OK`, reply ≈ `0x42B34040` |
+| 5 | `CMD_TMU_COMPUTE`, SINH(8) | Q31(0) | `0x70D0D986` (asinh(1) boundary) | `STATUS_OUT_OF_RANGE` (`0x08`) |
+| 6 | `CMD_TMU_COMPUTE`, LOG(6) | Q31(0) | `0x40000000` (0.5) | `STATUS_OK`, reply ≈ `0xA746F404` |
+| 7 | `CMD_TMU_COMPUTE`, LOG(6) | Q31(0) | `0x1999999A` (0.2) | `STATUS_OUT_OF_RANGE` |
+| 8 | `CMD_TMU_COMPUTE`, COSH(9) | Q31(0) | any | `STATUS_NOSUPPORT` (`0x06`), unchanged |
+| 9 | `CMD_TMU_COMPUTE`, SQRT(5) | F32(1) | `4.0f` (`0x40800000`) | `STATUS_OK`, reply `2.0f` — regression check, confirms F32 untouched |
 
-**PASS:** all eight match. **FAIL:** any mismatch — in particular, cases 4
-and 6 returning `STATUS_OK` with a wrong number would mean the
+**PASS:** all nine match. **FAIL:** any mismatch — in particular, cases 5
+and 7 returning `STATUS_OK` with a wrong number would mean the
 representability band is wider on real hardware than the manual's tables
 say (this fix has zero dependency on GD32 register semantics for the
 band arithmetic itself — `hal/gd32/tmu_q31_scale.c` is host-tested — so a

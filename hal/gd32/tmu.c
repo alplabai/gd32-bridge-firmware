@@ -109,10 +109,10 @@ int bridge_hw_tmu_compute(uint8_t   function,
      *         Table 14-15's own output range [1,1.692] confirms it) --
      *         never representable.  Genuinely, permanently unsupported
      *         in this wire format: NOTIMPL is the honest code.
-     *   SQRT  sqrt(x) for x in [0,1) is itself in [0,1) (sqrt is
-     *         monotone, sqrt(1)=1) -- ALWAYS representable, never
-     *         refused.  See tmu_q31_sqrt_factor() for the per-band
-     *         FACTOR selection (UM Table 14-26).
+     *   SQRT  sqrt(x) for x in [0,1) is itself in [0,1), but UM Table
+     *         14-26 only documents scaling for x > 0.027.  Refuse that
+     *         lower, undocumented interval before touching the TMU; see
+     *         tmu_q31_sqrt_representable() and tmu_q31_sqrt_factor().
      *   SINH  representable for |x| < asinh(1) (~0.8814, ~88% of the
      *         domain) -- see tmu_q31_sinh_representable().  FACTOR is
      *         fixed at f=1 per UM Table 14-18, not operand-dependent.
@@ -136,6 +136,9 @@ int bridge_hw_tmu_compute(uint8_t   function,
 			return BRIDGE_HW_ERR_NOTIMPL;
 
 		case TMU_MODE_SQRT: {
+			if (!tmu_q31_sqrt_representable(in_a)) {
+				return BRIDGE_HW_ERR_RANGE;
+			}
 			const unsigned f = tmu_q31_sqrt_factor(in_a);
 			q31_scale        = SCALE(f);
 			q31_pre_shift    = f;
