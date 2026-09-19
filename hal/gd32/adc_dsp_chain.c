@@ -205,14 +205,26 @@ int bridge_hw_adc_dsp_stage_push(uint8_t        chain_id,
 	}
 
 	/* Validate every overlap before writing anything.  Exact replays are
-     * idempotent; a conflicting overlap rejects atomically, leaving both
-     * the payload and its coverage map untouched. */
+	 * idempotent.  A complete offset-zero payload is also an unambiguous
+	 * replacement after bind rejected an assembled blob: there is no
+	 * CHAIN_CLOSE command with which the host could otherwise recover the
+	 * slot.  Partial conflicting overlaps still reject atomically. */
+	bool conflicting_overlap = false;
 	for (size_t i = 0u; i < chunk_data_len; ++i) {
 		const size_t offset = (size_t)chunk_offset + i;
 
 		if (adc_dsp_stage_byte_received(st, offset) && st->data[offset] != chunk_data[i]) {
+			conflicting_overlap = true;
+			break;
+		}
+	}
+	if (conflicting_overlap) {
+		if (chunk_offset != 0u || chunk_data_len != (size_t)chunk_total_size) {
 			return BRIDGE_HW_ERR_INVAL;
 		}
+		memset(st, 0, sizeof(*st));
+		st->kind       = kind;
+		st->total_size = chunk_total_size;
 	}
 
 	for (size_t i = 0u; i < chunk_data_len; ++i) {

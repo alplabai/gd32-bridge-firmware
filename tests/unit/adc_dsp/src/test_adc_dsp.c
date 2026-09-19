@@ -716,6 +716,33 @@ ZTEST(gd32_bridge_adc_dsp, test_changed_metadata_at_offset_zero_restarts_stage)
 	zassert_equal(st->data[6], 0u, "abandoned payload bytes must be cleared");
 }
 
+ZTEST(gd32_bridge_adc_dsp, test_full_same_metadata_payload_recovers_after_bind_rejection)
+{
+	reset_all();
+	stream_running(0u);
+
+	uint8_t chain_id        = open_chain();
+	uint8_t malformed_fft[] = { 31u, 0u, 0u, 0u }; /* Point count is not a power of two. */
+	uint8_t corrected_fft[] = { 32u, 0u, 0u, 0u };
+
+	push_stage(chain_id, 0u, 3u /* FFT */, malformed_fft, sizeof(malformed_fft));
+	zassert_equal(bridge_hw_adc_dsp_chain_bind(chain_id, 0u),
+	              BRIDGE_HW_ERR_INVAL,
+	              "malformed complete FFT must fail bind without releasing the chain");
+	zassert_equal(
+	    bridge_hw_adc_dsp_stage_push(
+	        chain_id, 0u, 3u, 0u, sizeof(corrected_fft), corrected_fft, sizeof(corrected_fft)),
+	    BRIDGE_HW_OK,
+	    "a complete corrected payload must replace the rejected blob");
+	zassert_mem_equal(adc_dsp_chains[chain_id].stages[0].data,
+	                  corrected_fft,
+	                  sizeof(corrected_fft),
+	                  "the corrected FFT payload must fully replace the rejected blob");
+	zassert_equal(bridge_hw_adc_dsp_chain_bind(chain_id, 0u),
+	              BRIDGE_HW_OK,
+	              "the corrected same-kind, same-size FFT must bind");
+}
+
 ZTEST(gd32_bridge_adc_dsp, test_chain_reopen_clears_entire_stage)
 {
 	reset_all();
