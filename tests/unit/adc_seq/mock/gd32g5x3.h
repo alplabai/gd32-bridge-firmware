@@ -357,6 +357,10 @@ void       fft_init(fft_parameter_struct *fft_parameter);
 void       fft_calculation_start(void);
 FlagStatus fft_flag_get(uint32_t flag);
 
+/* Test-only FFT completion control for production-linked DSP tests. */
+void     mock_fft_set_complete(FlagStatus state);
+unsigned mock_fft_start_count(void);
+
 /* ---- CMSIS core intrinsics -------------------------------------------- *
  *
  * hal/gd32/bridge_critical.h pulls "gd32g5x3.h" purely to reach these

@@ -831,6 +831,17 @@ static float             adc_dsp_fft_out[ADC_DSP_FFT_MAX_POINTS * 2u]; /* re,im 
 static float             adc_dsp_fft_wcoef[ADC_DSP_FFT_MAX_POINTS];
 static float             adc_dsp_fft_bins[ADC_DSP_FFT_MAX_POINTS * 2u]; /* published */
 
+/* A spectrum sequence names frames from ONE bound FFT session, never a
+ * lifetime boot counter.  Reset every observable publication field when a
+ * session is configured or released so a fresh binding cannot report an
+ * old nonzero sequence alongside an empty bin count (#140). */
+static void adc_dsp_fft_session_reset(void)
+{
+	adc_dsp_fft_fill  = 0u;
+	adc_dsp_fft_seq   = 0u;
+	adc_dsp_fft_nbins = 0u;
+}
+
 static uint8_t adc_dsp_fft_point_enum(uint16_t n)
 {
 	switch (n) {
@@ -909,8 +920,7 @@ static bool adc_dsp_fft_config(const adc_stream_state_t *s)
 
 	adc_dsp_fft_points = n;
 	adc_dsp_fft_outfmt = ofm;
-	adc_dsp_fft_fill   = 0u;
-	adc_dsp_fft_nbins  = 0u;
+	adc_dsp_fft_session_reset();
 
 	const uint8_t shape = (win_st != 0) ? win_st->data[0] : 0u;
 
@@ -1018,8 +1028,7 @@ void adc_dsp_fft_release(uint8_t stream_id)
 {
 	if (adc_dsp_fft_owner == (int8_t)stream_id) {
 		adc_dsp_fft_owner = -1;
-		adc_dsp_fft_fill  = 0u;
-		adc_dsp_fft_nbins = 0u;
+		adc_dsp_fft_session_reset();
 	}
 }
 
