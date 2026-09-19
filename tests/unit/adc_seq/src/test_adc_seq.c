@@ -48,6 +48,7 @@
 static void adc_seq_reset(void)
 {
 	mock_seq_reset();
+	mock_dma_reset();
 	memset(mock_adc_ctl1, 0, sizeof mock_adc_ctl1);
 	for (uint8_t s = 0u; s < BRIDGE_ADC_STREAM_COUNT; ++s) {
 		adc_streams[s] = (adc_stream_state_t){ 0 };
@@ -120,6 +121,41 @@ ZTEST(gd32_adc_seq, test_stream_restart_reloads_dma_count)
 	zassert_equal(dma_transfer_number_get(DMA0, DMA_CH0),
 	              BRIDGE_ADC_STREAM_RING_SAMPLES,
 	              "dma_init must reload the full count, not retain stale remainder (#183)");
+}
+
+/* #52 -- a new stream is configured only after CHEN reads clear, and ending
+ * it releases the DMAMUX request selection before the converter is offered
+ * to another stream. */
+ZTEST(gd32_adc_seq, test_stream_lifecycle_confirms_disable_and_releases_dmamux)
+{
+	adc_seq_reset();
+
+	int rc = bridge_hw_adc_stream_begin(0u, BRIDGE_ADC_CH0, 1000u);
+	zassert_equal(rc, BRIDGE_HW_OK, "stream begins against the mock");
+	zassert_equal(mock_dmamux_request_get(0u),
+	              DMA_REQUEST_ADC3,
+	              "DMA0 channel 0 selects ADC3 while the stream is live");
+	zassert_true(mock_seq_find_from("DMA_CHCTL_READ", DMA0, 0) >= 0,
+	             "begin must observe CHEN clear before configuring DMA");
+
+	rc = bridge_hw_adc_stream_end(0u);
+	zassert_equal(rc, BRIDGE_HW_OK, "stream ends against the mock");
+	zassert_equal(mock_dmamux_request_get(0u),
+	              0u,
+	              "end must return the DMAMUX channel to its no-request state");
+}
+
+ZTEST(gd32_adc_seq, test_stream_begin_refuses_a_channel_that_does_not_disable)
+{
+	adc_seq_reset();
+	mock_dma_set_disable_hold(DMA0, DMA_CH0, true);
+
+	int rc = bridge_hw_adc_stream_begin(0u, BRIDGE_ADC_CH0, 1000u);
+	zassert_equal(
+	    rc, BRIDGE_HW_ERR_IO, "begin must not configure count/address while CHEN remains set");
+	zassert_equal(mock_seq_find_from("dma_deinit", DMA0, 0),
+	              -1,
+	              "no SPL register rewrite is permitted before CHEN reads clear");
 }
 
 /* ---------------------------------------------------------------------

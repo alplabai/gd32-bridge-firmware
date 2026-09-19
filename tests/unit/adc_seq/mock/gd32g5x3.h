@@ -178,6 +178,14 @@ typedef enum { DMA_CH0 = 0 } dma_channel_enum;
 #define DMA_FLAG_FTF                ((uint32_t)(1u << 0))
 #define DMA_INT_FTF                 ((uint32_t)(1u << 0))
 #define DMA_INT_FLAG_FTF            ((uint32_t)(1u << 0))
+#define DMA_CHXCTL_CHEN             ((uint32_t)(1u << 0))
+
+extern uint32_t *mock_dma_chctl_ref(uint32_t dma_periph, dma_channel_enum channelx);
+#define DMA_CHCTL(dma_periph, channelx) (*mock_dma_chctl_ref((dma_periph), (channelx)))
+
+extern uint32_t *mock_dmamux_chcfg_ref(uint32_t channel);
+#define DMAMUX_RM_CHXCFG(channel) (*mock_dmamux_chcfg_ref(channel))
+#define DMAMUX_RM_CHXCFG_MUXID    ((uint32_t)0x7fu)
 
 typedef struct {
 	uint32_t periph_addr;
@@ -210,7 +218,10 @@ void dma_interrupt_flag_clear(uint32_t dma_periph, dma_channel_enum channelx, ui
 /* Test-only hook: set the value dma_transfer_number_get returns (the
  * "remaining" countdown), so the write-index math in adc_stream_write_
  * index resolves to a safe, in-range value without a real DMA. */
-void mock_dma_set_remaining(uint32_t dma_periph, dma_channel_enum channelx, uint32_t remaining);
+void     mock_dma_set_remaining(uint32_t dma_periph, dma_channel_enum channelx, uint32_t remaining);
+void     mock_dma_reset(void);
+void     mock_dma_set_disable_hold(uint32_t dma_periph, dma_channel_enum channelx, bool hold);
+uint32_t mock_dmamux_request_get(uint32_t channel);
 
 /* ------------------------------------------------------------------ */
 /* RCU -- every clock-gate call is a no-op tag; only logged.           */

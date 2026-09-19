@@ -30,6 +30,28 @@ adc_stream_state_t adc_streams[BRIDGE_ADC_STREAM_COUNT];
 #define ADC_STREAM_LAP_IRQ_PRIO    3u
 #define ADC_STREAM_LAP_IRQ_SUBPRIO 0u
 
+/* UM Rev1.2 §8.4.7 permits writing the channel address/count registers
+ * only after CHEN reads clear.  The SPL helpers are plain register writes,
+ * so make that interlock explicit rather than assuming a preceding write
+ * has already reached the DMA controller.  This path is command-driven,
+ * not a sampling hot path; a bounded failure is therefore preferable to
+ * reusing a possibly still-live channel configuration. */
+#define ADC_STREAM_DMA_DISABLE_SPINS 64u
+
+static bool adc_stream_dma_disable_confirm(uint32_t dma_periph, dma_channel_enum channel)
+{
+	dma_channel_disable(dma_periph, channel);
+	for (uint32_t spin = 0u; spin < ADC_STREAM_DMA_DISABLE_SPINS; ++spin) {
+		if ((DMA_CHCTL(dma_periph, channel) & DMA_CHXCTL_CHEN) == 0u) return true;
+	}
+	return false;
+}
+
+static uint32_t adc_stream_dmamux_channel(const adc_stream_state_t *s)
+{
+	return (s->dma_periph == DMA0) ? (uint32_t)s->dma_channel : (uint32_t)s->dma_channel + 7u;
+}
+
 /* DMA full-transfer-finish "lap" ISRs -- one per stream (stream 0 ->
  * DMA0 CH0, stream 1 -> DMA1 CH0, fixed in stream_begin below).  The
  * circular channel raises FTF exactly once per ring reload, so
@@ -114,6 +136,9 @@ int bridge_hw_adc_stream_begin(uint8_t stream_id, uint8_t channel, uint32_t samp
      * 2026-06-04 audit: an I2C-only build would stream zero samples). */
 	rcu_periph_clock_enable(RCU_DMAMUX);
 	rcu_periph_clock_enable((stream_id == 0u) ? RCU_DMA0 : RCU_DMA1);
+	if (!adc_stream_dma_disable_confirm(s->dma_periph, (dma_channel_enum)s->dma_channel)) {
+		return BRIDGE_HW_ERR_IO;
+	}
 	dma_deinit(s->dma_periph, (dma_channel_enum)s->dma_channel);
 
 	dma_parameter_struct init;
@@ -333,7 +358,9 @@ static bool adc_stream_recover_rovf(adc_stream_state_t *s, const gd32_adc_ch_t *
 	 * than exactly at a circular-reload boundary.  A stale FTF (see
 	 * the function comment above) is cleared here too, alongside the
 	 * rest of the reinit, before the channel comes back up. */
-	dma_channel_disable(s->dma_periph, (dma_channel_enum)s->dma_channel);
+	if (!adc_stream_dma_disable_confirm(s->dma_periph, (dma_channel_enum)s->dma_channel)) {
+		return false;
+	}
 	dma_transfer_number_config(
 	    s->dma_periph, (dma_channel_enum)s->dma_channel, BRIDGE_ADC_STREAM_RING_SAMPLES);
 	dma_interrupt_flag_clear(s->dma_periph, (dma_channel_enum)s->dma_channel, DMA_INT_FLAG_FTF);
@@ -487,7 +514,13 @@ int bridge_hw_adc_stream_end(uint8_t stream_id)
 	timer_deinit(s->pace_timer);
 	adc_dma_request_after_last_disable(ch->periph);
 	adc_dma_mode_disable(ch->periph);
-	dma_channel_disable(s->dma_periph, (dma_channel_enum)s->dma_channel);
+	if (!adc_stream_dma_disable_confirm(s->dma_periph, (dma_channel_enum)s->dma_channel)) {
+		return BRIDGE_HW_ERR_IO;
+	}
+	/* MUXID zero is the DMAMUX idle state.  Releasing it before clearing
+	 * in_use prevents a later stream from selecting the same ADC request on
+	 * the other controller's multiplexer channel (UM Rev1.2 §9.4.2). */
+	DMAMUX_RM_CHXCFG(adc_stream_dmamux_channel(s)) &= ~DMAMUX_RM_CHXCFG_MUXID;
 
 	/* Stand the lap counter down with the channel: mask the FTF
      * interrupt + NVIC line and clear a possibly-pending flag so a

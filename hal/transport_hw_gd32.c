@@ -101,9 +101,23 @@ static void spi_gpio_init(void)
  * anything the master over-clocks beyond this simply stops being captured
  * and the CRC check fails loud).  TX holds the staged reply drained from
  * the portable seams at decode time so the DMA has a stable flat buffer. */
-#define BRIDGE_SPI_DMA_BUF_LEN 72u
+#define BRIDGE_SPI_DMA_BUF_LEN       72u
+#define BRIDGE_SPI_DMA_DISABLE_SPINS 64u
+#define BRIDGE_SPI_RX_FIFO_FRAMES    4u
 static uint8_t spi_rx_dma_buf[BRIDGE_SPI_DMA_BUF_LEN];
 static uint8_t spi_tx_dma_buf[BRIDGE_SPI_DMA_BUF_LEN];
+
+/* The SPL's dma_channel_disable() is one CHEN write.  The manual requires
+ * observing CHEN clear before MADDR/CNT are written, so never reload a
+ * channel merely because that write was issued. */
+static bool spi_dma_disable_confirm(dma_channel_enum channel)
+{
+	dma_channel_disable(BRIDGE_SPI_DMA, channel);
+	for (uint32_t spin = 0u; spin < BRIDGE_SPI_DMA_DISABLE_SPINS; ++spin) {
+		if ((DMA_CHCTL(BRIDGE_SPI_DMA, channel) & DMA_CHXCTL_CHEN) == 0u) return true;
+	}
+	return false;
+}
 
 /* One-time channel configuration (clocks, DMAMUX routing, widths).  The
  * per-transaction address/count reloads live in the arm helpers below;
@@ -160,7 +174,7 @@ static void spi_dma_init(void)
  * be written while the channel is disabled. */
 static void spi_dma_arm_rx(void)
 {
-	dma_channel_disable(BRIDGE_SPI_DMA, BRIDGE_SPI_RX_DMA_CH);
+	if (!spi_dma_disable_confirm(BRIDGE_SPI_RX_DMA_CH)) return;
 	dma_memory_address_config(BRIDGE_SPI_DMA, BRIDGE_SPI_RX_DMA_CH, (uint32_t)spi_rx_dma_buf);
 	dma_transfer_number_config(BRIDGE_SPI_DMA, BRIDGE_SPI_RX_DMA_CH, BRIDGE_SPI_DMA_BUF_LEN);
 	dma_channel_enable(BRIDGE_SPI_DMA, BRIDGE_SPI_RX_DMA_CH);
@@ -171,7 +185,7 @@ static void spi_dma_arm_rx(void)
  * the same invariant the old per-byte path enforced via tx_pending()). */
 static void spi_dma_arm_tx(uint32_t len)
 {
-	dma_channel_disable(BRIDGE_SPI_DMA, BRIDGE_SPI_TX_DMA_CH);
+	if (!spi_dma_disable_confirm(BRIDGE_SPI_TX_DMA_CH)) return;
 	if (len == 0u) {
 		return;
 	}
@@ -278,9 +292,11 @@ void BRIDGE_SPI_CS_EXTI_HANDLER(void)
 		} else {
 			/* CS released: end of transaction.
              *
-             * 1. Snapshot the RX residue FIRST: bytes captured by RX DMA =
-             *    buffer length minus the remaining transfer count.
-             * 2. Quiesce both DMA channels, then FLUSH + re-init the SPI via
+			 * 1. Quiesce RX DMA, wait for CHEN to read clear, and execute a
+			 *    DSB before taking the residue.  A pending AHB beat must be
+			 *    visible in memory/count before the snapshot.  Then drain the
+			 *    (at most four-frame) byte-mode RX FIFO into the DMA tail.
+			 * 2. Quiesce TX DMA, then FLUSH + re-init the SPI via
              *    the RCU reset (the only reliable FIFO flush; it also clears
              *    BYTEN/DMAREN/DMATEN, which bridge_spi_periph_config
              *    re-applies) so the peripheral is reception-ready while the
@@ -294,12 +310,29 @@ void BRIDGE_SPI_CS_EXTI_HANDLER(void)
              * Budget: steps 1-4 are register writes + CRC over <=69 B at
              * 216 MHz -- single-digit microseconds, well inside the master's
              * inter-transaction gap (its CS setup window alone is 60 us). */
+			const bool rx_quiesced = spi_dma_disable_confirm(BRIDGE_SPI_RX_DMA_CH);
+			const bool tx_quiesced = spi_dma_disable_confirm(BRIDGE_SPI_TX_DMA_CH);
+			if (!rx_quiesced || !tx_quiesced) {
+				/* Do not decode a count from a channel which may still be
+				 * transferring.  Reset the SPI state and let the host retry the
+				 * dropped transaction; the next CS falling edge retries the arm. */
+				rcu_periph_reset_enable(RCU_SPI1RST);
+				rcu_periph_reset_disable(RCU_SPI1RST);
+				bridge_spi_periph_config();
+				spi_slave_cs_low();
+				return;
+			}
+
+			__DSB();
 			uint32_t remaining = dma_transfer_number_get(BRIDGE_SPI_DMA, BRIDGE_SPI_RX_DMA_CH);
 			uint32_t received =
 			    (remaining <= BRIDGE_SPI_DMA_BUF_LEN) ? (BRIDGE_SPI_DMA_BUF_LEN - remaining) : 0u;
-
-			dma_channel_disable(BRIDGE_SPI_DMA, BRIDGE_SPI_RX_DMA_CH);
-			dma_channel_disable(BRIDGE_SPI_DMA, BRIDGE_SPI_TX_DMA_CH);
+			for (uint32_t frame = 0u;
+			     frame < BRIDGE_SPI_RX_FIFO_FRAMES && received < BRIDGE_SPI_DMA_BUF_LEN &&
+			     spi_flag_get(BRIDGE_SPI_PERIPH, SPI_FLAG_RBNE) != RESET;
+			     ++frame) {
+				spi_rx_dma_buf[received++] = (uint8_t)spi_data_receive(BRIDGE_SPI_PERIPH);
+			}
 
 			rcu_periph_reset_enable(RCU_SPI1RST);
 			rcu_periph_reset_disable(RCU_SPI1RST);
