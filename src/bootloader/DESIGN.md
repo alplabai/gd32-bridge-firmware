@@ -12,12 +12,19 @@ ABORT, CRC-32, A/B metadata; FMC backend in `hal/fmc_ota.c`).
 `-DBRIDGE_OTA_PARTITIONED` (default **OFF**); otherwise every handler still
 returns `STATUS_NOSUPPORT` and no flash is touched, so the full-flash image
 cannot brick itself. When armed, the CMake build emits the partitioned set:
-a 32 KB bootloader (`src/boot/boot_main.c` + `toolchain/gd32g553_bootloader.ld`)
-that validates the active A/B slot and jumps (MSP/VTOR), plus the app linked
+a 32 KB bootloader (`src/boot/boot_main.c`, `src/boot/boot_decide.c`, and
+`toolchain/gd32g553_bootloader.ld`) that validates the active A/B slot and jumps
+(MSP/VTOR), plus the app linked
 for each slot (`toolchain/gd32g553_app_slot.ld.in`, `.ramfunc` in RAM; the app
 sets `SCB->VTOR` to its slot base). The host OTA opcodes already exist in
 [`chips/gd32g553/` (alp-sdk)](https://github.com/alplabai/alp-sdk/tree/main/chips/gd32g553/)
 and the firmware payloads are reconciled to them.
+
+The vendor-free decision unit in `src/boot/boot_decide.c` is also executed by
+the host unit suite. Those tests cover record ordering, torn or invalid
+metadata, image CRC and vector checks, fallback to the older record, and the
+no-valid-image recovery decision. The MCU jump and recovery loops remain
+silicon-only behavior.
 
 **SILICON-VALIDATED 2026-06-04** (bench, protocol v0.6): boot/validate/jump,
 slot relocation, dual-bank FMC-from-RAM, and the full stream → verify →

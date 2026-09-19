@@ -5,8 +5,8 @@
 Generate an initial OTA A/B metadata record for the GD32 bridge
 partitioned layout (factory provisioning).
 
-The Path-A bootloader (src/boot/boot_main.c) boots ONLY a slot that a
-CRC-valid metadata record marks active+valid -- a freshly partitioned
+The Path-A bootloader decision unit (src/boot/boot_decide.c) selects ONLY a
+slot that a CRC-valid metadata record marks active+valid -- a freshly partitioned
 part with erased metadata pages idles in the recovery WFI loop.  This
 tool emits the record binary that an external SWD probe flashes to
 OTA_META_REC0 (0x08008000) alongside the bootloader (0x08000000) and
@@ -58,7 +58,7 @@ def check_bootable(active_slot: int, img: bytes) -> None:
     the two in step): length covers the MSP+reset head, the initial MSP
     is a word-aligned address inside SRAM, and the reset vector has the
     Thumb bit set and lands inside the image.  The bootloader's
-    active_slot_valid() (src/boot/boot_main.c) applies exactly this test
+    active_slot_valid() (src/boot/boot_decide.c) applies exactly this test
     before it will jump to a slot -- a record that passes here but not
     there is the generator drifting from the firmware, not a new class
     of bug, so raise loudly rather than let it happen quietly.

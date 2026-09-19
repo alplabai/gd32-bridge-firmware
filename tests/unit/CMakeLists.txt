@@ -112,6 +112,22 @@ foreach(_slot A B)
     add_test(NAME ota_slot_${_slot_lc} COMMAND ${_tgt})
 endforeach()
 
+# --- boot_decide: real bootloader metadata/image selection (#153) ---------
+#
+# boot_main.c mixes the decision with CMSIS handoff and main(), so the pure
+# selection lives in src/boot/boot_decide.c.  This target supplies an address
+# mapper for fake flash and executes the exact newest-first/fallback logic the
+# bootloader calls on silicon.
+add_executable(test_boot_decide
+    boot_decide/src/test_boot_decide.c
+    ${FW}/src/boot/boot_decide.c
+    ${FW}/src/crc32.c
+)
+target_include_directories(test_boot_decide PRIVATE ${FW}/src ${FW}/src/boot)
+target_compile_options(test_boot_decide PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_boot_decide PRIVATE ztest_shim)
+add_test(NAME boot_decide COMMAND test_boot_decide)
+
 # --- crc32: table-driven CRC-32 pinned bit-identical to bit-serial ---------
 add_executable(test_crc32
     crc32/src/test_crc32.c
