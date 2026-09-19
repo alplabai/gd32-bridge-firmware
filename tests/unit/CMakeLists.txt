@@ -112,6 +112,22 @@ foreach(_slot A B)
     add_test(NAME ota_slot_${_slot_lc} COMMAND ${_tgt})
 endforeach()
 
+# --- boot_decide: real bootloader record/image selection (#153) ------------
+#
+# The decision source has no Cortex-M register dependency: a host flash-map
+# seam supplies metadata and image bytes from a model instead of dereferencing
+# GD32's memory-mapped addresses.  The production boot_main still supplies
+# that direct map and owns only the final MSP/VTOR jump.
+add_executable(test_boot_decide
+    boot_decide/src/test_boot_decide.c
+    ${FW}/src/boot/boot_decide.c
+    ${FW}/src/crc32.c
+)
+target_include_directories(test_boot_decide PRIVATE ${FW}/src ${FW}/src/boot)
+target_compile_options(test_boot_decide PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_boot_decide PRIVATE ztest_shim)
+add_test(NAME boot_decide COMMAND test_boot_decide)
+
 # --- crc32: table-driven CRC-32 pinned bit-identical to bit-serial ---------
 add_executable(test_crc32
     crc32/src/test_crc32.c
