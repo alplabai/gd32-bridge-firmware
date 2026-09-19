@@ -67,7 +67,8 @@ set(GD32_BRIDGE_SOURCES
 # OTA self-flashing is gated: only -DBRIDGE_OTA_PARTITIONED=ON (paired with
 # the partitioned bootloader layout + slot-linked app) arms the destructive
 # flash path.  Default OFF -> ota_dispatch() returns STATUS_NOSUPPORT and the
-# full-flash image can't brick itself.  HIL-REQUIRED before enabling.
+# full-flash image can't brick itself.  A->B update + rollback was validated
+# on silicon 2026-06-04; a fresh B->A update remains untested and HIL-gated.
 option(BRIDGE_OTA_PARTITIONED "Arm the OTA Path-A flash path (HIL-gated)" OFF)
 
 if(BRIDGE_HAL_BACKEND STREQUAL "stub")
@@ -264,13 +265,14 @@ if(NOT BRIDGE_OTA_PARTITIONED)
     gd32_firmware_target(gd32-bridge ${CMAKE_SOURCE_DIR}/toolchain/gd32g553_flash.ld)
 else()
     # OTA Path-A armed: a bootloader at flash base + the app linked for each
-    # A/B slot (vector table relocated via SCB->VTOR at boot).  HIL-REQUIRED:
-    # the boot/validate/jump + slot-relocation are NOT validated on silicon
-    # (a bug bricks the part -- no host SWD reflash this HW rev).
+    # A/B slot (vector table relocated via SCB->VTOR at boot).  Silicon-
+    # validated 2026-06-04 for A->B update + rollback; a fresh B->A update
+    # has NOT been exercised.  Still HIL-gated: a bug bricks the part, and
+    # this HW revision has no host-driven SWD reflash.
     if(NOT BRIDGE_HAL_BACKEND STREQUAL "gd32")
         message(FATAL_ERROR "BRIDGE_OTA_PARTITIONED requires BRIDGE_HAL_BACKEND=gd32.")
     endif()
-    message(STATUS "gd32-bridge: OTA Path-A ARMED (bootloader + A/B slots) -- HIL-required, do not field-flash unvalidated")
+    message(STATUS "gd32-bridge: OTA Path-A ARMED (bootloader + A/B slots) -- HIL-gated; A->B + rollback validated, B->A untested")
 
     set(APP_SLOT_LEN 0x0003B000)   # 236 KB per slot (ota_layout.h)
     set(APP_SLOT_BASE 0x0800A000)  # slot A

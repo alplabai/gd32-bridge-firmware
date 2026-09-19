@@ -13,7 +13,8 @@
  * SILICON-VALIDATED 2026-06-04 (bench, protocol v0.6): full cycle
  * BEGIN -> length-checked chunk stream at 25 MHz -> VERIFY -> COMMIT ->
  * boot into the new slot -> ROLLBACK -> boot back, proven by wire
- * build-id reads + the A/B metadata generation history.
+ * build-id reads + the A/B metadata generation history, for the A->B
+ * update + rollback direction.  A fresh B->A update has NOT been exercised.
  */
 
 #include <stddef.h>
