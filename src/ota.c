@@ -109,12 +109,14 @@ static uint32_t s_fw_version;   /* from OTA_BEGIN v0.7 form (packed
 static uint8_t  s_err;
 
 /* Background slot-erase progress (#770).  BEGIN must NOT erase the whole
- * 236 KB slot inline: that is a ~1 s RAMFUNC loop with the SPI slave
- * unserviced, so the BEGIN reply is lost and the host's ota_begin() hangs.
- * Instead BEGIN arms the erase (state=BUSY) and acks immediately; the main
- * loop's ota_erase_tick() erases ONE OTA_PAGE_SIZE region per tick (~8 ms
- * of blackout, which the host's reply re-read absorbs) and flips to READY
- * when done.  The host already polls GET_STATE for READY before streaming. */
+ * 236 KB slot inline: that can be a 4.72 s RAMFUNC loop in dual-bank mode
+ * with the SPI slave unserviced, so the BEGIN reply is lost and the host's
+ * ota_begin() hangs.  Instead BEGIN arms the erase (state=BUSY) and acks
+ * immediately; the main loop's ota_erase_tick() erases ONE OTA_PAGE_SIZE
+ * region per tick.  A tick is up to 20 ms single-bank or 40 ms dual-bank:
+ * tERASE is 20 ms maximum per page (Datasheet Rev2.0 p.126), and a 2 KB
+ * region spans two 1 KB pages in dual-bank mode.  The host polls GET_STATE
+ * for READY before streaming. */
 static bool     s_erasing;   /* an erase is armed + in progress */
 static uint32_t s_erase_at;  /* next flash address to erase */
 static uint32_t s_erase_end; /* one past the last address to erase */
@@ -703,11 +705,13 @@ static gd32_bridge_status_t h_get_state(uint8_t *reply, size_t cap, size_t *rlen
 }
 
 /* Background erase pump (#770): erase ONE OTA_PAGE_SIZE region per call
- * from the main loop (bridge_hw_tick).  Each call is a bounded ~8 ms
- * blackout the host's reply re-read absorbs -- unlike the old inline
- * whole-slot erase that stalled BEGIN's reply for ~1 s.  Flips the OTA
- * state machine to READY once the slot is fully erased, or ERROR on a
- * failed page.  No-op unless an erase is armed. */
+ * from the main loop (bridge_hw_tick).  Each call can black out execution
+ * for up to 20 ms single-bank or 40 ms dual-bank (Datasheet Rev2.0 p.126,
+ * tERASE maximum 20 ms per page; dual-bank mode uses two 1 KB pages per
+ * 2 KB region).  That is bounded per call, unlike the old inline whole-slot
+ * erase that could stall BEGIN's reply for 4.72 s.  Flips the OTA state
+ * machine to READY once the slot is fully erased, or ERROR on a failed page.
+ * No-op unless an erase is armed. */
 void ota_erase_tick(void)
 {
 	if (!s_erasing) {
