@@ -1138,10 +1138,11 @@ gd32_bridge_status_t protocol_dispatch(gd32_bridge_link_t link,
 		break;
 	default:
 		/* Route the reserved OTA opcode range (0xF0..0xFF) through
-         * the application bootloader's dispatcher.  Bodies return
-         * STATUS_NOSUPPORT until the FMC HAL lands -- see
-         * src/bootloader/.  `cmd` is uint8_t so the upper bound 0xFFu
-         * is implicit; explicit check would trip -Wtype-limits. */
+         * the application bootloader's dispatcher.  Commands 0xF0..0xF6
+         * execute only in a partitioned build with an FMC backend; the
+         * full-flash/stub builds return STATUS_NOSUPPORT without flash I/O,
+         * as do reserved 0xF7..0xFF.  `cmd` is uint8_t so the upper bound
+         * 0xFFu is implicit; an explicit check would trip -Wtype-limits. */
 		if (cmd >= CMD_OTA_BEGIN) {
 			return bl_dispatch_ota(cmd,
 			                       req_payload,

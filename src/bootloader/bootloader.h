@@ -5,10 +5,12 @@
  * gd32-bridge application bootloader -- internal header.
  *
  * Wires the OTA opcodes `0xF0..0xFF` reserved in
- * alp-sdk docs/gd32-bridge-protocol.md §10 into a separate dispatcher above
- * protocol.c.  Handler bodies + integration detail are tracked by
- * the maintainer outside this tree; the scaffold replies
- * STATUS_NOSUPPORT so the wire path is exercisable.
+ * alp-sdk docs/gd32-bridge-protocol.md §10 into ota_dispatch() above
+ * protocol.c.  In a partitioned GD32 build with an FMC backend, commands
+ * 0xF0..0xF6 run the implemented OTA state machine.  The default
+ * full-flash/non-partitioned build (and any build without FMC support)
+ * returns STATUS_NOSUPPORT without touching flash; reserved 0xF7..0xFF
+ * always return STATUS_NOSUPPORT.
  */
 
 #ifndef GD32_BRIDGE_BOOTLOADER_H
