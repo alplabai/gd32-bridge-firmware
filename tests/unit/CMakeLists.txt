@@ -167,11 +167,9 @@ add_test(NAME fault_diag COMMAND test_fault_diag)
 
 # --- timer_sync_iti: (slave, master) -> SYSCFG ITIx router code (gh#42) ----
 #
-# hal/gd32/timer_sync.c itself needs the Cortex-M33 vendor register headers
-# and is compiled by no CI job (issue #77).  The lookup table has no such
-# dependency, so it lives in its own translation unit (hal/gd32/
-# timer_sync_iti.c, no gd32g5x3.h include) purely so it can be linked and
-# tested here.
+# The lookup table has no vendor-register dependency, so it lives in its own
+# translation unit and is tested directly here.  The production HAL body is
+# additionally linked against a minimal vendor-API mock in the next target.
 add_executable(test_timer_sync_iti
     timer_sync_iti/src/test_timer_sync_iti.c
     ${FW}/hal/gd32/timer_sync_iti.c
@@ -180,6 +178,26 @@ target_include_directories(test_timer_sync_iti PRIVATE ${FW}/hal/gd32)
 target_compile_options(test_timer_sync_iti PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_timer_sync_iti PRIVATE ztest_shim)
 add_test(NAME timer_sync_iti COMMAND test_timer_sync_iti)
+
+# --- timer_sync: production HAL id validation + register-call sequence -----
+#
+# Links the REAL hal/gd32/timer_sync.c against a minimal vendor-API mock.
+# This pins #142's fail-closed TIMER19 rejection at the responsible layer:
+# id 2 must return RANGE before any timer/SYSCFG call.  It also prevents the
+# canonical compact wire ids from drifting back to peripheral numbers (#194).
+add_executable(test_timer_sync
+    timer_sync/src/test_timer_sync.c
+    ${FW}/hal/gd32/timer_sync.c
+    ${FW}/hal/gd32/timer_sync_iti.c
+)
+target_include_directories(test_timer_sync PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/timer_sync/mock
+    ${FW}/hal
+    ${FW}/hal/gd32
+)
+target_compile_options(test_timer_sync PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_timer_sync PRIVATE ztest_shim)
+add_test(NAME timer_sync COMMAND test_timer_sync)
 
 # --- tmu_q31_scale: Q31 FACTOR band-selection logic (gd32-bridge#46) -------
 #

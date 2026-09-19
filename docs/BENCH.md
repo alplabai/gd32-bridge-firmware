@@ -566,20 +566,21 @@ post-`bridge_hw_init()` half is.
 
 ## Phase 5 — timers and PWM (#86 + #82)
 
-Grouped because both PRs touch the same TIMER0/TIMER7/TIMER19 hardware and
+Grouped because both PRs touch the same TIMER0/TIMER7 hardware and
 because review on both surfaced a shared, unresolved cross-PR hazard
 (issue #89: forcing a timer-wide update event for one purpose can glitch a
 sync-slave relationship set up by the other). Run #86 first — it is the
 prerequisite for a meaningful multi-timer capture in #82's sibling-isolation
 step.
 
-### 5.1 — internal-trigger routing, all six ordered pairs (#86 / issue #42)
+### 5.1 — internal-trigger routing, supported pairs + fail-closed ID (#86 / issues #42, #142)
 
 **Proves:** the per-(master, slave) `SYSCFG_TIMERxCFG2` lookup table
-replaces the old hardwired-to-ITI0 routing, which was wrong for four of the
-six reachable (master, slave) pairs.
+replaces the old hardwired-to-ITI0 routing for the two initialised timer
+groups.  TIMER19 is not clocked or initialised, so its former wire id 2 is
+rejected rather than reporting success for a half-applied configuration.
 
-**Procedure:** for each of the six pairs, send `CMD_TIMER_SYNC` (`0x27`)
+**Procedure:** for each of the two supported pairs, send `CMD_TIMER_SYNC` (`0x27`)
 in reset mode (mode=1), then scope both timers' PWM outputs and confirm
 the slave's period locks to and resets in phase with the master's, at the
 master's rate — not free-running, not locked to a different timer. A
@@ -590,16 +591,19 @@ confirm it matches the table in the PR body.
 | Master | Slave | What proves it |
 |---|---|---|
 | TIMER7 | TIMER0 | Locks to TIMER7's period (was: free-running or dead) |
-| TIMER19 | TIMER0 | Locks to TIMER19's period (was: free-running or dead) |
 | TIMER0 | TIMER7 | Still locks to TIMER0 (regression check — was already correct) |
-| TIMER19 | TIMER7 | Locks to TIMER19, not TIMER0 (was: wrong master) |
-| TIMER0 | TIMER19 | Still locks to TIMER0 (regression check) |
-| TIMER7 | TIMER19 | Locks to TIMER7, not TIMER0 (was: wrong master) |
 
-**PASS:** all six lock as tabled. **FAIL:** any pair free-runs, locks to
-the wrong master, or reads back the wrong `TSCFG15` value.
+Then send one request with TIMER19 as master (`2,0,1`) and one with TIMER19
+as slave (`0,2,1`).  Both must return `STATUS_OUT_OF_RANGE`, and the timer
+and SYSCFG registers must remain unchanged.
 
-**Falsifies:** #86's lookup-table fix, per pair.
+**PASS:** both supported pairs lock as tabled and both TIMER19 requests fail
+closed. **FAIL:** a supported pair free-runs, locks to the wrong master, or
+reads back the wrong `TSCFG15` value; or an id-2 request returns success or
+changes a register.
+
+**Falsifies:** #86's lookup-table fix per supported pair and #142's id-2
+rejection.
 
 **Brick risk:** none — a wrong timer route is a functional bug, not a
 flash/boot hazard.

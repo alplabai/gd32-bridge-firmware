@@ -86,7 +86,9 @@
  *                               Slave ITIx looked up per (master, slave)
  *                               pair (timer_sync_iti_lookup, hal/gd32/
  *                               timer_sync_iti.c, UM p.570); an
- *                               unconnected pair returns INVAL.
+ *                               unconnected pair returns INVAL.  Only
+ *                               initialised TIMER0/TIMER7 are exposed;
+ *                               TIMER19 id 2 returns RANGE (#142).
  *   16. POWER_MODE_SET       -- DONE (§C.15c + §C.25): mode 0/1
  *                               (run/sleep) accepted no-ops, mode 2
  *                               (deep-sleep) calls

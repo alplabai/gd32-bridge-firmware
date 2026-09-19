@@ -2,15 +2,13 @@
  *
  * HOST unit tests for the (slave, master) -> SYSCFG ITIx router-code
  * lookup (hal/gd32/timer_sync_iti.c).  This is the one slice of
- * bridge_hw_timer_sync() that is host-testable at all: hal/gd32/
- * timer_sync.c itself needs the Cortex-M33 vendor register headers and is
- * compiled by no CI job (issue #77), but the lookup table has no hardware
- * dependency, so it was split into its own translation unit purely so
- * this suite could link and exercise it directly.
+ * bridge_hw_timer_sync() with no vendor-API dependency, so it stays split
+ * into its own translation unit and can be tested directly.  A sibling
+ * suite links the production HAL body against a minimal vendor mock (#142).
  *
- * Covers all six ordered (master, slave) pairs alp-sdk gd32-bridge-
- * firmware#42's Verification section asks for, plus the rejection cases:
- * master == slave and an out-of-range id.  Expected codes per GD32G553
+ * Covers both supported ordered (master, slave) pairs plus the rejection
+ * cases: master == slave, the uninitialised TIMER19 id 2 (#142), and an
+ * out-of-range id.  Expected codes per GD32G553
  * User Manual Rev1.2 p.570 (connection table) and p.83 (TSCFG15[4:0]
  * encoding) -- see hal/gd32/timer_sync_iti.h for the derivation.
  */
@@ -25,21 +23,14 @@
 
 #define ITI0 0x01u
 #define ITI5 0x0Au
-#define ITI9 0x0Eu
 
-/* ---- the six ordered (master, slave) pairs the wire protocol can
+/* ---- the two ordered (master, slave) pairs the wire protocol can
  * express, UM p.570 ------------------------------------------------- */
 
 ZTEST(timer_sync_iti, test_master_timer7_slave_timer0)
 {
 	/* TIMER0's ITI5 entry is TIMER7_TRGO0. */
 	zassert_equal(timer_sync_iti_lookup(TIMER0, TIMER7), ITI5);
-}
-
-ZTEST(timer_sync_iti, test_master_timer19_slave_timer0)
-{
-	/* TIMER0's ITI9 entry is TIMER19_TRGO0. */
-	zassert_equal(timer_sync_iti_lookup(TIMER0, TIMER19), ITI9);
 }
 
 ZTEST(timer_sync_iti, test_master_timer0_slave_timer7)
@@ -49,30 +40,11 @@ ZTEST(timer_sync_iti, test_master_timer0_slave_timer7)
 	zassert_equal(timer_sync_iti_lookup(TIMER7, TIMER0), ITI0);
 }
 
-ZTEST(timer_sync_iti, test_master_timer19_slave_timer7)
-{
-	/* TIMER7's ITI9 entry is TIMER19_TRGO0. */
-	zassert_equal(timer_sync_iti_lookup(TIMER7, TIMER19), ITI9);
-}
-
-ZTEST(timer_sync_iti, test_master_timer0_slave_timer19)
-{
-	/* TIMER19's ITI0 entry is TIMER0_TRGO0 -- the other pair that
-	 * already worked before #42's fix. */
-	zassert_equal(timer_sync_iti_lookup(TIMER19, TIMER0), ITI0);
-}
-
-ZTEST(timer_sync_iti, test_master_timer7_slave_timer19)
-{
-	/* TIMER19's ITI5 entry is TIMER7_TRGO0. */
-	zassert_equal(timer_sync_iti_lookup(TIMER19, TIMER7), ITI5);
-}
-
 /* ---- rejection cases ------------------------------------------------ */
 
 ZTEST(timer_sync_iti, test_rejects_master_equals_slave)
 {
-	/* Each of TIMER0/TIMER0, TIMER7/TIMER7, TIMER19/TIMER19 is the
+	/* Each of TIMER0/TIMER0 and TIMER7/TIMER7 is the
 	 * diagonal of the internal-trigger table ("-" in UM p.570) -- no
 	 * timer is its own ITI source.  bridge_hw_timer_sync() also rejects
 	 * master == slave before ever calling this lookup, but the lookup
@@ -80,6 +52,12 @@ ZTEST(timer_sync_iti, test_rejects_master_equals_slave)
 	 * dropped or bypassed. */
 	zassert_equal(timer_sync_iti_lookup(TIMER0, TIMER0), 0u);
 	zassert_equal(timer_sync_iti_lookup(TIMER7, TIMER7), 0u);
+}
+
+ZTEST(timer_sync_iti, test_rejects_uninitialised_timer19)
+{
+	zassert_equal(timer_sync_iti_lookup(TIMER0, TIMER19), 0u);
+	zassert_equal(timer_sync_iti_lookup(TIMER19, TIMER0), 0u);
 	zassert_equal(timer_sync_iti_lookup(TIMER19, TIMER19), 0u);
 }
 
