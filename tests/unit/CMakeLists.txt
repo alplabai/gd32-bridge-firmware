@@ -9,10 +9,10 @@
 #   ctest --test-dir build-tests --output-on-failure
 #
 # The `ota` and `transport_spi` suites moved here from alp-sdk when the firmware
-# split into its own repository (alp-sdk ADR 0031).  They, and `transport_i2c`,
-# link the REAL firmware sources against hal/bridge_hw_stub.c -- not mocks -- so
-# the bounds checks and the CS/register framing seams under test are the same
-# code paths the device runs.
+# split into its own repository (alp-sdk ADR 0031).  They link the REAL firmware
+# sources against hal/bridge_hw_stub.c; transport_i2c uses the injectable fake
+# so non-idempotent commands can expose duplicate dispatches (#4).  The framing
+# and dispatcher sources under test are the same code paths the device runs.
 #
 # `crc32` (#26 C2, #104) pins the table-driven ota_crc32() bit-identical to
 # the bit-serial implementation it replaced, against a reference copy of the
@@ -23,11 +23,11 @@
 # `crc16` (#26, #104) is the same proof for src/protocol.c's table-driven
 # crc16_ccitt_false() -- the FRAMING CRC, called twice per round trip.  It
 # links protocol.c itself (not a standalone crc16.c/.h -- see the comment
-# ahead of crc16_table[] in protocol.c for why) plus protocol.c's other
-# dependencies, the same set transport_spi/transport_i2c below link.
+# ahead of crc16_table[] in protocol.c for why) plus the same firmware
+# dependencies the transport suites use; their test HAL backends differ below.
 #
-# `protocol` is the deliberate exception: it links tests/unit/fake/bridge_hw_fake.c
-# INSTEAD of the stub.  The stub answers BRIDGE_HW_ERR_NOTIMPL for nearly
+# `protocol` and `transport_i2c` link tests/unit/fake/bridge_hw_fake.c INSTEAD
+# of the stub.  The stub answers BRIDGE_HW_ERR_NOTIMPL for nearly
 # everything, so only about two hardware opcodes can reach STATUS_OK through it,
 # which left src/protocol.c's reply encoding and its BRIDGE_HW_ERR_* -> STATUS_*
 # ladders unreachable from any host test.  The fake is injectable (a forced return
@@ -241,7 +241,7 @@ target_compile_options(test_fmc_ota_guard PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_fmc_ota_guard PRIVATE ztest_shim)
 add_test(NAME fmc_ota_guard COMMAND test_fmc_ota_guard)
 
-# --- transport_i2c: transport + dispatcher over the stub HAL ---------------
+# --- transport_i2c: transport + dispatcher over the injectable fake HAL ----
 add_executable(test_transport_i2c
     transport_i2c/src/test_transport_i2c.c
     ${FW}/src/transport_i2c.c
@@ -249,9 +249,13 @@ add_executable(test_transport_i2c
     ${FW}/src/bootloader/bootloader.c
     ${FW}/src/ota.c
     ${FW}/src/crc32.c
-    ${FW}/hal/bridge_hw_stub.c
+    fake/bridge_hw_fake.c
 )
-target_include_directories(test_transport_i2c PRIVATE ${FW}/src ${FW}/hal)
+target_include_directories(test_transport_i2c PRIVATE
+    ${FW}/src
+    ${FW}/hal
+    ${CMAKE_CURRENT_SOURCE_DIR}/fake
+)
 target_compile_options(test_transport_i2c PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_transport_i2c PRIVATE ztest_shim)
 add_test(NAME transport_i2c COMMAND test_transport_i2c)
@@ -261,7 +265,7 @@ add_test(NAME transport_i2c COMMAND test_transport_i2c)
 # hal/bridge_hw_stub.c answers BRIDGE_HW_ERR_NOTIMPL for essentially every
 # call, so it can only ever prove STATUS_OK on the opcodes with no hardware
 # dependency (PING/GET_VERSION/GET_BUILD_ID/LINK_FEATURES) -- the rest of
-# src/protocol.c's 1025 lines goes untouched by transport_spi/transport_i2c.
+# src/protocol.c's 1025 lines goes untouched by the stub-backed suites.
 # fake/bridge_hw_fake.c stands in for hal/bridge_hw_stub.c here instead, so
 # every opcode's success path AND its BRIDGE_HW_ERR_* -> STATUS_* mapping is
 # reachable.  Not -DBRIDGE_OTA_PARTITIONED (matching transport_spi/
@@ -303,8 +307,7 @@ add_test(NAME adc_dsp COMMAND test_adc_dsp)
 #     CONTRIBUTING.md claims (#31 finding E5) -------------------------------
 #
 # Feeds the canonical vectors' own bytes through the REAL transport_spi.c /
-# transport_i2c.c -> protocol.c seams (same link set as test_transport_spi /
-# test_transport_i2c above: hal/bridge_hw_stub.c, unpartitioned OTA) and
+# transport_i2c.c -> protocol.c seams (stub-backed, unpartitioned OTA) and
 # asserts the emitted reply bytes.  Before this target, nothing under
 # tests/unit/ read tests/protocol_vectors.txt at all -- the only automation
 # touching the file was the generator's own regenerate-and-diff, a comparison
