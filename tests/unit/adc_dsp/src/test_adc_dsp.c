@@ -795,9 +795,9 @@ force_stage(uint8_t chain_id, uint8_t idx, uint8_t kind, const uint8_t *data, ui
 
 /* A FIR stage declaring 200 taps -- more than triple
  * BRIDGE_DSP_MAX_FIR_TAPS (64), which is what sizes adc_dsp_fac_config's
- * `int16_t taps[]`.  That array sits on the single 2 KB stack shared with
- * the I2C ISR's protocol_dispatch() and a nested CS-EXTI ISR, and MSPLIM
- * is never written, so the overwrite would be silent. */
+ * `int16_t taps[]`.  That array sits on the single 2 KB transport ISR stack;
+ * nested dispatch is refused by #19, but MSPLIM is never written, so the
+ * overwrite would still be silent. */
 ZTEST(gd32_bridge_adc_dsp, test_p1_capable_rejects_overlong_fir_taps)
 {
 	reset_all();
