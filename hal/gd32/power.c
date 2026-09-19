@@ -16,6 +16,7 @@
 
 #include "bridge_board_config.h" /* BRIDGE_I2C_PERIPH */
 #include "gd32_common.h"
+#include "power_wake.h"
 #include "transport.h" /* bridge_transport_i2c_hw_init() */
 
 /* ----------------------------------------------------------------- */
@@ -46,15 +47,6 @@
  *            opcode; today the firmware rejects them so the host
  *            knows the request is moot.
  */
-#define POWER_WAKE_RTC            0x00000001u
-#define POWER_WAKE_GPIO           0x00000002u
-#define POWER_WAKE_UART_RX        0x00000004u
-#define POWER_WAKE_TIMER          0x00000008u
-#define POWER_WAKE_USB            0x00000010u
-#define POWER_WAKE_ETH_LINK       0x00000020u
-#define POWER_WAKE_MASK_SUPPORTED (POWER_WAKE_RTC | POWER_WAKE_GPIO | POWER_WAKE_TIMER)
-#define POWER_WAKE_MASK_HW_GATED  (POWER_WAKE_UART_RX | POWER_WAKE_USB | POWER_WAKE_ETH_LINK)
-
 /* RTC wakeup timer LSB.  POWER_WAKE_LSB_HZ = 2000 Hz assumes an exact
  * 32000 Hz IRC32K with the /16 divider -- 0.5 ms/tick nominal, max
  * wake 65535/2000 = 32.7 s -- but IRC32K is NOT a fixed 32000 Hz.
@@ -150,10 +142,10 @@ int bridge_hw_power_mode_set(uint8_t mode, uint32_t wake_bitmap, uint32_t wake_a
      * sources the host wants armed; `wake_after_ms` is a timed
      * fallback that arms the RTC wakeup timer regardless of the
      * bitmap (per the <alp/power.h> contract: the timer is implicit
-     * when wake_after_ms > 0).  Unsupported bits (UART_RX / USB /
-     * ETH_LINK on the GD32G5 baseline) reject so the host knows the
-     * request was not honoured. */
-	if ((wake_bitmap & POWER_WAKE_MASK_HW_GATED) != 0u) return BRIDGE_HW_ERR_NOTIMPL;
+	 * when wake_after_ms > 0).  Any bit outside the supported set rejects,
+	 * including future bits this firmware does not know, so the host is never
+	 * told that an unarmed source will wake the part. */
+	if (!power_wake_bitmap_supported(wake_bitmap)) return BRIDGE_HW_ERR_NOTIMPL;
 
 	switch (mode) {
 	case 0u: /* run -- no-op */
@@ -228,5 +220,4 @@ int bridge_hw_power_mode_set(uint8_t mode, uint32_t wake_bitmap, uint32_t wake_a
 	default:
 		return BRIDGE_HW_ERR_INVAL;
 	}
-	(void)POWER_WAKE_MASK_SUPPORTED;
 }
