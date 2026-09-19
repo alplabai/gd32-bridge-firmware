@@ -12,9 +12,11 @@
 #include <stdint.h>
 
 /* GD32G553 User Manual Rev1.2 §28.3.9 limits SMBus clock stretching to
- * 25--35 ms. Choose the earliest conforming limit: it bounds a bridge
+ * 25--35 ms. Choose the earliest conforming limit: it detects a bridge
  * request handler that has starved I2C0_EV without needlessly extending the
- * time the shared BRD_I2C bus is unavailable to the PMIC or secure element. */
+ * time the shared BRD_I2C bus is unavailable to the PMIC or secure element.
+ * The IP specifies TIMEOUT as a flag, not an automatic slave abort; the
+ * recovery path remains responsible for proving pad-level release. */
 #define BRIDGE_I2C_STRETCH_TIMEOUT_US 25000u
 
 /* Convert an I2C kernel clock to the BUSTOA/BUSTOB reload value for a timeout

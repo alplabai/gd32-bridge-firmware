@@ -482,9 +482,9 @@ int bridge_transport_i2c_hw_init(void)
 	 * continuously stretched clock; the extended counter covers cumulative
 	 * slave extension. Program both before their enable bits lock the reload
 	 * fields, then let the already-enabled ERRIE path clear TIMEOUT and
-	 * resynchronise the framing. The exact pad-level release remains a
-	 * silicon validation point because this bridge is a plain I2C slave on
-	 * the shared BRD_I2C bus, not a full SMBus device. */
+	 * resynchronise the framing. The manual specifies TIMEOUT as a flag, not
+	 * an automatic slave abort or SCL release; a stalled pad needs an explicit
+	 * disable/reinitialise recovery path, verified on silicon (#150). */
 	i2c_bus_timeout_a_config(BRIDGE_I2C_PERIPH, stretch_timeout_reload);
 	i2c_bus_timeout_b_config(BRIDGE_I2C_PERIPH, stretch_timeout_reload);
 	i2c_clock_timeout_enable(BRIDGE_I2C_PERIPH);

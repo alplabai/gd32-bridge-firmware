@@ -204,7 +204,7 @@ add_test(NAME timer_sync COMMAND test_timer_sync)
 # The vendor I2C register calls are covered by the GD32 backend build; this
 # vendor-header-free helper pins the timeout arithmetic at both normal and
 # Deep-sleep APB1 clocks, so a later clock-tree change cannot silently turn
-# the 25 ms bus-release ceiling into hundreds of milliseconds.
+# the 25 ms timeout-detection window into hundreds of milliseconds.
 add_executable(test_i2c_timeout
     i2c_timeout/src/test_i2c_timeout.c
     ${FW}/hal/gd32/i2c_timeout.c
