@@ -96,19 +96,14 @@
  * now also thrashes the board's rails/reset lines on every cycle instead
  * of just once.
  *
- * Known limitation, stated plainly: nothing clears RTC_BKP7 on a
- * healthy boot, because that belongs in bridge_hw_init() (owned by open
- * PRs #75/#81/#84/#86 -- out of this file's scope per the task, and
- * genuinely: it needs to run after the application decides the boot is
- * healthy, not merely reached, which is a policy this file has no basis
- * to invent). Until a future change adds that, this counter is
- * effectively lifetime-of-backup-domain-power, not per-incident: four
- * total faults ever (not four in a row) trips the halt path. Recovering
- * from that halted state needs either a debugger write to RTC_BKP7 or
- * removing backup-domain power entirely (VBAT, if populated on this
- * board -- unconfirmed, bench item). That is a real cost of not editing
- * init.c; it is still strictly better than today, where every one of
- * these five sources hangs forever on the very first occurrence.
+ * The application clears only RTC_BKP7 after both transports have reached
+ * their successful hardware-initialisation tail.  That is deliberately
+ * later than merely entering main: a detectable I2C timing failure returns
+ * before the clear, so a partially initialised bridge cannot call itself
+ * healthy.  The bootloader never clears the counter itself.  A fault that
+ * repeats during boot therefore reaches the bounded halt path, while a
+ * completed application bring-up starts the next incident at zero.  The
+ * diagnostic record in RTC_BKP0..6 is preserved across that clear.
  */
 
 #include <stdbool.h>
@@ -117,6 +112,7 @@
 #include "gd32g5x3.h"
 
 #include "fault_diag.h"
+#include "fault_handlers.h"
 
 /* Past this many consecutive fault-triggered resets (RTC_BKP7, see file
  * header), stop resetting and halt instead. */
@@ -131,6 +127,12 @@ static void fault_backup_unlock(void)
 {
 	RCU_APB1EN |= RCU_APB1EN_PMUEN;
 	PMU_CTL0 |= PMU_CTL0_BKPWEN;
+}
+
+void fault_reset_loop_mark_healthy(void)
+{
+	fault_backup_unlock();
+	RTC_BKP7 = 0u;
 }
 
 static void fault_record_save(const fault_record_t *rec)

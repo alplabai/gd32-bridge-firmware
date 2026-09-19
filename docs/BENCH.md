@@ -848,7 +848,7 @@ scope by the PR's own explicit statement, not an oversight here.
 
 ---
 
-## Phase 10 — fault handlers (#99 / issue #36)
+## Phase 10 — fault handlers (#99 / #100 / issue #36)
 
 Run last among the "everything else" phases: several of its own steps
 deliberately provoke a fault, which is a controlled, self-recovering
@@ -858,25 +858,22 @@ provocation step reuses the OTA path from Phase 2 — run it after Phase 2 so
 a Phase-2 regression is not mistaken for a Phase-10 finding or vice versa.
 
 **Proves:** all five NMI/fault vectors (NMI, HardFault, MemManage,
-BusFault, UsageFault) now record diagnostic state to `RTC_BKP0..7` and
-reset (or halt, if a debugger is attached) instead of hanging forever with
-no diagnostic — previously all five were weakly aliased to the vendor's
-`Default_Handler` (`b .`, an unconditional infinite loop).
+BusFault, UsageFault) in the full-flash app, both OTA slots, and the
+bootloader now record diagnostic state to `RTC_BKP0..7` and reset (or halt,
+if a debugger is attached) instead of hanging forever with no diagnostic —
+previously all five were weakly aliased to the vendor's `Default_Handler`
+(`b .`, an unconditional infinite loop) in the bootloader.
 
 **Procedure (per the PR's own bench section, one sub-step per source):**
 1. **Flash ECC (NMI, `FLASHECCIF`)** — the reachable path from issue #36:
    start an OTA update (Phase 2 must already be validated), cut power with
    the programmable PSU mid-program (interrupting one 72-bit doubleword),
    then boot and let the bootloader's CRC walk hit the damaged doubleword.
-   **Caveat stated in the PR itself:** this scenario is fully exercisable
-   only once `fault_handlers.c` is *also* linked into the bootloader — a
-   follow-up not in this PR (`src/boot/boot_main.c` links a disjoint
-   source list that does not pull in `hal/gd32/*.c`). Today, exercise it
-   via a direct read of a deliberately-corrupted flash location from
-   application code instead, and expect `RTC_BKP0` to read
-   `FAULT_RECORD_MAGIC | FAULT_TYPE_NMI`, `RTC_BKP3` (`SYSCFG_STAT`) to
-   have `FLASHECCIF` set, `RTC_BKP4` (`FMC_ECCCS`) to have `ECCDET0` set
-   with `ECCADDR`/`BK_ECC` matching the damaged doubleword.
+   `fault_handlers.c` is linked directly into the bootloader, so expect
+   `RTC_BKP0` to read `FAULT_RECORD_MAGIC | FAULT_TYPE_NMI`, `RTC_BKP3`
+   (`SYSCFG_STAT`) to have `FLASHECCIF` set, and `RTC_BKP4` (`FMC_ECCCS`)
+   to have `ECCDET0` set with `ECCADDR`/`BK_ECC` matching the damaged
+   doubleword.
 2. **HXTAL clock failure (NMI, `CKMNMIIF`)** — pull the HXTAL
    crystal/oscillator input while `CKNMIIE` is enabled. Expect `RTC_BKP3`
    bit 3 set, `RTC_BKP4` = 0.
@@ -898,9 +895,12 @@ no diagnostic — previously all five were weakly aliased to the vendor's
    and the recorded `BFAR` equal to the faulting address.
 7. **UsageFault** — execute an integer divide by zero (if `SCB->CCR`
    enables the trap). Expect `RTC_BKP3` `DIVBYZERO` set.
-8. **Reset-loop bound** — repeat any one of the above 4+ times without an
-   intervening manual clear of `RTC_BKP7`. Confirm the 4th occurrence
-   halts (core stopped per `DCB->DHCSR`) instead of resetting again.
+8. **Reset-loop bound and healthy clear** — use a deterministic bootloader
+   fault so the application cannot start between attempts. Confirm the 4th
+   occurrence halts (core stopped per `DCB->DHCSR`) instead of resetting
+   again. Repair the fault/provision a valid image, reset, and let both
+   application transports initialise successfully. Confirm `RTC_BKP7` is
+   then zero while the last diagnostic in `RTC_BKP0..6` is unchanged.
 9. **Debugger-attached skip** — attach the probe *before* provoking any of
    the above; confirm the handler halts instead of resetting, with
    `CFSR`/`SYSCFG_STAT`/`FMC_ECCCS` still live/readable, not cleared.
@@ -917,8 +917,9 @@ it gates for the rest of the SoM) while it re-runs its own `Reset_Handler`
 and `bridge_hw_init()`. If step 8's reset loop is triggered accidentally
 during an unrelated bench session elsewhere in this runbook, it is
 self-recovering (halts after 3 consecutive resets) but will leave
-`RTC_BKP7` non-zero — clear it via debugger write before the next fault
-test, or the counter reads as a false "already near the limit."
+`RTC_BKP7` non-zero until a successful application transport bring-up clears
+it. If the part is halted before that point, repair the boot fault and reset
+with SWD (or clear `RTC_BKP7` directly) before the next fault test.
 Recovery for a genuinely wedged fault handler: bench SWD probe (same as
 everywhere else), though this is the one phase in the batch whose entire
 purpose is to make that less necessary.
