@@ -17,10 +17,11 @@
 # the flashable set: build/gd32-bridge.elf + .hex + .bin.
 #
 # Status: both backends build clean (arm-none-eabi-gcc 13.x).  The gd32
-# backend links the GigaDevice firmware library at
-# `vendors/gd32_firmware_library/` and drives the peripheral HAL plus the
-# SPI1 + I2C0 slave transports; remaining HAL gaps (DSP chain upload,
-# POWER_MODE_SET) and OTA degrade to STATUS_NOSUPPORT.
+# backend links the GigaDevice firmware-library wrapper selected by
+# GD32_VENDOR_DIR (or the pre-split fallback documented below) and drives
+# the peripheral HAL plus the SPI1 + I2C0 slave transports.  Unsupported
+# hardware-specific options return STATUS_NOSUPPORT; OTA opcodes are inert
+# unless the partitioned build is selected with BRIDGE_OTA_PARTITIONED=ON.
 
 cmake_minimum_required(VERSION 3.20)
 project(gd32-bridge LANGUAGES C ASM)
@@ -295,6 +296,3 @@ else()
     add_executable(gd32-bootloader src/boot/boot_main.c src/crc32.c hal/gd32_libc_stubs.c)
     gd32_firmware_target(gd32-bootloader ${CMAKE_SOURCE_DIR}/toolchain/gd32g553_bootloader.ld)
 endif()
-
-# GET_BUILD_ID reports "<fw-version>+<short-sha>"; the post-link SHA hook is
-# still TODO (firmware reports "<fw-version>+0000000" until then).

@@ -220,7 +220,9 @@ void spi_slave_cs_low(void)
 	spi_rx_len = 0u;
 }
 
-/* Call once per received byte (per the GD32 SPI ISR). */
+/* Feed one received byte into the framing layer.  The gd32 backend calls
+ * this from the CS-rising EXTI drain after RX DMA completes; host tests may
+ * drive the same seam directly. */
 void spi_slave_rx_byte(uint8_t b)
 {
 	if (spi_rx_len < sizeof(spi_rx_buf)) {
