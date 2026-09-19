@@ -36,9 +36,15 @@
 #include <zephyr/ztest.h>
 
 #include "bridge_hw.h"
+#include "adc_dsp_chain.h"
 #include "gd32_common.h"
 
 #include "gd32g5x3.h" /* mock -- tests/unit/adc_seq/mock/ */
+
+/* Internal base-level lifecycle hooks from adc_stream.c. */
+void adc_dsp_fac_release(uint8_t stream_id);
+void adc_dsp_fft_release(uint8_t stream_id);
+void bridge_hw_dsp_pump(void);
 
 /* adc_channels_map[0] = { ADC3, ADC_CHANNEL_12, GPIOD, GPIO_PIN_9 } --
  * bridge channel 0, the periph every "channel 0" test below drives. */
@@ -47,8 +53,16 @@
 
 static void adc_seq_reset(void)
 {
+	/* The owner bytes are file-local production state. Release both stream
+	 * IDs before zeroing the visible arrays so a failed prior case cannot
+	 * contaminate the next case; clear the resulting mock log afterward. */
+	for (uint8_t s = 0u; s < BRIDGE_ADC_STREAM_COUNT; ++s) {
+		adc_dsp_fac_release(s);
+		adc_dsp_fft_release(s);
+	}
 	mock_seq_reset();
 	memset(mock_adc_ctl1, 0, sizeof mock_adc_ctl1);
+	memset(adc_dsp_chains, 0, sizeof adc_dsp_chains);
 	for (uint8_t s = 0u; s < BRIDGE_ADC_STREAM_COUNT; ++s) {
 		adc_streams[s] = (adc_stream_state_t){ 0 };
 	}
@@ -208,6 +222,206 @@ ZTEST(gd32_adc_seq, test_rovf_recovery_clears_dma_ftf)
 	             "ROVF recovery must clear the DMA FTF interrupt flag, "
 	             "or a pending lap tick fires the instant this handler "
 	             "returns and corrupts the freshly-resynced lap_count");
+}
+
+/* ---------------------------------------------------------------------
+ * #140 -- ending and rebinding an FFT stream starts a new publication
+ * session. Until that session fills and publishes its own FFT window,
+ * spectrum_read must answer IO/BUSY instead of reporting the prior sequence
+ * as a successful empty frame.
+ * --------------------------------------------------------------------- */
+
+static void bind_test_fft_chain(uint8_t stream_id)
+{
+	adc_dsp_chain_t *chain = &adc_dsp_chains[0];
+	memset(chain, 0, sizeof(*chain));
+	chain->in_use = true;
+
+	adc_dsp_stage_t *fft = &chain->stages[0];
+	fft->kind            = 3u;
+	fft->total_size      = BRIDGE_DSP_STAGE_HDR_BYTES;
+	fft->bytes_received  = BRIDGE_DSP_STAGE_HDR_BYTES;
+	fft->complete        = true;
+	fft->data[0]         = 32u; /* 32-point FFT, little-endian u16 */
+	fft->data[1]         = 0u;
+	fft->data[2]         = 0u; /* complex output */
+	fft->data[3]         = 0u;
+
+	zassert_equal(bridge_hw_adc_dsp_chain_bind(0u, stream_id),
+	              BRIDGE_HW_OK,
+	              "well-formed test FFT chain binds");
+}
+
+static void bind_test_fir_chain(uint8_t stream_id)
+{
+	adc_dsp_chain_t *chain = &adc_dsp_chains[0];
+	memset(chain, 0, sizeof(*chain));
+	chain->in_use = true;
+
+	adc_dsp_stage_t *fir = &chain->stages[0];
+	fir->kind            = 0u;
+	fir->total_size      = BRIDGE_DSP_STAGE_HDR_BYTES + 4u;
+	fir->bytes_received  = fir->total_size;
+	fir->complete        = true;
+	fir->data[0]         = 1u;    /* Q31 */
+	fir->data[1]         = 1u;    /* one tap */
+	fir->data[7]         = 0x40u; /* 0.5 in little-endian Q31 */
+
+	zassert_equal(bridge_hw_adc_dsp_chain_bind(0u, stream_id),
+	              BRIDGE_HW_OK,
+	              "well-formed test FIR chain binds");
+}
+
+static int fft_init_end_result;
+static int fac_init_end_result;
+
+static void end_stream_during_fft_init(void)
+{
+	fft_init_end_result = bridge_hw_adc_stream_end(0u);
+}
+
+static void end_stream_during_fac_init(void)
+{
+	fac_init_end_result = bridge_hw_adc_stream_end(0u);
+}
+
+ZTEST(gd32_adc_seq, test_fft_rebind_rejects_previous_sequence_until_new_frame)
+{
+	adc_seq_reset();
+
+	/* Session 1 publishes one real frame through the production pump. */
+	zassert_equal(
+	    bridge_hw_adc_stream_begin(0u, BRIDGE_ADC_CH0, 1000u), BRIDGE_HW_OK, "first stream begins");
+	bind_test_fft_chain(0u);
+	for (uint16_t i = 0u; i < 32u; ++i)
+		adc_streams[0].ring[i] = i;
+	mock_dma_set_remaining(DMA0, DMA_CH0, BRIDGE_ADC_STREAM_RING_SAMPLES - 32u);
+	mock_fft_set_flag(SET);
+	bridge_hw_dsp_pump();
+
+	uint32_t seq   = 0u;
+	uint16_t total = 0u;
+	uint8_t  got   = 0u;
+	float    bin   = -1.0f;
+	zassert_equal(bridge_hw_adc_spectrum_read(0u, 0u, 1u, &seq, &total, &got, &bin),
+	              BRIDGE_HW_OK,
+	              "first session publishes a readable frame");
+	zassert_equal(seq, 1u, "first session frame sequence starts at one");
+	zassert_equal(got, 1u, "one complex-output bin component is returned");
+	zassert_equal(bridge_hw_adc_stream_end(0u), BRIDGE_HW_OK, "first stream ends cleanly");
+
+	/* Session 2 has configured the FFT owner but produced no samples. The
+	 * old frame must remain hidden until this session publishes its own. */
+	zassert_equal(bridge_hw_adc_stream_begin(0u, BRIDGE_ADC_CH0, 1000u),
+	              BRIDGE_HW_OK,
+	              "second stream begins");
+	bind_test_fft_chain(0u);
+	mock_fft_set_flag(RESET);
+	bridge_hw_dsp_pump();
+
+	seq   = 0xDEADBEEFu;
+	total = 0xFFFFu;
+	got   = 0xFFu;
+	bin   = -1.0f;
+	zassert_equal(bridge_hw_adc_spectrum_read(0u, 0u, 1u, &seq, &total, &got, &bin),
+	              BRIDGE_HW_ERR_IO,
+	              "freshly rebound FFT session has no frame yet");
+	zassert_equal(got, 0u, "no bins are reported before this session publishes");
+
+	for (uint16_t i = 0u; i < 32u; ++i)
+		adc_streams[0].ring[i] = (uint16_t)(32u - i);
+	mock_dma_set_remaining(DMA0, DMA_CH0, BRIDGE_ADC_STREAM_RING_SAMPLES - 32u);
+	mock_fft_set_flag(SET);
+	bridge_hw_dsp_pump();
+	seq   = 0u;
+	total = 0u;
+	got   = 0u;
+	zassert_equal(bridge_hw_adc_spectrum_read(0u, 0u, 1u, &seq, &total, &got, &bin),
+	              BRIDGE_HW_OK,
+	              "second session publishes its own readable frame");
+	zassert_equal(seq, 1u, "new session frame sequence restarts at one");
+	zassert_equal(got, 1u, "new session serves its own bin data");
+	zassert_equal(bridge_hw_adc_stream_end(0u), BRIDGE_HW_OK, "second stream ends cleanly");
+}
+
+ZTEST(gd32_adc_seq, test_fft_config_preemption_cannot_resurrect_ended_stream)
+{
+	adc_seq_reset();
+	fft_init_end_result = BRIDGE_HW_ERR_IO;
+
+	/* Give the first pump enough data to publish, then model the transport
+	 * ISR ending the stream from inside the long first-time FFT config. */
+	zassert_equal(
+	    bridge_hw_adc_stream_begin(0u, BRIDGE_ADC_CH0, 1000u), BRIDGE_HW_OK, "stream begins");
+	bind_test_fft_chain(0u);
+	for (uint16_t i = 0u; i < 32u; ++i)
+		adc_streams[0].ring[i] = i;
+	mock_dma_set_remaining(DMA0, DMA_CH0, BRIDGE_ADC_STREAM_RING_SAMPLES - 32u);
+	mock_fft_set_flag(SET);
+	mock_fft_set_init_hook(end_stream_during_fft_init);
+	bridge_hw_dsp_pump();
+
+	zassert_equal(fft_init_end_result, BRIDGE_HW_OK, "ISR-side stream end succeeds");
+	zassert_false(adc_streams[0].in_use, "interrupted session remains ended");
+
+	/* A fresh same-ID session must not inherit the owner or a frame that
+	 * base level could otherwise have published after the teardown. */
+	zassert_equal(bridge_hw_adc_stream_begin(0u, BRIDGE_ADC_CH0, 1000u),
+	              BRIDGE_HW_OK,
+	              "replacement stream begins");
+	bind_test_fft_chain(0u);
+	bridge_hw_dsp_pump();
+
+	uint32_t seq   = 0u;
+	uint16_t total = 0u;
+	uint8_t  got   = 0u;
+	float    bin   = -1.0f;
+	zassert_equal(bridge_hw_adc_spectrum_read(0u, 0u, 1u, &seq, &total, &got, &bin),
+	              BRIDGE_HW_ERR_IO,
+	              "replacement session has no frame before its own samples");
+	zassert_equal(got, 0u, "replacement session reports no bins before publication");
+	zassert_equal(bridge_hw_adc_stream_end(0u), BRIDGE_HW_OK, "replacement stream ends cleanly");
+}
+
+ZTEST(gd32_adc_seq, test_fac_config_preemption_cannot_resurrect_ended_stream)
+{
+	adc_seq_reset();
+	fac_init_end_result = BRIDGE_HW_ERR_IO;
+
+	/* End the session from the transport-ISR seam inside FAC setup. The
+	 * configuring token must let release see the in-progress owner. */
+	zassert_equal(
+	    bridge_hw_adc_stream_begin(0u, BRIDGE_ADC_CH0, 1000u), BRIDGE_HW_OK, "stream begins");
+	bind_test_fir_chain(0u);
+	adc_streams[0].ring[0] = 2048u;
+	mock_dma_set_remaining(DMA0, DMA_CH0, BRIDGE_ADC_STREAM_RING_SAMPLES - 1u);
+	mock_fac_set_init_hook(end_stream_during_fac_init);
+	bridge_hw_dsp_pump();
+
+	zassert_equal(fac_init_end_result, BRIDGE_HW_OK, "ISR-side stream end succeeds");
+	zassert_false(adc_streams[0].in_use, "interrupted FAC session remains ended");
+	zassert_equal(adc_streams[0].proc_write, 0u, "ended session publishes no filtered sample");
+	int first_stop = mock_seq_find_from("fac_stop", 0u, 0);
+	int restart    = mock_seq_find_from("fac_start", 0u, first_stop + 1);
+	int final_stop = mock_seq_find_from("fac_stop", 0u, restart + 1);
+	zassert_true(first_stop >= 0, "release stops the configuring FAC owner");
+	zassert_true(restart > first_stop, "interrupted config resumes and starts FAC once");
+	zassert_true(final_stop > restart, "failed ownership commit stops FAC again");
+
+	/* Reusing the stream ID must perform a fresh configuration and process
+	 * new data instead of inheriting the ended session's FAC owner. */
+	zassert_equal(bridge_hw_adc_stream_begin(0u, BRIDGE_ADC_CH0, 1000u),
+	              BRIDGE_HW_OK,
+	              "replacement stream begins");
+	bind_test_fir_chain(0u);
+	adc_streams[0].ring[0] = 1024u;
+	mock_dma_set_remaining(DMA0, DMA_CH0, BRIDGE_ADC_STREAM_RING_SAMPLES - 1u);
+	const int before_replacement_pump = mock_seq_n;
+	bridge_hw_dsp_pump();
+	zassert_true(mock_seq_find_from("fac_init", 0u, before_replacement_pump) >= 0,
+	             "replacement session configures FAC again");
+	zassert_equal(adc_streams[0].proc_write, 1u, "replacement session processes its own sample");
+	zassert_equal(bridge_hw_adc_stream_end(0u), BRIDGE_HW_OK, "replacement stream ends cleanly");
 }
 
 ZTEST_SUITE(gd32_adc_seq, NULL, NULL, NULL, NULL, NULL);

@@ -273,9 +273,11 @@ void nvic_irq_enable(IRQn_Type nvic_irq,
 void nvic_irq_disable(IRQn_Type nvic_irq);
 
 /* ------------------------------------------------------------------ */
-/* FAC -- the DSP filter block.  adc_stream.c's #496 pump code must    */
-/* link; none of the tests below exercise it, so every hook is inert.  */
+/* FAC -- the DSP filter block. Lifecycle hooks let a test model an   */
+/* ISR preempting the base-level pump during initial configuration.   */
 /* ------------------------------------------------------------------ */
+
+typedef void (*mock_dsp_init_hook_t)(void);
 
 #define FAC_THRESHOLD_1        0u
 #define FAC_CP_ENABLE          1u
@@ -322,10 +324,11 @@ void       fac_stop(void);
 void       fac_fixed_data_write(int16_t data);
 int16_t    fac_fixed_data_read(void);
 FlagStatus fac_flag_get(uint32_t flag);
+void       mock_fac_set_init_hook(mock_dsp_init_hook_t hook);
 
 /* ------------------------------------------------------------------ */
-/* FFT -- the spectrum block.  Same story as FAC: link-only for these  */
-/* tests.                                                               */
+/* FFT -- the spectrum block. The completion flag is controllable so */
+/* the session-lifecycle regression can publish one synthetic frame.  */
 /* ------------------------------------------------------------------ */
 
 #define FFT_MODE           0u
@@ -356,6 +359,8 @@ void       fft_struct_para_init(fft_parameter_struct *fft_parameter);
 void       fft_init(fft_parameter_struct *fft_parameter);
 void       fft_calculation_start(void);
 FlagStatus fft_flag_get(uint32_t flag);
+void       mock_fft_set_flag(FlagStatus status);
+void       mock_fft_set_init_hook(mock_dsp_init_hook_t hook);
 
 /* ---- CMSIS core intrinsics -------------------------------------------- *
  *

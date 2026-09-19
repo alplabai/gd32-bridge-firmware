@@ -14,6 +14,9 @@ void mock_seq_reset(void)
 {
 	mock_seq_n = 0;
 	memset(mock_seq, 0, sizeof mock_seq);
+	mock_fac_set_init_hook(0);
+	mock_fft_set_flag(RESET);
+	mock_fft_set_init_hook(0);
 }
 
 void mock_seq_log(const char *name, uint32_t periph, uint32_t arg)
@@ -306,7 +309,9 @@ void nvic_irq_disable(IRQn_Type nvic_irq)
 	mock_seq_log("nvic_irq_disable", (uint32_t)nvic_irq, 0u);
 }
 
-/* --- FAC / FFT: link-only stubs, never exercised by these tests ----------*/
+/* --- FAC / FFT: lightweight lifecycle stubs ------------------------------*/
+
+static mock_dsp_init_hook_t mock_fac_init_hook;
 
 void fac_deinit(void)
 {
@@ -318,6 +323,12 @@ void fac_struct_para_init(fac_parameter_struct *p)
 void fac_init(fac_parameter_struct *p)
 {
 	(void)p;
+	mock_seq_log("fac_init", 0u, 0u);
+	if (mock_fac_init_hook != 0) {
+		mock_dsp_init_hook_t hook = mock_fac_init_hook;
+		mock_fac_init_hook        = 0;
+		hook();
+	}
 }
 void fac_fixed_data_preload_init(fac_fixed_data_preload_struct *p)
 {
@@ -333,9 +344,11 @@ void fac_function_config(fac_parameter_struct *p)
 }
 void fac_start(void)
 {
+	mock_seq_log("fac_start", 0u, 0u);
 }
 void fac_stop(void)
 {
+	mock_seq_log("fac_stop", 0u, 0u);
 }
 void fac_fixed_data_write(int16_t data)
 {
@@ -350,6 +363,10 @@ FlagStatus fac_flag_get(uint32_t flag)
 	(void)flag;
 	return RESET;
 }
+void mock_fac_set_init_hook(mock_dsp_init_hook_t hook)
+{
+	mock_fac_init_hook = hook;
+}
 
 void fft_deinit(void)
 {
@@ -358,17 +375,34 @@ void fft_struct_para_init(fft_parameter_struct *p)
 {
 	memset(p, 0, sizeof *p);
 }
+static mock_dsp_init_hook_t mock_fft_init_hook;
+
 void fft_init(fft_parameter_struct *p)
 {
 	(void)p;
+	if (mock_fft_init_hook != 0) {
+		mock_dsp_init_hook_t hook = mock_fft_init_hook;
+		mock_fft_init_hook        = 0;
+		hook();
+	}
 }
 void fft_calculation_start(void)
 {
 }
+static FlagStatus mock_fft_status;
+
 FlagStatus fft_flag_get(uint32_t flag)
 {
 	(void)flag;
-	return RESET;
+	return mock_fft_status;
+}
+void mock_fft_set_flag(FlagStatus status)
+{
+	mock_fft_status = status;
+}
+void mock_fft_set_init_hook(mock_dsp_init_hook_t hook)
+{
+	mock_fft_init_hook = hook;
 }
 
 /* --- gd32_common.h externs the driver needs but this suite doesn't use ---*/
