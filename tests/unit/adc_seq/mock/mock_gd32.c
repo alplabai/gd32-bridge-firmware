@@ -7,13 +7,17 @@
 
 #include <string.h>
 
-mock_seq_evt_t mock_seq[MOCK_SEQ_MAX];
-int            mock_seq_n;
+mock_seq_evt_t    mock_seq[MOCK_SEQ_MAX];
+int               mock_seq_n;
+static FlagStatus mock_fft_complete;
+static unsigned   mock_fft_starts;
 
 void mock_seq_reset(void)
 {
 	mock_seq_n = 0;
 	memset(mock_seq, 0, sizeof mock_seq);
+	mock_fft_complete = RESET;
+	mock_fft_starts   = 0u;
 }
 
 void mock_seq_log(const char *name, uint32_t periph, uint32_t arg)
@@ -364,11 +368,20 @@ void fft_init(fft_parameter_struct *p)
 }
 void fft_calculation_start(void)
 {
+	mock_fft_starts++;
 }
 FlagStatus fft_flag_get(uint32_t flag)
 {
 	(void)flag;
-	return RESET;
+	return mock_fft_complete;
+}
+void mock_fft_set_complete(FlagStatus state)
+{
+	mock_fft_complete = state;
+}
+unsigned mock_fft_start_count(void)
+{
+	return mock_fft_starts;
 }
 
 /* --- gd32_common.h externs the driver needs but this suite doesn't use ---*/

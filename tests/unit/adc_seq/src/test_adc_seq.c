@@ -40,6 +40,8 @@
 
 #include "gd32g5x3.h" /* mock -- tests/unit/adc_seq/mock/ */
 
+extern void bridge_hw_dsp_pump(void);
+
 /* adc_channels_map[0] = { ADC3, ADC_CHANNEL_12, GPIOD, GPIO_PIN_9 } --
  * bridge channel 0, the periph every "channel 0" test below drives. */
 #define BRIDGE_ADC_CH0        0u
@@ -55,6 +57,24 @@ static void adc_seq_reset(void)
 	mock_adc_set_flag(BRIDGE_ADC_CH0_PERIPH, ADC_FLAG_ROVF, RESET);
 	mock_adc_set_flag(BRIDGE_ADC_CH0_PERIPH, ADC_FLAG_EOC, RESET);
 	vref_ok = true;
+}
+
+static void bind_fft_stream0(void)
+{
+	uint8_t chain_id    = 0xFFu;
+	uint8_t fft_blob[4] = { 32u, 0u, 0u, 0u }; /* 32-point complex FFT */
+
+	zassert_equal(bridge_hw_adc_dsp_chain_open(&chain_id), BRIDGE_HW_OK);
+	zassert_equal(bridge_hw_adc_dsp_stage_push(
+	                  chain_id, 0u, 3u /* FFT */, 0u, sizeof(fft_blob), fft_blob, sizeof(fft_blob)),
+	              BRIDGE_HW_OK);
+	zassert_equal(bridge_hw_adc_dsp_chain_bind(chain_id, 0u), BRIDGE_HW_OK);
+}
+
+static void begin_bound_fft_stream0(void)
+{
+	zassert_equal(bridge_hw_adc_stream_begin(BRIDGE_ADC_CH0, BRIDGE_ADC_CH0, 1000u), BRIDGE_HW_OK);
+	bind_fft_stream0();
 }
 
 /* ---------------------------------------------------------------------
@@ -208,6 +228,48 @@ ZTEST(gd32_adc_seq, test_rovf_recovery_clears_dma_ftf)
 	             "ROVF recovery must clear the DMA FTF interrupt flag, "
 	             "or a pending lap tick fires the instant this handler "
 	             "returns and corrupts the freshly-resynced lap_count");
+}
+
+/* #140: a frame sequence belongs to a bound FFT SESSION, not the global
+ * lifetime of the FFT block.  This drives the real production pump through
+ * one complete 32-sample frame, tears the stream down, then rebinds the same
+ * stream id.  The replacement must stay IO until it has a new frame, whose
+ * sequence restarts at one. */
+ZTEST(gd32_adc_seq, test_fft_rebind_resets_frame_sequence)
+{
+	adc_seq_reset();
+	mock_fft_set_complete(SET);
+	begin_bound_fft_stream0();
+
+	for (uint16_t i = 0u; i < 32u; ++i) {
+		adc_streams[0].ring[i] = i;
+	}
+	mock_dma_set_remaining(DMA0, DMA_CH0, BRIDGE_ADC_STREAM_RING_SAMPLES - 32u);
+	bridge_hw_dsp_pump();
+
+	uint32_t seq   = 0u;
+	uint16_t total = 0u;
+	uint8_t  got   = 0u;
+	float    bins[64];
+	zassert_equal(bridge_hw_adc_spectrum_read(0u, 0u, 1u, &seq, &total, &got, bins), BRIDGE_HW_OK);
+	zassert_equal(seq, 1u, "first session's first frame starts at one");
+	zassert_equal(mock_fft_start_count(), 1u);
+
+	zassert_equal(bridge_hw_adc_stream_end(0u), BRIDGE_HW_OK);
+	begin_bound_fft_stream0();
+	bridge_hw_dsp_pump(); /* configure the new session, but no DMA samples */
+	zassert_equal(bridge_hw_adc_spectrum_read(0u, 0u, 1u, &seq, &total, &got, bins),
+	              BRIDGE_HW_ERR_IO,
+	              "new session has no frame until it collects a full window");
+
+	for (uint16_t i = 0u; i < 32u; ++i) {
+		adc_streams[0].ring[i] = (uint16_t)(100u + i);
+	}
+	mock_dma_set_remaining(DMA0, DMA_CH0, BRIDGE_ADC_STREAM_RING_SAMPLES - 32u);
+	bridge_hw_dsp_pump();
+	zassert_equal(bridge_hw_adc_spectrum_read(0u, 0u, 1u, &seq, &total, &got, bins), BRIDGE_HW_OK);
+	zassert_equal(seq, 1u, "replacement session's first frame restarts at one");
+	zassert_equal(mock_fft_start_count(), 2u);
 }
 
 ZTEST_SUITE(gd32_adc_seq, NULL, NULL, NULL, NULL, NULL);
