@@ -81,25 +81,50 @@ bool trng_start(void)
 	return true;
 }
 
-/* TRNG fault detector.  Mirrors the vendor's trng_ready_check: a
- * fault shows in FOUR places, and the two LATCHED interrupt flags are
- * the ones that persist -- a seed error parks the unit with SEIF +
- * STAT.ERRSTA set while the *current*-status SECS reads CLEAR again
- * (silicon 2026-06-04: TRNG_STAT == 0x48, DRDY never returning, and a
- * CECS/SECS-only check looping blind on DRDY until its budget died).
- * Recovery for any of them is the same full deinit + reconfigure. */
+/* TRNG fault detector.  User Manual Rev1.2 p.343 SS12.4.7 step 5 names
+ * FIVE bits that must all read 0 before TRNG_DATA may be trusted:
+ * SEIF, CEIF, ERRSTA, SECS and CECS.  Through this commit only four
+ * were checked -- ERRSTA (BIT3, TRNG_STAT_ERRSTA) was never read, so a
+ * repetition-count-test trip (RCTTH default 40, User Manual Rev1.2
+ * p.349) that sets ERRSTA alone, with SEIF/SECS/CEIF/CECS all clear,
+ * passed this gate (alp-sdk-internal gd32-bridge-firmware#47).  The
+ * vendor enums in gd32g5x3_trng.h expose no TRNG_FLAG_ERRSTA accessor,
+ * so this is a raw register read against the vendor's own
+ * TRNG_STAT_ERRSTA bit macro.  Recovery is unchanged: ERRSTA "could be
+ * reset by CONDRST" (p.347), which trng_deinit()'s RCU reset already
+ * does. NOTE: the vendor's own TRNG_NIST_mode example
+ * (Examples/TRNG/TRNG_NIST_mode/main.c, trng_ready_check) has this
+ * identical four-bit gap -- don't "fix" this back to match it.
+ *
+ * The two LATCHED interrupt flags (SEIF/CEIF) are the ones that
+ * persist -- a seed error parks the unit with SEIF + ERRSTA set while
+ * the *current*-status SECS reads CLEAR again (silicon 2026-06-04:
+ * TRNG_STAT == 0x48, DRDY never returning, and a CECS/SECS-only check
+ * looping blind on DRDY until its budget died). */
 static bool trng_faulted(void)
 {
+	if ((TRNG_STAT & TRNG_STAT_ERRSTA) != 0u) return true;
 	return (SET == trng_interrupt_flag_get(TRNG_INT_FLAG_CEIF)) ||
 	       (SET == trng_interrupt_flag_get(TRNG_INT_FLAG_SEIF)) ||
 	       (SET == trng_flag_get(TRNG_FLAG_CECS)) || (SET == trng_flag_get(TRNG_FLAG_SECS));
 }
 
+/* FIPS PUB 140-2 output-repetition state (User Manual Rev1.2 p.344,
+ * tail of SS12.4.7): "the first random data in data register should be
+ * saved but not be used.  Every subsequent new random data should be
+ * compared to the previously random data.  The data can only be used
+ * if it is not equal to the previously one."  trng_poll_ready() below
+ * performs the first-word discard; bridge_hw_trng_read() performs the
+ * repeat comparison against trng_prev_word. */
+static uint32_t trng_prev_word;
+static bool     trng_prev_valid;
+
 static void trng_demote(void)
 {
 	trng_deinit(); /* RCU reset clears the latched flags too */
-	trng_started = false;
-	trng_ready   = false;
+	trng_started    = false;
+	trng_ready      = false;
+	trng_prev_valid = false; /* the discard must run again after a rebuild */
 }
 
 /* Short, handler-safe DRDY poll: promotes `trng_ready` once the first
@@ -122,7 +147,15 @@ bool trng_poll_ready(void)
 		if (trng_faulted()) trng_demote();
 		return false;
 	}
-	trng_ready = true;
+	/* FIPS PUB 140-2 discard (User Manual Rev1.2 p.343 SS12.4.6: "a
+     * random number is also generated for the first sample generate
+     * time reduce consideration, even if this sample is suggested to
+     * discard").  Reading TRNG_DATA clears DRDY and the conditioning
+     * stage restarts autonomously -- this word is saved as
+     * trng_prev_word for the repeat check, never emitted to a host. */
+	trng_prev_word  = trng_get_true_random_data();
+	trng_prev_valid = true;
+	trng_ready      = true;
 	return true;
 }
 
@@ -182,7 +215,23 @@ int bridge_hw_trng_read(uint8_t *dest, size_t len)
 			return BRIDGE_HW_ERR_BUSY; /* healthy, mid-conditioning */
 		}
 
-		uint32_t     word  = trng_get_true_random_data();
+		uint32_t word = trng_get_true_random_data();
+
+		/* FIPS PUB 140-2 repetition check (User Manual Rev1.2 p.344):
+         * a word equal to its immediate predecessor means the
+         * conditioning stage is wedged and re-presenting a constant --
+         * none of the four/five trng_faulted() bits observe the
+         * CONDITIONED output, only the noise source and the clock, so
+         * this is the only place that catches it.  Demote (full
+         * re-seed) and fail loudly rather than pad the reply with a
+         * repeated, non-random word. */
+		if (trng_prev_valid && word == trng_prev_word) {
+			trng_demote();
+			return BRIDGE_HW_ERR_IO;
+		}
+		trng_prev_word  = word;
+		trng_prev_valid = true;
+
 		const size_t chunk = (len - off >= 4u) ? 4u : (len - off);
 		for (size_t i = 0; i < chunk; ++i) {
 			dest[off++] = (uint8_t)(word & 0xFFu);

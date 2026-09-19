@@ -16,25 +16,30 @@
 
 #include "gd32_common.h"
 
-/* Analog-reference health latch.  bridge_hw_init arms the on-chip
- * reference buffer and records whether VREFRDY ever set; every
- * ADC/DAC entry point consults this before touching its converter.
- * A reference that never locked means EVERY conversion result is
- * garbage referenced to a dead node -- the v0.2.6 root cause -- and a
- * STATUS_OK reply carrying garbage millivolts is indistinguishable on
- * the wire from healthy analog (no GET_FAULT-style opcode exists).
- * Failing the analog ops with an IO error is the only honest signal
- * this protocol revision can give.
+/* Analog-reference availability latch.
  *
- * The check self-heals: a buffer that locks LATE (after init's bounded
- * wait expired) is promoted on the first analog op that finds VREFRDY
- * set -- same lazy-readiness shape the TRNG bring-up uses. */
-bool vref_ok = false;
+ * Through v0.2.8 this polled VREFRDY, the ready bit for the on-chip
+ * VREF buffer's INTERNAL voltage-reference mode.  hal/gd32/init.c no
+ * longer drives that mode -- running the buffer's 2.048 V target on
+ * the module's 1.8 V VDDA violated Datasheet Rev2.0 p.109 Table 4-3
+ * (VDDA min = VREFP+0.3 when VREFBUF is used, i.e. 2.348 V), so VREF_CS
+ * is left at its reset value 0x0000 0002 (VREFEN=0, HIPM=1 -- external
+ * voltage reference mode, User Manual Rev1.2 p.520 Table 20-1; see the
+ * VREF bring-up comment in init.c, alp-sdk-internal
+ * gd32-bridge-firmware#59).
+ *
+ * VREFRDY's only documented meaning (User Manual Rev1.2 p.520) is
+ * scoped to internal voltage-reference mode, so it says nothing about
+ * external-reference mode's state -- there is no on-chip bit left for
+ * this firmware to poll.  vref_ok is therefore a constant true: ADC
+ * and DAC ops proceed unconditionally, same as before this fix but now
+ * without pretending a meaningless flag is a health signal.  Whether
+ * VREFP is actually board-tied to VDDA -- the fact ADC_VREF_MV /
+ * DAC_VREF_MV assume -- is a hardware question this firmware cannot
+ * observe; it needs a meter on the VREFP ball (J6). */
+bool vref_ok = true;
 
 bool vref_ready_check(void)
 {
-	if (!vref_ok) {
-		vref_ok = (vref_status_get() == SET);
-	}
 	return vref_ok;
 }
