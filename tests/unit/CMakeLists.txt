@@ -232,6 +232,13 @@ target_compile_options(test_tmu_q31_scale PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_tmu_q31_scale PRIVATE ztest_shim)
 add_test(NAME tmu_q31_scale COMMAND test_tmu_q31_scale)
 
+# --- pwm_ownership: timer-wide one-shot sibling guard (issue #87) ---------
+add_executable(test_pwm_ownership pwm_ownership/src/test_pwm_ownership.c)
+target_include_directories(test_pwm_ownership PRIVATE ${FW}/hal/gd32)
+target_compile_options(test_pwm_ownership PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_pwm_ownership PRIVATE ztest_shim)
+add_test(NAME pwm_ownership COMMAND test_pwm_ownership)
+
 # --- adc_seq: GD32 ADC register-sequence gate -------------------------------
 #
 # #77 means no CI job compiles hal/gd32/*.c -- the stub build above links
