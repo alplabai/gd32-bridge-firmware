@@ -27,9 +27,10 @@
  *
  * Mapping notes per V2N hardware reality:
  *
- *   - GPIO : routes through PMU_WAKEUP_PIN0..4 -- five fixed pads
- *            on the GD32G553 + board wires the desired triggers
- *            onto them.  Landed §C.15c.
+ *   - GPIO : routes only through PMU_WAKEUP_PIN2 (PE6).  The other
+ *            fixed wake pads are claimed by the encoder (PA0), SE_RST
+ *            (PC13), ADC (PA2), or PWM3 (PC5), so arming them would
+ *            silently alter a live bridge function (#20).
  *   - RTC  : RTC alarm 0 fires on a scheduled wallclock; the
  *            wakeup timer also surfaces under this bit so the
  *            firmware uses the timer (simpler than absolute-time
@@ -131,11 +132,11 @@ static int rtc_wakeup_arm_ms(uint32_t wake_after_ms)
 static void power_wake_pins_enable(uint32_t wake_bitmap)
 {
 	if ((wake_bitmap & POWER_WAKE_GPIO) == 0u) return;
-	pmu_wakeup_pin_enable(PMU_WAKEUP_PIN0);
-	pmu_wakeup_pin_enable(PMU_WAKEUP_PIN1);
+	/* GD32G553 PMU wake pads: WKUP0=PA0 (qenc), WKUP1=PC13
+	 * (SE_RST), WKUP2=PE6 (unclaimed), WKUP3=PA2 (ADC), and
+	 * WKUP4=PC5 (PWM3).  PE6 is the sole pad this board may arm
+	 * without stealing an active peripheral's signal (#20). */
 	pmu_wakeup_pin_enable(PMU_WAKEUP_PIN2);
-	pmu_wakeup_pin_enable(PMU_WAKEUP_PIN3);
-	pmu_wakeup_pin_enable(PMU_WAKEUP_PIN4);
 }
 
 int bridge_hw_power_mode_set(uint8_t mode, uint32_t wake_bitmap, uint32_t wake_after_ms)
