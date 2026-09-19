@@ -43,11 +43,13 @@ git log --oneline origin/dev..HEAD   # every commit the PR would carry -- eyebal
 If that list contains commits you did not write for this change, the branch was
 cut from the wrong place.
 
-**`Closes #N` does not auto-close on a `dev` merge.** GitHub auto-closes a linked
-issue only when the merge lands on the repository's *default* branch, which is
-`main`. In a PR targeting `dev` the keyword still records intent and links the
-issue, but the issue has to be closed by hand after the merge. Use `Refs #N` when
-the change does not fully resolve the issue.
+**`Closes #N` auto-closes on a `dev` merge.** `dev` is the repository's default
+branch as well as its integration target, so GitHub closes the linked issue when
+the PR lands. Repeat the keyword for every issue (`Closes #1. Closes #2.`); a
+single comma-separated form closes only the first. Use `Refs #N` when the change
+does not fully resolve the issue. A `dev` -> `main` release PR is the exception:
+`main` is not the default branch, so issues linked only there must be closed
+manually.
 
 **Why `dev` exists**, having previously not: this tree grew a host test suite and
 a set of cross-repo wire obligations, so changes now accumulate that are complete
