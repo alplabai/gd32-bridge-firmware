@@ -60,16 +60,22 @@ them is not wasted, but the response will point here:
   the CAU (`0x4802 1000`), which is symmetric-only — DES, TDES and AES. There
   is no PKA, HMAC, CMAC or message-hash engine on the GD32G553 (GD32G553 User
   Manual Rev1.2 p.350 §13.1; confirmed absent from the peripheral memory map
-  at Datasheet Rev2.0 p.19). The reserved 64-byte `signature` field in
-  `ota_img_header_t` (`src/ota_layout.h`) can never be verified on this part
-  as specified — nothing in this repo populates or checks it today; only
-  `body_crc32` is enforced. The on-module OPTIGA Trust M cannot stand in as
-  the GD32's root of trust either, as currently wired: `BRD_I2C`'s `I2C0` is
-  configured slave-only on the GD32 (`hal/transport_hw_gd32.c`) and the
-  RZ/V2N masters that bus, so the GD32's only interaction with the SE is
-  holding its reset line (`PC13`, `CMD_SE_RESET` = `0x41`). Any bridge-side
-  image verification would have to run in the 32 KB bootloader before the
-  host is even up.
+  at Datasheet Rev2.0 p.19). The CAU key registers (`CAU_KEY0H` through
+  `CAU_KEY3L`, offsets `0x20` through `0x3C`) are write-only, which protects a
+  provisioned symmetric key from direct readback but does not add public-key
+  verification. The TRNG's SHA-256 setting is an internal conditioner, not a
+  message-hash peripheral: its register block has a read-only data register
+  and no data-input path. OTA images are therefore raw vector-table-first
+  binaries with CRC-32 integrity checks, not authenticated images; the old
+  unused signature-header declaration was removed in #50 rather than imply a
+  security property the bootloader cannot enforce.
+
+  The on-module OPTIGA Trust M cannot stand in as the GD32's root of trust
+  either, as currently wired: `BRD_I2C`'s `I2C0` is configured slave-only on
+  the GD32 (`hal/transport_hw_gd32.c`) and the RZ/V2N masters that bus, so the
+  GD32's only interaction with the SE is holding its reset line (`PC13`,
+  `CMD_SE_RESET` = `0x41`). Any bridge-side image verification would have to
+  run in the 32 KB bootloader before the host is even up.
 
 ## Disclosure
 

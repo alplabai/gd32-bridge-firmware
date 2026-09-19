@@ -54,29 +54,12 @@
 
 enum { OTA_SLOT_A = 0u, OTA_SLOT_B = 1u };
 
-/* RESERVED future image-container format.  It is NOT present in any
- * image today and is parsed nowhere: the OTA image is a raw Cortex-M
- * vector-table-first binary (initial MSP at +0, reset vector at +4),
- * validated by the metadata-recorded length and CRC-32 plus
- * ota_image_bootable() below.  A header-first image would present
- * msp = OTA_IMG_MAGIC, which fails that check.  `signature` would also
- * be UNVERIFIABLE on this part as specified: the GD32G553's only crypto
- * engine is the CAU, which is symmetric-only (DES/TDES/AES) -- there is
- * no PKA, HMAC, CMAC or message-hash engine on this device (GD32G553
- * User Manual Rev1.2 p.350 §13.1; confirmed absent from the peripheral
- * memory map, Datasheet Rev2.0 p.19).  See SECURITY.md. */
-#define OTA_IMG_MAGIC       0x4F544131u /* "OTA1" */
-#define OTA_IMG_FMT_VERSION 1u
-#define OTA_SIG_LEN         64u /* NOT ECDSA-P256-verifiable on this part; see comment above */
-
-typedef struct {
-	uint32_t magic;       /* OTA_IMG_MAGIC */
-	uint32_t fmt_version; /* OTA_IMG_FMT_VERSION */
-	uint32_t img_len;     /* bytes of the image body (incl. this header) */
-	uint32_t fw_version;  /* firmware semver, packed */
-	uint32_t body_crc32;  /* CRC-32 over the body excluding this field+sig */
-	uint8_t  signature[OTA_SIG_LEN];
-} ota_img_header_t;
+/* An OTA image is a raw Cortex-M vector-table-first binary: initial MSP at
+ * +0 and reset vector at +4.  Length, firmware version and CRC-32 live in
+ * ota_meta_record_t below, outside the image.  Do not place a container
+ * header at the slot base: ota_image_bootable() and the bootloader consume
+ * those first two words directly.  This part also has no public-key or
+ * message-hash engine for authenticated boot; see SECURITY.md (#50). */
 
 /* A/B metadata record — the bootloader picks the highest `counter` with a
  * valid `rec_crc32`, then boots `active_slot` if the slot's metadata-recorded
@@ -103,10 +86,10 @@ typedef struct {
 	uint32_t rec_crc32;     /* CRC-32 over this record excluding this field */
 } ota_meta_record_t;
 
-/* On-flash layout guards (#733).  BOTH structs are serialized by raw byte
- * access: the bootloader byte-copies a flash record and CRCs the raw
- * bytes, and ota.c programs them to flash verbatim.  Their in-memory
- * layout therefore IS the on-flash / CRC-covered format -- any compiler
+/* On-flash layout guards (#733).  The metadata struct is serialized by raw
+ * byte access: the bootloader byte-copies a flash record and CRCs the raw
+ * bytes, and ota.c programs it to flash verbatim.  Its in-memory layout
+ * therefore IS the on-flash / CRC-covered format -- any compiler
  * padding change or field reorder silently invalidates every stored
  * record's CRC and can brick the boot path.  These are all naturally
  * aligned (u32/u8 + explicit pad), so the layout is deterministic without
@@ -124,14 +107,6 @@ _Static_assert(offsetof(ota_meta_record_t, fw_version) == 16u, "meta.fw_version 
 _Static_assert(offsetof(ota_meta_record_t, img_len) == 24u, "meta.img_len offset");
 _Static_assert(offsetof(ota_meta_record_t, img_crc32) == 32u, "meta.img_crc32 offset");
 _Static_assert(offsetof(ota_meta_record_t, rec_crc32) == 40u, "meta.rec_crc32 offset");
-
-_Static_assert(sizeof(ota_img_header_t) == 84u, "ota_img_header_t on-flash size drifted");
-_Static_assert(offsetof(ota_img_header_t, magic) == 0u, "img.magic offset");
-_Static_assert(offsetof(ota_img_header_t, fmt_version) == 4u, "img.fmt_version offset");
-_Static_assert(offsetof(ota_img_header_t, img_len) == 8u, "img.img_len offset");
-_Static_assert(offsetof(ota_img_header_t, fw_version) == 12u, "img.fw_version offset");
-_Static_assert(offsetof(ota_img_header_t, body_crc32) == 16u, "img.body_crc32 offset");
-_Static_assert(offsetof(ota_img_header_t, signature) == 20u, "img.signature offset");
 
 /* Derive a slot's flash base with EXPLICIT validation.  The old
  * `ota_slot_base` silently mapped every non-B value (incl. a corrupt
