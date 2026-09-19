@@ -44,10 +44,10 @@
  *                               non-defaults NOSUPPORT pending follow-up.
  *   8. ADC_READ              -- DONE: 8-pad map across ADC0..3, single-
  *                               shot polling, mV<->code at VREF=1800mV.
- *   9. ADC_CONFIGURE         -- PARTIAL: per-channel sample_cycles
- *                               cached + applied; oversample_ratio +
- *                               resolution_bits gated to defaults (1,
- *                               12) until a follow-up commit.
+ *   9. ADC_CONFIGURE         -- DONE: per-channel sample-cycle,
+ *                               oversample-ratio and 6/8/10/12-bit
+ *                               resolution settings cached + applied;
+ *                               14/16-bit effective modes are NOSUPPORT.
  *   10. ADC_STREAM_*         -- DONE (§C.23): DMA0/1-backed
  *                               continuous acquisition.  Two parallel
  *                               streams; each owns a 1024-sample
