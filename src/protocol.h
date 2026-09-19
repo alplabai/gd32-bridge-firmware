@@ -137,7 +137,7 @@ typedef enum {
      * firmware-owned (OPTIGA RST is active-low; see hal/gd32/se_reset.c). */
 	CMD_SE_RESET = 0x41,
 	/* v0.2 additions -- the GD32 carries every E1M-standard analog
-     * and counter peripheral on V2N (per gd32-io-mcu-map.tsv); the
+	 * and counter peripheral on V2N (per alp-sdk gd32-io-mcu-map.tsv); the
      * SDK's portable surface routes through these. */
 	CMD_DAC_SET      = 0x50,
 	CMD_DAC_GET      = 0x51,
@@ -192,7 +192,7 @@ typedef enum {
      * All three are RESERVED at protocol v0.5; firmware default-case
      * dispatch returns STATUS_NOSUPPORT until the bridge_hw_adc_dsp_*
      * HAL bodies land in the GD32 firmware tree.  Host helpers in
-     * chips/gd32g553/ honour the same NOSUPPORT contract by routing
+     * alp-sdk chips/gd32g553/ honour the same NOSUPPORT contract by routing
      * the wire dispatch through cmd_send unchanged. */
 	CMD_ADC_DSP_CHAIN_OPEN = 0x37,
 	CMD_ADC_DSP_STAGE_PUSH = 0x38,

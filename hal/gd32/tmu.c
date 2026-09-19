@@ -23,7 +23,7 @@
 
 /* Per-host-function -> vendor TMU mode mapping.  Indexed by the wire
  * `function` byte (gd32g553_tmu_function_t in
- * `include/alp/chips/gd32g553.h`).  `mode = 0` is the NOSUPPORT
+ * alp-sdk `include/alp/chips/gd32g553.h`).  `mode = 0` is the NOSUPPORT
  * sentinel for the three host functions the GD32G5 TMU doesn't
  * natively support (tan / exp / tanh) -- the host wrapper can later
  * compose them via libm or via two TMU calls (tan = sin/cos,
@@ -99,7 +99,7 @@ int bridge_hw_tmu_compute(uint8_t   function,
      *
      * This bridge's Q31 wire contract is narrower than the manual's own
      * worked examples (which post-scale to values > 1, e.g. cosh(1.0) =
-     * 1.543): docs/gd32-bridge-protocol.md SS3.12 defines format=0 as Q31
+	 * 1.543): alp-sdk docs/gd32-bridge-protocol.md SS3.12 defines format=0 as Q31
      * full-scale +-1.0 for BOTH inputs and outputs, with no exponent/
      * factor field on the wire, so an operand or a post-scaled result
      * that needs |value| >= 1.0 cannot be encoded at all.  Against that

@@ -26,8 +26,8 @@
  * Bumping any of them requires a coordinated edit on both sides --
  * see `docs/gd32-bridge-protocol.md` §3.x (alp-sdk --
  * https://github.com/alplabai/alp-sdk/blob/main/docs/gd32-bridge-protocol.md)
- * for the wire-format implications.  That file lives in the OTHER
- * repository; this one has no docs/ tree. */
+ * for the wire-format implications.  That protocol document lives in
+ * the other repository; it is not duplicated here. */
 #define BRIDGE_DSP_MAX_CHAINS      4u
 #define BRIDGE_DSP_MAX_STAGES      4u
 #define BRIDGE_DSP_MAX_STAGE_BYTES 260u

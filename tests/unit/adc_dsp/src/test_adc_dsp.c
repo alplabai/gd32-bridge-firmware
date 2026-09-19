@@ -82,7 +82,7 @@ push_stage(uint8_t chain_id, uint8_t stage_index, uint8_t kind, const uint8_t *d
 	              rv);
 }
 
-/* ---- per-kind blob builders (docs/gd32-bridge-protocol.md §3.x layout,
+/* ---- per-kind blob builders (alp-sdk docs/gd32-bridge-protocol.md §3.x layout,
  * mirrored in hal/gd32/adc_dsp_chain.h's header comment) ---------------- */
 
 /* FIR: format:u8 n_taps:u8 rsvd:u16 taps[n_taps*4].  `out` must be at

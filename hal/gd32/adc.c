@@ -22,7 +22,7 @@
 /* ----------------------------------------------------------------- */
 
 /* E1M ADC0..7 -> (ADC peripheral, channel index, pad).  Sourced from
- * maintainer-confirmed `metadata/e1m_modules/v2n/gd32-io-mcu-map.tsv`
+ * maintainer-confirmed alp-sdk `metadata/e1m_modules/v2n/gd32-io-mcu-map.tsv`
  * with channel + peripheral assignments cross-checked against the
  * GD32G553xx datasheet pin alt-function summary:
  *
@@ -105,7 +105,7 @@ uint16_t adc_full_scale_for_bits(uint8_t bits)
 }
 
 /* Oversample ratio -> (OVSR register value, OVSS shift enum).  The
- * wire contract (docs/gd32-bridge-protocol.md §3.9) rounds a caller's
+ * wire contract (alp-sdk docs/gd32-bridge-protocol.md §3.9) rounds a caller's
  * ratio DOWN to the nearest power of two in 1..256: 0 or 1 means "no
  * oversampling", and any value >1 is floored to 2^n.  The GD32 OVSR
  * field is the conversion count minus one, and a matching right-shift
@@ -576,7 +576,7 @@ int bridge_hw_adc_configure(uint8_t  channel,
 	 * on -- the new format takes effect on this channel's next read or
 	 * stream_begin.
 	 *
-	 * Field semantics follow the wire contract (docs/gd32-bridge-
+	 * Field semantics follow the wire contract (alp-sdk docs/gd32-bridge-
 	 * protocol.md §3.9):
 	 *   resolution_bits: 0 -> default (12).  6/8/10/12 map to the
 	 *     hardware DRES field.  14/16 are effective-resolution modes

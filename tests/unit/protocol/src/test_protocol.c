@@ -93,7 +93,7 @@
  *         IO are pinned for both.
  *       * handle_adc_stream_read (src/protocol.c) keeps its explicit
  *         NOTIMPL and BUSY rows (the BUSY row carries a load-bearing
- *         "poll faster" comment referencing docs/gd32-bridge-protocol.md
+ *         "poll faster" comment referencing alp-sdk docs/gd32-bridge-protocol.md
  *         §3.10) and now routes everything else -- including the
  *         previously-swallowed INVAL and RANGE -- through status_from_hw()
  *         (issue's B4, FIXED).  NOTIMPL, BUSY, INVAL and RANGE are all

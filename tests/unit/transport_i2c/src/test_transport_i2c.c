@@ -283,7 +283,7 @@ ZTEST(gd32_bridge_transport_i2c, test_mangled_request_stages_no_pending)
 
 /* A read that lands before any matching write since the last START must
  * stage the I2C-only STATUS_NO_PENDING (0x80) sentinel -- see
- * ../docs/gd32-bridge-protocol.md §5 and transport_i2c.c's
+ * alp-sdk docs/gd32-bridge-protocol.md §5 and transport_i2c.c's
  * i2c_slave_tx_next_byte(). */
 ZTEST(gd32_bridge_transport_i2c, test_read_before_write_stages_no_pending)
 {

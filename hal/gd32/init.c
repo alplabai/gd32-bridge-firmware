@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  *
  * GD32G5x3 backend for the bridge HAL.  Selected by setting
- * BRIDGE_HAL_BACKEND=gd32 in firmware/gd32-bridge/CMakeLists.txt.  Links
+ * BRIDGE_HAL_BACKEND=gd32 in CMakeLists.txt.  Links
  * against the GigaDevice firmware-library wrapper.  This repo does NOT
  * vendor that tree: pass -DGD32_VENDOR_DIR=<path> pointing at a checkout
  * of alp-sdk's vendors/gd32_firmware_library/ (a verbatim mirror of GD's
@@ -129,7 +129,7 @@
  *
  * Build assumptions:
  *   - arm-none-eabi-gcc on PATH (toolchain file
- *     firmware/gd32-bridge/toolchain/arm-none-eabi.cmake handles the rest).
+ *     toolchain/arm-none-eabi.cmake handles the rest).
  *   - the GigaDevice firmware-library tree reachable, either via
  *     -DGD32_VENDOR_DIR=<path> or the ../../vendors/gd32_firmware_library
  *     fallback (see the note at the top of this file).

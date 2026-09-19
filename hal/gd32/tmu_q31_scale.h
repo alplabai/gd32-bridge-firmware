@@ -15,7 +15,7 @@
  * 14-23 and p.394 Tables 14-25/14-26, restricted to the domain this
  * bridge's wire protocol can actually encode: format=0 (Q31) is
  * full-scale +-1.0 for BOTH inputs and outputs
- * (docs/gd32-bridge-protocol.md SS3.12), with no exponent/factor field on
+ * (alp-sdk docs/gd32-bridge-protocol.md SS3.12), with no exponent/factor field on
  * the wire, so an operand or a post-scaled result that needs
  * |value| >= 1.0 cannot be encoded at all -- regardless of the manual's
  * own illustrative worked-example inputs (8, 2, 1.0), which are
