@@ -319,6 +319,22 @@ ZTEST(protocol_vectors, test_spi_requests_match_committed_replies)
 	}
 }
 
+/* #194: this vector used the peripheral NUMBER 7 for TIMER7 even though
+ * TIMER_SYNC's compact wire id is 1.  The stub-backed roundtrip above could
+ * not notice: both valid and invalid payloads answer NOSUPPORT.  Pin the
+ * semantic fields independently of the generator's own regenerate check. */
+ZTEST(protocol_vectors, test_timer_sync_uses_compact_wire_ids)
+{
+	const pv_vector_t *req = pv_find("spi_timer_sync_t0_master_t7_slave_request");
+
+	zassert_equal(req->len, 7u, "TIMER_SYNC frame must be SOF+CMD+3-byte payload+CRC");
+	zassert_equal(req->bytes[0], GD32_BRIDGE_SOF, "TIMER_SYNC SOF");
+	zassert_equal(req->bytes[1], CMD_TIMER_SYNC, "TIMER_SYNC opcode");
+	zassert_equal(req->bytes[2], 0u, "TIMER0 compact wire id");
+	zassert_equal(req->bytes[3], 1u, "TIMER7 compact wire id (not peripheral number 7)");
+	zassert_equal(req->bytes[4], 0u, "disabled mode");
+}
+
 /* GET_BUILD_ID: the file explicitly commits no reply vector for it (the
  * real 20-byte payload is baked at CMake build time into GD32_BRIDGE_BUILD_ID
  * -- protocol.c's cmake/gen_build_id.cmake target, which this host-test

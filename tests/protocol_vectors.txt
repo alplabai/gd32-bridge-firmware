@@ -205,8 +205,8 @@ spi_reply_io                   = A50521AF
 spi_pwm_capture_read_ch0_request = A52400D250
 # SOF | CMD=0x25 | channel=0 | CRC -- dispatched to handle_pwm_capture_end() (protocol.c); empty-payload reply on success.  The stub HAL backend answers STATUS_NOSUPPORT; see spi_reply_nosupport
 spi_pwm_capture_end_ch0_request = A52500E363
-# SOF | CMD=0x27 | master=0(TIMER0) | slave=7(TIMER7) | mode=0 | CRC -- dispatched to handle_timer_sync() (protocol.c); the mode encoding beyond master/slave linkage is HAL-internal and undocumented at the wire layer, so this pins only the 3-byte request framing.  The stub HAL backend answers STATUS_NOSUPPORT; see spi_reply_nosupport
-spi_timer_sync_t0_master_t7_slave_request = A527000700CBE7
+# SOF | CMD=0x27 | master=0(TIMER0) | slave=1(TIMER7) | mode=0 | CRC -- dispatched to handle_timer_sync() (protocol.c); the mode encoding beyond master/slave linkage is HAL-internal and undocumented at the wire layer, so this pins only the 3-byte request framing.  The stub HAL backend answers STATUS_NOSUPPORT; see spi_reply_nosupport
+spi_timer_sync_t0_master_t7_slave_request = A5270001006D4D
 
 # ---------------------------------------------------------------------
 # §15. CMD_ADC_SPECTRUM_READ (#496, #31 E2) -- FFT-chain bin readback

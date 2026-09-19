@@ -555,14 +555,10 @@ def build_vectors() -> list[tuple[str, str, str | None]]:
 
     # ----- §8. v0.5 additions (§2B.2): advanced timer extras --------
     # CMD_PWM_CAPTURE_{BEGIN, READ, END}, CMD_PWM_SINGLE_PULSE, and
-    # CMD_TIMER_SYNC are all RESERVED at v0.5.  Portable surfaces in
-    # <alp/pwm.h> (alp_pwm_capture_t + alp_pwm_single_pulse) declare
-    # the API today with NOSUPPORT-with-INVAL-pre-checks stubs; the
-    # GD32 bridge_hw_* HAL bodies land in a follow-up firmware drop.
-    # Representative probe vectors below: PWM_CAPTURE_BEGIN with a
-    # minimal payload (channel + edge) and PWM_SINGLE_PULSE with the
-    # caller's intended pulse width.  Firmware replies
-    # STATUS_NOSUPPORT today via the default branch.
+    # CMD_TIMER_SYNC are implemented by the GD32 HAL.  Representative
+    # vectors below pin their request framing; the protocol-vector host
+    # suite deliberately links the generic stub HAL, so its round-trip
+    # checks still expect STATUS_NOSUPPORT for these hardware operations.
     out.append((
         "spi_pwm_capture_begin_probe_request",
         spi_frame(SOF, CMD_PWM_CAPTURE_BEGIN,
@@ -953,8 +949,8 @@ def build_vectors() -> list[tuple[str, str, str | None]]:
     ))
     out.append((
         "spi_timer_sync_t0_master_t7_slave_request",
-        spi_frame(SOF, CMD_TIMER_SYNC, bytes([0x00, 0x07, 0x00])).hex().upper(),
-        "SOF | CMD=0x27 | master=0(TIMER0) | slave=7(TIMER7) | mode=0"
+        spi_frame(SOF, CMD_TIMER_SYNC, bytes([0x00, 0x01, 0x00])).hex().upper(),
+        "SOF | CMD=0x27 | master=0(TIMER0) | slave=1(TIMER7) | mode=0"
         " | CRC -- dispatched to handle_timer_sync() (protocol.c); the"
         " mode encoding beyond master/slave linkage is HAL-internal and"
         " undocumented at the wire layer, so this pins only the 3-byte"
