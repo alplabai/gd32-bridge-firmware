@@ -581,6 +581,187 @@ ZTEST(gd32_bridge_adc_dsp, test_multi_chunk_assembly_succeeds)
 	                  "assembled stage bytes must match the two pushed chunks");
 }
 
+/* ===================================================================== *
+ * #138 -- stage completion is coverage, not the sum of chunk lengths.
+ * Retries may overlap already-received bytes and the documented wire
+ * contract permits chunks in any order.
+ * ===================================================================== */
+
+ZTEST(gd32_bridge_adc_dsp, test_repeated_chunk_cannot_forge_completion)
+{
+	reset_all();
+	stream_running(0u);
+
+	uint8_t  chain_id = open_chain();
+	uint8_t  fir[BRIDGE_DSP_MAX_STAGE_BYTES];
+	uint16_t fir_len = fir_blob(fir, BRIDGE_DSP_MAX_FIR_TAPS);
+	zassert_equal(fir_len, BRIDGE_DSP_MAX_STAGE_BYTES, "64-tap FIR must fill the stage");
+
+	zassert_equal(bridge_hw_adc_dsp_stage_push(chain_id, 0u, 0u, 0u, fir_len, fir, 58u),
+	              BRIDGE_HW_OK,
+	              "first chunk must succeed");
+	zassert_equal(bridge_hw_adc_dsp_stage_push(chain_id, 0u, 0u, 58u, fir_len, &fir[58], 58u),
+	              BRIDGE_HW_OK,
+	              "second chunk must succeed");
+	for (uint8_t retry = 0u; retry < 2u; ++retry) {
+		zassert_equal(bridge_hw_adc_dsp_stage_push(chain_id, 0u, 0u, 58u, fir_len, &fir[58], 58u),
+		              BRIDGE_HW_OK,
+		              "identical retry %u must be idempotent",
+		              retry);
+	}
+	zassert_equal(bridge_hw_adc_dsp_stage_push(chain_id, 0u, 0u, 58u, fir_len, &fir[58], 28u),
+	              BRIDGE_HW_OK,
+	              "overlapping short retry must be idempotent");
+
+	const adc_dsp_stage_t *st = &adc_dsp_chains[chain_id].stages[0];
+	zassert_equal(st->bytes_received, 116u, "only unique byte positions count");
+	zassert_false(st->complete, "holes [116,260) must keep the stage incomplete");
+	zassert_equal(bridge_hw_adc_dsp_chain_bind(chain_id, 0u),
+	              BRIDGE_HW_ERR_INVAL,
+	              "a stage with holes must not bind");
+}
+
+ZTEST(gd32_bridge_adc_dsp, test_out_of_order_chunks_and_replay_succeed)
+{
+	reset_all();
+	stream_running(0u);
+
+	uint8_t chain_id  = open_chain();
+	uint8_t first[4]  = { 1u, 1u, 0u, 0u };
+	uint8_t second[4] = { 0x00u, 0x00u, 0x00u, 0x10u };
+
+	zassert_equal(bridge_hw_adc_dsp_stage_push(chain_id, 0u, 0u, 4u, 8u, second, 4u),
+	              BRIDGE_HW_OK,
+	              "a non-zero-offset first chunk must succeed");
+	zassert_equal(bridge_hw_adc_dsp_stage_push(chain_id, 0u, 0u, 4u, 8u, second, 4u),
+	              BRIDGE_HW_OK,
+	              "an identical replay must succeed");
+	zassert_equal(adc_dsp_chains[chain_id].stages[0].bytes_received,
+	              4u,
+	              "an identical replay must not advance coverage");
+	zassert_equal(bridge_hw_adc_dsp_stage_push(chain_id, 0u, 0u, 0u, 8u, first, 4u),
+	              BRIDGE_HW_OK,
+	              "the leading chunk may arrive last");
+	zassert_true(adc_dsp_chains[chain_id].stages[0].complete,
+	             "full out-of-order coverage must complete the stage");
+	zassert_equal(bridge_hw_adc_dsp_stage_push(chain_id, 0u, 0u, 0u, 8u, first, 4u),
+	              BRIDGE_HW_OK,
+	              "an identical replay after completion must succeed");
+	zassert_equal(adc_dsp_chains[chain_id].stages[0].bytes_received,
+	              8u,
+	              "a completed-stage replay must not advance coverage");
+
+	uint8_t expect[8];
+	memcpy(expect, first, sizeof(first));
+	memcpy(expect + sizeof(first), second, sizeof(second));
+	zassert_mem_equal(adc_dsp_chains[chain_id].stages[0].data,
+	                  expect,
+	                  sizeof(expect),
+	                  "out-of-order assembly must preserve byte positions");
+	zassert_equal(bridge_hw_adc_dsp_chain_bind(chain_id, 0u),
+	              BRIDGE_HW_OK,
+	              "a fully-covered out-of-order stage must bind");
+}
+
+ZTEST(gd32_bridge_adc_dsp, test_conflicting_overlap_rejects_atomically)
+{
+	reset_all();
+
+	uint8_t chain_id       = open_chain();
+	uint8_t received[2]    = { 0x11u, 0x22u };
+	uint8_t conflicting[4] = { 0xA0u, 0xA1u, 0xFFu, 0x22u };
+
+	zassert_equal(bridge_hw_adc_dsp_stage_push(chain_id, 0u, 0u, 2u, 8u, received, 2u),
+	              BRIDGE_HW_OK,
+	              "initial middle chunk must succeed");
+	zassert_equal(bridge_hw_adc_dsp_stage_push(chain_id, 0u, 0u, 0u, 8u, conflicting, 4u),
+	              BRIDGE_HW_ERR_INVAL,
+	              "a conflicting overlap must reject");
+
+	const adc_dsp_stage_t *st = &adc_dsp_chains[chain_id].stages[0];
+	zassert_equal(st->bytes_received, 2u, "a rejected chunk must not advance coverage");
+	zassert_equal(st->coverage[0], 0x0Cu, "a rejected chunk must not mark new coverage");
+	zassert_equal(st->data[0], 0u, "a rejected chunk must not copy a new leading byte");
+	zassert_equal(st->data[1], 0u, "a rejected chunk must not copy a new leading byte");
+	zassert_equal(st->data[2], received[0], "previously received data must remain intact");
+	zassert_equal(st->data[3], received[1], "previously received data must remain intact");
+}
+
+ZTEST(gd32_bridge_adc_dsp, test_changed_metadata_at_offset_zero_restarts_stage)
+{
+	reset_all();
+
+	uint8_t chain_id      = open_chain();
+	uint8_t abandoned[2]  = { 0xA5u, 0x5Au };
+	uint8_t replacement[] = { 2u, 0u, 0u, 0u }; /* Hamming window. */
+
+	zassert_equal(bridge_hw_adc_dsp_stage_push(chain_id, 0u, 0u, 6u, 8u, abandoned, 2u),
+	              BRIDGE_HW_OK,
+	              "the abandoned out-of-order chunk must succeed");
+	zassert_equal(bridge_hw_adc_dsp_stage_push(
+	                  chain_id, 0u, 2u, 0u, sizeof(replacement), replacement, sizeof(replacement)),
+	              BRIDGE_HW_OK,
+	              "changed metadata at offset zero must restart the stage");
+
+	const adc_dsp_stage_t *st = &adc_dsp_chains[chain_id].stages[0];
+	zassert_equal(st->kind, 2u, "replacement kind must be installed");
+	zassert_equal(st->total_size, sizeof(replacement), "replacement size must be installed");
+	zassert_equal(st->bytes_received, sizeof(replacement), "only replacement coverage counts");
+	zassert_true(st->complete, "the complete replacement must be ready");
+	zassert_equal(st->coverage[0], 0x0Fu, "abandoned coverage must be cleared");
+	zassert_mem_equal(st->data,
+	                  replacement,
+	                  sizeof(replacement),
+	                  "replacement payload must occupy the restarted stage");
+	zassert_equal(st->data[6], 0u, "abandoned payload bytes must be cleared");
+}
+
+ZTEST(gd32_bridge_adc_dsp, test_full_same_metadata_payload_recovers_after_bind_rejection)
+{
+	reset_all();
+	stream_running(0u);
+
+	uint8_t chain_id        = open_chain();
+	uint8_t malformed_fft[] = { 31u, 0u, 0u, 0u }; /* Point count is not a power of two. */
+	uint8_t corrected_fft[] = { 32u, 0u, 0u, 0u };
+
+	push_stage(chain_id, 0u, 3u /* FFT */, malformed_fft, sizeof(malformed_fft));
+	zassert_equal(bridge_hw_adc_dsp_chain_bind(chain_id, 0u),
+	              BRIDGE_HW_ERR_INVAL,
+	              "malformed complete FFT must fail bind without releasing the chain");
+	zassert_equal(
+	    bridge_hw_adc_dsp_stage_push(
+	        chain_id, 0u, 3u, 0u, sizeof(corrected_fft), corrected_fft, sizeof(corrected_fft)),
+	    BRIDGE_HW_OK,
+	    "a complete corrected payload must replace the rejected blob");
+	zassert_mem_equal(adc_dsp_chains[chain_id].stages[0].data,
+	                  corrected_fft,
+	                  sizeof(corrected_fft),
+	                  "the corrected FFT payload must fully replace the rejected blob");
+	zassert_equal(bridge_hw_adc_dsp_chain_bind(chain_id, 0u),
+	              BRIDGE_HW_OK,
+	              "the corrected same-kind, same-size FFT must bind");
+}
+
+ZTEST(gd32_bridge_adc_dsp, test_chain_reopen_clears_entire_stage)
+{
+	reset_all();
+
+	uint8_t chain_id = open_chain();
+	memset(adc_dsp_chains[chain_id].stages, 0xA5, sizeof(adc_dsp_chains[chain_id].stages));
+	adc_dsp_chain_release(chain_id);
+
+	uint8_t reopened = open_chain();
+	zassert_equal(reopened, chain_id, "first-fit allocation must reuse the released slot");
+
+	uint8_t zero_stages[sizeof(adc_dsp_chains[reopened].stages)];
+	memset(zero_stages, 0, sizeof(zero_stages));
+	zassert_mem_equal(adc_dsp_chains[reopened].stages,
+	                  zero_stages,
+	                  sizeof(zero_stages),
+	                  "reopen must clear every stage's payload, coverage, and scalar metadata");
+}
+
 /* T6 -- adc_dsp_chain_p1_capable()'s FFT-terminal loop rejects a FIR/IIR
  * stage ahead of an FFT terminal whether or not a WINDOW is present, but
  * test_reject_fir_before_window_fft above only exercises the FIR+WINDOW+
@@ -641,9 +822,9 @@ force_stage(uint8_t chain_id, uint8_t idx, uint8_t kind, const uint8_t *data, ui
 
 /* A FIR stage declaring 200 taps -- more than triple
  * BRIDGE_DSP_MAX_FIR_TAPS (64), which is what sizes adc_dsp_fac_config's
- * `int16_t taps[]`.  That array sits on the single 2 KB stack shared with
- * the I2C ISR's protocol_dispatch() and a nested CS-EXTI ISR, and MSPLIM
- * is never written, so the overwrite would be silent. */
+ * `int16_t taps[]`.  That array sits on the single 2 KB transport ISR stack;
+ * nested dispatch is refused by #19, but MSPLIM is never written, so the
+ * overwrite would still be silent. */
 ZTEST(gd32_bridge_adc_dsp, test_p1_capable_rejects_overlong_fir_taps)
 {
 	reset_all();

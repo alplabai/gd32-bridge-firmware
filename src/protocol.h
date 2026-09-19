@@ -321,6 +321,11 @@ typedef enum {
  *   reply_payload_cap  -- capacity of reply_payload.
  *   reply_payload_len  -- [out] M (bytes actually written).
  *
+ * Only one dispatch may execute at a time across both transport ISRs.
+ * A nested request returns STATUS_BUSY with a zero-length payload before
+ * entering any command handler; the host may retry it after the active
+ * request completes.
+ *
  * Return:  STATUS_OK on success; STATUS_NOSUPPORT for unknown
  *          opcodes; STATUS_INVAL on bad payload lengths /
  *          out-of-range args; STATUS_TIMEOUT / STATUS_IO for

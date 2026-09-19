@@ -452,16 +452,9 @@ int bridge_hw_pwm_configure(uint8_t  channel,
      * The section covers a disable, one RMW, an enable and a store --
      * short enough for the CS-EXTI handler's deadline (bridge_critical.h).
      *
-     * RESIDUAL, deliberately not fixed here: the REVERSE direction is
-     * still open.  If bridge_hw_pwm_configure is the one reached from
-     * CS-EXTI (priority 1) and bridge_hw_pwm_single_pulse from I2C0_EV
-     * (priority 2), configure pre-empts single_pulse mid-sequence --
-     * between its SPM write and its timer_enable -- and single_pulse then
-     * resumes and enables a one-shot whose alignment guard was checked
-     * against the alignment configure has since changed.  Closing that
-     * needs single_pulse's own register sequence to become a section too,
-     * which lands squarely in open PR #82's rewrite of that function.
-     * Tracked under #19. */
+     * The reverse cross-transport sequence is excluded by #19's atomic
+     * protocol-dispatch guard: a CS-EXTI request that pre-empts I2C is
+     * answered STATUS_BUSY before either PWM handler can run. */
 	const uint32_t sect        = bridge_irq_lock();
 	const bool     was_running = (TIMER_CTL0(ch->periph) & (uint32_t)TIMER_CTL0_CEN) != 0u;
 	timer_disable(ch->periph);

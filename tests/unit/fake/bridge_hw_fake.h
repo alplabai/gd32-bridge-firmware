@@ -139,7 +139,16 @@ void bridge_hw_fake_reset(void);
  * to return `rv` without touching that function's state model.
  * `rv == BRIDGE_HW_OK` (0) clears the override and resumes normal fake
  * behaviour -- it is never itself an "error" a test needs to force. */
-void bridge_hw_fake_force(bridge_hw_fake_fn_t fn, int rv);
+void     bridge_hw_fake_force(bridge_hw_fake_fn_t fn, int rv);
+uint32_t bridge_hw_fake_call_count(bridge_hw_fake_fn_t fn);
+
+/* Run `hook(context)` once, immediately before the next call to `fn` enters
+ * the fake HAL body.  The hook disarms itself before invocation so it may
+ * safely issue a recursive protocol_dispatch() for reentrancy tests. */
+typedef void (*bridge_hw_fake_call_hook_t)(void *context);
+void bridge_hw_fake_set_call_hook(bridge_hw_fake_fn_t        fn,
+                                  bridge_hw_fake_call_hook_t hook,
+                                  void                      *context);
 
 /* --------------------------------------------------------------- */
 /* Reset-cause + DA9292 -- no error channel, so a plain setter each. */
