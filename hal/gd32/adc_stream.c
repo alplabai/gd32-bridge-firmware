@@ -30,6 +30,24 @@ adc_stream_state_t adc_streams[BRIDGE_ADC_STREAM_COUNT];
 #define ADC_STREAM_LAP_IRQ_PRIO    3u
 #define ADC_STREAM_LAP_IRQ_SUBPRIO 0u
 
+/* ERRIF means this channel has stopped delivering a trustworthy ring.  The
+ * latch is used by both its DMA IRQ and the higher-priority CS handler, which
+ * polls it directly before interpreting stream state. */
+static void adc_stream_latch_dma_error(uint8_t stream_id)
+{
+	adc_stream_state_t *s = &adc_streams[stream_id];
+	if (dma_interrupt_flag_get(s->dma_periph, (dma_channel_enum)s->dma_channel, DMA_INT_FLAG_ERR) ==
+	    RESET) {
+		return;
+	}
+	/* ERRIFC only: a global clear would discard a concurrent FTF. */
+	dma_interrupt_flag_clear(s->dma_periph, (dma_channel_enum)s->dma_channel, DMA_INT_FLAG_ERR);
+	dma_interrupt_disable(
+	    s->dma_periph, (dma_channel_enum)s->dma_channel, DMA_INT_FTF | DMA_INT_ERR);
+	dma_channel_disable(s->dma_periph, (dma_channel_enum)s->dma_channel);
+	s->dma_error_count++;
+}
+
 /* DMA full-transfer-finish "lap" ISRs -- one per stream (stream 0 ->
  * DMA0 CH0, stream 1 -> DMA1 CH0, fixed in stream_begin below).  The
  * circular channel raises FTF exactly once per ring reload, so
@@ -44,6 +62,7 @@ void DMA0_Channel0_IRQHandler(void)
 		dma_interrupt_flag_clear(DMA0, DMA_CH0, DMA_INT_FLAG_FTF);
 		adc_streams[0].lap_count++;
 	}
+	adc_stream_latch_dma_error(0u);
 }
 
 void DMA1_Channel0_IRQHandler(void)
@@ -52,6 +71,7 @@ void DMA1_Channel0_IRQHandler(void)
 		dma_interrupt_flag_clear(DMA1, DMA_CH0, DMA_INT_FLAG_FTF);
 		adc_streams[1].lap_count++;
 	}
+	adc_stream_latch_dma_error(1u);
 }
 
 /* TRIGSEL route target for an ADC peripheral's routine-group trigger. */
@@ -236,9 +256,11 @@ int bridge_hw_adc_stream_begin(uint8_t stream_id, uint8_t channel, uint32_t samp
 	 * enable the FTF interrupt + its NVIC line so EVERY ring reload is
 	 * counted -- the overrun detection in stream_read is exact
 	 * total-written-vs-read accounting, not a heuristic. */
-	s->lap_count = 0u;
-	dma_flag_clear(s->dma_periph, (dma_channel_enum)s->dma_channel, DMA_FLAG_FTF);
-	dma_interrupt_enable(s->dma_periph, (dma_channel_enum)s->dma_channel, DMA_INT_FTF);
+	s->lap_count       = 0u;
+	s->dma_error_count = 0u;
+	dma_flag_clear(s->dma_periph, (dma_channel_enum)s->dma_channel, DMA_FLAG_FTF | DMA_FLAG_ERR);
+	dma_interrupt_enable(
+	    s->dma_periph, (dma_channel_enum)s->dma_channel, DMA_INT_FTF | DMA_INT_ERR);
 	nvic_irq_enable((s->dma_periph == DMA0) ? DMA0_Channel0_IRQn : DMA1_Channel0_IRQn,
 	                ADC_STREAM_LAP_IRQ_PRIO,
 	                ADC_STREAM_LAP_IRQ_SUBPRIO);
@@ -360,6 +382,8 @@ int bridge_hw_adc_stream_read(uint8_t   stream_id,
 
 	adc_stream_state_t *s = &adc_streams[stream_id];
 	if (!s->in_use) return BRIDGE_HW_ERR_INVAL;
+	adc_stream_latch_dma_error(stream_id);
+	if (s->dma_error_count != 0u) return BRIDGE_HW_ERR_IO;
 
 	/* ROVF (routine-data overflow) recovery (#44) -- checked before
 	 * EITHER data plane below, raw or DSP-filtered: both draw from
@@ -493,9 +517,10 @@ int bridge_hw_adc_stream_end(uint8_t stream_id)
      * interrupt + NVIC line and clear a possibly-pending flag so a
      * later single-shot user of this DMA controller can't inherit a
      * stale lap tick. */
-	dma_interrupt_disable(s->dma_periph, (dma_channel_enum)s->dma_channel, DMA_INT_FTF);
+	dma_interrupt_disable(
+	    s->dma_periph, (dma_channel_enum)s->dma_channel, DMA_INT_FTF | DMA_INT_ERR);
 	nvic_irq_disable((s->dma_periph == DMA0) ? DMA0_Channel0_IRQn : DMA1_Channel0_IRQn);
-	dma_flag_clear(s->dma_periph, (dma_channel_enum)s->dma_channel, DMA_FLAG_FTF);
+	dma_flag_clear(s->dma_periph, (dma_channel_enum)s->dma_channel, DMA_FLAG_FTF | DMA_FLAG_ERR);
 
 	/* A trigger edge may have started a conversion just before the
      * timer stopped.  Dwell past one conversion time (~6.3 us healthy;
@@ -740,6 +765,7 @@ static bool adc_dsp_fac_config(const adc_stream_state_t *s)
 static void adc_dsp_pump_stream(uint8_t sid)
 {
 	adc_stream_state_t *s = &adc_streams[sid];
+	if (s->dma_error_count != 0u) return;
 
 	if (adc_dsp_fac_owner != (int8_t)sid) {
 		if (!adc_dsp_fac_config(s)) return; /* unsupported chain -> stay idle */
@@ -963,6 +989,7 @@ static void adc_dsp_fft_publish(void)
 static void adc_dsp_pump_fft(uint8_t sid)
 {
 	adc_stream_state_t *s = &adc_streams[sid];
+	if (s->dma_error_count != 0u) return;
 
 	if (adc_dsp_fft_owner != (int8_t)sid) {
 		if (!adc_dsp_fft_config(s)) return;
@@ -1026,7 +1053,8 @@ void adc_dsp_fft_release(uint8_t stream_id)
 /* HAL: read spectrum bins (float32 LE) for a bound FFT stream.  Chunked:
  * the host asks for [bin_offset, bin_offset+max_bins); the reply carries
  * the frame seq so the host detects a frame roll mid-fetch.  Returns
- * NOSUPPORT if the stream isn't FFT-bound, IO before the first frame. */
+ * NOSUPPORT if the stream isn't FFT-bound, BUSY before the first frame, and
+ * IO after its DMA channel reports a transfer error. */
 int bridge_hw_adc_spectrum_read(uint8_t   stream_id,
                                 uint16_t  bin_offset,
                                 uint8_t   max_bins,
@@ -1042,8 +1070,10 @@ int bridge_hw_adc_spectrum_read(uint8_t   stream_id,
 	if (stream_id >= BRIDGE_ADC_STREAM_COUNT) return BRIDGE_HW_ERR_RANGE;
 	adc_stream_state_t *s = &adc_streams[stream_id];
 	if (!s->in_use || !s->dsp_bound || s->dsp_terminal != 3u) return BRIDGE_HW_ERR_NOTIMPL;
+	adc_stream_latch_dma_error(stream_id);
+	if (s->dma_error_count != 0u) return BRIDGE_HW_ERR_IO;
 	if (adc_dsp_fft_owner != (int8_t)stream_id || adc_dsp_fft_seq == 0u) {
-		return BRIDGE_HW_ERR_IO; /* no frame yet */
+		return BRIDGE_HW_ERR_BUSY; /* no frame yet */
 	}
 
 	*seq_out        = adc_dsp_fft_seq;

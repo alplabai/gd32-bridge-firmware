@@ -101,9 +101,48 @@ static void spi_gpio_init(void)
  * anything the master over-clocks beyond this simply stops being captured
  * and the CRC check fails loud).  TX holds the staged reply drained from
  * the portable seams at decode time so the DMA has a stable flat buffer. */
-#define BRIDGE_SPI_DMA_BUF_LEN 72u
-static uint8_t spi_rx_dma_buf[BRIDGE_SPI_DMA_BUF_LEN];
-static uint8_t spi_tx_dma_buf[BRIDGE_SPI_DMA_BUF_LEN];
+#define BRIDGE_SPI_DMA_BUF_LEN         72u
+#define BRIDGE_SPI_DMA_ERR_IRQ_PRIO    3u
+#define BRIDGE_SPI_DMA_ERR_IRQ_SUBPRIO 0u
+static uint8_t           spi_rx_dma_buf[BRIDGE_SPI_DMA_BUF_LEN];
+static uint8_t           spi_tx_dma_buf[BRIDGE_SPI_DMA_BUF_LEN];
+static volatile uint32_t spi_dma_rx_error_count;
+static volatile uint32_t spi_dma_tx_error_count;
+static volatile bool     spi_dma_error_pending;
+
+/* DMA error IRQs deliberately run below CS EXTI (priority 1).  The CS-rising
+ * handler also samples ERRIF directly, so an error that arrives just before
+ * CS release cannot be hidden behind the pending lower-priority IRQ. */
+static void spi_dma_latch_error(dma_channel_enum channel)
+{
+	if (dma_interrupt_flag_get(BRIDGE_SPI_DMA, channel, DMA_INT_FLAG_ERR) == RESET) return;
+	dma_interrupt_flag_clear(BRIDGE_SPI_DMA, channel, DMA_INT_FLAG_ERR);
+	if (channel == BRIDGE_SPI_RX_DMA_CH) {
+		spi_dma_rx_error_count++;
+	} else {
+		spi_dma_tx_error_count++;
+	}
+	spi_dma_error_pending = true;
+}
+
+void DMA0_Channel2_IRQHandler(void)
+{
+	spi_dma_latch_error(BRIDGE_SPI_TX_DMA_CH);
+}
+
+void DMA0_Channel3_IRQHandler(void)
+{
+	spi_dma_latch_error(BRIDGE_SPI_RX_DMA_CH);
+}
+
+static bool spi_dma_error_consume(void)
+{
+	spi_dma_latch_error(BRIDGE_SPI_RX_DMA_CH);
+	spi_dma_latch_error(BRIDGE_SPI_TX_DMA_CH);
+	if (!spi_dma_error_pending) return false;
+	spi_dma_error_pending = false;
+	return true;
+}
 
 /* One-time channel configuration (clocks, DMAMUX routing, widths).  The
  * per-transaction address/count reloads live in the arm helpers below;
@@ -134,6 +173,8 @@ static void spi_dma_init(void)
 	dma_circulation_disable(BRIDGE_SPI_DMA, BRIDGE_SPI_RX_DMA_CH);
 	dma_memory_to_memory_disable(BRIDGE_SPI_DMA, BRIDGE_SPI_RX_DMA_CH);
 	dmamux_synchronization_disable(DMAMUX_MULTIPLEXER_CH3);
+	dma_flag_clear(BRIDGE_SPI_DMA, BRIDGE_SPI_RX_DMA_CH, DMA_FLAG_ERR);
+	dma_interrupt_enable(BRIDGE_SPI_DMA, BRIDGE_SPI_RX_DMA_CH, DMA_INT_ERR);
 
 	/* TX: spi_tx_dma_buf -> SPI1 DATA.  Armed per-reply with the exact
      * staged length; the SPI's TBE request prefills the TX FIFO the moment
@@ -154,6 +195,12 @@ static void spi_dma_init(void)
 	dma_circulation_disable(BRIDGE_SPI_DMA, BRIDGE_SPI_TX_DMA_CH);
 	dma_memory_to_memory_disable(BRIDGE_SPI_DMA, BRIDGE_SPI_TX_DMA_CH);
 	dmamux_synchronization_disable(DMAMUX_MULTIPLEXER_CH2);
+	dma_flag_clear(BRIDGE_SPI_DMA, BRIDGE_SPI_TX_DMA_CH, DMA_FLAG_ERR);
+	dma_interrupt_enable(BRIDGE_SPI_DMA, BRIDGE_SPI_TX_DMA_CH, DMA_INT_ERR);
+	nvic_irq_enable(
+	    DMA0_Channel2_IRQn, BRIDGE_SPI_DMA_ERR_IRQ_PRIO, BRIDGE_SPI_DMA_ERR_IRQ_SUBPRIO);
+	nvic_irq_enable(
+	    DMA0_Channel3_IRQn, BRIDGE_SPI_DMA_ERR_IRQ_PRIO, BRIDGE_SPI_DMA_ERR_IRQ_SUBPRIO);
 }
 
 /* Re-arm RX for a fresh transaction: full staging buffer.  CHCNT may only
@@ -236,6 +283,9 @@ void bridge_transport_spi_hw_init(void)
 {
 	rcu_periph_clock_enable(BRIDGE_SPI_RCU);
 	spi_gpio_init();
+	spi_dma_rx_error_count = 0u;
+	spi_dma_tx_error_count = 0u;
+	spi_dma_error_pending  = false;
 	spi_dma_init();
 	bridge_spi_periph_config();
 	spi_dma_arm_rx();
@@ -294,6 +344,25 @@ void BRIDGE_SPI_CS_EXTI_HANDLER(void)
              * Budget: steps 1-4 are register writes + CRC over <=69 B at
              * 216 MHz -- single-digit microseconds, well inside the master's
              * inter-transaction gap (its CS setup window alone is 60 us). */
+			if (spi_dma_error_consume()) {
+				/* The byte run is incomplete or the staged reply was not sent.
+				 * Reset it and stage a definite STATUS_IO for the host's next
+				 * reply-read instead of decoding a truncated frame. */
+				dma_channel_disable(BRIDGE_SPI_DMA, BRIDGE_SPI_RX_DMA_CH);
+				dma_channel_disable(BRIDGE_SPI_DMA, BRIDGE_SPI_TX_DMA_CH);
+				rcu_periph_reset_enable(RCU_SPI1RST);
+				rcu_periph_reset_disable(RCU_SPI1RST);
+				bridge_spi_periph_config();
+				spi_slave_transport_error();
+				uint32_t reply_len = 0u;
+				while (spi_slave_tx_pending() && reply_len < BRIDGE_SPI_DMA_BUF_LEN) {
+					spi_tx_dma_buf[reply_len++] = spi_slave_tx_next_byte();
+				}
+				spi_dma_arm_rx();
+				spi_dma_arm_tx(reply_len);
+				return;
+			}
+
 			uint32_t remaining = dma_transfer_number_get(BRIDGE_SPI_DMA, BRIDGE_SPI_RX_DMA_CH);
 			uint32_t received =
 			    (remaining <= BRIDGE_SPI_DMA_BUF_LEN) ? (BRIDGE_SPI_DMA_BUF_LEN - remaining) : 0u;

@@ -738,12 +738,13 @@ static const hal_map_case_t HAL_MAP_CASES[] = {
 	{ "ADC_STREAM_READ/INVAL",   CMD_ADC_STREAM_READ, req_adc_stream_read, 2u, FAKE_FN_ADC_STREAM_READ, BRIDGE_HW_ERR_INVAL,   STATUS_INVAL },
 	{ "ADC_STREAM_READ/RANGE",   CMD_ADC_STREAM_READ, req_adc_stream_read, 2u, FAKE_FN_ADC_STREAM_READ, BRIDGE_HW_ERR_RANGE,   STATUS_OUT_OF_RANGE },
 
-	/* --- ADC_SPECTRUM_READ: NOTIMPL explicit; IO is the documented
+	/* --- ADC_SPECTRUM_READ: NOTIMPL explicit; BUSY is the documented
 	 * "no frame yet" -> STATUS_BUSY special-case (src/protocol.c:546),
 	 * distinct from every other opcode's IO handling -- worth pinning
 	 * on its own. */
 	{ "ADC_SPECTRUM_READ/NOTIMPL", CMD_ADC_SPECTRUM_READ, req_adc_spectrum_read, 4u, FAKE_FN_ADC_SPECTRUM_READ, BRIDGE_HW_ERR_NOTIMPL, STATUS_NOSUPPORT },
-	{ "ADC_SPECTRUM_READ/IO_is_BUSY", CMD_ADC_SPECTRUM_READ, req_adc_spectrum_read, 4u, FAKE_FN_ADC_SPECTRUM_READ, BRIDGE_HW_ERR_IO, STATUS_BUSY },
+	{ "ADC_SPECTRUM_READ/BUSY", CMD_ADC_SPECTRUM_READ, req_adc_spectrum_read, 4u, FAKE_FN_ADC_SPECTRUM_READ, BRIDGE_HW_ERR_BUSY, STATUS_BUSY },
+	{ "ADC_SPECTRUM_READ/IO", CMD_ADC_SPECTRUM_READ, req_adc_spectrum_read, 4u, FAKE_FN_ADC_SPECTRUM_READ, BRIDGE_HW_ERR_IO, STATUS_IO },
 };
 /* clang-format on */
 

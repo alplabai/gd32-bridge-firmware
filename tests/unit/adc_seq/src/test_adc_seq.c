@@ -210,4 +210,43 @@ ZTEST(gd32_adc_seq, test_rovf_recovery_clears_dma_ftf)
 	             "returns and corrupts the freshly-resynced lap_count");
 }
 
+/* #51 -- an AHB DMA transfer error cannot be reported as an apparently
+ * healthy empty stream.  ERRIF and a simultaneous FTF are cleared through
+ * their dedicated bits so exact lap accounting remains intact. */
+ZTEST(gd32_adc_seq, test_dma_error_is_sticky_and_preserves_simultaneous_lap)
+{
+	adc_seq_reset();
+	int rc = bridge_hw_adc_stream_begin(0u, BRIDGE_ADC_CH0, 1000u);
+	zassert_equal(rc, BRIDGE_HW_OK, "stream begins against the mock");
+	int enable_i = mock_seq_find_from("dma_interrupt_enable", DMA0, 0);
+	zassert_true(enable_i >= 0, "stream begins with DMA interrupts armed");
+	zassert_equal(mock_seq[enable_i].arg,
+	              DMA_INT_FTF | DMA_INT_ERR,
+	              "both full-transfer and transfer-error interrupts are armed");
+
+	mock_dma_set_interrupt_flag(DMA0, DMA_CH0, DMA_INT_FLAG_FTF | DMA_INT_FLAG_ERR, SET);
+	DMA0_Channel0_IRQHandler();
+	zassert_equal(adc_streams[0].lap_count, 1u, "simultaneous FTF remains counted");
+	zassert_equal(adc_streams[0].dma_error_count, 1u, "ERRIF is retained as stream state");
+
+	uint8_t  got = 0xFFu;
+	uint16_t mv[1];
+	rc = bridge_hw_adc_stream_read(0u, 1u, &got, mv);
+	zassert_equal(rc, BRIDGE_HW_ERR_IO, "transfer error reaches the host as IO");
+	zassert_equal(got, 0u, "no stale ring samples escape after DMA error");
+
+	rc = bridge_hw_adc_stream_end(0u);
+	zassert_equal(rc, BRIDGE_HW_OK, "END clears the faulted session");
+	rc = bridge_hw_adc_stream_begin(0u, BRIDGE_ADC_CH0, 1000u);
+	zassert_equal(rc, BRIDGE_HW_OK, "BEGIN starts a clean replacement session");
+	zassert_equal(adc_streams[0].dma_error_count, 0u, "new session clears the sticky DMA error");
+
+	/* CS EXTI outranks the DMA IRQ: it must consume a just-raised ERRIF
+	 * itself rather than waiting for the lower-priority vector to run. */
+	mock_dma_set_interrupt_flag(DMA0, DMA_CH0, DMA_INT_FLAG_ERR, SET);
+	rc = bridge_hw_adc_stream_read(0u, 1u, &got, mv);
+	zassert_equal(
+	    rc, BRIDGE_HW_ERR_IO, "direct ERRIF check is host-visible without waiting for IRQ");
+}
+
 ZTEST_SUITE(gd32_adc_seq, NULL, NULL, NULL, NULL, NULL);
