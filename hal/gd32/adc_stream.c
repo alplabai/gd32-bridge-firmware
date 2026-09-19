@@ -17,6 +17,7 @@
 #include "gd32g5x3.h"
 
 #include "adc_dsp_chain.h"
+#include "bridge_critical.h"
 #include "gd32_common.h"
 
 /* Stream slots; layout + sizing doc in gd32_common.h. */
@@ -469,7 +470,7 @@ int bridge_hw_adc_stream_read(uint8_t   stream_id,
  * DSP dispatch helpers still defined in the #496 pump section at end
  * of this file but referenced earlier by stream_end. */
 void        adc_dsp_fac_release(uint8_t stream_id);
-void        adc_dsp_fft_release(uint8_t stream_id);
+static void adc_dsp_fft_revoke_locked(uint8_t stream_id);
 static void adc_dsp_pump_fft(uint8_t sid);
 
 int bridge_hw_adc_stream_end(uint8_t stream_id)
@@ -477,6 +478,14 @@ int bridge_hw_adc_stream_end(uint8_t stream_id)
 	if (stream_id >= BRIDGE_ADC_STREAM_COUNT) return BRIDGE_HW_ERR_RANGE;
 	adc_stream_state_t *s = &adc_streams[stream_id];
 	if (!s->in_use) return BRIDGE_HW_OK; /* idempotent */
+	/* FFT setup can take a full window-coefficient generation at base level.
+	 * Revoke a visible configuring claim before the long teardown below so
+	 * the suspended setup cannot later publish the ended stream (#184). */
+	const uint32_t dsp_crit = bridge_irq_lock();
+	if (s->dsp_bound) {
+		adc_dsp_fft_revoke_locked(stream_id);
+	}
+	bridge_irq_unlock(dsp_crit);
 
 	/* Stop the trigger SOURCE first (pacing timer), then disarm the
      * ADC's DMA request generation, then the DMA channel -- the other
@@ -527,7 +536,6 @@ int bridge_hw_adc_stream_end(uint8_t stream_id)
      * dsp_chain_id is only meaningful while dsp_bound, so gate on it. */
 	if (s->dsp_bound) {
 		adc_dsp_fac_release(stream_id); /* free the FAC if this stream owned it */
-		adc_dsp_fft_release(stream_id); /* free the FFT if this stream owned it */
 		adc_dsp_chain_release(s->dsp_chain_id);
 	}
 
@@ -820,7 +828,10 @@ void bridge_hw_dsp_pump(void)
  * buffers automatically. */
 #define ADC_DSP_FFT_MAX_POINTS BRIDGE_DSP_MAX_FFT_POINTS
 
-static int8_t            adc_dsp_fft_owner = -1;
+static int8_t adc_dsp_fft_owner = -1;
+/* A configuration claim is distinct from an active owner: spectrum reads
+ * must never observe it, while STREAM_END must be able to revoke it. */
+static int8_t            adc_dsp_fft_configuring = -1;
 static uint16_t          adc_dsp_fft_points;
 static uint8_t           adc_dsp_fft_outfmt; /* 0 complex / 1 mag / 2 mag-onesided */
 static uint16_t          adc_dsp_fft_fill;
@@ -965,8 +976,35 @@ static void adc_dsp_pump_fft(uint8_t sid)
 	adc_stream_state_t *s = &adc_streams[sid];
 
 	if (adc_dsp_fft_owner != (int8_t)sid) {
-		if (!adc_dsp_fft_config(s)) return;
-		adc_dsp_fft_owner = (int8_t)sid;
+		const uint32_t claim_crit = bridge_irq_lock();
+		if (!s->in_use || !s->dsp_bound || s->dsp_terminal != 3u ||
+		    (adc_dsp_fft_owner != -1 && adc_dsp_fft_owner != (int8_t)sid) ||
+		    adc_dsp_fft_configuring != -1) {
+			bridge_irq_unlock(claim_crit);
+			return;
+		}
+		adc_dsp_fft_configuring = (int8_t)sid;
+		bridge_irq_unlock(claim_crit);
+
+		if (!adc_dsp_fft_config(s)) {
+			const uint32_t abort_crit = bridge_irq_lock();
+			if (adc_dsp_fft_configuring == (int8_t)sid) adc_dsp_fft_configuring = -1;
+			bridge_irq_unlock(abort_crit);
+			return;
+		}
+		/* Configuration is deliberately interruptible.  Commit the active
+		 * owner only when END has not revoked this configuring token. */
+		const uint32_t commit_crit = bridge_irq_lock();
+		const bool commit = (adc_dsp_fft_configuring == (int8_t)sid && s->in_use && s->dsp_bound &&
+		                     s->dsp_terminal == 3u);
+		if (commit) {
+			adc_dsp_fft_owner       = (int8_t)sid;
+			adc_dsp_fft_configuring = -1;
+		} else if (adc_dsp_fft_configuring == (int8_t)sid) {
+			adc_dsp_fft_configuring = -1;
+		}
+		bridge_irq_unlock(commit_crit);
+		if (!commit) return;
 		/* pump_raw_read is deliberately NOT rewound here (#70).
 		 * chain_bind already seeds it (adc_dsp_chain.c: `s->pump_raw_read
 		 * = s->total_read;`) at the moment this stream's chain was
@@ -1014,12 +1052,13 @@ static void adc_dsp_pump_fft(uint8_t sid)
 }
 
 /* Release the FFT block if this stream owned it (stream_end). */
-void adc_dsp_fft_release(uint8_t stream_id)
+static void adc_dsp_fft_revoke_locked(uint8_t stream_id)
 {
-	if (adc_dsp_fft_owner == (int8_t)stream_id) {
-		adc_dsp_fft_owner = -1;
-		adc_dsp_fft_fill  = 0u;
-		adc_dsp_fft_nbins = 0u;
+	if (adc_dsp_fft_owner == (int8_t)stream_id || adc_dsp_fft_configuring == (int8_t)stream_id) {
+		adc_dsp_fft_owner       = -1;
+		adc_dsp_fft_configuring = -1;
+		adc_dsp_fft_fill        = 0u;
+		adc_dsp_fft_nbins       = 0u;
 	}
 }
 

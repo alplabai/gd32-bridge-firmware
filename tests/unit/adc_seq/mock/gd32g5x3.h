@@ -357,6 +357,10 @@ void       fft_init(fft_parameter_struct *fft_parameter);
 void       fft_calculation_start(void);
 FlagStatus fft_flag_get(uint32_t flag);
 
+/* Test-only FFT hook/counter for ISR-reentry ownership tests. */
+void     mock_fft_set_init_hook(void (*hook)(void));
+unsigned mock_fft_init_count(void);
+
 /* ---- CMSIS core intrinsics -------------------------------------------- *
  *
  * hal/gd32/bridge_critical.h pulls "gd32g5x3.h" purely to reach these
