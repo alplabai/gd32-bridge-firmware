@@ -78,8 +78,8 @@ set(TEST_FLAGS -std=c11 -Wall -Wextra -Werror)
 # drift silently against it.  The top-level CMakeLists.txt now parses the
 # same definitions, and its app_slot_base.S witness makes the linker verify
 # the compiled macro against the generated FLASH origin (#78).
-# OTA_SLOT_SIZE's separate copy in tools/gen_ota_metadata.py remains outside
-# this host-test setup.
+# tools/gen_ota_metadata.py also parses its layout constants from this header,
+# so firmware, linker and factory provisioning share one flash map (#2).
 set(_OTA_LAYOUT_H ${FW}/src/ota_layout.h)
 file(STRINGS ${_OTA_LAYOUT_H} _OTA_SLOT_A_BASE_LINE
      REGEX "^#define[ \t]+OTA_SLOT_A_BASE[ \t]+0x[0-9A-Fa-f]+u")

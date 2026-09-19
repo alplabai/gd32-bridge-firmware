@@ -55,7 +55,6 @@
  * 2 KB pages, bank0 only.  Getting this wrong "succeeds" loudly:
  * page indexes silently resolve into bank0 and erase the wrong region
  * (caught on silicon as a PGERR on the first slot-B program). */
-#define OTA_FMC_BANK1_BASE      0x08040000u
 #define OTA_FMC_PAGE_SIZE_DBANK 0x400u
 #define OTA_FMC_PAGE_SIZE_SBANK 0x800u
 

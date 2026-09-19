@@ -5,11 +5,11 @@
  * gd32-bridge: CRC-32 (IEEE 802.3, reflected). See crc32.h.
  *
  * Table-driven (#26 C2, #104): the OTA verify path walks a whole
- * OTA_SLOT_SIZE image (0x0003B000 = 241664 bytes) through this
+ * OTA_SLOT_SIZE image (0x00036000 = 221184 bytes) through this
  * function in one call (src/ota.c's h_verify), and the bootloader does
  * the same over a whole slot on every boot (src/boot/boot_main.c).  The
  * previous bit-serial form cost 8 shift-and-branch iterations per byte
- * -- ~1.93M for a full-slot verify.  crc32_table[] below is the
+ * -- ~1.77M for a full-slot verify.  crc32_table[] below is the
  * standard Sarwate byte-wise table: one lookup replaces those 8
  * iterations, cut to one XOR-and-shift, at a cost of 1 KB of .rodata.
  * Measured (arm-none-eabi-gcc 13.3.1, -mcpu=cortex-m33 -mthumb,

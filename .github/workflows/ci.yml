@@ -206,6 +206,12 @@ jobs:
       - name: byte-compile
         run: python3 -m compileall -q tests tools
 
+      # The factory record generator parses the production flash geometry
+      # from ota_layout.h.  Exercise both that parser and the invariant that
+      # the two slots meet at (and do not cross) the bank boundary (#2).
+      - name: test OTA metadata generator and layout contract
+        run: python3 tools/test_gen_ota_metadata.py -v
+
   gd32-backend-build:
     name: gd32 backend build
     runs-on: ubuntu-latest
@@ -490,3 +496,41 @@ jobs:
             fi
             echo "$script: swapped base rejected"
           done
+
+      # Mutate the generated slot-A length back past 0x08040000 and prove
+      # the production linker assertion rejects it.  A/B address ranges can
+      # remain disjoint while slot A still crosses into slot B's physical
+      # bank, which is the read-while-write hazard fixed by #2.
+      - name: reject OTA slots that cross the flash-bank boundary
+        run: |
+          set -euo pipefail
+          script=build-gd32/gd32g553_slot_a.ld
+          mutated=/tmp/gd32g553_slot_a_crosses_bank.ld
+          sed 's/LENGTH = 0x00036000/LENGTH = 0x00037000/' \
+            "$script" >"$mutated"
+          grep -Fq 'LENGTH = 0x00037000' "$mutated"
+
+          printf 'void Reset_Handler(void) {}\n' >/tmp/bank-boundary-canary.c
+          arm-none-eabi-gcc -mcpu=cortex-m33 -mthumb \
+            -ffunction-sections -fdata-sections \
+            -c /tmp/bank-boundary-canary.c -o /tmp/bank-boundary-canary.o
+          slot_a_witness="$(find build-gd32/CMakeFiles/gd32-bridge-slot-a.dir \
+            -type f \( -name 'app_slot_base.S.o' -o -name 'app_slot_base.S.obj' \) \
+            -print -quit)"
+          test -n "$slot_a_witness"
+
+          if out=$(arm-none-eabi-gcc -mcpu=cortex-m33 -mthumb \
+              -nostartfiles -Wl,--gc-sections -T"$mutated" \
+              /tmp/bank-boundary-canary.o "$slot_a_witness" \
+              -o /tmp/gd32g553_slot_a_crosses_bank.elf 2>&1); then
+            echo "$out"
+            echo '::error::slot linker accepted a bank-crossing application'
+            exit 1
+          fi
+          if ! grep -Fq 'application slot crosses dual-bank boundary' \
+              <<<"$out"; then
+            echo "$out"
+            echo '::error::link failed without the bank-boundary guard diagnostic'
+            exit 1
+          fi
+          echo 'bank-crossing slot rejected'

@@ -32,20 +32,44 @@ from __future__ import annotations
 
 import argparse
 import pathlib
+import re
 import struct
 import sys
 import zlib
 
 OTA_META_MAGIC = 0x4F544D31  # "OTM1"
 OTA_META_STRUCT_VER = 2
-OTA_SLOT_SIZE = 0x0003B000
 
-# Mirrors src/ota_layout.h -- keep these four in lockstep with that file.
-OTA_SLOT_A_BASE = 0x0800A000
-OTA_SLOT_B_BASE = 0x08045000
-OTA_IMG_MIN_LEN = 8
-OTA_SRAM_BASE = 0x20000000
-OTA_SRAM_END = 0x20040000
+# ota_layout.h is the firmware, linker and provisioning source of truth.
+# Parse its simple integer defines instead of maintaining another flash map
+# here: a factory metadata record built for a stale slot base can make a
+# correctly linked application permanently unbootable.
+_OTA_LAYOUT_H = pathlib.Path(__file__).resolve().parents[1] / "src" / "ota_layout.h"
+_OTA_LAYOUT_TEXT = _OTA_LAYOUT_H.read_text(encoding="utf-8")
+
+
+def _layout_constant(name: str) -> int:
+    matches = re.findall(
+        rf"^#define[ \t]+{re.escape(name)}[ \t]+(0x[0-9A-Fa-f]+|[0-9]+)u(?:[ \t]|$)",
+        _OTA_LAYOUT_TEXT,
+        flags=re.MULTILINE,
+    )
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"expected exactly one simple integer #define for {name} in "
+            f"{_OTA_LAYOUT_H}; found {len(matches)}"
+        )
+    return int(matches[0], 0)
+
+
+OTA_SLOT_SIZE = _layout_constant("OTA_SLOT_SIZE")
+OTA_SLOT_A_BASE = _layout_constant("OTA_SLOT_A_BASE")
+OTA_SLOT_B_BASE = _layout_constant("OTA_SLOT_B_BASE")
+OTA_FMC_BANK1_BASE = _layout_constant("OTA_FMC_BANK1_BASE")
+OTA_FLASH_END = _layout_constant("OTA_FLASH_END")
+OTA_IMG_MIN_LEN = _layout_constant("OTA_IMG_MIN_LEN")
+OTA_SRAM_BASE = _layout_constant("OTA_SRAM_BASE")
+OTA_SRAM_END = _layout_constant("OTA_SRAM_END")
 
 SLOT_NAMES = {"a": 0, "b": 1}
 SLOT_BASES = {0: OTA_SLOT_A_BASE, 1: OTA_SLOT_B_BASE}

@@ -24,9 +24,10 @@ slot relocation, dual-bank FMC-from-RAM, and the full stream → verify →
 commit → boot-new-slot → rollback cycle proven end-to-end over the 25 MHz
 link, including two GD32 self-reboots through this bootloader.  This run
 exercised the **A→B direction and rollback only** — the B→A direction has
-**not** been exercised, which matters because the slot map's overlap with
-the dual-bank boundary at `0x08040000` bites in that direction.  Still
-HIL-gated: a bad bootloader bricks the part, and this HW revision has no
+**not** been exercised. The bank-aligned map now ends slot A and starts
+slot B at `0x08040000` (#2), with compile/link guards against a future
+crossing, but both directions still require a bench pass. Still HIL-gated:
+a bad bootloader bricks the part, and this HW revision has no
 host-driven SWD reflash, so recovery needs a bench SWD probe on the
 physical board; the default (unarmed) image remains the
 cannot-brick-itself configuration.  First-flash of a partitioned part

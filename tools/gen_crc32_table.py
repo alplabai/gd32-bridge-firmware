@@ -7,8 +7,8 @@ src/crc32.c, and (--check) prove that the checked-in table still matches
 what this script produces.
 
 Why this exists (#26 C2, #104): ota_crc32() used to be bit-serial, 8
-inner iterations per byte -- ~1.93M iterations for a full OTA_SLOT_SIZE
-(0x0003B000 = 241664 byte) verify.  The table trades that for one lookup
+inner iterations per byte -- ~1.77M iterations for a full OTA_SLOT_SIZE
+(0x00036000 = 221184 byte) verify.  The table trades that for one lookup
 per byte, at a cost of 1 KB of .rodata.  Nobody should have to eyeball
 256 magic numbers and trust they are the right ones, so the table is
 generated here from the algorithm alone, and this script's own --check
