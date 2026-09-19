@@ -594,6 +594,11 @@ static gd32_bridge_status_t h_commit(void)
 		s_err   = 6u;
 		return STATUS_IO;
 	}
+	/* On silicon the reset happens before protocol_dispatch() returns to
+	 * the transport, so STATUS_OK below is never staged on the wire.  The
+	 * host must treat the missing/all-0x00 reply as "rebooting", then re-init
+	 * the link and probe OTA_GET_STATE or CMD_GET_BUILD_ID.  The return is
+	 * retained for the host-test reset seam, where ota_system_reset() returns. */
 	ota_system_reset(); /* no return on real silicon */
 	return STATUS_OK;
 }
@@ -656,6 +661,9 @@ static gd32_bridge_status_t h_rollback(void)
 	if (!meta_commit(other, false, 0u, 0u, 0u)) {
 		return STATUS_IO;
 	}
+	/* Same reset-before-reply contract as h_commit(): STATUS_OK is not
+	 * staged on silicon.  The host must treat a missing/all-0x00 reply as
+	 * "rebooting", then re-init and confirm with OTA_GET_STATE or CMD_GET_BUILD_ID. */
 	ota_system_reset();
 	return STATUS_OK;
 }
