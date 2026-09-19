@@ -17,6 +17,7 @@
 #include "gd32g5x3.h"
 
 #include "adc_dsp_chain.h"
+#include "bridge_board_config.h"
 #include "gd32_common.h"
 
 /* Stream slots; layout + sizing doc in gd32_common.h. */
@@ -27,7 +28,7 @@ adc_stream_state_t adc_streams[BRIDGE_ADC_STREAM_COUNT];
  * bridge_board_config.h): a lap tick fires once per ring period
  * (>= ~10 ms at the 100 kHz rate cap) and is pure bookkeeping, so it
  * must never delay the latency-sensitive link ISRs. */
-#define ADC_STREAM_LAP_IRQ_PRIO    3u
+#define ADC_STREAM_LAP_IRQ_PRIO    BRIDGE_ADC_STREAM_LAP_IRQ_PRIO
 #define ADC_STREAM_LAP_IRQ_SUBPRIO 0u
 
 /* DMA full-transfer-finish "lap" ISRs -- one per stream (stream 0 ->
