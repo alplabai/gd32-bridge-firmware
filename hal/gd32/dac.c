@@ -21,7 +21,7 @@
 /* ----------------------------------------------------------------- */
 
 /* E1M DAC0/DAC1 -> physical DAC peripheral + output + pad.  Sourced
- * from `metadata/e1m_modules/v2n/gd32-io-mcu-map.tsv`; PA4 is the
+ * from alp-sdk `metadata/e1m_modules/v2n/gd32-io-mcu-map.tsv`; PA4 is the
  * GD32G5x3's stock DAC0_OUT0 alt-function and PA6 is DAC1_OUT0 per
  * the datasheet's pin alt-function table. */
 const gd32_dac_ch_t dac_channels[] = {

@@ -46,7 +46,9 @@
 #define OTA_SLOT_SIZE       0x0003B000u /* 236 KB */
 #define OTA_FLASH_END       0x08080000u
 
-/* Two metadata records on separate pages -> power-fail-safe alternation. */
+/* Two metadata records on separate pages -- a power-fail-safe A/B commit.
+ * meta_commit() in ota.c chooses which page to erase + overwrite BY RANK
+ * (see the block comment above meta_commit), not by simple alternation. */
 #define OTA_META_REC0 (OTA_META_BASE + 0u * OTA_PAGE_SIZE)
 #define OTA_META_REC1 (OTA_META_BASE + 1u * OTA_PAGE_SIZE)
 

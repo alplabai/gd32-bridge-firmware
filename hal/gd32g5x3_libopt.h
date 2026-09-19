@@ -4,9 +4,11 @@
  *
  * gd32-bridge's project-level standard-peripheral selector.  Both the
  * GD32G5x3 CMSIS header (`gd32g5x3.h`) and any peripheral source that
- * includes it pull in this file by name -- the vendor archive's
- * Examples follow the same convention, each example carrying its own
- * libopt.h selector to keep the per-image flash footprint minimal.
+ * includes it pull in this file by name.  This selector controls which
+ * peripheral declarations are visible to firmware translation units; it
+ * does not select vendor source files or determine the linked image size.
+ * The vendor wrapper compiles every driver into a sectioned static library,
+ * and the linker discards unreferenced sections.
  *
  * Pattern: each time a `hal/gd32/` TU (or any peer that uses
  * the standard-peripheral library) starts calling into a new
@@ -14,14 +16,9 @@
  * here so the driver's prototype + register layouts are visible to
  * the translation unit.
  *
- * Today the file lists every header the real-hook implementations
- * enumerated in `hal/gd32/init.c`'s top comment
- * need.  Including a header that isn't yet referenced is cheap
- * (header-only -- the driver's .c lives in
- * `vendors/gd32_firmware_library/upstream/Firmware/.../Source/`,
- * pulled into the static library by the vendor wrapper's CMake);
- * the build flags `-ffunction-sections -fdata-sections` +
- * `-Wl,--gc-sections` drop the unreferenced symbols at link time.
+ * Today the file lists only headers referenced by the real backend.  Add a
+ * driver header when a firmware TU starts using it; doing so exposes the
+ * API but still does not pull that driver's code into the final image.
  */
 
 #ifndef GD32G5X3_LIBOPT_H
@@ -37,15 +34,13 @@
 #include "gd32g5x3_exti.h"
 #include "gd32g5x3_syscfg.h"
 
-/* Timers (advanced + general purpose + low-power) for PWM / capture
- * / single-pulse / encoder / free-running counter. */
+/* Timers (advanced + general purpose) for PWM / capture / single-pulse
+ * / encoder.  The free-running counter uses the Cortex-M DWT directly. */
 #include "gd32g5x3_timer.h"
-#include "gd32g5x3_lptimer.h"
 
-/* Analog: ADC + DAC + comparator + reference. */
+/* Analog: ADC + DAC + reference. */
 #include "gd32g5x3_adc.h"
 #include "gd32g5x3_dac.h"
-#include "gd32g5x3_cmp.h"
 #include "gd32g5x3_vref.h"
 
 /* DMA + trigger routing for ADC streaming + FFT/FAC pipelines. */
@@ -57,21 +52,17 @@
 #include "gd32g5x3_fft.h"
 #include "gd32g5x3_fac.h"
 
-/* Security: TRNG + CAU (AES/DES). */
+/* Security: TRNG. */
 #include "gd32g5x3_trng.h"
-#include "gd32g5x3_cau.h"
 
-/* Serial buses (host bridge + DA9292 + board I2C). */
+/* Serial buses for the host bridge. */
 #include "gd32g5x3_spi.h"
 #include "gd32g5x3_i2c.h"
-#include "gd32g5x3_usart.h"
 
 /* Flash controller for OTA + factory provisioning. */
 #include "gd32g5x3_fmc.h"
 
-/* Watchdogs + RTC for system supervision. */
-#include "gd32g5x3_fwdgt.h"
-#include "gd32g5x3_wwdgt.h"
+/* RTC wake source. */
 #include "gd32g5x3_rtc.h"
 
 #endif /* GD32G5X3_LIBOPT_H */

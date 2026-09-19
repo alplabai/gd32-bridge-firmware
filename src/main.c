@@ -5,20 +5,21 @@
  * gd32-bridge firmware -- entry point.
  *
  * The GD32G553 supervisor runs this firmware as its sole user
- * application (no RTOS).  The runtime model is purely
- * interrupt-driven: SPI slave + I2C slave each have their own ISR
- * that hands complete request envelopes off to protocol_dispatch()
- * (in protocol.c) and stages the matching reply envelope back to
- * the transport.
+ * application (no RTOS).  The SPI CS-EXTI and I2C interrupt paths
+ * hand complete request envelopes to protocol_dispatch() (in
+ * protocol.c) and stage the matching reply envelope back to the
+ * transport.
  *
- * The main loop has no work of its own; it sleeps in WFI() so the
- * Cortex-M33 idles between interrupts.  bridge_hw_tick() runs on the
- * wakeups as a periodic housekeeping hook; it is a no-op on this SoM
- * revision -- the DA9292 fault nets (DA9292_INT/DA9292_TW) reach only
- * the Renesas (P37/P36), the GD32 has no pin to sample and no I2C
- * path to the PMIC, so CMD_DA9292_STATUS_FORWARD serves the 0xFF
- * "no sample" sentinel.  Register-level PMIC status (PMC_STATUS_00
- * etc.) is read by the host over BRD_I2C via the chips/da9292 driver.
+ * The main loop calls the __WFI seam, then bridge_hw_tick().  The
+ * current ARM image still resolves __WFI to the empty weak fallback
+ * below (#13), so it does not yet idle between interrupts.  The gd32
+ * tick override pumps DSP streams and advances background OTA erases.
+ * The DA9292 fault nets
+ * (DA9292_INT/DA9292_TW) reach only the Renesas (P37/P36), so the GD32
+ * still has no PMIC sample to collect and CMD_DA9292_STATUS_FORWARD
+ * serves the 0xFF "no sample" sentinel.  Register-level PMIC status
+ * (PMC_STATUS_00 etc.) is read by the host over BRD_I2C via the alp-sdk
+ * chips/da9292 driver.
  *
  * Backends: BRIDGE_HAL_BACKEND=gd32 drives real silicon (peripheral
  * HAL in the per-peripheral TUs under hal/gd32/, SPI1 + I2C0 slave
@@ -33,10 +34,9 @@
 #include "protocol.h"
 #include "transport.h"
 
-/* Optional weak hooks the HAL layer can override.  Defaults to a
- * busy WFI loop -- behaviour-equivalent to a no-op for the
- * scaffold; the real HAL overrides these for peripheral bring-up
- * and periodic housekeeping. */
+/* Optional weak hooks the HAL layer can override.  Both defaults are
+ * no-ops; the real backend overrides them for peripheral bring-up and
+ * base-level housekeeping. */
 __attribute__((weak)) void bridge_hw_init(void)
 {
 }
@@ -44,8 +44,9 @@ __attribute__((weak)) void bridge_hw_tick(void)
 {
 }
 
-/* The Cortex-M intrinsic; weakly defined here so the scaffold
- * compiles under hosted toolchains where __WFI() is missing. */
+/* Weak fallback for hosted toolchains where the Cortex-M intrinsic is
+ * unavailable.  It currently also resolves in the ARM image; #13 tracks
+ * replacing that no-op with a real wait-for-interrupt instruction. */
 #ifndef __WFI
 __attribute__((weak)) void __WFI(void)
 {
@@ -58,8 +59,8 @@ int main(void)
 	transport_spi_init();
 	transport_i2c_init();
 
-	/* Periodic housekeeping lives inside bridge_hw_tick() (a no-op on
-     * this SoM rev); the main loop just yields. */
+	/* The gd32 override pumps DSP streams and background OTA erase work;
+     * the weak stub default remains a no-op. */
 	for (;;) {
 		__WFI();
 		bridge_hw_tick();

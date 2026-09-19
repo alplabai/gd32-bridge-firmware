@@ -125,8 +125,11 @@ Development flashing uses an external SWD probe on `GD32_SWDIO` /
 > `qenc`, `tmu` — silicon-validated; the analog subsystem additionally
 > needed the v0.2.6 internal-VREF bring-up).  The ADC DSP-chain runtime
 > dispatch (FIR/IIR via the FAC, FFT via `CMD_ADC_SPECTRUM_READ`) is
-> wired in `hal/gd32/adc_stream.c`.  The stub backend stays HW-free for
-> host protocol round-trip tests.
+> wired in `hal/gd32/adc_stream.c`; the chain pool and `chain_bind`
+> capability validation (#69, #70) live in the vendor-header-free
+> `hal/gd32/adc_dsp_chain.c`, which a host suite links directly
+> (`tests/unit/adc_dsp/`).  The stub backend stays HW-free for host
+> protocol round-trip tests.
 
 ## Protocol majorset
 

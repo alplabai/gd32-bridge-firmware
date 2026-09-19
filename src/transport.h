@@ -33,13 +33,20 @@ void transport_i2c_init(void);
 
 /* ---- weak HW bring-up hooks (strong impl in transport_hw_gd32.c) - */
 void bridge_transport_spi_hw_init(void);
-void bridge_transport_i2c_hw_init(void);
+
+/* I2C returns BRIDGE_HW_OK / BRIDGE_HW_ERR_RANGE (../hal/bridge_hw.h):
+ * its I2C_TIMING derivation depends on the LIVE APB1 kernel clock (see
+ * hal/transport_hw_gd32.c), which is not fixed once this is called from
+ * the Deep-sleep wake path (hal/gd32/power.c) -- BRIDGE_HW_ERR_RANGE
+ * means the derived timing fields didn't fit their 4-bit registers and
+ * I2C0 was left disabled rather than brought up mistimed. */
+int bridge_transport_i2c_hw_init(void);
 
 /* ---- SPI slave seams (defined in transport_spi.c) -------------- */
 void    spi_slave_cs_low(void);       /* CS falling edge: reset RX staging   */
-void    spi_slave_rx_byte(uint8_t b); /* one received byte (per SPI RBNE)     */
+void    spi_slave_rx_byte(uint8_t b); /* one received request byte            */
 void    spi_slave_cs_high(void);      /* CS rising edge: decode + dispatch    */
-uint8_t spi_slave_tx_next_byte(void); /* next reply byte (per SPI TBE), 0xFF idle */
+uint8_t spi_slave_tx_next_byte(void); /* next staged reply byte; 0xFF if empty */
 bool    spi_slave_tx_pending(void);   /* true while staged reply has bytes left   */
 
 /* ---- I2C slave seams (defined in transport_i2c.c) -------------- */
@@ -47,5 +54,9 @@ void    i2c_slave_write_start(void);  /* START + addressed write: reset RX    */
 void    i2c_slave_rx_byte(uint8_t b); /* one received byte (write phase)      */
 bool    i2c_slave_write_end(void);    /* STOP / repeated-START: dispatch+stage */
 uint8_t i2c_slave_tx_next_byte(void); /* next reply byte (read phase), 0xFF idle */
+void    i2c_slave_tx_abort(void);     /* bus-error resync: drop a half-consumed
+                                        * staged reply so a retried read gets a
+                                        * clean STATUS_NO_PENDING, not a resumed
+                                        * or exhausted stale cursor */
 
 #endif /* GD32_BRIDGE_TRANSPORT_H */

@@ -328,12 +328,46 @@ jobs:
       # -DGD32_VENDOR_DIR points at the tree staged above -- the positive
       # path (Refs #110): this is the flag itself doing the work, not the
       # CMakeLists.txt fallback.
+      # Negative path for the #127 guard, in the same style as the
+      # GD32_VENDOR_DIR one above: the vendor tree IS staged now, but
+      # ci/gd32_vendor_wrapper/CMakeLists.txt deliberately omits alp-sdk's
+      # overrides/system_gd32g5x3.c, so configuring WITHOUT
+      # -DBRIDGE_ALLOW_STOCK_SYSTEM_INIT must fail rather than emit an image
+      # that hangs in system_clock_216m_hxtal() before main().  Asserts on
+      # the message naming the flag, not just the non-zero exit -- an
+      # exit-code-only check would pass just as happily if the guard started
+      # firing for some unrelated reason.
+      - name: configure (gd32 backend, no clock override) must fail naming the flag
+        run: |
+          set -uo pipefail
+          if out=$(cmake -B build-negative-clock -S . \
+              -DCMAKE_TOOLCHAIN_FILE=toolchain/arm-none-eabi.cmake \
+              -DBRIDGE_HAL_BACKEND=gd32 \
+              -DGD32_VENDOR_DIR="$RUNNER_TEMP/gd32_vendor/gd32_firmware_library" 2>&1); then
+            echo "$out"
+            echo "::error::configure succeeded against a vendor tree with no overrides/system_gd32g5x3.c; expected the FATAL_ERROR from #127 (this build would produce an image that hangs before main())"
+            exit 1
+          fi
+          echo "$out"
+          if ! echo "$out" | grep -q -- 'BRIDGE_ALLOW_STOCK_SYSTEM_INIT'; then
+            echo "::error::configure failed as expected, but the message does not name -DBRIDGE_ALLOW_STOCK_SYSTEM_INIT"
+            exit 1
+          fi
+          echo "negative path OK: FATAL_ERROR names -DBRIDGE_ALLOW_STOCK_SYSTEM_INIT"
+
+      # -DBRIDGE_ALLOW_STOCK_SYSTEM_INIT=ON (#127): the wrapper staged above
+      # carries no clock override, so this build links the STOCK vendor
+      # SystemInit() and the resulting .bin HANGS before main() on real
+      # silicon. That is fine and intended HERE -- this job compiles and
+      # links only -- but the flag has to be explicit, so nothing produces a
+      # bricking image by accident. Never add this flag to anything flashed.
       - name: configure (gd32 backend, OTA partitioned)
         run: |
           cmake -B build-gd32 -S . \
             -DCMAKE_TOOLCHAIN_FILE=toolchain/arm-none-eabi.cmake \
             -DBRIDGE_HAL_BACKEND=gd32 \
             -DBRIDGE_OTA_PARTITIONED=ON \
+            -DBRIDGE_ALLOW_STOCK_SYSTEM_INIT=ON \
             -DGD32_VENDOR_DIR="$RUNNER_TEMP/gd32_vendor/gd32_firmware_library"
 
       - name: build
@@ -349,6 +383,7 @@ jobs:
           cmake -B build-gd32-flash -S . \
             -DCMAKE_TOOLCHAIN_FILE=toolchain/arm-none-eabi.cmake \
             -DBRIDGE_HAL_BACKEND=gd32 \
+            -DBRIDGE_ALLOW_STOCK_SYSTEM_INIT=ON \
             -DGD32_VENDOR_DIR="$RUNNER_TEMP/gd32_vendor/gd32_firmware_library"
 
       - name: build (full-flash)

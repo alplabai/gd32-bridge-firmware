@@ -86,6 +86,8 @@
  * being retyped.
  */
 
+#include <stdbool.h>
+#include <stdio.h>
 #include <string.h>
 #include <zephyr/ztest.h>
 
@@ -150,11 +152,32 @@ typedef struct {
 	const char *reply_name; /* PV_EXACT only; NULL otherwise */
 } pv_case_t;
 
+/* The GET_VERSION reply vector is NAMED after the protocol triple --
+ * gen_protocol_vectors.py emits `spi_get_version_reply_v<maj>_<min>_<pat>` --
+ * so every version bump renames it.  Hardcoding that name here meant the
+ * lookup broke the first time the triple moved: #69/#70 bumped MINOR 9 -> 10
+ * and this table still asked for `..._v0_9_0`, which pv_find() cannot find,
+ * failing a suite that was otherwise correct about the wire.  Built from the
+ * macros instead, so the next bump cannot repeat it.  The pointer stored in
+ * the table is constant; only the buffer's contents are filled at runtime,
+ * before the table is ever walked. */
+static char pv_get_version_reply_name[48];
+
+static void pv_build_get_version_reply_name(void)
+{
+	(void)snprintf(pv_get_version_reply_name,
+	               sizeof pv_get_version_reply_name,
+	               "spi_get_version_reply_v%u_%u_%u",
+	               (unsigned)PROTOCOL_VERSION_MAJOR,
+	               (unsigned)PROTOCOL_VERSION_MINOR,
+	               (unsigned)PROTOCOL_VERSION_PATCH);
+}
+
 /* clang-format off */
 static const pv_case_t SPI_CASES[] = {
 	/* PV_EXACT: the request has its own named reply vector. */
 	{ "spi_ping_request",                               PV_EXACT,  "spi_ping_reply_ok" },
-	{ "spi_get_version_request",                         PV_EXACT,  "spi_get_version_reply_v0_9_0" },
+	{ "spi_get_version_request",                         PV_EXACT,  pv_get_version_reply_name },
 	{ "spi_reset_reason_request",                        PV_EXACT,  "spi_reset_reason_reply_unknown" },
 	{ "spi_da9292_status_forward_request",               PV_EXACT,  "spi_da9292_status_forward_reply_no_sample" },
 
@@ -208,9 +231,79 @@ static const pv_case_t SPI_CASES[] = {
 
 #define N_SPI_CASES (sizeof(SPI_CASES) / sizeof(SPI_CASES[0]))
 
+/* Request vectors exercised by dedicated tests instead of SPI_CASES.  Keep
+ * this list minimal: the completeness test below rejects entries duplicated
+ * in SPI_CASES, and every exclusion must resolve to a committed request.
+ * GET_BUILD_ID has a build-time payload; LINK_FEATURES mutates link state. */
+static const char *const DEDICATED_SPI_REQUESTS[] = {
+	"spi_get_build_id_request",  /* test_get_build_id_request_accepted */
+	"spi_link_features_request", /* test_link_features_request_matches_committed_vector */
+};
+
+#define N_DEDICATED_SPI_REQUESTS \
+	(sizeof(DEDICATED_SPI_REQUESTS) / sizeof(DEDICATED_SPI_REQUESTS[0]))
+
+static bool pv_name_ends_with_request(const char *name)
+{
+	static const char suffix[]   = "_request";
+	const size_t      name_len   = strlen(name);
+	const size_t      suffix_len = sizeof suffix - 1u;
+
+	return name_len >= suffix_len && strcmp(name + name_len - suffix_len, suffix) == 0;
+}
+
+static bool pv_is_spi_case_request(const char *name)
+{
+	for (size_t i = 0; i < N_SPI_CASES; i++) {
+		if (strcmp(SPI_CASES[i].req_name, name) == 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool pv_is_dedicated_spi_request(const char *name)
+{
+	for (size_t i = 0; i < N_DEDICATED_SPI_REQUESTS; i++) {
+		if (strcmp(DEDICATED_SPI_REQUESTS[i], name) == 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
+ZTEST(protocol_vectors, test_every_spi_request_vector_has_a_test)
+{
+	for (size_t i = 0; i < PV_VECTOR_COUNT; i++) {
+		const char *name = pv_vectors[i].name;
+
+		if (!pv_name_ends_with_request(name)) {
+			continue;
+		}
+		zassert_true(pv_is_spi_case_request(name) || pv_is_dedicated_spi_request(name),
+		             "%s is not in SPI_CASES or DEDICATED_SPI_REQUESTS",
+		             name);
+	}
+
+	for (size_t i = 0; i < N_DEDICATED_SPI_REQUESTS; i++) {
+		const char *name = DEDICATED_SPI_REQUESTS[i];
+
+		zassert_true(
+		    pv_name_ends_with_request(pv_find(name)->name), "%s is not a request vector", name);
+		zassert_false(pv_is_spi_case_request(name),
+		              "%s is already in SPI_CASES; remove its dedicated exclusion",
+		              name);
+	}
+}
+
 ZTEST(protocol_vectors, test_spi_requests_match_committed_replies)
 {
-	uint8_t            reply[96];
+	uint8_t reply[96];
+
+	/* Fill the version-derived vector name before the table is walked --
+	 * SPI_CASES stores a pointer to this buffer, not a literal. */
+	pv_build_get_version_reply_name();
+
 	const pv_vector_t *nosupp = pv_find("spi_reply_nosupport");
 	const pv_vector_t *io     = pv_find("spi_reply_io");
 

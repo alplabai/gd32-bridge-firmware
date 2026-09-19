@@ -92,6 +92,108 @@ static uint32_t pwm_capture_flag(uint16_t unit)
 	}
 }
 
+/* Per-timer confirmed-ACTIVE reload mirror.  Index 0 = TIMER0
+ * (PWM0..3), index 1 = TIMER7 (PWM4..7) -- same mapping as pwm.c's
+ * private pwm_timer_index, duplicated here rather than shared because
+ * this file only ever needs it for TIMER0/TIMER7 via pwm_channels.
+ *
+ * bridge_hw_pwm_set writes TIMERx_CAR through the ARSE shadow: the
+ * write lands in the PRELOAD register only, and a raw TIMER_CAR read
+ * always returns that preload content, never the separate,
+ * host-inaccessible active copy the counter is actually comparing
+ * against.  A first cut of this mirror (#82 review, first round)
+ * re-read TIMER_CAR once TIMER_FLAG_UP confirmed a promotion had
+ * happened -- but a second, un-promoted write can land in preload
+ * between the promotion and the poll, so that raw re-read silently
+ * commits the WRONG (not-yet-promoted) value (#82 review, second
+ * round).  Registers alone can't disambiguate this: once a write
+ * overwrites preload, the identity of what an earlier UPIF actually
+ * promoted is gone.  So this mirror is now driven entirely by two
+ * SOFTWARE-tracked values pwm.c hands over explicitly --
+ * pwm_capture_pending_car (a write not yet known to be promoted) and
+ * this array (the write last PROVEN promoted) -- rather than
+ * reconstructed from the register after the fact.  See
+ * pwm_car_shadow_defer / pwm_car_shadow_commit / pwm_capture_consume_
+ * update below.  Boot default matches pwm_timer_init's initial ARR
+ * (PWM_TIMER_ARR_MAX) before any PWM_SET has run. */
+static uint32_t pwm_capture_active_car[2] = { PWM_TIMER_ARR_MAX, PWM_TIMER_ARR_MAX };
+
+/* Per-timer outstanding write: the CAR value pwm_car_shadow_defer
+ * last handed the ARSE preload without forcing its promotion.  The
+ * preload register only ever holds ONE value at a time (a later
+ * defer before this one promotes simply supersedes it, which is
+ * correct -- hardware will promote whichever value was preload-
+ * resident at its own next update event), so a single pending slot
+ * per timer is sufficient; _valid distinguishes "nothing outstanding"
+ * from a legitimately-zero CAR. */
+static uint32_t pwm_capture_pending_car[2];
+static bool     pwm_capture_pending_valid[2];
+
+/* TIMER base -> pwm_capture_active_car / pending index. */
+static uint8_t pwm_capture_timer_index(uint32_t periph)
+{
+	/* Same shape as pwm.c's pwm_timer_index(): the ternary promotes to
+	 * unsigned int before the uint8_t return narrows it, and -Wconversion
+	 * can't see that only 0 or 1 ever comes out. Both fit; explicit cast
+	 * only to satisfy the warning. */
+	return (uint8_t)((periph == TIMER0) ? 0u : 1u);
+}
+
+/* Consume ONE outstanding update event for periph's timer, if
+ * TIMER_FLAG_UP evidences one landed since the last time this ran.
+ * A single update event can promote at most one outstanding pending
+ * write (only the latest write is ever preload-resident -- see the
+ * pending-CAR comment above), so on a hit this commits pending_car
+ * into the active mirror when there IS one, and always clears the
+ * flag regardless -- a steady period with no intervening write still
+ * fires UPIF and must not leave it sticky for the next observer.
+ *
+ * Called from BOTH sides that can otherwise lose track of which
+ * write an update event belongs to: the write side
+ * (pwm_car_shadow_defer, before it overwrites the pending slot with a
+ * newer value) and the read side (pwm_capture_drain).  Draining the
+ * flag at every point that could stomp the evidence is what closes
+ * the #82-review race the raw-CAR-re-read design had.  Nothing else
+ * in this backend reads or clears TIMER_FLAG_UP -- confirmed by grep
+ * across hal/ and src/ -- so polling and clearing it here (and in
+ * pwm_car_shadow_commit below) is safe. */
+static void pwm_capture_consume_update(uint32_t periph)
+{
+	const uint8_t idx = pwm_capture_timer_index(periph);
+	if (RESET == timer_flag_get(periph, TIMER_FLAG_UP)) return;
+	timer_flag_clear(periph, TIMER_FLAG_UP);
+	if (pwm_capture_pending_valid[idx]) {
+		pwm_capture_active_car[idx]    = pwm_capture_pending_car[idx];
+		pwm_capture_pending_valid[idx] = false;
+	}
+}
+
+void pwm_car_shadow_defer(uint32_t periph, uint32_t car)
+{
+	const uint8_t idx = pwm_capture_timer_index(periph);
+	/* Settle any earlier pending write FIRST: if it was already
+	 * promoted (UPIF set), this is the last chance to commit it to
+	 * the active mirror before its record is overwritten below. */
+	pwm_capture_consume_update(periph);
+	pwm_capture_pending_car[idx]   = car;
+	pwm_capture_pending_valid[idx] = true;
+}
+
+void pwm_car_shadow_commit(uint32_t periph, uint32_t car)
+{
+	const uint8_t idx = pwm_capture_timer_index(periph);
+	/* This call's forced UPG (bridge_hw_pwm_set's halted-recovery
+	 * path, or bridge_hw_pwm_single_pulse) promotes `car` to active
+	 * SYNCHRONOUSLY -- no need to consult or wait on TIMER_FLAG_UP,
+	 * and any earlier still-pending write is superseded outright, not
+	 * merely raced with. Clear the flag this write also sets so a
+	 * later observer doesn't misread it as evidence about a write
+	 * that no longer exists. */
+	timer_flag_clear(periph, TIMER_FLAG_UP);
+	pwm_capture_active_car[idx]    = car;
+	pwm_capture_pending_valid[idx] = false;
+}
+
 /* Drain any newly-latched capture from the timer's CCxVAL into the
  * per-channel state.  Polled from bridge_hw_pwm_capture_read; safe to
  * call when no edge has occurred (clears nothing, leaves state). */
@@ -106,6 +208,7 @@ static void pwm_capture_drain(uint8_t channel)
 
 	const uint32_t now = timer_channel_capture_value_register_read(ch->periph, unit);
 	timer_flag_clear(ch->periph, flag);
+	pwm_capture_consume_update(ch->periph);
 
 	/* WRAP-AWARE edge delta.  The capture counter is the timer's own
      * up-counter (0..CAR), so consecutive edges straddle the wrap and a
@@ -126,8 +229,13 @@ static void pwm_capture_drain(uint8_t channel)
      * flags, CHxOF/MCHxOF, are not read in this revision).  Callers
      * must keep the captured signal's edge spacing under the timer
      * period; BEGIN inherits whatever CAR the last pwm_set programmed
-     * (boot default 65536 ticks = 65.5 ms at the 1 us tick). */
-	const uint32_t mod   = (TIMER_CAR(ch->periph) & 0xFFFFu) + 1u;
+     * (boot default 65536 ticks = 65.5 ms at the 1 us tick).
+     *
+     * The modulus comes from pwm_capture_active_car, the software-
+     * tracked PROVEN-promoted mirror, not a raw TIMER_CAR read -- see
+     * the comment above that array for why re-reading the register
+     * after the fact is ambiguous (#82 review). */
+	const uint32_t mod   = pwm_capture_active_car[pwm_capture_timer_index(ch->periph)] + 1u;
 	const uint32_t delta = (now + mod - (s->last_tick % mod)) % mod;
 
 	if (s->edge == 2u) {

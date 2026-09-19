@@ -9,10 +9,10 @@
 #   ctest --test-dir build-tests --output-on-failure
 #
 # The `ota` and `transport_spi` suites moved here from alp-sdk when the firmware
-# split into its own repository (alp-sdk ADR 0031).  They, and `transport_i2c`,
-# link the REAL firmware sources against hal/bridge_hw_stub.c -- not mocks -- so
-# the bounds checks and the CS/register framing seams under test are the same
-# code paths the device runs.
+# split into its own repository (alp-sdk ADR 0031).  They link the REAL firmware
+# sources against hal/bridge_hw_stub.c; transport_i2c uses the injectable fake
+# so non-idempotent commands can expose duplicate dispatches (#4).  The framing
+# and dispatcher sources under test are the same code paths the device runs.
 #
 # `crc32` (#26 C2, #104) pins the table-driven ota_crc32() bit-identical to
 # the bit-serial implementation it replaced, against a reference copy of the
@@ -23,11 +23,11 @@
 # `crc16` (#26, #104) is the same proof for src/protocol.c's table-driven
 # crc16_ccitt_false() -- the FRAMING CRC, called twice per round trip.  It
 # links protocol.c itself (not a standalone crc16.c/.h -- see the comment
-# ahead of crc16_table[] in protocol.c for why) plus protocol.c's other
-# dependencies, the same set transport_spi/transport_i2c below link.
+# ahead of crc16_table[] in protocol.c for why) plus the same firmware
+# dependencies the transport suites use; their test HAL backends differ below.
 #
-# `protocol` is the deliberate exception: it links tests/unit/fake/bridge_hw_fake.c
-# INSTEAD of the stub.  The stub answers BRIDGE_HW_ERR_NOTIMPL for nearly
+# `protocol` and `transport_i2c` link tests/unit/fake/bridge_hw_fake.c INSTEAD
+# of the stub.  The stub answers BRIDGE_HW_ERR_NOTIMPL for nearly
 # everything, so only about two hardware opcodes can reach STATUS_OK through it,
 # which left src/protocol.c's reply encoding and its BRIDGE_HW_ERR_* -> STATUS_*
 # ladders unreachable from any host test.  The fake is injectable (a forced return
@@ -66,16 +66,51 @@ set(TEST_FLAGS -std=c11 -Wall -Wextra -Werror)
 # The flash read/program seams are redirected into a host buffer by the weak
 # ota_fmc_* overrides inside the test source, so no raw 32-bit flash address is
 # ever dereferenced on a 64-bit host.
-add_executable(test_ota
-    ota/src/test_ota.c
-    ${FW}/src/ota.c
-    ${FW}/src/crc32.c
-)
-target_include_directories(test_ota PRIVATE ${FW}/src ${FW}/hal)
-target_compile_definitions(test_ota PRIVATE BRIDGE_OTA_PARTITIONED)
-target_compile_options(test_ota PRIVATE ${TEST_FLAGS})
-target_link_libraries(test_ota PRIVATE ztest_shim)
-add_test(NAME ota COMMAND test_ota)
+#
+# Built TWICE off the same source (#3): ota.c derives the compile-time
+# OTA_RUNNING_SLOT from -DBRIDGE_APP_SLOT_BASE (see ota.c), and that
+# derivation is only exercised for the value it is actually built with --
+# an A-resident-only test build would never compile the OTA_SLOT_B_BASE
+# arm of the #elif chain.
+#
+# The two bases below are PARSED out of src/ota_layout.h -- the same
+# header ota.c includes -- rather than hand-copied, so this copy cannot
+# drift silently against it.  Two other independent copies of the same
+# numbers remain and are NOT derived here: the top-level CMakeLists.txt's
+# gd32-bridge-slot-a / gd32-bridge-slot-b BRIDGE_APP_SLOT_BASE compile
+# defines (:197,202) and APP_SLOT_BASE linker-script sets (:187,190) --
+# out of scope for this fix, and that file is explicitly not to be edited
+# here -- and OTA_SLOT_SIZE's separate copy in tools/gen_ota_metadata.py:34.
+# A mismatch in either of those still fails loudly: ota.c's own #error
+# chain rejects any BRIDGE_APP_SLOT_BASE that doesn't equal
+# OTA_SLOT_A_BASE/OTA_SLOT_B_BASE from the header.
+set(_OTA_LAYOUT_H ${FW}/src/ota_layout.h)
+file(STRINGS ${_OTA_LAYOUT_H} _OTA_SLOT_A_BASE_LINE
+     REGEX "^#define[ \t]+OTA_SLOT_A_BASE[ \t]+0x[0-9A-Fa-f]+u")
+file(STRINGS ${_OTA_LAYOUT_H} _OTA_SLOT_B_BASE_LINE
+     REGEX "^#define[ \t]+OTA_SLOT_B_BASE[ \t]+0x[0-9A-Fa-f]+u")
+string(REGEX MATCH "0x[0-9A-Fa-f]+u" _OTA_SLOT_A_BASE "${_OTA_SLOT_A_BASE_LINE}")
+string(REGEX MATCH "0x[0-9A-Fa-f]+u" _OTA_SLOT_B_BASE "${_OTA_SLOT_B_BASE_LINE}")
+if(NOT _OTA_SLOT_A_BASE OR NOT _OTA_SLOT_B_BASE)
+    message(FATAL_ERROR
+        "tests/unit/CMakeLists.txt: could not parse OTA_SLOT_A_BASE / "
+        "OTA_SLOT_B_BASE out of ${_OTA_LAYOUT_H} -- has the #define layout changed?")
+endif()
+foreach(_slot A B)
+    string(TOLOWER "${_slot}" _slot_lc)
+    set(_tgt test_ota_slot_${_slot_lc})
+    add_executable(${_tgt}
+        ota/src/test_ota.c
+        ${FW}/src/ota.c
+        ${FW}/src/crc32.c
+    )
+    target_include_directories(${_tgt} PRIVATE ${FW}/src ${FW}/hal)
+    target_compile_definitions(${_tgt} PRIVATE
+        BRIDGE_OTA_PARTITIONED BRIDGE_APP_SLOT_BASE=${_OTA_SLOT_${_slot}_BASE})
+    target_compile_options(${_tgt} PRIVATE ${TEST_FLAGS})
+    target_link_libraries(${_tgt} PRIVATE ztest_shim)
+    add_test(NAME ota_slot_${_slot_lc} COMMAND ${_tgt})
+endforeach()
 
 # --- crc32: table-driven CRC-32 pinned bit-identical to bit-serial ---------
 add_executable(test_crc32
@@ -116,7 +151,97 @@ target_compile_options(test_transport_spi PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_transport_spi PRIVATE ztest_shim)
 add_test(NAME transport_spi COMMAND test_transport_spi)
 
-# --- transport_i2c: transport + dispatcher over the stub HAL ---------------
+# --- fault_diag: CFSR/SYSCFG_STAT -> fault_record_t decode (issue #36) ------
+#
+# Pure logic, no vendor register header (see hal/gd32/fault_diag.h) -- the
+# only slice of the fault-handler fix that's host-testable at all, since no
+# CI job compiles hal/gd32/*.c (issue #77).
+add_executable(test_fault_diag
+    fault_diag/src/test_fault_diag.c
+    ${FW}/hal/gd32/fault_diag.c
+)
+target_include_directories(test_fault_diag PRIVATE ${FW}/hal/gd32)
+target_compile_options(test_fault_diag PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_fault_diag PRIVATE ztest_shim)
+add_test(NAME fault_diag COMMAND test_fault_diag)
+
+# --- timer_sync_iti: (slave, master) -> SYSCFG ITIx router code (gh#42) ----
+#
+# hal/gd32/timer_sync.c itself needs the Cortex-M33 vendor register headers
+# and is compiled by no CI job (issue #77).  The lookup table has no such
+# dependency, so it lives in its own translation unit (hal/gd32/
+# timer_sync_iti.c, no gd32g5x3.h include) purely so it can be linked and
+# tested here.
+add_executable(test_timer_sync_iti
+    timer_sync_iti/src/test_timer_sync_iti.c
+    ${FW}/hal/gd32/timer_sync_iti.c
+)
+target_include_directories(test_timer_sync_iti PRIVATE ${FW}/hal/gd32)
+target_compile_options(test_timer_sync_iti PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_timer_sync_iti PRIVATE ztest_shim)
+add_test(NAME timer_sync_iti COMMAND test_timer_sync_iti)
+
+# --- tmu_q31_scale: Q31 FACTOR band-selection logic (gd32-bridge#46) -------
+#
+# hal/gd32/tmu.c itself needs the Cortex-M33 vendor register headers and is
+# compiled by no CI job (issue #77).  The FACTOR band arithmetic has no such
+# dependency, so it lives in its own translation unit (hal/gd32/tmu_q31_scale.c,
+# no gd32g5x3.h include) purely so it can be linked and tested here.
+add_executable(test_tmu_q31_scale
+    tmu_q31_scale/src/test_tmu_q31_scale.c
+    ${FW}/hal/gd32/tmu_q31_scale.c
+)
+target_include_directories(test_tmu_q31_scale PRIVATE ${FW}/hal/gd32)
+target_compile_options(test_tmu_q31_scale PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_tmu_q31_scale PRIVATE ztest_shim)
+add_test(NAME tmu_q31_scale COMMAND test_tmu_q31_scale)
+
+# --- adc_seq: GD32 ADC register-sequence gate -------------------------------
+#
+# #77 means no CI job compiles hal/gd32/*.c -- the stub build above links
+# only hal/bridge_hw_stub.c.  This target links the REAL hal/gd32/adc.c +
+# hal/gd32/adc_stream.c, unmodified, against a hand-written mock of the GD32
+# vendor header (adc_seq/mock/gd32g5x3.h) so the two register sequences
+# PR #80's review asked for by name -- ROVF cleared before adc_enable, and
+# calibration run after every adc_enable on the request path -- are pinned
+# by a real assertion instead of a diff read.  See adc_seq/mock/gd32g5x3.h's
+# top comment for exactly what the mock does and does not model.
+add_executable(test_adc_seq
+    adc_seq/src/test_adc_seq.c
+    adc_seq/mock/mock_gd32.c
+    ${FW}/hal/gd32/adc.c
+    ${FW}/hal/gd32/adc_stream.c
+    # adc_dsp_chain.c carries the chain pool + adc_dsp_chain_p1_capable()
+    # that adc_stream.c's pump-side config functions call.  It was split
+    # out of adc_stream.c by #69/#70 AFTER this target was written, so the
+    # original two-file list left adc_dsp_chains / adc_dsp_chain_release /
+    # adc_dsp_chain_p1_capable undefined at link once this branch merged
+    # dev.  Vendor-header-free by design, so it needs no mock.
+    ${FW}/hal/gd32/adc_dsp_chain.c
+)
+target_include_directories(test_adc_seq PRIVATE
+    ${FW}/hal
+    ${FW}/hal/gd32
+    ${CMAKE_CURRENT_SOURCE_DIR}/adc_seq/mock
+)
+target_compile_options(test_adc_seq PRIVATE ${TEST_FLAGS})
+# adc_stream.c's FFT-window math (__builtin_cosf/sqrtf) lowers to real libm
+# calls on a host compiler with no -ffreestanding; the M33 build never needs
+# this because CMSIS-DSP/arm-none-eabi's libm supplies them implicitly.
+target_link_libraries(test_adc_seq PRIVATE ztest_shim m)
+add_test(NAME adc_seq COMMAND test_adc_seq)
+
+# --- fmc_ota_guard: the #79 address guard, header-only, no GD32 register
+# dependency (see hal/fmc_ota_guard.h) -------------------------------------
+add_executable(test_fmc_ota_guard fmc_ota_guard/src/test_fmc_ota_guard.c)
+target_include_directories(test_fmc_ota_guard PRIVATE ${FW}/src ${FW}/hal)
+target_compile_definitions(test_fmc_ota_guard PRIVATE
+    BRIDGE_OTA_PARTITIONED BRIDGE_APP_SLOT_BASE=0x0800A000u)
+target_compile_options(test_fmc_ota_guard PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_fmc_ota_guard PRIVATE ztest_shim)
+add_test(NAME fmc_ota_guard COMMAND test_fmc_ota_guard)
+
+# --- transport_i2c: transport + dispatcher over the injectable fake HAL ----
 add_executable(test_transport_i2c
     transport_i2c/src/test_transport_i2c.c
     ${FW}/src/transport_i2c.c
@@ -124,9 +249,13 @@ add_executable(test_transport_i2c
     ${FW}/src/bootloader/bootloader.c
     ${FW}/src/ota.c
     ${FW}/src/crc32.c
-    ${FW}/hal/bridge_hw_stub.c
+    fake/bridge_hw_fake.c
 )
-target_include_directories(test_transport_i2c PRIVATE ${FW}/src ${FW}/hal)
+target_include_directories(test_transport_i2c PRIVATE
+    ${FW}/src
+    ${FW}/hal
+    ${CMAKE_CURRENT_SOURCE_DIR}/fake
+)
 target_compile_options(test_transport_i2c PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_transport_i2c PRIVATE ztest_shim)
 add_test(NAME transport_i2c COMMAND test_transport_i2c)
@@ -136,7 +265,7 @@ add_test(NAME transport_i2c COMMAND test_transport_i2c)
 # hal/bridge_hw_stub.c answers BRIDGE_HW_ERR_NOTIMPL for essentially every
 # call, so it can only ever prove STATUS_OK on the opcodes with no hardware
 # dependency (PING/GET_VERSION/GET_BUILD_ID/LINK_FEATURES) -- the rest of
-# src/protocol.c's 1025 lines goes untouched by transport_spi/transport_i2c.
+# src/protocol.c's 1025 lines goes untouched by the stub-backed suites.
 # fake/bridge_hw_fake.c stands in for hal/bridge_hw_stub.c here instead, so
 # every opcode's success path AND its BRIDGE_HW_ERR_* -> STATUS_* mapping is
 # reachable.  Not -DBRIDGE_OTA_PARTITIONED (matching transport_spi/
@@ -155,12 +284,30 @@ target_compile_options(test_protocol PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_protocol PRIVATE ztest_shim)
 add_test(NAME protocol COMMAND test_protocol)
 
+# --- adc_dsp: chain pool + chain_bind capability validation (#69, #70) -----
+#
+# Links ONLY hal/gd32/adc_dsp_chain.c -- the chain pool + bind-time validator
+# split out of hal/gd32/adc_stream.c specifically because it touches ZERO
+# GD32 vendor symbols (no "gd32g5x3.h").  adc_stream.c itself is NOT linked
+# here: it pulls the vendor header for the FAC/FFT register-level pump, which
+# this suite cannot exercise on a host.  Instead this target supplies its own
+# definition of adc_streams[] (test_adc_dsp.c) so cases can drive `in_use` /
+# `dsp_bound` / `dsp_terminal` directly -- the same "fake state instead of a
+# real HAL" trade the `protocol` suite above makes, for the same reason.
+add_executable(test_adc_dsp
+    adc_dsp/src/test_adc_dsp.c
+    ${FW}/hal/gd32/adc_dsp_chain.c
+)
+target_include_directories(test_adc_dsp PRIVATE ${FW}/hal ${FW}/hal/gd32)
+target_compile_options(test_adc_dsp PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_adc_dsp PRIVATE ztest_shim)
+add_test(NAME adc_dsp COMMAND test_adc_dsp)
+
 # --- protocol_vectors: the firmware-side consumer of tests/protocol_vectors.txt
 #     CONTRIBUTING.md claims (#31 finding E5) -------------------------------
 #
 # Feeds the canonical vectors' own bytes through the REAL transport_spi.c /
-# transport_i2c.c -> protocol.c seams (same link set as test_transport_spi /
-# test_transport_i2c above: hal/bridge_hw_stub.c, unpartitioned OTA) and
+# transport_i2c.c -> protocol.c seams (stub-backed, unpartitioned OTA) and
 # asserts the emitted reply bytes.  Before this target, nothing under
 # tests/unit/ read tests/protocol_vectors.txt at all -- the only automation
 # touching the file was the generator's own regenerate-and-diff, a comparison

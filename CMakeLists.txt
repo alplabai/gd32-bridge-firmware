@@ -17,10 +17,11 @@
 # the flashable set: build/gd32-bridge.elf + .hex + .bin.
 #
 # Status: both backends build clean (arm-none-eabi-gcc 13.x).  The gd32
-# backend links the GigaDevice firmware library at
-# `vendors/gd32_firmware_library/` and drives the peripheral HAL plus the
-# SPI1 + I2C0 slave transports; remaining HAL gaps (DSP chain upload,
-# POWER_MODE_SET) and OTA degrade to STATUS_NOSUPPORT.
+# backend links the GigaDevice firmware-library wrapper selected by
+# GD32_VENDOR_DIR (or the pre-split fallback documented below) and drives
+# the peripheral HAL plus the SPI1 + I2C0 slave transports.  Unsupported
+# hardware-specific options return STATUS_NOSUPPORT; OTA opcodes are inert
+# unless the partitioned build is selected with BRIDGE_OTA_PARTITIONED=ON.
 
 cmake_minimum_required(VERSION 3.20)
 project(gd32-bridge LANGUAGES C ASM)
@@ -67,7 +68,8 @@ set(GD32_BRIDGE_SOURCES
 # OTA self-flashing is gated: only -DBRIDGE_OTA_PARTITIONED=ON (paired with
 # the partitioned bootloader layout + slot-linked app) arms the destructive
 # flash path.  Default OFF -> ota_dispatch() returns STATUS_NOSUPPORT and the
-# full-flash image can't brick itself.  HIL-REQUIRED before enabling.
+# full-flash image can't brick itself.  A->B update + rollback was validated
+# on silicon 2026-06-04; a fresh B->A update remains untested and HIL-gated.
 option(BRIDGE_OTA_PARTITIONED "Arm the OTA Path-A flash path (HIL-gated)" OFF)
 
 if(BRIDGE_HAL_BACKEND STREQUAL "stub")
@@ -84,9 +86,12 @@ elseif(BRIDGE_HAL_BACKEND STREQUAL "gd32")
     list(APPEND GD32_BRIDGE_SOURCES
         hal/gd32/init.c
         hal/gd32/adc.c
+        hal/gd32/adc_dsp_chain.c
         hal/gd32/adc_stream.c
         hal/gd32/counter.c
         hal/gd32/dac.c
+        hal/gd32/fault_diag.c
+        hal/gd32/fault_handlers.c
         hal/gd32/gpio.c
         hal/gd32/power.c
         hal/gd32/pwm.c
@@ -94,23 +99,19 @@ elseif(BRIDGE_HAL_BACKEND STREQUAL "gd32")
         hal/gd32/qenc.c
         hal/gd32/se_reset.c
         hal/gd32/timer_sync.c
+        hal/gd32/timer_sync_iti.c
         hal/gd32/tmu.c
+        hal/gd32/tmu_q31_scale.c
         hal/gd32/trng.c
         hal/gd32/vref.c
         hal/transport_hw_gd32.c
         hal/fmc_ota.c
         hal/gd32_libc_stubs.c
     )
-    # -Wconversion (added below, gd32_firmware_target()) flags one site in
-    # this list today: hal/gd32/pwm.c:125's `(periph == TIMER0) ? 0u : 1u`
-    # narrowed into a uint8_t return.  That file is owned by open PR #82
-    # (three review rounds in); it is not this change's to edit.  Silence
-    # -Wconversion for this one source only so the flag can go live now
-    # instead of waiting on #82 -- routed to that PR as a one-line fix.
-    # TODO(#82): delete this override in the same change that lands the
-    # cast, so -Wconversion covers hal/gd32/pwm.c like everything else.
-    set_source_files_properties(hal/gd32/pwm.c PROPERTIES
-        COMPILE_OPTIONS "-Wno-conversion")
+    # -Wno-conversion override for hal/gd32/pwm.c (#109) deleted here: #82
+    # lands the one-line cast in pwm_timer_index() that was the only site
+    # -Wconversion flagged, so this source needs no override any more and
+    # -Wconversion now covers it like everything else in the list above.
     # Pull in the GigaDevice firmware-library wrapper.  Its CMakeLists
     # fatal-errors with a clear "drop the SDK into sdk/" instruction
     # when the unpacked archive is missing, so an unconfigured
@@ -134,6 +135,55 @@ elseif(BRIDGE_HAL_BACKEND STREQUAL "gd32")
             "vendors/gd32_firmware_library/ tree (the wrapper README "
             "documents the manual SDK drop).")
     endif()
+    # #127: refuse to produce an image that hangs before main().
+    #
+    # The STOCK vendor system_gd32g5x3.c selects __SYSTEM_CLOCK_216M_PLL_HXTAL,
+    # and its system_clock_216m_hxtal() body is
+    #     if(0U == (RCU_CTL & RCU_CTL_HXTALSTB)){ while(1){ } }
+    # -- no timeout escape, no fallback, with HXTAL_STARTUP_TIMEOUT only
+    # 0x0FFFF.  On this SoM HXTALSTB never sets, so the part spins there
+    # forever and never reaches main(): SPI and I2C never come up, and the
+    # flashed image looks bricked with no diagnostic.  alp-sdk's wrapper
+    # substitutes overrides/system_gd32g5x3.c, which selects
+    # __SYSTEM_CLOCK_216M_PLL_IRC8M and boots.
+    #
+    # Before this check, a standalone clone pointed at a vendor tree with no
+    # overrides/ configured, compiled, linked and produced a .bin with no
+    # #error, no warning and no runtime check anywhere -- the failure only
+    # showed up as a dead board on a bench.  Fail at CONFIGURE time instead.
+    #
+    # The opt-out exists for compile-and-link jobs (CI's `gd32 backend build`
+    # stages ci/gd32_vendor_wrapper/CMakeLists.txt, which deliberately omits
+    # the override because that job never runs on silicon).  Its name is the
+    # documentation: anything built with it on must not be flashed.
+    option(BRIDGE_ALLOW_STOCK_SYSTEM_INIT
+        "Build against the vendor's STOCK SystemInit(). The resulting image HANGS before main() on this SoM -- compile/link checks only, never flash it."
+        OFF)
+    if(NOT EXISTS ${_GD32_VENDOR_DIR}/overrides/system_gd32g5x3.c)
+        if(BRIDGE_ALLOW_STOCK_SYSTEM_INIT)
+            message(WARNING
+                "BRIDGE_ALLOW_STOCK_SYSTEM_INIT=ON and no clock override found at\n"
+                "  ${_GD32_VENDOR_DIR}/overrides/system_gd32g5x3.c\n"
+                "Building against the STOCK vendor SystemInit(). The image this "
+                "produces HANGS in system_clock_216m_hxtal() waiting for HXTALSTB "
+                "and never reaches main() on this SoM. NOT FLASHABLE -- "
+                "compile-and-link verification only (#127).")
+        else()
+            message(FATAL_ERROR
+                "No clock override found at\n"
+                "  ${_GD32_VENDOR_DIR}/overrides/system_gd32g5x3.c\n"
+                "The stock vendor SystemInit() selects __SYSTEM_CLOCK_216M_PLL_HXTAL, "
+                "whose system_clock_216m_hxtal() spins `while(1){}` forever when "
+                "HXTALSTB never sets -- which is what this SoM does. The resulting "
+                "image is flashable and hangs before main(), with SPI and I2C never "
+                "coming up.\n"
+                "Point -DGD32_VENDOR_DIR at an alp-sdk vendors/gd32_firmware_library "
+                "tree that carries overrides/system_gd32g5x3.c, or pass "
+                "-DBRIDGE_ALLOW_STOCK_SYSTEM_INIT=ON if you are only compiling and "
+                "linking and will NOT flash the result (#127).")
+        endif()
+    endif()
+
     add_subdirectory(${_GD32_VENDOR_DIR} ${CMAKE_BINARY_DIR}/vendors/gd32_firmware_library)
     # gd32g5x3.h #error-guards on the device-family macro; pick
     # GD32G553 since the V2N's supervisor is the GD32G553MEY7TR.
@@ -216,13 +266,14 @@ if(NOT BRIDGE_OTA_PARTITIONED)
     gd32_firmware_target(gd32-bridge ${CMAKE_SOURCE_DIR}/toolchain/gd32g553_flash.ld)
 else()
     # OTA Path-A armed: a bootloader at flash base + the app linked for each
-    # A/B slot (vector table relocated via SCB->VTOR at boot).  HIL-REQUIRED:
-    # the boot/validate/jump + slot-relocation are NOT validated on silicon
-    # (a bug bricks the part -- no host SWD reflash this HW rev).
+    # A/B slot (vector table relocated via SCB->VTOR at boot).  Silicon-
+    # validated 2026-06-04 for A->B update + rollback; a fresh B->A update
+    # has NOT been exercised.  Still HIL-gated: a bug bricks the part, and
+    # this HW revision has no host-driven SWD reflash.
     if(NOT BRIDGE_HAL_BACKEND STREQUAL "gd32")
         message(FATAL_ERROR "BRIDGE_OTA_PARTITIONED requires BRIDGE_HAL_BACKEND=gd32.")
     endif()
-    message(STATUS "gd32-bridge: OTA Path-A ARMED (bootloader + A/B slots) -- HIL-required, do not field-flash unvalidated")
+    message(STATUS "gd32-bridge: OTA Path-A ARMED (bootloader + A/B slots) -- HIL-gated; A->B + rollback validated, B->A untested")
 
     set(APP_SLOT_LEN 0x0003B000)   # 236 KB per slot (ota_layout.h)
     set(APP_SLOT_BASE 0x0800A000)  # slot A
@@ -245,6 +296,3 @@ else()
     add_executable(gd32-bootloader src/boot/boot_main.c src/crc32.c hal/gd32_libc_stubs.c)
     gd32_firmware_target(gd32-bootloader ${CMAKE_SOURCE_DIR}/toolchain/gd32g553_bootloader.ld)
 endif()
-
-# GET_BUILD_ID reports "<fw-version>+<short-sha>"; the post-link SHA hook is
-# still TODO (firmware reports "<fw-version>+0000000" until then).

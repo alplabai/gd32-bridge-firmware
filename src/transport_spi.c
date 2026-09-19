@@ -81,7 +81,7 @@ static uint8_t spi_seq;
 
 static void stage_reply(uint8_t status, const uint8_t *payload, size_t payload_len)
 {
-	if ((protocol_link_features() & GD32_BRIDGE_LINK_FEAT_STATUS_SEQ) != 0u) {
+	if ((protocol_link_features(GD32_BRIDGE_LINK_SPI) & GD32_BRIDGE_LINK_FEAT_STATUS_SEQ) != 0u) {
 		spi_seq = (uint8_t)((spi_seq + 1u) & 0x0Fu);
 		status  = (uint8_t)(status | (uint8_t)(spi_seq << GD32_BRIDGE_STATUS_SEQ_SHIFT));
 	}
@@ -200,7 +200,8 @@ static void decode_and_dispatch(void)
 	const uint8_t              cmd = spi_rx_buf[1];
 	uint8_t                    reply_pl[GD32_BRIDGE_MAX_PAYLOAD_BYTES];
 	size_t                     reply_pl_len = 0u;
-	const gd32_bridge_status_t st = protocol_dispatch(cmd,
+	const gd32_bridge_status_t st = protocol_dispatch(GD32_BRIDGE_LINK_SPI,
+	                                                  cmd,
 	                                                  payload_len > 0u ? &spi_rx_buf[2] : NULL,
 	                                                  payload_len,
 	                                                  reply_pl,
@@ -219,7 +220,9 @@ void spi_slave_cs_low(void)
 	spi_rx_len = 0u;
 }
 
-/* Call once per received byte (per the GD32 SPI ISR). */
+/* Feed one received byte into the framing layer.  The gd32 backend calls
+ * this from the CS-rising EXTI drain after RX DMA completes; host tests may
+ * drive the same seam directly. */
 void spi_slave_rx_byte(uint8_t b)
 {
 	if (spi_rx_len < sizeof(spi_rx_buf)) {

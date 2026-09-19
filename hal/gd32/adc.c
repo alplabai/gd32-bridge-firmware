@@ -14,6 +14,7 @@
 #include "bridge_hw.h"
 #include "gd32g5x3.h"
 
+#include "bridge_critical.h"
 #include "gd32_common.h"
 
 /* ----------------------------------------------------------------- */
@@ -21,7 +22,7 @@
 /* ----------------------------------------------------------------- */
 
 /* E1M ADC0..7 -> (ADC peripheral, channel index, pad).  Sourced from
- * maintainer-confirmed `metadata/e1m_modules/v2n/gd32-io-mcu-map.tsv`
+ * maintainer-confirmed alp-sdk `metadata/e1m_modules/v2n/gd32-io-mcu-map.tsv`
  * with channel + peripheral assignments cross-checked against the
  * GD32G553xx datasheet pin alt-function summary:
  *
@@ -104,7 +105,7 @@ uint16_t adc_full_scale_for_bits(uint8_t bits)
 }
 
 /* Oversample ratio -> (OVSR register value, OVSS shift enum).  The
- * wire contract (docs/gd32-bridge-protocol.md §3.9) rounds a caller's
+ * wire contract (alp-sdk docs/gd32-bridge-protocol.md §3.9) rounds a caller's
  * ratio DOWN to the nearest power of two in 1..256: 0 or 1 means "no
  * oversampling", and any value >1 is floored to 2^n.  The GD32 OVSR
  * field is the conversion count minus one, and a matching right-shift
@@ -134,13 +135,33 @@ adc_oversample_params(uint16_t ratio, bool *enable_out, uint16_t *ovsr_out, uint
 	*shift_out  = OVSCR_OVSS(log2); /* ADC_OVERSAMPLING_SHIFT_<log2>B */
 }
 
+/* The oversample ratio the HARDWARE actually runs for a channel: the
+ * cache floored to a power of two in [1, ADC_OVERSAMPLE_RATIO_MAX], which
+ * is what adc_oversample_params programs.  One helper so the residency
+ * budget (#135) and the EOC timeout bound cannot drift apart from each
+ * other or from the register value -- the EOC bound previously scaled by
+ * the CLAMPED cache rather than the floored one, so a ratio of 200 sized
+ * its bound for 200 while the converter ran 128. */
+static uint16_t adc_effective_ratio(uint8_t channel)
+{
+	bool     enable = false;
+	uint16_t ovsr   = 0u;
+	uint32_t shift  = 0u;
+
+	adc_oversample_params(adc_oversample_ratio_cache[channel], &enable, &ovsr, &shift);
+	return enable ? (uint16_t)(ovsr + 1u) : 1u;
+}
+
 /* Program a channel's cached resolution + oversample into its ADC.
  * The caller MUST have the converter disabled (DRES lives in CTL0 and
  * OVSAMPCTL only latches with ADCON==0 -- the vendor's own
  * ADC3_resolution_oversample example brackets every change with
  * adc_disable/adc_enable).  Shared by the single-shot read (which
  * wraps it in a disable/enable/tSTAB) and stream_begin (already inside
- * its own disable..enable window). */
+ * its own disable..enable window).  That disable/enable bracket is
+ * also an ADCON power-off/on: both callers must recalibrate
+ * (adc_calibrate_bounded) after their tSTAB dwell, not just re-apply
+ * the format -- the calibration factor does not survive it (#34). */
 void adc_apply_conv_format(uint32_t periph, uint8_t channel)
 {
 	uint32_t res_reg;
@@ -174,8 +195,11 @@ void adc_apply_conv_format(uint32_t periph, uint8_t channel)
  * Without the irony: the self-heal for a wedged converter must not
  * itself trust that converter to terminate a loop.  Same register
  * sequence as the vendor, same bound family as the other handler-safe
- * waits in this file; returns false if either phase never completes. */
-static bool adc_calibrate_bounded(uint32_t periph)
+ * waits in this file; returns false if either phase never completes.
+ * NOT static: adc_stream.c's stream_begin and ROVF recovery share it
+ * (declared in gd32_common.h) -- every ADCON toggle needs the same
+ * bounded recalibration, not just adc_periph_init's boot call. */
+bool adc_calibrate_bounded(uint32_t periph)
 {
 	uint32_t to;
 
@@ -215,6 +239,81 @@ bool adc_periph_init(uint32_t periph)
 	return adc_calibrate_bounded(periph);
 }
 
+/* ---- per-converter ownership interlock (#133) ------------------------ *
+ *
+ * Two bridge channels ride each ADC peripheral (0/1 -> ADC3, 2/3 -> ADC2,
+ * 4/5 -> ADC1, 6/7 -> ADC0), and both bridge_hw_adc_read and
+ * bridge_hw_adc_stream_begin reconfigure that shared converter -- from
+ * INTERRUPT context, at two different NVIC group priorities.  The only
+ * mutual exclusion either had was a scan of adc_streams[].in_use, which
+ * says nothing about a single-shot read in flight.
+ *
+ * So: an I2C-side CMD_ADC_READ(channel=6) passes the stream scan, does
+ * adc_disable(ADC0), points routine rank 0 at ADC_CHANNEL_2 / PA2, emits
+ * two of four samples -- and the SPI CS-EXTI handler pre-empts with
+ * CMD_ADC_READ(channel=7), passes the same scan, and re-points the same
+ * converter at PA3.  The I2C side resumes and reads its remaining samples
+ * from THE WRONG PAD, then answers STATUS_OK.  Nothing on the wire
+ * distinguishes that reading from a good one.
+ *
+ * The flag is claimed for the WHOLE disable/reconfigure/enable/convert
+ * sequence, but interrupts are masked only across the test-and-set --
+ * see bridge_critical.h on why the section must stay that short.  The
+ * loser is told BRIDGE_HW_ERR_BUSY and returns immediately; nothing here
+ * spins waiting for the flag, so there is no deadlock to construct even
+ * though the claim can be held for milliseconds (#135). */
+#define ADC_PERIPH_COUNT 4u
+
+/* Dense slot index for the four converters.  A switch rather than
+ * `channel >> 1` so the mapping does not silently follow a future
+ * re-ordering of adc_channels_map[]. */
+static uint8_t adc_periph_slot(uint32_t periph)
+{
+	switch (periph) {
+	case ADC0:
+		return 0u;
+	case ADC1:
+		return 1u;
+	case ADC2:
+		return 2u;
+	case ADC3:
+		return 3u;
+	default:
+		return ADC_PERIPH_COUNT; /* unreachable: adc_channels_map has no other */
+	}
+}
+
+/* `volatile` is load-bearing here, unlike most of this tree: the flag is
+ * written at one NVIC priority and read at another, and the compiler has
+ * no reason to reload it across the claim. */
+static volatile bool adc_periph_busy[ADC_PERIPH_COUNT];
+
+/* Test-and-set.  True = the caller now owns `periph` and MUST release it
+ * on every return path.  False = someone else holds it; answer BUSY. */
+bool adc_periph_claim(uint32_t periph)
+{
+	const uint8_t slot = adc_periph_slot(periph);
+
+	if (slot >= ADC_PERIPH_COUNT) return false;
+
+	const uint32_t st       = bridge_irq_lock();
+	const bool     free_now = !adc_periph_busy[slot];
+	if (free_now) {
+		adc_periph_busy[slot] = true;
+	}
+	bridge_irq_unlock(st);
+	return free_now;
+}
+
+void adc_periph_release(uint32_t periph)
+{
+	const uint8_t slot = adc_periph_slot(periph);
+
+	if (slot >= ADC_PERIPH_COUNT) return;
+	/* A single aligned store; no section needed to clear it. */
+	adc_periph_busy[slot] = false;
+}
+
 int bridge_hw_adc_read(uint8_t channel, uint8_t samples, uint16_t *mv)
 {
 	if (mv == 0) return BRIDGE_HW_ERR_INVAL;
@@ -241,6 +340,32 @@ int bridge_hw_adc_read(uint8_t channel, uint8_t samples, uint16_t *mv)
 		}
 	}
 
+	/* Residency budget (#135).  Bound the PRODUCT of the two host-settable
+     * multipliers -- and the sample window they multiply -- against an
+     * explicit ceiling on how long this may hold a transport ISR, BEFORE
+     * touching the converter or claiming it.  See
+     * ADC_READ_ISR_BUDGET_US in gd32_common.h for the model, the numbers
+     * it is derived from, and what the current 1 ms ceiling permits.
+     *
+     * Rejecting here rather than capping a factor is deliberate: silently
+     * halving a requested oversample ratio would return a reading whose
+     * noise floor is not what the caller asked for, with STATUS_OK and no
+     * way to tell. */
+	const uint32_t half_cycles_per_conv =
+	    (uint32_t)(2u * adc_sample_cycles_cache[channel]) + ADC_READ_CONV_HALF_CYCLES_12B;
+	const uint32_t residency_half_cycles =
+	    (uint32_t)samples * (uint32_t)adc_effective_ratio(channel) * half_cycles_per_conv;
+	if (residency_half_cycles > ADC_READ_BUDGET_HALF_CYCLES) {
+		return BRIDGE_HW_ERR_RANGE;
+	}
+
+	/* Claim the shared converter for the whole sequence below (#133).
+     * The stream scan above only covers stream-vs-read; this is what
+     * covers read-vs-read and read-vs-stream_begin across the CS-EXTI
+     * pre-emption of I2C0_EV.  Every return path from here down must
+     * release. */
+	if (!adc_periph_claim(ch->periph)) return BRIDGE_HW_ERR_BUSY;
+
 	/* Configure the routine channel for this op (each call re-applies
      * because multiple bridge channels can share an ADC peripheral -- a
      * prior bridge_hw_adc_read on a different bridge channel may have
@@ -255,13 +380,63 @@ int bridge_hw_adc_read(uint8_t channel, uint8_t samples, uint16_t *mv)
      * share each converter and may hold different formats, so this
      * re-applies every read; the sibling-stream case already returned
      * BUSY above, so no live stream owns the converter here.  The
-     * ADCON toggle preserves the boot calibration. */
+     * ADCON toggle does NOT preserve the boot calibration -- UM
+     * Rev1.2 p.424 17.4.1: the calibration factor is applied "until
+     * the next ADC power-off", and clearing ADCON IS that power-off
+     * (p.447).  17.7 exposes no calibration-value register to save
+     * and restore across the toggle, so it must be recomputed below,
+     * every read (#34). */
 	adc_disable(ch->periph);
 	adc_apply_conv_format(ch->periph, channel);
 	adc_routine_channel_config(ch->periph, 0u, ch->channel, adc_sample_cycles_cache[channel]);
 	adc_enable(ch->periph);
 	for (volatile uint32_t stab = 0u; stab < 4096u; ++stab) {
 		/* tSTAB dwell after ADCON */
+	}
+	/* Recalibrate: bounded (UM Rev1.2 17.4.1 sequence, adc_calibrate_
+     * bounded above), cost tCAL = 902 1/fADC (GD32G553xx Datasheet
+     * Rev2.0 Table 4-35) = 25.06 us at this driver's fixed 36 MHz
+     * ADC_CLK_SYNC_HCLK_DIV6 clock -- negligible next to the samples
+     * loop below.  A false return means the calibration FSM never
+     * finished (wedged converter); report IO rather than serve
+     * readings from an unproven converter.
+     *
+     * DISCLOSURE (#34 review): before this PR, adc_calibrate_bounded's
+     * worst case -- two phases x 100000 iterations if the RSTCLB/CLB
+     * FSM is wedged, ~200000 iterations total -- mattered once, at
+     * boot (adc_periph_init).  It now runs here on every CMD_ADC_READ,
+     * and identically in bridge_hw_adc_stream_begin and the ROVF
+     * recovery path (adc_stream.c), all three inside the priority-1
+     * CS-EXTI transport ISR.  A wedged calibration FSM now costs that
+     * same ~200000-iteration worst case on essentially every analog
+     * request, not just once.  This is not wrong -- #34's correctness
+     * fix REQUIRES recalibrating after every ADCON toggle -- but it is
+     * a real, disclosed increase in worst-case ISR dwell, of the same
+     * order as the EOC bound below.
+     *
+     * Considered shortening the bound so a wedged FSM fails faster.
+     * Declined: tCAL (25.06 us, above) is a hardware-cycle figure at
+     * the ADC clock, not a CPU-iteration count, and -- exactly as the
+     * EOC bound's own per-iteration cost is unverified two comments
+     * down (no -O flag anywhere in this repo, #26) -- there is no
+     * verified conversion from tCAL to an iteration count for THIS
+     * loop either.  Shortening it on a guess risks turning a
+     * legitimately-slow-but-healthy calibration into a false IO
+     * failure, which is a worse outcome than the bounded ~200000-
+     * iteration wait: that wait is still hard-bounded (same "abort
+     * latch" shape as the EOC bound), and the loop body here is a
+     * plain register read/compare (no out-of-line call like
+     * adc_flag_get), so it is very likely cheaper per iteration than
+     * the EOC poll.  Left at the existing, already-in-service bound
+     * rather than re-deriving a smaller one from a guess. */
+	if (!adc_calibrate_bounded(ch->periph)) {
+		/* Release the converter claim before bailing (#133 x #80) --
+         * same merge-created hazard as in bridge_hw_adc_stream_begin:
+         * an early return inside the claimed window would strand
+         * adc_periph_busy[] set, and every later read or stream_begin on
+         * this converter would answer BRIDGE_HW_ERR_BUSY until reboot. */
+		adc_periph_release(ch->periph);
+		return BRIDGE_HW_ERR_IO;
 	}
 
 	/* A stale EOC (e.g. the in-flight conversion that completes after
@@ -282,17 +457,79 @@ int bridge_hw_adc_read(uint8_t channel, uint8_t samples, uint16_t *mv)
      * reconfig + recalibrate) so the NEXT read starts from a clean
      * converter -- same self-healing shape as the TRNG fault path.
      *
-     * SCALE the bound by the oversample ratio: with oversampling ON,
-     * ONE triggered "conversion" is `ratio` back-to-back samples (up to
-     * 256), so a healthy oversampled conversion legitimately takes up to
-     * ~ratio x longer than the ~6.3 us un-oversampled case.  A fixed
-     * 100k bound would false-timeout every legal high-ratio read and
-     * needlessly recalibrate.  The floored-to-pow2 ratio is what the
-     * hardware actually runs; clamp the raw cache to [1,256] to match. */
-	uint32_t ovs_ratio = adc_oversample_ratio_cache[channel];
-	if (ovs_ratio < 1u) ovs_ratio = 1u;
-	if (ovs_ratio > ADC_OVERSAMPLE_RATIO_MAX) ovs_ratio = ADC_OVERSAMPLE_RATIO_MAX;
-	const uint32_t eoc_bound = 100000u * ovs_ratio;
+     * SCALE the bound by the oversample ratio, ADDITIVELY and CAPPED
+     * (#17) -- NOT `100000u * ratio`, which reaches 25 600 000
+     * iterations at the 256x ceiling and, at that magnitude, turns
+     * this handler-context spin into the same "whole link down"
+     * failure the bound exists to prevent, just with a longer fuse.
+     *
+     * With oversampling ON, ONE triggered conversion is `ratio`
+     * back-to-back sub-conversions before a single EOC.  At this
+     * driver's fixed ADC_CLK_SYNC_HCLK_DIV6 clock (36 MHz, HCLK =
+     * 216 MHz) one sub-conversion takes (sample_cycles + 12.5)
+     * CK_ADC (UM Rev1.2 17.4.9, p.431): the default 240-cycle config
+     * this file uses is ~7.0 us, and the slowest legal config
+     * (sample_cycles clamped to 638 in bridge_hw_adc_configure) is
+     * ~18.1 us.  That is HARDWARE conversion time (ADC clock cycles),
+     * independent of firmware -- so a healthy oversampled read costs
+     * at most ratio * 18.1 us of actual ADC dwell, ~4.6 ms at
+     * ratio=256.
+     *
+     * THE BOUND THIS CODE ACTUALLY GUARANTEES IS AN ITERATION COUNT,
+     * not a millisecond figure: 100000u base + 25000u per oversample
+     * step, capped at 400000u total.  Translating that count to
+     * wall-clock time depends on the EOC poll loop's per-iteration
+     * cost, which is UNVERIFIED here -- disassembling this handler
+     * (arm-none-eabi-gcc 13.3.1) shows adc_flag_get() compiled as an
+     * out-of-line `bl` per iteration, a function call, not the
+     * inlined register read a ~10-cycles/iteration estimate would
+     * assume, and this repo sets no -O flag anywhere (neither
+     * CMakeLists.txt nor ci.yml sets CMAKE_BUILD_TYPE, #26).  So the
+     * true per-iteration cost, and therefore any millisecond figure
+     * below, is plausibly several times higher than a naive estimate
+     * and is NOT measured on real hardware here.
+     *
+     * An earlier version of this comment claimed the pre-existing
+     * 100000u bound was "documented at the top of this comment block
+     * as ~4.6 ms of real dwell" -- that was false: no in-file
+     * measurement of this loop exists anywhere in this repo; the only
+     * source for a 4.6 ms figure was an issue-body assertion, not a
+     * recorded measurement.  The ~4.6 ms two paragraphs up is a math
+     * estimate from the datasheet-derived HARDWARE conversion timing,
+     * not a measured dwell of this polling loop, and must not be read
+     * as one.
+     *
+     * What holds regardless of per-iteration cost: this is a hard,
+     * fixed iteration ceiling -- 400000u -- so the wait is bounded no
+     * matter how expensive a single iteration turns out to be, the
+     * same abort-latch shape as the rest of this file's handler-safe
+     * waits.  As a rough ESTIMATE only (contingent on #26, not to be
+     * quoted as a fact): "tens of milliseconds" at the high end,
+     * still roughly 64x fewer iterations than the old
+     * `100000u * ovs_ratio` multiplicative form reached at the 256x
+     * ceiling (25 600 000 iterations) -- regardless of what the true
+     * per-iteration cost is.
+     *
+     * THE RATIO COMES FROM adc_effective_ratio() (#135), not from a
+     * locally re-clamped copy of the cache.  That helper returns the
+     * power-of-two the hardware ACTUALLY runs, which is also what the
+     * residency budget above is computed from -- so the fault-path
+     * bound here and the nominal-path budget there cannot drift apart
+     * from each other or from the register value.  The previous local
+     * clamp sized this bound for a requested ratio of 200 while the
+     * converter ran 128.
+     *
+     * The two bounds now reinforce each other rather than overlap:
+     * #135's ADC_READ_ISR_BUDGET_US refuses any read whose TOTAL
+     * conversion time exceeds ~1 ms before the converter is touched, so
+     * every read that reaches this loop is a short one and this ceiling
+     * can only ever fire on a genuinely wedged converter -- which is
+     * exactly what #17 wanted it to mean.  400000u is comfortably above
+     * every configuration the budget still permits (the widest is 256x
+     * oversampling at the 2-cycle minimum window, ~103 us per triggered
+     * conversion). */
+	uint32_t eoc_bound = 100000u + 25000u * (uint32_t)adc_effective_ratio(channel);
+	if (eoc_bound > 400000u) eoc_bound = 400000u;
 	for (uint8_t i = 0; i < samples; ++i) {
 		adc_software_trigger_enable(ch->periph, ADC_ROUTINE_CHANNEL);
 		uint32_t to = eoc_bound;
@@ -303,8 +540,11 @@ int bridge_hw_adc_read(uint8_t channel, uint8_t samples, uint16_t *mv)
 			/* Self-heal is best-effort: the re-init's calibration is
              * itself bounded (a wedged converter must not convert a
              * read timeout into a link wedge), and this path already
-             * reports IO either way. */
+             * reports IO either way.  Release AFTER the re-init so no
+             * pre-empting claimant sees a half-reinitialised converter
+             * (#133). */
 			(void)adc_periph_init(ch->periph);
+			adc_periph_release(ch->periph);
 			return BRIDGE_HW_ERR_IO;
 		}
 		adc_flag_clear(ch->periph, ADC_FLAG_EOC);
@@ -316,6 +556,7 @@ int bridge_hw_adc_read(uint8_t channel, uint8_t samples, uint16_t *mv)
 		if (code > fs) code = fs;
 		mv[i] = (uint16_t)((code * ADC_VREF_MV) / fs);
 	}
+	adc_periph_release(ch->periph);
 	return BRIDGE_HW_OK;
 }
 
@@ -335,7 +576,7 @@ int bridge_hw_adc_configure(uint8_t  channel,
 	 * on -- the new format takes effect on this channel's next read or
 	 * stream_begin.
 	 *
-	 * Field semantics follow the wire contract (docs/gd32-bridge-
+	 * Field semantics follow the wire contract (alp-sdk docs/gd32-bridge-
 	 * protocol.md §3.9):
 	 *   resolution_bits: 0 -> default (12).  6/8/10/12 map to the
 	 *     hardware DRES field.  14/16 are effective-resolution modes
