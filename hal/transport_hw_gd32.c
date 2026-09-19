@@ -280,26 +280,29 @@ void BRIDGE_SPI_CS_EXTI_HANDLER(void)
              *
              * 1. Snapshot the RX residue FIRST: bytes captured by RX DMA =
              *    buffer length minus the remaining transfer count.
-             * 2. Quiesce both DMA channels, then FLUSH + re-init the SPI via
-             *    the RCU reset (the only reliable FIFO flush; it also clears
-             *    BYTEN/DMAREN/DMATEN, which bridge_spi_periph_config
-             *    re-applies) so the peripheral is reception-ready while the
-             *    heavier decode below runs.
-             * 3. Feed the captured bytes through the byte seams and decode
-             *    (spi_slave_cs_high stages the reply; the all-0x00 reply-
-             *    drain gate in the portable layer is unchanged).
-             * 4. Drain the staged reply into the flat TX DMA buffer and
-             *    re-arm: RX for a full buffer, TX for exactly the reply.
-             *
-             * Budget: steps 1-4 are register writes + CRC over <=69 B at
-             * 216 MHz -- single-digit microseconds, well inside the master's
-             * inter-transaction gap (its CS setup window alone is 60 us). */
+			 * 2. Quiesce both DMA channels, snapshot RX overrun, then FLUSH + re-init the SPI via
+			 *    the RCU reset (the only reliable FIFO flush; it also clears
+			 *    BYTEN/DMAREN/DMATEN, which bridge_spi_periph_config
+			 *    re-applies).
+			 * 3. Feed the captured bytes through the byte seams, then re-arm RX
+			 *    BEFORE decoding. The portable layer has copied them, so a
+			 *    following transaction can safely reuse the DMA buffer while
+			 *    protocol_dispatch() handles this one.
+			 * 4. Decode, or stage STATUS_IO if RXORERR made the snapshot
+			 *    untrustworthy, then drain the staged reply into the flat TX DMA
+			 *    buffer and arm TX for exactly that reply.
+			 *
+			 * Budget: reset/copy/re-arm is a short register-and-memory path.
+			 * protocol_dispatch() is deliberately outside that budget: it can
+			 * perform ADC, FMC, or image-validation work, which must not leave
+			 * SPI deaf to the next transaction (#152). */
 			uint32_t remaining = dma_transfer_number_get(BRIDGE_SPI_DMA, BRIDGE_SPI_RX_DMA_CH);
 			uint32_t received =
 			    (remaining <= BRIDGE_SPI_DMA_BUF_LEN) ? (BRIDGE_SPI_DMA_BUF_LEN - remaining) : 0u;
 
 			dma_channel_disable(BRIDGE_SPI_DMA, BRIDGE_SPI_RX_DMA_CH);
 			dma_channel_disable(BRIDGE_SPI_DMA, BRIDGE_SPI_TX_DMA_CH);
+			const bool rx_overrun = (SPI_STAT(BRIDGE_SPI_PERIPH) & SPI_STAT_RXORERR) != 0u;
 
 			rcu_periph_reset_enable(RCU_SPI1RST);
 			rcu_periph_reset_disable(RCU_SPI1RST);
@@ -312,14 +315,21 @@ void BRIDGE_SPI_CS_EXTI_HANDLER(void)
 			for (uint32_t i = 0; i < received; i++) {
 				spi_slave_rx_byte(spi_rx_dma_buf[i]);
 			}
-			spi_slave_cs_high();
+			/* The portable staging owns a copy now. Do not defer this arm until
+			 * after dispatch: a new frame arriving during a slow command must
+			 * be captured, not dropped at SPI1. */
+			spi_dma_arm_rx();
+			if (rx_overrun) {
+				spi_slave_rx_fault();
+			} else {
+				spi_slave_cs_high();
+			}
 
 			uint32_t reply_len = 0;
 			while (spi_slave_tx_pending() && (reply_len < BRIDGE_SPI_DMA_BUF_LEN)) {
 				spi_tx_dma_buf[reply_len++] = spi_slave_tx_next_byte();
 			}
 
-			spi_dma_arm_rx();
 			spi_dma_arm_tx(reply_len);
 		}
 	}

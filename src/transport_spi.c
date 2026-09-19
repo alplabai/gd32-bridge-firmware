@@ -238,6 +238,15 @@ void spi_slave_cs_high(void)
 	decode_and_dispatch();
 }
 
+/* Call when the hardware reports that the just-finished receive was
+ * overrun.  Do not decode a DMA snapshot whose request envelope may have
+ * dropped bytes; replacing any previously staged reply makes the loss loud
+ * and gives the host's normal re-frame/retry path a clean starting point. */
+void spi_slave_rx_fault(void)
+{
+	stage_error_reply(STATUS_IO);
+}
+
 /* Returns the next staged reply byte.  On the gd32 backend the drain
  * loop is gated on spi_slave_tx_pending(), so the 0xFF tail below is
  * reachable only from the stub backend and the unit tests -- hosts

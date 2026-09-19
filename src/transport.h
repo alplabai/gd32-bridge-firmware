@@ -46,6 +46,7 @@ int bridge_transport_i2c_hw_init(void);
 void    spi_slave_cs_low(void);       /* CS falling edge: reset RX staging   */
 void    spi_slave_rx_byte(uint8_t b); /* one received request byte            */
 void    spi_slave_cs_high(void);      /* CS rising edge: decode + dispatch    */
+void    spi_slave_rx_fault(void);     /* corrupt RX: stage fresh STATUS_IO    */
 uint8_t spi_slave_tx_next_byte(void); /* next staged reply byte; 0xFF if empty */
 bool    spi_slave_tx_pending(void);   /* true while staged reply has bytes left   */
 
