@@ -199,6 +199,24 @@ target_compile_options(test_timer_sync PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_timer_sync PRIVATE ztest_shim)
 add_test(NAME timer_sync COMMAND test_timer_sync)
 
+# --- pwm_preload_transaction: coherent PWM shadow update boundary (#177) --
+#
+# Links the real update-inhibit transaction against a tiny register/CMSIS
+# mock.  The callback models the CAR + CHxCV + mirror sequence and proves it
+# sees UPDIS with interrupts masked; the test also pins the crucial rule that
+# restoring UPDIS does not resurrect stale CTL0 control bits.
+add_executable(test_pwm_preload_transaction
+    pwm_preload_transaction/src/test_pwm_preload_transaction.c
+    ${FW}/hal/gd32/pwm_preload_transaction.c
+)
+target_include_directories(test_pwm_preload_transaction PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/pwm_preload_transaction/mock
+    ${FW}/hal/gd32
+)
+target_compile_options(test_pwm_preload_transaction PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_pwm_preload_transaction PRIVATE ztest_shim)
+add_test(NAME pwm_preload_transaction COMMAND test_pwm_preload_transaction)
+
 # --- gpio_grouped: production GPIO port grouping + promotion order (#198) --
 #
 # Links the real hal/gd32/gpio.c against a minimal register/API mock.  This
