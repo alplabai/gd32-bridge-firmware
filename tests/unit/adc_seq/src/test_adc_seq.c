@@ -40,6 +40,8 @@
 
 #include "gd32g5x3.h" /* mock -- tests/unit/adc_seq/mock/ */
 
+extern void bridge_hw_dsp_pump(void);
+
 /* adc_channels_map[0] = { ADC3, ADC_CHANNEL_12, GPIOD, GPIO_PIN_9 } --
  * bridge channel 0, the periph every "channel 0" test below drives. */
 #define BRIDGE_ADC_CH0        0u
@@ -55,6 +57,30 @@ static void adc_seq_reset(void)
 	mock_adc_set_flag(BRIDGE_ADC_CH0_PERIPH, ADC_FLAG_ROVF, RESET);
 	mock_adc_set_flag(BRIDGE_ADC_CH0_PERIPH, ADC_FLAG_EOC, RESET);
 	vref_ok = true;
+}
+
+static void bind_fft_stream0(void)
+{
+	uint8_t chain_id    = 0xFFu;
+	uint8_t fft_blob[4] = { 32u, 0u, 0u, 0u }; /* 32-point complex FFT */
+
+	zassert_equal(bridge_hw_adc_dsp_chain_open(&chain_id), BRIDGE_HW_OK);
+	zassert_equal(bridge_hw_adc_dsp_stage_push(
+	                  chain_id, 0u, 3u /* FFT */, 0u, sizeof(fft_blob), fft_blob, sizeof(fft_blob)),
+	              BRIDGE_HW_OK);
+	zassert_equal(bridge_hw_adc_dsp_chain_bind(chain_id, 0u), BRIDGE_HW_OK);
+}
+
+static void begin_bound_fft_stream0(void)
+{
+	zassert_equal(bridge_hw_adc_stream_begin(0u, BRIDGE_ADC_CH0, 1000u), BRIDGE_HW_OK);
+	bind_fft_stream0();
+}
+
+static void fft_init_end_and_rebind_stream0(void)
+{
+	zassert_equal(bridge_hw_adc_stream_end(0u), BRIDGE_HW_OK);
+	begin_bound_fft_stream0();
 }
 
 /* ---------------------------------------------------------------------
@@ -120,6 +146,30 @@ ZTEST(gd32_adc_seq, test_stream_restart_reloads_dma_count)
 	zassert_equal(dma_transfer_number_get(DMA0, DMA_CH0),
 	              BRIDGE_ADC_STREAM_RING_SAMPLES,
 	              "dma_init must reload the full count, not retain stale remainder (#183)");
+}
+
+/* #184: END can interrupt long FFT configuration.  Re-enter END and a
+ * same-ID rebind from fft_init; the suspended first pump must not publish
+ * itself as owner, so the next tick configures the replacement again. */
+ZTEST(gd32_adc_seq, test_fft_end_during_config_cannot_resurrect_same_id)
+{
+	adc_seq_reset();
+	begin_bound_fft_stream0();
+	mock_fft_set_init_hook(fft_init_end_and_rebind_stream0);
+
+	bridge_hw_dsp_pump();
+	zassert_equal(mock_fft_init_count(), 1u, "old configuration ran exactly once");
+
+	bridge_hw_dsp_pump();
+	zassert_equal(mock_fft_init_count(), 2u, "replacement must configure FFT again");
+
+	uint32_t seq   = 0u;
+	uint16_t total = 0u;
+	uint8_t  got   = 0u;
+	float    bins[1];
+	zassert_equal(bridge_hw_adc_spectrum_read(0u, 0u, 1u, &seq, &total, &got, bins),
+	              BRIDGE_HW_ERR_IO,
+	              "replacement remains unreadable until it completes a frame");
 }
 
 /* ---------------------------------------------------------------------

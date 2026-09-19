@@ -9,11 +9,15 @@
 
 mock_seq_evt_t mock_seq[MOCK_SEQ_MAX];
 int            mock_seq_n;
+static void (*mock_fft_init_hook)(void);
+static unsigned mock_fft_inits;
 
 void mock_seq_reset(void)
 {
 	mock_seq_n = 0;
 	memset(mock_seq, 0, sizeof mock_seq);
+	mock_fft_init_hook = NULL;
+	mock_fft_inits     = 0u;
 }
 
 void mock_seq_log(const char *name, uint32_t periph, uint32_t arg)
@@ -361,6 +365,12 @@ void fft_struct_para_init(fft_parameter_struct *p)
 void fft_init(fft_parameter_struct *p)
 {
 	(void)p;
+	mock_fft_inits++;
+	if (mock_fft_init_hook != NULL) {
+		void (*hook)(void) = mock_fft_init_hook;
+		mock_fft_init_hook = NULL; /* one-shot; replacement config must not recurse */
+		hook();
+	}
 }
 void fft_calculation_start(void)
 {
@@ -369,6 +379,14 @@ FlagStatus fft_flag_get(uint32_t flag)
 {
 	(void)flag;
 	return RESET;
+}
+void mock_fft_set_init_hook(void (*hook)(void))
+{
+	mock_fft_init_hook = hook;
+}
+unsigned mock_fft_init_count(void)
+{
+	return mock_fft_inits;
 }
 
 /* --- gd32_common.h externs the driver needs but this suite doesn't use ---*/
