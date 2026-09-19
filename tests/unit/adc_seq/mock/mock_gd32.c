@@ -9,11 +9,19 @@
 
 mock_seq_evt_t mock_seq[MOCK_SEQ_MAX];
 int            mock_seq_n;
+static void (*mock_fac_init_hook)(void);
+static unsigned mock_fac_starts;
+static unsigned mock_fac_stops;
+static unsigned mock_fac_writes;
 
 void mock_seq_reset(void)
 {
 	mock_seq_n = 0;
 	memset(mock_seq, 0, sizeof mock_seq);
+	mock_fac_init_hook = NULL;
+	mock_fac_starts    = 0u;
+	mock_fac_stops     = 0u;
+	mock_fac_writes    = 0u;
 }
 
 void mock_seq_log(const char *name, uint32_t periph, uint32_t arg)
@@ -318,6 +326,11 @@ void fac_struct_para_init(fac_parameter_struct *p)
 void fac_init(fac_parameter_struct *p)
 {
 	(void)p;
+	if (mock_fac_init_hook != NULL) {
+		void (*hook)(void) = mock_fac_init_hook;
+		mock_fac_init_hook = NULL; /* one-shot; replacement must not recurse */
+		hook();
+	}
 }
 void fac_fixed_data_preload_init(fac_fixed_data_preload_struct *p)
 {
@@ -333,13 +346,16 @@ void fac_function_config(fac_parameter_struct *p)
 }
 void fac_start(void)
 {
+	mock_fac_starts++;
 }
 void fac_stop(void)
 {
+	mock_fac_stops++;
 }
 void fac_fixed_data_write(int16_t data)
 {
 	(void)data;
+	mock_fac_writes++;
 }
 int16_t fac_fixed_data_read(void)
 {
@@ -349,6 +365,22 @@ FlagStatus fac_flag_get(uint32_t flag)
 {
 	(void)flag;
 	return RESET;
+}
+void mock_fac_set_init_hook(void (*hook)(void))
+{
+	mock_fac_init_hook = hook;
+}
+unsigned mock_fac_start_count(void)
+{
+	return mock_fac_starts;
+}
+unsigned mock_fac_stop_count(void)
+{
+	return mock_fac_stops;
+}
+unsigned mock_fac_write_count(void)
+{
+	return mock_fac_writes;
 }
 
 void fft_deinit(void)

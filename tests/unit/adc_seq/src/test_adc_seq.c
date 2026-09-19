@@ -40,6 +40,8 @@
 
 #include "gd32g5x3.h" /* mock -- tests/unit/adc_seq/mock/ */
 
+extern void bridge_hw_dsp_pump(void);
+
 /* adc_channels_map[0] = { ADC3, ADC_CHANNEL_12, GPIOD, GPIO_PIN_9 } --
  * bridge channel 0, the periph every "channel 0" test below drives. */
 #define BRIDGE_ADC_CH0        0u
@@ -55,6 +57,31 @@ static void adc_seq_reset(void)
 	mock_adc_set_flag(BRIDGE_ADC_CH0_PERIPH, ADC_FLAG_ROVF, RESET);
 	mock_adc_set_flag(BRIDGE_ADC_CH0_PERIPH, ADC_FLAG_EOC, RESET);
 	vref_ok = true;
+}
+
+static void bind_fir_stream0(void)
+{
+	uint8_t chain_id = 0xFFu;
+	/* Q31, one tap.  The specific gain is immaterial to ownership. */
+	uint8_t fir_blob[8] = { 1u, 1u, 0u, 0u, 0u, 0u, 0u, 0x10u };
+
+	zassert_equal(bridge_hw_adc_dsp_chain_open(&chain_id), BRIDGE_HW_OK);
+	zassert_equal(bridge_hw_adc_dsp_stage_push(
+	                  chain_id, 0u, 0u /* FIR */, 0u, sizeof(fir_blob), fir_blob, sizeof(fir_blob)),
+	              BRIDGE_HW_OK);
+	zassert_equal(bridge_hw_adc_dsp_chain_bind(chain_id, 0u), BRIDGE_HW_OK);
+}
+
+static void begin_bound_fir_stream0(void)
+{
+	zassert_equal(bridge_hw_adc_stream_begin(0u, BRIDGE_ADC_CH0, 1000u), BRIDGE_HW_OK);
+	bind_fir_stream0();
+}
+
+static void fac_init_end_and_rebind_stream0(void)
+{
+	zassert_equal(bridge_hw_adc_stream_end(0u), BRIDGE_HW_OK);
+	begin_bound_fir_stream0();
 }
 
 /* ---------------------------------------------------------------------
@@ -120,6 +147,30 @@ ZTEST(gd32_adc_seq, test_stream_restart_reloads_dma_count)
 	zassert_equal(dma_transfer_number_get(DMA0, DMA_CH0),
 	              BRIDGE_ADC_STREAM_RING_SAMPLES,
 	              "dma_init must reload the full count, not retain stale remainder (#183)");
+}
+
+/* #185: FAC configuration runs at base level.  Re-enter END from fac_init,
+ * then create and bind a replacement on the SAME stream id.  The suspended
+ * first pump must not publish ownership or feed a replacement sample through
+ * stale FAC state; the next pump configures the replacement cleanly. */
+ZTEST(gd32_adc_seq, test_fac_end_during_config_cannot_resurrect_same_id)
+{
+	adc_seq_reset();
+	begin_bound_fir_stream0();
+	mock_fac_set_init_hook(fac_init_end_and_rebind_stream0);
+
+	bridge_hw_dsp_pump();
+	zassert_equal(mock_fac_start_count(), 1u, "old configuration resumed through fac_start");
+	zassert_equal(mock_fac_stop_count(), 2u, "revoked config must finish stopped");
+	zassert_equal(mock_fac_write_count(), 0u, "old pump must not process replacement samples");
+	zassert_equal(adc_streams[0].proc_write, 0u, "old pump must not publish processed output");
+
+	adc_streams[0].ring[0] = 123u;
+	mock_dma_set_remaining(DMA0, DMA_CH0, BRIDGE_ADC_STREAM_RING_SAMPLES - 1u);
+	bridge_hw_dsp_pump();
+	zassert_equal(mock_fac_start_count(), 2u, "replacement must configure FAC again");
+	zassert_equal(mock_fac_write_count(), 1u, "replacement sample must reach FAC once");
+	zassert_equal(adc_streams[0].proc_write, 1u, "replacement output is published once");
 }
 
 /* ---------------------------------------------------------------------

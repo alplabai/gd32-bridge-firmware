@@ -323,6 +323,12 @@ void       fac_fixed_data_write(int16_t data);
 int16_t    fac_fixed_data_read(void);
 FlagStatus fac_flag_get(uint32_t flag);
 
+/* Test-only FAC hook/counters for ISR-reentry ownership tests. */
+void     mock_fac_set_init_hook(void (*hook)(void));
+unsigned mock_fac_start_count(void);
+unsigned mock_fac_stop_count(void);
+unsigned mock_fac_write_count(void);
+
 /* ------------------------------------------------------------------ */
 /* FFT -- the spectrum block.  Same story as FAC: link-only for these  */
 /* tests.                                                               */

@@ -17,6 +17,7 @@
 #include "gd32g5x3.h"
 
 #include "adc_dsp_chain.h"
+#include "bridge_critical.h"
 #include "gd32_common.h"
 
 /* Stream slots; layout + sizing doc in gd32_common.h. */
@@ -468,7 +469,7 @@ int bridge_hw_adc_stream_read(uint8_t   stream_id,
  *
  * DSP dispatch helpers still defined in the #496 pump section at end
  * of this file but referenced earlier by stream_end. */
-void        adc_dsp_fac_release(uint8_t stream_id);
+static void adc_dsp_fac_revoke_locked(uint8_t stream_id);
 void        adc_dsp_fft_release(uint8_t stream_id);
 static void adc_dsp_pump_fft(uint8_t sid);
 
@@ -477,6 +478,16 @@ int bridge_hw_adc_stream_end(uint8_t stream_id)
 	if (stream_id >= BRIDGE_ADC_STREAM_COUNT) return BRIDGE_HW_ERR_RANGE;
 	adc_stream_state_t *s = &adc_streams[stream_id];
 	if (!s->in_use) return BRIDGE_HW_OK; /* idempotent */
+	/* A DSP configuration runs at base level and can be pre-empted here.
+	 * Revoke its visible configuring claim BEFORE the long ADC/DMA restore
+	 * below: otherwise FAC config resumes after END and publishes an owner
+	 * for the dead session (#185).  The helper is intentionally invoked
+	 * under the same short lock that protects the owner/configuring state. */
+	const uint32_t dsp_crit = bridge_irq_lock();
+	if (s->dsp_bound) {
+		adc_dsp_fac_revoke_locked(stream_id);
+	}
+	bridge_irq_unlock(dsp_crit);
 
 	/* Stop the trigger SOURCE first (pacing timer), then disarm the
      * ADC's DMA request generation, then the DMA channel -- the other
@@ -526,7 +537,6 @@ int bridge_hw_adc_stream_end(uint8_t stream_id)
      * chain_open returns NOSUPPORT forever until a reboot (#496).
      * dsp_chain_id is only meaningful while dsp_bound, so gate on it. */
 	if (s->dsp_bound) {
-		adc_dsp_fac_release(stream_id); /* free the FAC if this stream owned it */
 		adc_dsp_fft_release(stream_id); /* free the FFT if this stream owned it */
 		adc_dsp_chain_release(s->dsp_chain_id);
 	}
@@ -563,14 +573,21 @@ int bridge_hw_adc_stream_end(uint8_t stream_id)
 
 /* stream_id currently loaded into the FAC, or -1 when the FAC is idle. */
 static int8_t adc_dsp_fac_owner = -1;
+/* A distinct in-progress marker closes the END-during-config window:
+ * release must be able to revoke a stream before it becomes the active
+ * owner.  It never counts as an owner for sample processing. */
+static int8_t adc_dsp_fac_configuring = -1;
 
-/* Release the FAC if this stream owned it (called from stream_end). */
-void adc_dsp_fac_release(uint8_t stream_id)
+/* Called with bridge_irq_lock held.  Stopping is harmless before a config
+ * reached fac_start(), and necessary if END landed after fac_start but before
+ * the final owner commit. */
+static void adc_dsp_fac_revoke_locked(uint8_t stream_id)
 {
-	if (adc_dsp_fac_owner == (int8_t)stream_id) {
+	if (adc_dsp_fac_owner == (int8_t)stream_id || adc_dsp_fac_configuring == (int8_t)stream_id) {
 		fac_stop();
-		adc_dsp_fac_owner = -1;
 	}
+	if (adc_dsp_fac_owner == (int8_t)stream_id) adc_dsp_fac_owner = -1;
+	if (adc_dsp_fac_configuring == (int8_t)stream_id) adc_dsp_fac_configuring = -1;
 }
 
 /* Decode one wire coefficient (4 bytes little-endian, Q31 or F32) into
@@ -742,8 +759,42 @@ static void adc_dsp_pump_stream(uint8_t sid)
 	adc_stream_state_t *s = &adc_streams[sid];
 
 	if (adc_dsp_fac_owner != (int8_t)sid) {
-		if (!adc_dsp_fac_config(s)) return; /* unsupported chain -> stay idle */
-		adc_dsp_fac_owner = (int8_t)sid;
+		const uint32_t claim_crit = bridge_irq_lock();
+		if (!s->in_use || !s->dsp_bound || s->dsp_terminal == 3u ||
+		    (adc_dsp_fac_owner != -1 && adc_dsp_fac_owner != (int8_t)sid) ||
+		    adc_dsp_fac_configuring != -1) {
+			bridge_irq_unlock(claim_crit);
+			return;
+		}
+		adc_dsp_fac_configuring = (int8_t)sid;
+		bridge_irq_unlock(claim_crit);
+
+		if (!adc_dsp_fac_config(s)) {
+			const uint32_t abort_crit = bridge_irq_lock();
+			if (adc_dsp_fac_configuring == (int8_t)sid) adc_dsp_fac_configuring = -1;
+			bridge_irq_unlock(abort_crit);
+			return; /* unsupported chain -> stay idle */
+		}
+		/* Config ran with interrupts enabled.  END may have revoked its
+		 * configuring claim; commit ownership only if this is still the
+		 * same live filter stream. */
+		const uint32_t commit_crit = bridge_irq_lock();
+		const bool commit = (adc_dsp_fac_configuring == (int8_t)sid && s->in_use && s->dsp_bound &&
+		                     s->dsp_terminal != 3u);
+		if (commit) {
+			adc_dsp_fac_owner       = (int8_t)sid;
+			adc_dsp_fac_configuring = -1;
+		} else if (adc_dsp_fac_configuring == (int8_t)sid) {
+			adc_dsp_fac_configuring = -1;
+		}
+		bridge_irq_unlock(commit_crit);
+		if (!commit) {
+			/* END can have landed immediately before fac_start() inside the
+			 * configuration function.  Its first stop happened too early;
+			 * stop again after the failed commit so stale FAC cannot run. */
+			fac_stop();
+			return;
+		}
 	}
 
 	const uint32_t laps          = s->lap_count;
