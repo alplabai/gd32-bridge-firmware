@@ -149,7 +149,7 @@ int bridge_hw_adc_stream_begin(uint8_t stream_id, uint8_t channel, uint32_t samp
      * exactly how the v0.2.3 stream silently produced zero samples.
      * Calibration IS redone below, after ADCON re-enables: an ADCON
      * toggle does NOT preserve the boot calibration from
-     * adc_periph_init (UM Rev1.2 p.424: the factor is applied only
+     * the boot setup (UM Rev1.2 p.424: the factor is applied only
      * "until the next ADC power-off", and clearing ADCON IS that
      * power-off, p.447) -- and the recalibration is bounded
      * (adc_calibrate_bounded), so it is not the unbounded vendor spin
@@ -202,7 +202,7 @@ int bridge_hw_adc_stream_begin(uint8_t stream_id, uint8_t channel, uint32_t samp
 	adc_flag_clear(ch->periph, ADC_FLAG_ROVF);
 	adc_enable(ch->periph);
 	for (volatile uint32_t stab = 0u; stab < 4096u; ++stab) {
-		/* tSTAB dwell after ADCON, same bound adc_periph_init uses */
+		/* tSTAB dwell after ADCON, same bound the boot setup uses */
 	}
 	/* Recalibrate after the ADCON toggle above -- see the disable/
      * enable comment at the top of this bracket (#34).  Bounded, cost
@@ -343,7 +343,7 @@ static bool adc_stream_recover_rovf(adc_stream_state_t *s, const gd32_adc_ch_t *
 	adc_dma_mode_enable(ch->periph); /* 6. Set DMA bit of ADC_CTL1. */
 	adc_enable(ch->periph);          /* 7. Set ADCON bit of ADC_CTL1. */
 	for (volatile uint32_t stab = 0u; stab < 4096u; ++stab) {
-		/* 8. Wait T(setup) -- same bound stream_begin/adc_periph_init use. */
+		/* 8. Wait T(setup) -- same bound stream_begin/the boot setup use. */
 	}
 	return adc_calibrate_bounded(ch->periph); /* ADCON edge above invalidated calibration. */
 }
@@ -508,16 +508,18 @@ int bridge_hw_adc_stream_end(uint8_t stream_id)
 		/* fixed dwell, ~tens of microseconds */
 	}
 
-	/* Full single-shot restore: deinit + reconfigure + recalibrate
-     * (calibration BOUNDED -- this runs in the CS-EXTI handler).  This
+	/* Full single-shot restore: reconfigure + recalibrate (calibration
+	 * BOUNDED -- this runs in the CS-EXTI handler).  This deliberately
+	 * does not reset an ADC or reconfigure a shared clock domain, because
+	 * ADC0/1/2 may have a sibling stream running.  It
      * puts EXTERNAL_TRIGGER_DISABLE, routine length 1 and a fresh
      * calibration back so a following bridge_hw_adc_read sees the
-     * exact converter state adc_periph_init promised it -- the same
+	 * exact converter state the boot setup promised it -- the same
      * self-heal shape the read path's timeout branch uses.  The stream
      * state clears regardless of the restore verdict (the stream IS
      * over); a calibration that never completed reports IO so the host
      * knows the converter came back in an unproven state. */
-	const bool restored = adc_periph_init(ch->periph);
+	const bool restored = adc_periph_restore(ch->periph);
 
 	/* Release the DSP chain bound to this stream back to the pool.
      * chain_open is the ONLY allocator (sets in_use=true) and nothing

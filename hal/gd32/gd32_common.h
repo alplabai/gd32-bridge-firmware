@@ -195,7 +195,7 @@ typedef struct {
  *
  * The residency model, all of it sourced in this tree:
  *   ADCCK   = HCLK / 6 = 216 MHz / 6 = 36 MHz (ADC_CLK_SYNC_HCLK_DIV6,
- *             adc_periph_init)
+ *             adc_shared_clock_init)
  *   one conversion = sample_cycles + 12.5 ADCCK  (the 12-bit figure this
  *             header already quotes above: 240 + 12.5 at 36 MHz ~= 7.0 us)
  *   one triggered sample with oversampling = ratio x that
@@ -337,17 +337,24 @@ extern bool                vref_ok;                              /* vref.c */
 /* Shared helpers (defined in the TU named per line).                 */
 /* ----------------------------------------------------------------- */
 
-bool trng_start(void);                 /* trng.c */
-bool trng_poll_ready(void);            /* trng.c */
-bool vref_ready_check(void);           /* vref.c */
-bool adc_periph_init(uint32_t periph); /* adc.c */
+bool trng_start(void);       /* trng.c */
+bool trng_poll_ready(void);  /* trng.c */
+bool vref_ready_check(void); /* vref.c */
+/* Boot-only sequence: reset all converters, set the two shared clock domains
+ * once (ADC0 covers ADC0/1/2; ADC3 covers itself), then initialise each
+ * converter.  Request paths must use adc_periph_restore() instead so a
+ * sibling stream never sees a shared-clock rewrite. */
+void adc_periph_boot_reset_all(void);       /* adc.c */
+void adc_shared_clock_init(void);           /* adc.c */
+bool adc_periph_boot_init(uint32_t periph); /* adc.c */
+bool adc_periph_restore(uint32_t periph);   /* adc.c */
 
 /* Bounded RSTCLB/CLB calibration cycle (UM Rev1.2 17.4.1, p.424-425),
  * shared with the stream path: any ADCON toggle invalidates the
  * calibration factor (it is applied only "until the next ADC
  * power-off"), so every re-enable on the request path -- single-shot
  * read, stream_begin, and the stream ROVF recovery -- must recalibrate
- * rather than assume adc_periph_init's boot calibration survived. */
+ * rather than assume boot calibration survived. */
 bool adc_calibrate_bounded(uint32_t periph); /* adc.c */
 
 /* Resolution/oversample helpers (adc.c) shared with the stream path.
