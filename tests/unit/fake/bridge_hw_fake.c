@@ -16,11 +16,29 @@
 
 /* ---- forced-return table ------------------------------------------- */
 
-static int s_force_rv[FAKE_FN_COUNT];
+static int                        s_force_rv[FAKE_FN_COUNT];
+static uint32_t                   s_call_count[FAKE_FN_COUNT];
+static bridge_hw_fake_fn_t        s_call_hook_fn;
+static bridge_hw_fake_call_hook_t s_call_hook;
+static void                      *s_call_hook_context;
 
 void bridge_hw_fake_force(bridge_hw_fake_fn_t fn, int rv)
 {
 	s_force_rv[fn] = rv;
+}
+
+uint32_t bridge_hw_fake_call_count(bridge_hw_fake_fn_t fn)
+{
+	return s_call_count[fn];
+}
+
+void bridge_hw_fake_set_call_hook(bridge_hw_fake_fn_t        fn,
+                                  bridge_hw_fake_call_hook_t hook,
+                                  void                      *context)
+{
+	s_call_hook_fn      = fn;
+	s_call_hook         = hook;
+	s_call_hook_context = context;
 }
 
 /* Returns true (and writes *out) when `fn` has a non-OK override
@@ -28,6 +46,14 @@ void bridge_hw_fake_force(bridge_hw_fake_fn_t fn, int rv)
  * touching its state model. */
 static int forced(bridge_hw_fake_fn_t fn, int *out)
 {
+	s_call_count[fn]++;
+	if (s_call_hook != NULL && s_call_hook_fn == fn) {
+		bridge_hw_fake_call_hook_t hook    = s_call_hook;
+		void                      *context = s_call_hook_context;
+		s_call_hook                        = NULL;
+		s_call_hook_context                = NULL;
+		hook(context);
+	}
 	if (s_force_rv[fn] != BRIDGE_HW_OK) {
 		*out = s_force_rv[fn];
 		return 1;
@@ -405,6 +431,10 @@ void bridge_hw_fake_dsp_stage_push_get_last_call(uint8_t  *chain_id,
 void bridge_hw_fake_reset(void)
 {
 	memset(s_force_rv, 0, sizeof(s_force_rv));
+	memset(s_call_count, 0, sizeof(s_call_count));
+	s_call_hook_fn      = FAKE_FN_GPIO_READ;
+	s_call_hook         = NULL;
+	s_call_hook_context = NULL;
 
 	s_reset_reason  = 0u;
 	s_da9292_status = 0xFFu;

@@ -4,17 +4,18 @@
  *
  * The firmware's ONE critical-section primitive.
  *
- * Why this file exists (#19 and its children #133/#134/#147): this is a
+ * Why this file exists: this is a
  * bare-metal, purely interrupt-driven application in which
  * protocol_dispatch() runs synchronously inside BOTH transport ISRs --
  * BRIDGE_SPI_CS_EXTI_HANDLER at BRIDGE_CS_IRQ_PRIO (1) and
  * BRIDGE_I2C_EV_HANDLER at BRIDGE_I2C_IRQ_PRIO (2), see
  * hal/bridge_board_config.h.  Group priority 1 pre-empts group priority
- * 2, so any handler reached from I2C can be suspended mid-sequence and
- * resumed after the SPI side has rewritten the same peripheral.  Until
- * this header there was no critical section anywhere in the application:
- * the only __disable_irq() in the tree is src/boot/boot_main.c's, in the
- * bootloader, on the way out of the bootloader.
+ * 2.  protocol_dispatch() now refuses a nested transport request with
+ * STATUS_BUSY (#19), but short critical sections are still required for
+ * state shared with peripheral ISRs, base-level pumps, or HAL entry points
+ * outside the dispatcher.  Until this header there was no such primitive
+ * in the application: the only __disable_irq() was in src/boot/boot_main.c,
+ * in the bootloader, on the way out of the bootloader.
  *
  * Why PRIMASK and not BASEPRI: BASEPRI is the finer instrument, but the
  * only thing this application ever needs to exclude is the CS-EXTI
