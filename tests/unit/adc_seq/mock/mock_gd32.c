@@ -195,9 +195,11 @@ void dma_struct_para_init(dma_parameter_struct *init_struct)
 }
 void dma_init(uint32_t dma_periph, dma_channel_enum channelx, dma_parameter_struct *init_struct)
 {
-	(void)channelx;
-	(void)init_struct;
-	mock_seq_log("dma_init", dma_periph, 0u);
+	/* The real SPL dma_init() writes init_struct->number to DMA_CHCNT.
+	 * Mirror that observable contract so a new stream cannot inherit the
+	 * previous test session's remaining-count state. */
+	mock_dma_remaining[dma_periph][channelx] = init_struct->number;
+	mock_seq_log("dma_init", dma_periph, init_struct->number);
 }
 void dma_circulation_enable(uint32_t dma_periph, dma_channel_enum channelx)
 {
