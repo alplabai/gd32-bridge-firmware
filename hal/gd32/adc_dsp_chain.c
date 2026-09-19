@@ -28,16 +28,18 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "bridge_hw.h"
 
 #include "adc_dsp_chain.h"
 #include "gd32_common.h"
 
-/* 4 chains x 4 stages x 260 B = 4160 bytes of stage-data RAM + ~80
- * bytes of metadata; well inside the GD32G553's 128 KB SRAM.  Non-
- * static (adc_dsp_chain.h) because adc_stream.c's pump-side config
- * functions index it directly to decode a bound chain's stage blobs. */
+/* 4 chains x 4 stages reserve 4160 bytes of stage data plus 528 bytes
+ * of coverage bits and small scalar metadata; well inside the
+ * GD32G553's 128 KB SRAM.  Non-static (adc_dsp_chain.h) because
+ * adc_stream.c's pump-side config functions index it directly to decode
+ * a bound chain's stage blobs. */
 adc_dsp_chain_t adc_dsp_chains[BRIDGE_DSP_MAX_CHAINS];
 
 /* Return a chain slot to the pool.  The counterpart to chain_open's
@@ -53,14 +55,14 @@ void adc_dsp_chain_release(uint8_t chain_id)
 }
 
 /* Validate one completed stage's reassembled blob against its declared
- * `kind`.  stage_push only bounds the byte COUNT (<= total_size) and
- * the kind range; it never looks at the payload.  This runs at bind --
- * the last point before the chain goes live -- so a filter with a bad
- * tap count, an out-of-range FFT size, or a header/length mismatch is
- * rejected here rather than mis-programming the FAC/FFT block later.
- * The 4-byte header is present for every kind (guaranteed because bind
- * only inspects populated stages, and total_size >= 1 for those --
- * but we re-check to keep the field reads in-bounds). */
+ * `kind`.  stage_push proves full byte coverage and a stable kind/size,
+ * but it deliberately leaves the per-kind payload interpretation to
+ * bind -- the last point before the chain goes live -- so a filter with
+ * a bad tap count, an out-of-range FFT size, or a header/length mismatch
+ * is rejected rather than mis-programming the FAC/FFT block later.  The
+ * 4-byte header is present for every kind (guaranteed because bind only
+ * inspects populated stages, and total_size >= 1 for those -- but we
+ * re-check to keep the field reads in-bounds). */
 static bool adc_dsp_stage_blob_valid(const adc_dsp_stage_t *st)
 {
 	if (st->total_size < BRIDGE_DSP_STAGE_HDR_BYTES) return false;
@@ -111,12 +113,7 @@ int bridge_hw_adc_dsp_chain_open(uint8_t *chain_id)
 		if (!adc_dsp_chains[i].in_use) {
 			/* Zero the chain state so a previously-released chain
              * doesn't leak stale stage data into the new allocation. */
-			for (uint8_t s = 0u; s < BRIDGE_DSP_MAX_STAGES; ++s) {
-				adc_dsp_chains[i].stages[s].kind           = 0u;
-				adc_dsp_chains[i].stages[s].total_size     = 0u;
-				adc_dsp_chains[i].stages[s].bytes_received = 0u;
-				adc_dsp_chains[i].stages[s].complete       = false;
-			}
+			memset(adc_dsp_chains[i].stages, 0, sizeof(adc_dsp_chains[i].stages));
 			adc_dsp_chains[i].in_use = true;
 			adc_dsp_chains[i].bound  = false;
 			*chain_id                = i;
@@ -130,6 +127,20 @@ int bridge_hw_adc_dsp_chain_open(uint8_t *chain_id)
      * wire -- what's missing is a NOMEM-equivalent BRIDGE_HW_ERR_*
      * here in hal/bridge_hw.h for this path. */
 	return BRIDGE_HW_ERR_NOTIMPL;
+}
+
+static bool adc_dsp_stage_byte_received(const adc_dsp_stage_t *st, size_t offset)
+{
+	const uint8_t mask = (uint8_t)(1u << (offset % 8u));
+
+	return (st->coverage[offset / 8u] & mask) != 0u;
+}
+
+static void adc_dsp_stage_mark_byte_received(adc_dsp_stage_t *st, size_t offset)
+{
+	const uint8_t mask = (uint8_t)(1u << (offset % 8u));
+
+	st->coverage[offset / 8u] |= mask;
 }
 
 int bridge_hw_adc_dsp_stage_push(uint8_t        chain_id,
@@ -172,32 +183,47 @@ int bridge_hw_adc_dsp_stage_push(uint8_t        chain_id,
 
 	adc_dsp_stage_t *st = &chain->stages[stage_index];
 
-	if (chunk_offset == 0u) {
-		/* First chunk of this stage.  Seed `kind` + `total_size`;
-         * any subsequent chunks must agree with these values so a
-         * mid-upload re-target of the stage is caught as INVAL. */
+	if (st->total_size == 0u) {
+		/* Chunks may arrive in any order.  The first one observed seeds
+         * kind + total_size; every later chunk must agree. */
 		st->kind           = kind;
 		st->total_size     = chunk_total_size;
 		st->bytes_received = 0u;
 		st->complete       = false;
 	} else {
-		/* Continuation chunk.  The host must keep the same kind +
-         * total_size as the first chunk of this (chain, stage)
-         * pair -- otherwise the buffer would be a mix of two
-         * different stage payloads. */
-		if (st->total_size == 0u) return BRIDGE_HW_ERR_INVAL; /* stage not yet opened */
-		if (st->kind != kind) return BRIDGE_HW_ERR_INVAL;
-		if (st->total_size != chunk_total_size) return BRIDGE_HW_ERR_INVAL;
-		if (st->complete) return BRIDGE_HW_ERR_INVAL; /* already done */
+		/* A zero-offset chunk with different metadata is the only
+		 * unambiguous request to restart this stage: same-metadata traffic
+		 * may instead be a transport replay and must remain idempotent.
+		 * Clear the whole object so the replacement cannot inherit payload
+		 * bytes or coverage from the abandoned upload. */
+		if (st->kind != kind || st->total_size != chunk_total_size) {
+			if (chunk_offset != 0u) return BRIDGE_HW_ERR_INVAL;
+			memset(st, 0, sizeof(*st));
+			st->kind       = kind;
+			st->total_size = chunk_total_size;
+		}
+	}
+
+	/* Validate every overlap before writing anything.  Exact replays are
+     * idempotent; a conflicting overlap rejects atomically, leaving both
+     * the payload and its coverage map untouched. */
+	for (size_t i = 0u; i < chunk_data_len; ++i) {
+		const size_t offset = (size_t)chunk_offset + i;
+
+		if (adc_dsp_stage_byte_received(st, offset) && st->data[offset] != chunk_data[i]) {
+			return BRIDGE_HW_ERR_INVAL;
+		}
 	}
 
 	for (size_t i = 0u; i < chunk_data_len; ++i) {
-		st->data[chunk_offset + i] = chunk_data[i];
+		const size_t offset = (size_t)chunk_offset + i;
+
+		if (adc_dsp_stage_byte_received(st, offset)) continue;
+		st->data[offset] = chunk_data[i];
+		adc_dsp_stage_mark_byte_received(st, offset);
+		++st->bytes_received;
 	}
-	st->bytes_received += (uint16_t)chunk_data_len;
-	if (st->bytes_received == st->total_size) {
-		st->complete = true;
-	}
+	st->complete = st->bytes_received == st->total_size;
 	return BRIDGE_HW_OK;
 }
 
