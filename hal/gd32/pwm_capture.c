@@ -287,6 +287,7 @@ int bridge_hw_pwm_capture_begin(uint8_t channel, uint8_t edge)
 
 	const gd32_pwm_ch_t *ch   = &pwm_channels[channel];
 	const uint16_t       unit = pwm_capture_unit(ch);
+	pwm_channel_claim(channel);
 
 	/* Stop the pad driving: the complementary output (CHxNEN) is what
      * feeds the MCH pad in COMPLEMENTARY mode.  The classic CHx output
@@ -406,6 +407,7 @@ int bridge_hw_pwm_capture_end(uint8_t channel)
 	gpio_output_options_set(ch->gpio_port, GPIO_OTYPE_PP, GPIO_OSPEED_12MHZ, ch->gpio_pin);
 	gpio_af_set(ch->gpio_port, ch->gpio_af, ch->gpio_pin);
 	pwm_channel_init(ch);
+	pwm_channel_release(channel);
 
 	pwm_capture[channel].in_capture = false;
 	return BRIDGE_HW_OK;

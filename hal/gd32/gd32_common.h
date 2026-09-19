@@ -360,6 +360,8 @@ void     adc_apply_conv_format(uint32_t periph, uint8_t channel); /* adc.c */
 void     qenc_channel_init(const gd32_qenc_t *e);                 /* qenc.c */
 void     pwm_timer_init(uint32_t periph);                         /* pwm.c */
 void     pwm_channel_init(const gd32_pwm_ch_t *ch);               /* pwm.c */
+void     pwm_channel_claim(uint8_t channel);                      /* pwm.c */
+void     pwm_channel_release(uint8_t channel);                    /* pwm.c */
 void     se_reset_init(void);                                     /* se_reset.c */
 
 /* Per-timer CAR shadow-promotion tracking (pwm_capture.c owns the

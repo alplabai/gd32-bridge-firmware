@@ -348,7 +348,10 @@ int bridge_hw_pwm_capture_end(uint8_t channel);
  * the timer + programming period = pulse_ns.  The PWM stays in
  * one-pulse mode until the next bridge_hw_pwm_set call switches it
  * back to continuous output (that call also re-enables the timer if a
- * prior single pulse left it halted).  pulse_ns == 0 answers
+ * prior single pulse left it halted).  Because the GD32's one-pulse mode
+ * and period register belong to the whole timer, this answers
+ * BRIDGE_HW_ERR_BUSY when a sibling channel has a continuous PWM output or
+ * an active capture session.  pulse_ns == 0 answers
  * BRIDGE_HW_ERR_RANGE; the widest pulse the 16-bit timer can produce is
  * 65535 us (65535000 ns) -- a wider request answers BRIDGE_HW_ERR_RANGE
  * rather than silently firing a shorter pulse than commanded. */
