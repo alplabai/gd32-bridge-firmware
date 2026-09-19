@@ -31,14 +31,16 @@
  *   E1M ENC3  X=PB2  Y=PA1  TIMER4  CH0/CH1  AF2
  *
  * TIMER1 + TIMER4 are 32-bit counters on the GD32G5x3; TIMER2 +
- * TIMER3 are 16-bit.  bridge_hw_qenc_read returns the raw counter
- * cast to int32_t -- the host handles wrap detection via deltas. */
+ * TIMER3 are 16-bit.  bridge_hw_qenc_read() sign-extends the narrow
+ * (16-bit) timers from int16_t so a count backwards reads as a small
+ * negative value instead of wrapping to +65535; see the `wide` field
+ * below and gd32_qenc_t's comment in gd32_common.h. */
 
 const gd32_qenc_t qenc_map[] = {
-	[0] = { TIMER1, GPIOA, GPIO_PIN_0, GPIOB, GPIO_PIN_3, GPIO_AF_1 },
-	[1] = { TIMER2, GPIOC, GPIO_PIN_6, GPIOC, GPIO_PIN_7, GPIO_AF_2 },
-	[2] = { TIMER3, GPIOB, GPIO_PIN_6, GPIOB, GPIO_PIN_7, GPIO_AF_2 },
-	[3] = { TIMER4, GPIOB, GPIO_PIN_2, GPIOA, GPIO_PIN_1, GPIO_AF_2 },
+	[0] = { TIMER1, GPIOA, GPIO_PIN_0, GPIOB, GPIO_PIN_3, GPIO_AF_1, true },
+	[1] = { TIMER2, GPIOC, GPIO_PIN_6, GPIOC, GPIO_PIN_7, GPIO_AF_2, false },
+	[2] = { TIMER3, GPIOB, GPIO_PIN_6, GPIOB, GPIO_PIN_7, GPIO_AF_2, false },
+	[3] = { TIMER4, GPIOB, GPIO_PIN_2, GPIOA, GPIO_PIN_1, GPIO_AF_2, true },
 };
 _Static_assert(sizeof(qenc_map) / sizeof(qenc_map[0]) == QENC_CHANNEL_COUNT,
                "qenc_map size must match QENC_CHANNEL_COUNT");
@@ -76,12 +78,16 @@ int bridge_hw_qenc_read(uint8_t encoder, int32_t *position)
 	if (position == 0) return BRIDGE_HW_ERR_INVAL;
 	*position = 0;
 	if (encoder >= QENC_CHANNEL_COUNT) return BRIDGE_HW_ERR_RANGE;
-	/* Cast the raw counter (uint32_t) to int32_t.  For 16-bit timers
-     * (TIMER2, TIMER3) the upper bits read zero so the value is
-     * always positive; for 32-bit timers (TIMER1, TIMER4) the value
-     * wraps the full int32_t range.  The host detects wraps via
-     * deltas. */
-	*position = (int32_t)timer_counter_read(qenc_map[encoder].timer_periph);
+	/* TIMER1 and TIMER4 (encoders 0, 3) are 32-bit counters -- the
+     * raw uint32_t IS the signed count and casting straight to
+     * int32_t is correct.  TIMER2 and TIMER3 (encoders 1, 2) are
+     * 16-bit counters, so their upper 16 bits always read zero; a
+     * plain (int32_t) cast would report a count backwards from zero
+     * as +65535 instead of -1.  Route the 16-bit timers through an
+     * (int32_t)(int16_t)(uint16_t) chain instead, which sign-extends
+     * the 16-bit two's-complement value the way the timer intends. */
+	const uint32_t raw = timer_counter_read(qenc_map[encoder].timer_periph);
+	*position          = qenc_map[encoder].wide ? (int32_t)raw : (int32_t)(int16_t)(uint16_t)raw;
 	return BRIDGE_HW_OK;
 }
 
