@@ -75,11 +75,11 @@ enum {
  * newest record's slot fails validation, and once that happens the
  * newest metadata names a slot that is not running.
  *
- * The #error below is the point, not a formality: if issue #2's dual-bank
- * boundary fix ever relocates OTA_SLOT_A_BASE/OTA_SLOT_B_BASE without a
- * matching CMakeLists.txt update (or vice versa), the build fails loudly
- * here instead of this guard silently going dead or resolving to the
- * wrong slot. */
+ * The #error below remains defence in depth for non-CMake consumers and
+ * manual overrides.  The production CMake build parses both bases from
+ * ota_layout.h, and app_slot_base.S plus the slot linker's ASSERT separately
+ * prove that this compiled macro equals the image's actual FLASH origin
+ * (#78). */
 #if !defined(BRIDGE_APP_SLOT_BASE)
 #error \
     "BRIDGE_OTA_PARTITIONED requires BRIDGE_APP_SLOT_BASE (see CMakeLists.txt: gd32-bridge-slot-a / gd32-bridge-slot-b)"
@@ -109,7 +109,7 @@ static uint32_t s_fw_version;   /* from OTA_BEGIN v0.7 form (packed
 static uint8_t  s_err;
 
 /* Background slot-erase progress (#770).  BEGIN must NOT erase the whole
- * 236 KB slot inline: that is a ~1 s RAMFUNC loop with the SPI slave
+ * 216 KB slot inline: that is a ~1 s RAMFUNC loop with the SPI slave
  * unserviced, so the BEGIN reply is lost and the host's ota_begin() hangs.
  * Instead BEGIN arms the erase (state=BUSY) and acks immediately; the main
  * loop's ota_erase_tick() erases ONE OTA_PAGE_SIZE region per tick (~8 ms
@@ -397,13 +397,11 @@ h_begin(const uint8_t *req, size_t len, uint8_t *reply, size_t cap, size_t *rlen
      * actual safety property ("will this erase touch what I execute") and
      * would still catch a future geometry bug that makes the erase range
      * and the running range overlap without their bases changing.  This
-     * is an ADDRESS-RANGE check ONLY -- it does NOT catch flash-BANK
-     * aliasing.  Issue #2's hazard is exactly that: slot A's tail
-     * (0x08040000..0x08045000) shares bank 1 with slot B while the two
-     * slot RANGES stay adjacent and disjoint (A ends where B begins), so
-     * this intersection test reads false and does not fire for #2's
-     * situation; a bank-overlap guard belongs to #2's (and #37's) fix,
-     * not this one.  If this ever trips, refuse: the erase has not been
+	 * is an ADDRESS-RANGE check ONLY -- it does not itself reason about
+	 * flash banks.  ota_layout.h and the slot linker script independently
+	 * assert that each slot stays wholly within one physical bank (#2),
+	 * while this runtime check protects against future range selection
+	 * mistakes.  If this ever trips, refuse: the erase has not been
      * armed yet at this point, so refusing here costs nothing new.  Note
      * s_err=7u on trip is currently UNREADABLE by the host: s_err is
      * written at several sites in this file but read nowhere in this

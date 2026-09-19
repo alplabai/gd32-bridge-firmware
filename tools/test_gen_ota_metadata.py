@@ -48,6 +48,17 @@ GOOD_MSP = 0x20010000  # inside [0x20000000, 0x20040000], word-aligned
 GOOD_RESET = gom.OTA_SLOT_A_BASE | 1  # Thumb bit set, base itself
 
 
+class LayoutContract(unittest.TestCase):
+    """The two OTA images must remain in separate physical flash banks."""
+
+    def test_slots_meet_at_bank_boundary(self) -> None:
+        self.assertEqual(gom.OTA_SLOT_A_BASE + gom.OTA_SLOT_SIZE,
+                         gom.OTA_FMC_BANK1_BASE)
+        self.assertEqual(gom.OTA_SLOT_B_BASE, gom.OTA_FMC_BANK1_BASE)
+        self.assertLessEqual(gom.OTA_SLOT_B_BASE + gom.OTA_SLOT_SIZE,
+                             gom.OTA_FLASH_END)
+
+
 class CheckBootable(unittest.TestCase):
     def test_good_image_accepted(self) -> None:
         img = _image(GOOD_MSP, GOOD_RESET, pad_to=64)
@@ -83,6 +94,10 @@ class CheckBootable(unittest.TestCase):
         img += b"\xff" * gom.OTA_SLOT_SIZE  # push length past OTA_SLOT_SIZE
         with self.assertRaisesRegex(ValueError, "must be within"):
             gom.build_record(0, 1, img, 0)
+
+    def test_exact_slot_size_accepted_by_build_record(self) -> None:
+        img = _image(GOOD_MSP, GOOD_RESET, pad_to=gom.OTA_SLOT_SIZE)
+        gom.build_record(0, 1, img, 0)  # must not raise
 
 
 class BuildRecordCrc(unittest.TestCase):

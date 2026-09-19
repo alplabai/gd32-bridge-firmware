@@ -14,8 +14,9 @@
  *
  *   0x08000000  bootloader   32 KB   (never erased by OTA)
  *   0x08008000  metadata      8 KB   (A/B records, one per page)
- *   0x0800A000  slot A      236 KB
- *   0x08045000  slot B      236 KB
+ *   0x0800A000  slot A      216 KB   (ends at the bank boundary)
+ *   0x08040000  slot B      216 KB   (starts at the bank boundary)
+ *   0x08076000  reserved     40 KB
  *   0x08080000  end
  *
  * NOTE: OTA self-flashing needs the partitioned bootloader layout
@@ -42,9 +43,20 @@
 #define OTA_META_BASE       0x08008000u
 #define OTA_META_SIZE       0x00002000u /* 8 KB = 4 pages */
 #define OTA_SLOT_A_BASE     0x0800A000u
-#define OTA_SLOT_B_BASE     0x08045000u
-#define OTA_SLOT_SIZE       0x0003B000u /* 236 KB */
+#define OTA_SLOT_B_BASE     0x08040000u
+#define OTA_SLOT_SIZE       0x00036000u /* 216 KB */
+#define OTA_FMC_BANK1_BASE  0x08040000u
 #define OTA_FLASH_END       0x08080000u
+
+/* The GD32G553's dual-bank read-while-write safety only helps when the
+ * running image and erase target occupy different banks.  Keep each slot
+ * wholly on one side of the bank boundary: adjacent address ranges alone
+ * are not sufficient, because the old slot A crossed into bank 1 (#2). */
+_Static_assert(OTA_SLOT_A_BASE + OTA_SLOT_SIZE <= OTA_FMC_BANK1_BASE,
+               "OTA slot A crosses into flash bank 1");
+_Static_assert(OTA_SLOT_B_BASE >= OTA_FMC_BANK1_BASE, "OTA slot B starts in flash bank 0");
+_Static_assert(OTA_SLOT_A_BASE + OTA_SLOT_SIZE <= OTA_SLOT_B_BASE, "OTA slots overlap");
+_Static_assert(OTA_SLOT_B_BASE + OTA_SLOT_SIZE <= OTA_FLASH_END, "OTA slot B exceeds flash");
 
 /* Two metadata records on separate pages -- a power-fail-safe A/B commit.
  * meta_commit() in ota.c chooses which page to erase + overwrite BY RANK

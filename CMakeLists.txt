@@ -275,23 +275,46 @@ else()
     endif()
     message(STATUS "gd32-bridge: OTA Path-A ARMED (bootloader + A/B slots) -- HIL-gated; A->B + rollback validated, B->A untested")
 
-    set(APP_SLOT_LEN 0x0003B000)   # 236 KB per slot (ota_layout.h)
-    set(APP_SLOT_BASE 0x0800A000)  # slot A
-    configure_file(${CMAKE_SOURCE_DIR}/toolchain/gd32g553_app_slot.ld.in
-                   ${CMAKE_BINARY_DIR}/gd32g553_slot_a.ld @ONLY)
-    set(APP_SLOT_BASE 0x08045000)  # slot B
-    configure_file(${CMAKE_SOURCE_DIR}/toolchain/gd32g553_app_slot.ld.in
-                   ${CMAKE_BINARY_DIR}/gd32g553_slot_b.ld @ONLY)
+    # ota_layout.h is the source of truth for slot geometry.  Parse the
+    # simple hexadecimal defines here instead of copying their values into
+    # the build, and reconfigure whenever the header changes.
+    set(_OTA_LAYOUT_H ${CMAKE_CURRENT_SOURCE_DIR}/src/ota_layout.h)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_OTA_LAYOUT_H})
+    foreach(_constant IN ITEMS OTA_SLOT_A_BASE OTA_SLOT_B_BASE OTA_SLOT_SIZE)
+        file(STRINGS ${_OTA_LAYOUT_H} _constant_line
+             REGEX "^#define[ \t]+${_constant}[ \t]+0x[0-9A-Fa-f]+u")
+        list(LENGTH _constant_line _constant_count)
+        if(NOT _constant_count EQUAL 1)
+            message(FATAL_ERROR
+                "Could not parse exactly one ${_constant} hexadecimal define from ${_OTA_LAYOUT_H}")
+        endif()
+        string(REGEX REPLACE
+               "^#define[ \t]+${_constant}[ \t]+(0x[0-9A-Fa-f]+)u.*$" "\\1"
+               ${_constant} "${_constant_line}")
+    endforeach()
+    set(APP_SLOT_LEN ${OTA_SLOT_SIZE})
 
-    add_executable(gd32-bridge-slot-a ${GD32_BRIDGE_SOURCES})
-    gd32_firmware_target(gd32-bridge-slot-a ${CMAKE_BINARY_DIR}/gd32g553_slot_a.ld)
-    target_compile_definitions(gd32-bridge-slot-a PRIVATE
-        BRIDGE_OTA_PARTITIONED=1 BRIDGE_APP_SLOT_BASE=0x0800A000u)
+    # One base argument drives all three representations that must agree:
+    # the generated linker FLASH origin and the C macro used by VTOR/OTA.
+    # app_slot_base.S is preprocessed with that exact macro and exports it as
+    # an absolute linker symbol, so the linker ASSERT observes what the
+    # firmware compiler actually saw.  Keeping these in one helper removes
+    # the independently maintained literal pair that made a legal A/B swap
+    # invisible to the old compile-time checks (#78).
+    function(gd32_app_slot_target tgt slot_name slot_base)
+        set(APP_SLOT_BASE ${slot_base})
+        set(_linker_script ${CMAKE_BINARY_DIR}/gd32g553_slot_${slot_name}.ld)
+        configure_file(${CMAKE_SOURCE_DIR}/toolchain/gd32g553_app_slot.ld.in
+                       ${_linker_script} @ONLY)
 
-    add_executable(gd32-bridge-slot-b ${GD32_BRIDGE_SOURCES})
-    gd32_firmware_target(gd32-bridge-slot-b ${CMAKE_BINARY_DIR}/gd32g553_slot_b.ld)
-    target_compile_definitions(gd32-bridge-slot-b PRIVATE
-        BRIDGE_OTA_PARTITIONED=1 BRIDGE_APP_SLOT_BASE=0x08045000u)
+        add_executable(${tgt} ${GD32_BRIDGE_SOURCES} src/app_slot_base.S)
+        gd32_firmware_target(${tgt} ${_linker_script})
+        target_compile_definitions(${tgt} PRIVATE
+            BRIDGE_OTA_PARTITIONED=1 BRIDGE_APP_SLOT_BASE=${slot_base}u)
+    endfunction()
+
+    gd32_app_slot_target(gd32-bridge-slot-a a ${OTA_SLOT_A_BASE})
+    gd32_app_slot_target(gd32-bridge-slot-b b ${OTA_SLOT_B_BASE})
 
     add_executable(gd32-bootloader src/boot/boot_main.c src/crc32.c hal/gd32_libc_stubs.c)
     gd32_firmware_target(gd32-bootloader ${CMAKE_SOURCE_DIR}/toolchain/gd32g553_bootloader.ld)
