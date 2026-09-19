@@ -845,7 +845,7 @@ def build_vectors() -> list[tuple[str, str, str | None]]:
         spi_frame(SOF, STATUS_OK, bytes([0x00])).hex().upper(),
         "SOF | STATUS=0x00 | reason=0(UNKNOWN) | CRC -- the STUB HAL's"
         " bridge_hw_reset_reason() hardcodes 0u; on real hardware this"
-        " reads (and clears) the live MCU reset-cause flags, so this"
+        " reports the reset cause captured at boot, so this"
         " vector pins only the stub-backend value, not a representative"
         " live one",
     ))

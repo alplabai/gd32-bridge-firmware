@@ -165,6 +165,20 @@ target_compile_options(test_fault_diag PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_fault_diag PRIVATE ztest_shim)
 add_test(NAME fault_diag COMMAND test_fault_diag)
 
+# --- reset_reason: boot-time RCU_RSTSCK snapshot + diagnostic decode (#56) -
+#
+# The real backend reads this sticky, clear-on-RSTFC register exactly once at
+# boot.  The helper has no vendor-header dependency so these raw register
+# shaped values prove the documented power-on value cannot mask WDT/SW causes.
+add_executable(test_reset_reason
+    reset_reason/src/test_reset_reason.c
+    ${FW}/hal/gd32/reset_reason.c
+)
+target_include_directories(test_reset_reason PRIVATE ${FW}/hal/gd32)
+target_compile_options(test_reset_reason PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_reset_reason PRIVATE ztest_shim)
+add_test(NAME reset_reason COMMAND test_reset_reason)
+
 # --- timer_sync_iti: (slave, master) -> SYSCFG ITIx router code (gh#42) ----
 #
 # The lookup table has no vendor-register dependency, so it lives in its own

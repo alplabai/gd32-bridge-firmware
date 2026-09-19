@@ -454,13 +454,9 @@ void bridge_hw_fake_reset(void)
 
 uint8_t bridge_hw_reset_reason(void)
 {
-	/* DESTRUCTIVE READ, mirroring the CURRENT documented contract
-	 * (hal/bridge_hw.h:60-62, hal/gd32/init.c:440, src/protocol.c:139-140,
-	 * gh#56): capture, then latch back to 0 (UNKNOWN) so a second reader
-	 * in the same boot sees UNKNOWN, not the same event twice. */
-	const uint8_t v = s_reset_reason;
-	s_reset_reason  = 0u;
-	return v;
+	/* Mirrors the boot-snapshot contract in hal/bridge_hw.h: callers in one
+	 * boot observe the same retained reset cause. */
+	return s_reset_reason;
 }
 
 int bridge_hw_gpio_read(uint32_t mask, uint32_t *levels)

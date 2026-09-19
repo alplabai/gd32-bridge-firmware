@@ -18,15 +18,9 @@
  * firmware exercises against real silicon.
  *
  * State model, one line each:
- *   - Reset reason: one uint8_t, DESTRUCTIVE READ -- bridge_hw_reset_reason()
- *                   returns the captured value and latches it to 0
- *                   (UNKNOWN), mirroring the CURRENT documented contract
- *                   (hal/bridge_hw.h:60-62, hal/gd32/init.c:440,
- *                   src/protocol.c:139-140).  gh#56 (open) proposes
- *                   replacing this with a boot-snapshot, idempotent-within-
- *                   a-boot contract instead; if/when #56 lands, this fake
- *                   and this comment must flip in the SAME change, not
- *                   silently drift from whichever bridge_hw.h says.
+ *   - Reset reason: one uint8_t boot snapshot.  bridge_hw_reset_reason()
+ *                   returns the retained value every time, mirroring the
+ *                   idempotent contract in hal/bridge_hw.h and #56.
  *   - GPIO:        one 32-bit pad-level word (bridge_hw_gpio_write sets
  *                   under mask; bridge_hw_gpio_read reads back under mask).
  *   - PWM:         one { duty_ns, align_mode, dead_time_ns, break_cfg,
@@ -145,11 +139,8 @@ void bridge_hw_fake_force(bridge_hw_fake_fn_t fn, int rv);
 /* Reset-cause + DA9292 -- no error channel, so a plain setter each. */
 /* --------------------------------------------------------------- */
 
-/* Arms the value the NEXT bridge_hw_reset_reason() call returns.  That
- * call is DESTRUCTIVE (see this header's state-model block and gh#56) --
- * it latches back to 0 (UNKNOWN) as it returns, so a SECOND call without
- * an intervening bridge_hw_fake_set_reset_reason() reports 0, not the
- * value seeded here. */
+/* Sets the boot-snapshot value returned by bridge_hw_reset_reason().  Every
+ * later call returns it until a test resets or re-seeds this fake. */
 void bridge_hw_fake_set_reset_reason(uint8_t reason);
 void bridge_hw_fake_set_da9292_status(uint8_t status);
 

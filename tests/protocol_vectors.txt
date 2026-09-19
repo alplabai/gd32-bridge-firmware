@@ -178,7 +178,7 @@ spi_ping_reply_ok_seq5         = A55071A5
 spi_get_build_id_request       = A502C6DF
 # SOF | CMD=0x03 (RESET_REASON) | CRC -- empty payload
 spi_reset_reason_request       = A503E7CF
-# SOF | STATUS=0x00 | reason=0(UNKNOWN) | CRC -- the STUB HAL's bridge_hw_reset_reason() hardcodes 0u; on real hardware this reads (and clears) the live MCU reset-cause flags, so this vector pins only the stub-backend value, not a representative live one
+# SOF | STATUS=0x00 | reason=0(UNKNOWN) | CRC -- the STUB HAL's bridge_hw_reset_reason() hardcodes 0u; on real hardware this reports the reset cause captured at boot, so this vector pins only the stub-backend value, not a representative live one
 spi_reset_reason_reply_unknown = A50000F09A
 # SOF | CMD=0x10 | mask=0x00000001 (LE) | CRC -- reply (on the gd32 backend) is levels:u32(LE); see spi_reply_io for what the stub backend answers today
 spi_gpio_read_mask_bit0_request = A51001000000D7DE
