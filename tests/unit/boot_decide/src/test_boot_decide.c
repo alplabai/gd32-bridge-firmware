@@ -77,6 +77,13 @@ write_record(uint32_t address, uint32_t counter, uint8_t active_slot, uint8_t va
 	memcpy(flash_mut(address), &record, sizeof(record));
 }
 
+static void reseal_record(uint32_t address)
+{
+	ota_meta_record_t *record = (ota_meta_record_t *)flash_mut(address);
+	record->rec_crc32 =
+	    ota_crc32(0u, (const uint8_t *)record, offsetof(ota_meta_record_t, rec_crc32));
+}
+
 static void reset_model(void)
 {
 	memset(flash_model, 0, sizeof(flash_model));
@@ -148,6 +155,20 @@ ZTEST(gd32_bridge_boot_decide, test_invalid_active_or_descriptor_falls_back_to_o
 	reset_model();
 	write_record(OTA_META_REC0, 1u, OTA_SLOT_A, 0x03u);
 	write_record(OTA_META_REC1, 2u, OTA_SLOT_B, 0x01u);
+	assert_selected(OTA_SLOT_A_BASE);
+
+	reset_model();
+	write_record(OTA_META_REC0, 1u, OTA_SLOT_A, 0x03u);
+	write_record(OTA_META_REC1, 2u, OTA_SLOT_B, 0x03u);
+	((ota_meta_record_t *)flash_mut(OTA_META_REC1))->img_len[OTA_SLOT_B] = 0u;
+	reseal_record(OTA_META_REC1);
+	assert_selected(OTA_SLOT_A_BASE);
+
+	reset_model();
+	write_record(OTA_META_REC0, 1u, OTA_SLOT_A, 0x03u);
+	write_record(OTA_META_REC1, 2u, OTA_SLOT_B, 0x03u);
+	((ota_meta_record_t *)flash_mut(OTA_META_REC1))->img_len[OTA_SLOT_B] = OTA_SLOT_SIZE + 1u;
+	reseal_record(OTA_META_REC1);
 	assert_selected(OTA_SLOT_A_BASE);
 }
 
