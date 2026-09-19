@@ -75,15 +75,11 @@ set(TEST_FLAGS -std=c11 -Wall -Wextra -Werror)
 #
 # The two bases below are PARSED out of src/ota_layout.h -- the same
 # header ota.c includes -- rather than hand-copied, so this copy cannot
-# drift silently against it.  Two other independent copies of the same
-# numbers remain and are NOT derived here: the top-level CMakeLists.txt's
-# gd32-bridge-slot-a / gd32-bridge-slot-b BRIDGE_APP_SLOT_BASE compile
-# defines (:197,202) and APP_SLOT_BASE linker-script sets (:187,190) --
-# out of scope for this fix, and that file is explicitly not to be edited
-# here -- and OTA_SLOT_SIZE's separate copy in tools/gen_ota_metadata.py:34.
-# A mismatch in either of those still fails loudly: ota.c's own #error
-# chain rejects any BRIDGE_APP_SLOT_BASE that doesn't equal
-# OTA_SLOT_A_BASE/OTA_SLOT_B_BASE from the header.
+# drift silently against it.  The top-level CMakeLists.txt now parses the
+# same definitions, and its app_slot_base.S witness makes the linker verify
+# the compiled macro against the generated FLASH origin (#78).
+# OTA_SLOT_SIZE's separate copy in tools/gen_ota_metadata.py remains outside
+# this host-test setup.
 set(_OTA_LAYOUT_H ${FW}/src/ota_layout.h)
 file(STRINGS ${_OTA_LAYOUT_H} _OTA_SLOT_A_BASE_LINE
      REGEX "^#define[ \t]+OTA_SLOT_A_BASE[ \t]+0x[0-9A-Fa-f]+u")
