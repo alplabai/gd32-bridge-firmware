@@ -658,9 +658,23 @@ static gd32_bridge_status_t h_rollback(void)
 	    cur.img_len[other] > OTA_SLOT_SIZE) {
 		return STATUS_INVAL; /* no valid fallback slot */
 	}
+	/* A metadata valid-bit records what was true when that image was
+	 * committed, not a guarantee that its flash is still intact.  The
+	 * bootloader rechecks both of these properties on the next reset; do
+	 * the same BEFORE changing active_slot, or a host-commanded rollback
+	 * can select a damaged image and strand the part in boot recovery. */
+	uint32_t other_base;
+	if (!ota_slot_base_checked(other, &other_base)) {
+		return STATUS_INVAL; /* defensive: `other` is derived from an A/B value */
+	}
+	const uint8_t *other_img = (const uint8_t *)ota_fmc_flash_ptr(other_base);
+	if (ota_crc32(0u, other_img, cur.img_len[other]) != cur.img_crc32[other] ||
+	    !ota_image_bootable(other_base, other_img, cur.img_len[other])) {
+		return STATUS_INVAL;
+	}
 	/* Flip active to `other` WITHOUT touching the per-slot descriptors
-     * (update_entry=false): the bootloader validates the rolled-to slot
-     * against the len/CRC recorded when that slot was last committed. */
+	 * (update_entry=false): the descriptor was just revalidated above and
+	 * remains the bootloader's source of truth after reset. */
 	if (!meta_commit(other, false, 0u, 0u, 0u)) {
 		return STATUS_IO;
 	}
