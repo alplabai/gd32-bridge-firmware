@@ -56,6 +56,7 @@
 
 #include "bridge_board_config.h"
 #include "bridge_hw.h" /* BRIDGE_HW_OK / BRIDGE_HW_ERR_RANGE */
+#include "gd32/i2c_timeout.h"
 #include "protocol.h"  /* GD32_BRIDGE_DEFAULT_I2C_ADDR */
 #include "transport.h" /* the seams we drive */
 
@@ -460,8 +461,11 @@ int bridge_transport_i2c_hw_init(void)
 	rcu_periph_clock_enable(BRIDGE_I2C_RCU);
 	i2c_gpio_init();
 
-	uint32_t psc, scl_dely, sda_dely;
-	if (!i2c_timing_derive(rcu_clock_freq_get(CK_APB1), &psc, &scl_dely, &sda_dely)) {
+	const uint32_t apb1_hz = rcu_clock_freq_get(CK_APB1);
+	uint32_t       psc, scl_dely, sda_dely;
+	uint16_t       stretch_timeout_reload;
+	if (!i2c_timing_derive(apb1_hz, &psc, &scl_dely, &sda_dely) ||
+	    !bridge_i2c_stretch_timeout_reload(apb1_hz, &stretch_timeout_reload)) {
 		/* Refuse rather than clamp: no i2c_timing_config()/i2c_enable()
          * below, so I2C0 stays disabled and every access on the bus
          * gets a hard failure the host/analyser can see, instead of a
@@ -472,6 +476,19 @@ int bridge_transport_i2c_hw_init(void)
 	}
 	i2c_timing_config(BRIDGE_I2C_PERIPH, psc, scl_dely, sda_dely);
 	i2c_analog_noise_filter_enable(BRIDGE_I2C_PERIPH);
+
+	/* UM Rev1.2 §28.3.9/§28.4.6: both counters use
+	 * (reload + 1) * 2048 * tI2CCLK. A normal low-SCL timeout covers a
+	 * continuously stretched clock; the extended counter covers cumulative
+	 * slave extension. Program both before their enable bits lock the reload
+	 * fields, then let the already-enabled ERRIE path clear TIMEOUT and
+	 * resynchronise the framing. The manual specifies TIMEOUT as a flag, not
+	 * an automatic slave abort or SCL release; a stalled pad needs an explicit
+	 * disable/reinitialise recovery path, verified on silicon (#150). */
+	i2c_bus_timeout_a_config(BRIDGE_I2C_PERIPH, stretch_timeout_reload);
+	i2c_bus_timeout_b_config(BRIDGE_I2C_PERIPH, stretch_timeout_reload);
+	i2c_clock_timeout_enable(BRIDGE_I2C_PERIPH);
+	i2c_extented_clock_timeout_enable(BRIDGE_I2C_PERIPH);
 
 	i2c_address_config(
 	    BRIDGE_I2C_PERIPH, (uint32_t)GD32_BRIDGE_DEFAULT_I2C_ADDR << 1, I2C_ADDFORMAT_7BITS);
@@ -618,6 +635,15 @@ void BRIDGE_I2C_ER_HANDLER(void)
 	}
 	if (RESET != i2c_interrupt_flag_get(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_OUERR)) {
 		i2c_interrupt_flag_clear(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_OUERR);
+		bus_error = true;
+	}
+	if (RESET != i2c_interrupt_flag_get(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_TIMEOUT)) {
+		/* A timeout leaves the request/reply framing untrustworthy even
+		 * though the IP only exposes it as a status flag. Clear it and use
+		 * the same portable-side resynchronisation as a bus error; otherwise
+		 * the next address match can append to a transaction that timed out
+		 * while this handler was pre-empted. */
+		i2c_interrupt_flag_clear(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_TIMEOUT);
 		bus_error = true;
 	}
 

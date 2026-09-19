@@ -199,6 +199,21 @@ target_compile_options(test_timer_sync PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_timer_sync PRIVATE ztest_shim)
 add_test(NAME timer_sync COMMAND test_timer_sync)
 
+# --- i2c_timeout: clock-derived shared-bus stretch ceiling (#150) ---------
+#
+# The vendor I2C register calls are covered by the GD32 backend build; this
+# vendor-header-free helper pins the timeout arithmetic at both normal and
+# Deep-sleep APB1 clocks, so a later clock-tree change cannot silently turn
+# the 25 ms timeout-detection window into hundreds of milliseconds.
+add_executable(test_i2c_timeout
+    i2c_timeout/src/test_i2c_timeout.c
+    ${FW}/hal/gd32/i2c_timeout.c
+)
+target_include_directories(test_i2c_timeout PRIVATE ${FW}/hal/gd32)
+target_compile_options(test_i2c_timeout PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_i2c_timeout PRIVATE ztest_shim)
+add_test(NAME i2c_timeout COMMAND test_i2c_timeout)
+
 # --- gpio_grouped: production GPIO port grouping + promotion order (#198) --
 #
 # Links the real hal/gd32/gpio.c against a minimal register/API mock.  This
