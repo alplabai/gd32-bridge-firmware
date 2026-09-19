@@ -9,6 +9,17 @@
 
 #include "tmu_q31_scale.h"
 
+/* UM p.394 Table 14-26 lower bound: real x > 0.027.  This word is
+ * round(0.027 * 2^31) = 0x0374BC6A and represents 0.026999999769;
+ * the next word is the first Q31 value strictly above 0.027. */
+#define TMU_Q31_SQRT_MIN_THRESHOLD 0x0374BC6A
+
+int tmu_q31_sqrt_representable(uint32_t q31_operand)
+{
+	const int is_negative = (q31_operand & 0x80000000u) != 0u;
+	return !is_negative && q31_operand > TMU_Q31_SQRT_MIN_THRESHOLD;
+}
+
 /* UM p.394 Table 14-26 band boundary: real x = 0.75.
  * Q31 word = round(0.75 * 2^31). */
 #define TMU_Q31_SQRT_BAND1_THRESHOLD 0x60000000

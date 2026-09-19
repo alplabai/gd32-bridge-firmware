@@ -217,14 +217,14 @@ int bridge_hw_trng_read(uint8_t *dest, size_t len);
  * inputs outside the function's domain (e.g. sqrt(negative) in Q31)
  * and BRIDGE_HW_ERR_IO if the TMU flags a hardware fault.
  *
- * Q31 (format 0) is narrower than the IEEE-754 form for three modes,
+ * Q31 (format 0) is narrower than the IEEE-754 form for four modes,
  * because it is full-scale +-1.0 with no exponent/factor field on the
- * wire (alp-sdk docs/gd32-bridge-protocol.md SS3.12): BRIDGE_TMU_FN_SQRT is
- * unaffected (always representable), but BRIDGE_TMU_FN_SINH and
- * BRIDGE_TMU_FN_LOG (ln) also return BRIDGE_HW_ERR_RANGE in Q31 when
- * the operand's real result would not fit in signed Q31 -- |x| >=
- * asinh(1) (~0.8814) for sinh, x <= e^-1 (~0.3679) for ln.  Both are
- * unaffected in F32.  BRIDGE_TMU_FN_COSH returns BRIDGE_HW_ERR_NOTIMPL
+ * wire (alp-sdk docs/gd32-bridge-protocol.md SS3.12).  SQRT returns
+ * BRIDGE_HW_ERR_RANGE outside the manual's documented 0.027 < x < 1
+ * Q31 interval.  SINH and LOG (ln) return BRIDGE_HW_ERR_RANGE when the
+ * operand's real result would not fit in signed Q31 -- |x| >= asinh(1)
+ * (~0.8814) for sinh, x <= e^-1 (~0.3679) for ln.  These restrictions
+ * do not affect F32.  BRIDGE_TMU_FN_COSH returns BRIDGE_HW_ERR_NOTIMPL
  * in Q31 unconditionally: cosh(x) >= 1 for every x, so no Q31 operand
  * ever produces a representable result (F32 cosh is unaffected). */
 int bridge_hw_tmu_compute(uint8_t   function,

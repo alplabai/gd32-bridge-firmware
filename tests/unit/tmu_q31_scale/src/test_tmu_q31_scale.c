@@ -26,15 +26,31 @@ ZTEST(tmu_q31_scale, test_sqrt_band0_low)
 	 * (v2n-gd32-bridge-functional t_tmu_q31_sqrt) -- 0.25 < 0.75, so
 	 * FACTOR must stay f=0, exactly what the driver wrote
 	 * unconditionally before this fix broke it. */
+	zassert_true(tmu_q31_sqrt_representable(0x20000000u));
 	zassert_equal(tmu_q31_sqrt_factor(0x20000000u), 0u);
 }
 
-ZTEST(tmu_q31_scale, test_sqrt_band0_zero)
+ZTEST(tmu_q31_scale, test_sqrt_refuses_at_and_below_manual_floor)
 {
-	/* x=0: below the table's 0.027 accuracy floor, but nothing in the
-	 * general constraint (x/2^f < 1-1/2^(f+2)) sets a lower bound --
-	 * f=0 stays correct, sqrt(0)=0 stays representable. */
-	zassert_equal(tmu_q31_sqrt_factor(0x00000000u), 0u);
+	/* round(0.027 * 2^31) = 0x0374BC6A.  The rounded word is still
+	 * slightly below 0.027, so it and its predecessor are outside the
+	 * manual's strict 0.027 < x band. */
+	zassert_false(tmu_q31_sqrt_representable(0x0374BC69u));
+	zassert_false(tmu_q31_sqrt_representable(0x0374BC6Au));
+}
+
+ZTEST(tmu_q31_scale, test_sqrt_accepts_just_above_manual_floor)
+{
+	/* One Q31 ULP above the rounded threshold is the first encoded value
+	 * strictly greater than 0.027, and remains in FACTOR band f=0. */
+	zassert_true(tmu_q31_sqrt_representable(0x0374BC6Bu));
+	zassert_equal(tmu_q31_sqrt_factor(0x0374BC6Bu), 0u);
+}
+
+ZTEST(tmu_q31_scale, test_sqrt_refuses_zero_and_negative)
+{
+	zassert_false(tmu_q31_sqrt_representable(0x00000000u));
+	zassert_false(tmu_q31_sqrt_representable(0x80000000u)); /* -1.0 */
 }
 
 ZTEST(tmu_q31_scale, test_sqrt_band0_upper_boundary)
@@ -56,17 +72,6 @@ ZTEST(tmu_q31_scale, test_sqrt_band1_near_one)
 	 * highest operand this wire format can ever present -- still
 	 * squarely inside band 1 (band 1 covers up to x<1.75). */
 	zassert_equal(tmu_q31_sqrt_factor(0x7FFFFFFFu), 1u);
-}
-
-ZTEST(tmu_q31_scale, test_sqrt_negative_defaults_to_band0)
-{
-	/* A negative operand is an invalid sqrt() domain -- caught by the
-	 * TMU's hardware OVRF flag in bridge_hw_tmu_compute(), not here.
-	 * This function must still return SOME factor rather than crash;
-	 * f=0 matches the unconditional FACTOR this driver wrote for every
-	 * mode before the FACTOR fix, so the already-verified negative-
-	 * input rejection path is unaffected by this change. */
-	zassert_equal(tmu_q31_sqrt_factor(0x80000000u), 0u); /* -1.0 */
 }
 
 /* ---- LN (UM p.393 Table 14-23) ---------------------------------------- */
