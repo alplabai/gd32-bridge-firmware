@@ -374,8 +374,8 @@ int bridge_hw_adc_dsp_chain_bind(uint8_t chain_id, uint8_t stream_id)
 		}
 	} else if (window_index != BRIDGE_DSP_MAX_STAGES) {
 		/* WINDOW without a terminating FFT has no defined meaning in
-         * the filtered-samples path -- reject per alp-sdk
-         * docs/gd32-bridge-protocol.md §3.x. */
+		 * the filtered-samples path -- reject per
+		 * alp-sdk docs/gd32-bridge-protocol.md §3.x. */
 		return BRIDGE_HW_ERR_INVAL;
 	}
 

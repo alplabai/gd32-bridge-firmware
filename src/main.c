@@ -18,7 +18,7 @@
  * the Renesas (P37/P36), the GD32 has no pin to sample and no I2C
  * path to the PMIC, so CMD_DA9292_STATUS_FORWARD serves the 0xFF
  * "no sample" sentinel.  Register-level PMIC status (PMC_STATUS_00
- * etc.) is read by the host over BRD_I2C via the chips/da9292 driver.
+ * etc.) is read by the host over BRD_I2C via the alp-sdk chips/da9292 driver.
  *
  * Backends: BRIDGE_HAL_BACKEND=gd32 drives real silicon (peripheral
  * HAL in the per-peripheral TUs under hal/gd32/, SPI1 + I2C0 slave

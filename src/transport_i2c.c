@@ -4,7 +4,7 @@
  *
  * gd32-bridge firmware: I2C-slave transport.
  *
- * Wire framing (see ../docs/gd32-bridge-protocol.md §5):
+ * Wire framing (see alp-sdk docs/gd32-bridge-protocol.md §5):
  *
  *   WRITE: [S+ADDR+W] reg=0x00 CMD PAYLOAD CRC(CMD..PAYLOAD)
  *   READ : [S+ADDR+R] STATUS  PAYLOAD CRC(STATUS..PAYLOAD)

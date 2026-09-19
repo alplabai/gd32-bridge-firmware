@@ -376,7 +376,7 @@ int bridge_hw_adc_stream_read(uint8_t   stream_id,
 		s->total_read           = s->lap_count * BRIDGE_ADC_STREAM_RING_SAMPLES + (uint32_t)w;
 		s->pump_raw_read        = s->total_read;
 		/* Same wire contract as the ring-overrun branch below
-		 * (docs/gd32-bridge-protocol.md §3.10): STATUS_BUSY, "poll
+		 * (alp-sdk docs/gd32-bridge-protocol.md §3.10): STATUS_BUSY, "poll
 		 * faster".  A failed recalibration is the harder failure --
 		 * report IO so the host doesn't keep polling a converter left
 		 * in an unproven state. */
@@ -442,7 +442,7 @@ int bridge_hw_adc_stream_read(uint8_t   stream_id,
 	     * beat).  Drop the corrupt backlog and resynchronise the
 	     * cursor to the live write position so the NEXT read returns
 	     * fresh, gap-free samples; answer BUSY so the host learns
-	     * samples were lost (docs/gd32-bridge-protocol.md §3.10: ring
+	     * samples were lost (alp-sdk docs/gd32-bridge-protocol.md §3.10: ring
 	     * overrun -> STATUS_BUSY, "poll faster"). */
 		s->read_idx   = w;
 		s->total_read = total_written;

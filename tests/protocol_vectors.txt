@@ -128,7 +128,7 @@ spi_adc_dsp_chain_bind_probe_request = A5390000C789
 
 # ---------------------------------------------------------------------
 # §11. OTA Path-A opcodes (0xF0..0xF6) -- in-system upgrade over the
-#       bridge (docs/gd32-bridge-protocol.md §10 Path A).  Unarmed
+#       bridge (alp-sdk docs/gd32-bridge-protocol.md §10 Path A).  Unarmed
 #       firmware replies STATUS_NOSUPPORT to every OTA opcode.
 # ---------------------------------------------------------------------
 # SOF | CMD=0xF0 | size=41976 (LE 0x0000A3F8) | expected_crc32=0xDEADBEEF (LE) | CRC

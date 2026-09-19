@@ -2,7 +2,7 @@
  * Copyright 2026 Alp Lab AB
  * SPDX-License-Identifier: Apache-2.0
  *
- * Hardware-abstraction shim consumed by firmware/gd32-bridge/src/protocol.c.
+ * Hardware-abstraction shim consumed by src/protocol.c.
  * Each function maps an opcode-level operation onto the GigaDevice
  * firmware library (timer / GPIO / ADC / DAC / etc.).
  *
@@ -221,7 +221,7 @@ int bridge_hw_trng_read(uint8_t *dest, size_t len);
  *
  * Q31 (format 0) is narrower than the IEEE-754 form for three modes,
  * because it is full-scale +-1.0 with no exponent/factor field on the
- * wire (docs/gd32-bridge-protocol.md SS3.12): BRIDGE_TMU_FN_SQRT is
+ * wire (alp-sdk docs/gd32-bridge-protocol.md SS3.12): BRIDGE_TMU_FN_SQRT is
  * unaffected (always representable), but BRIDGE_TMU_FN_SINH and
  * BRIDGE_TMU_FN_LOG (ln) also return BRIDGE_HW_ERR_RANGE in Q31 when
  * the operand's real result would not fit in signed Q31 -- |x| >=
@@ -281,9 +281,10 @@ int bridge_hw_counter_read(uint8_t counter, uint32_t *ticks);
  * path to the PMIC), so this returns the 0xFF sentinel unconditionally
  * (schematic-verified 2026-06-04).  The packing is reserved for a
  * future HW rev that mirrors the nets onto GD32 inputs.  Today the
- * host samples the pins directly (chips/da9292 da9292_get_fault_pins(),
+ * host samples the pins directly (alp-sdk chips/da9292,
+ * da9292_get_fault_pins(),
  * same packing) and reads PMC_STATUS_00 etc. over BRD_I2C via
- * chips/da9292. */
+ * alp-sdk chips/da9292. */
 uint8_t bridge_hw_da9292_status_cached(void);
 
 /* --------------------------------------------------------------- */
@@ -407,7 +408,7 @@ int bridge_hw_adc_dsp_chain_open(uint8_t *chain_id);
  * `GD32G553_BRIDGE_ADC_DSP_MAX_STAGE_BYTES`; the per-stage assembly
  * is complete when the host has covered `[0, chunk_total_size)`.
  * The eventual per-kind layouts the firmware decodes are documented
- * in `docs/gd32-bridge-protocol.md` §3.x. */
+ * in alp-sdk `docs/gd32-bridge-protocol.md` §3.x. */
 int bridge_hw_adc_dsp_stage_push(uint8_t        chain_id,
                                  uint8_t        stage_index,
                                  uint8_t        kind,

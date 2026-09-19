@@ -2,7 +2,7 @@
 # Copyright 2026 Alp Lab AB
 # SPDX-License-Identifier: Apache-2.0
 """
-Regenerate firmware/gd32-bridge/tests/protocol_vectors.txt.
+Regenerate tests/protocol_vectors.txt.
 
 This script is the authoritative source-of-truth for the canonical
 wire vectors consumed by BOTH sides of the bridge protocol, which now
@@ -67,7 +67,7 @@ def spi_frame(framing_byte: int, op_or_status: int, payload: bytes = b"") -> byt
 def i2c_write(cmd: int, payload: bytes = b"") -> bytes:
     """Build an I2C write envelope.
 
-    Wire layout per docs/gd32-bridge-protocol.md §5: the host clocks
+    Wire layout per alp-sdk docs/gd32-bridge-protocol.md §5: the host clocks
     `<reg-addr=0x00> CMD PAYLOAD CRC(2)` after the I2C
     `S | ADDR | W` envelope.  CRC covers `CMD | PAYLOAD` only and is
     transmitted low byte first (see spi_frame's docstring, issue #68).
@@ -619,7 +619,7 @@ def build_vectors() -> list[tuple[str, str, str | None]]:
     # is what the customer wants.  Portable surfaces in <alp/adc.h>
     # (alp_adc_filter_t / alp_adc_spectrum_t) and <alp/dsp.h>
     # (alp_dsp_chain_t).  Wire format documented in
-    # docs/gd32-bridge-protocol.md §3.x.  Firmware default-case
+    # alp-sdk docs/gd32-bridge-protocol.md §3.x.  Firmware default-case
     # dispatch returns STATUS_NOSUPPORT for all three opcodes until
     # the bridge_hw_adc_dsp_* HAL bodies land.  Representative probe
     # vectors below: CHAIN_OPEN with no payload, STAGE_PUSH carrying
@@ -666,7 +666,7 @@ def build_vectors() -> list[tuple[str, str, str | None]]:
     ))
 
     # ----- §11. OTA Path-A opcodes (0xF0..0xF6) ----------------------
-    # Payload layouts per docs/gd32-bridge-protocol.md §10 / src/ota.c.
+    # Payload layouts per alp-sdk docs/gd32-bridge-protocol.md §10 / src/ota.c.
     # Unarmed firmware (no -DBRIDGE_OTA_PARTITIONED) replies
     # STATUS_NOSUPPORT to every OTA opcode; the vectors lock the
     # request framing and the armed-firmware reply layouts.
@@ -1101,7 +1101,7 @@ def emit(vectors: list[tuple[str, str, str | None]]) -> str:
     # ----- §11 block -------------------------------------------------
     chunks.append("\n# ---------------------------------------------------------------------")
     chunks.append("# §11. OTA Path-A opcodes (0xF0..0xF6) -- in-system upgrade over the")
-    chunks.append("#       bridge (docs/gd32-bridge-protocol.md §10 Path A).  Unarmed")
+    chunks.append("#       bridge (alp-sdk docs/gd32-bridge-protocol.md §10 Path A).  Unarmed")
     chunks.append("#       firmware replies STATUS_NOSUPPORT to every OTA opcode.")
     chunks.append("# ---------------------------------------------------------------------")
     for name, value, comment in vectors[31:44]:

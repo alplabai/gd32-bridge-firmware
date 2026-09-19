@@ -22,7 +22,7 @@
 /* ----------------------------------------------------------------- */
 
 /* E1M PWM channel -> GD32 (timer, channel, output kind, pad, AF).
- * Sourced from `metadata/e1m_modules/v2n/gd32-io-mcu-map.tsv` for the
+ * Sourced from alp-sdk `metadata/e1m_modules/v2n/gd32-io-mcu-map.tsv` for the
  * pad column; AF + timer-channel from the GD32G553xx Datasheet Rev2.0
  * Tables 2-10..2-13 (pin alternate-function summary).
  *
