@@ -184,6 +184,29 @@ ZTEST(gd32_bridge_transport, test_mangled_request_stages_io_error)
 	zassert_equal(buf[1], 0x05u, "STATUS_IO");
 }
 
+/* A hardware RX overrun is not a malformed request we can safely decode:
+ * bytes may be missing entirely.  It must replace any previous reply with a
+ * fresh STATUS_IO envelope, so the host retries instead of accepting a stale
+ * reply from the transaction that preceded the overrun. */
+ZTEST(gd32_bridge_transport, test_rx_fault_replaces_staged_reply)
+{
+	uint8_t buf[80];
+
+	transport_spi_init();
+	transaction(ping_frame, sizeof ping_frame);
+	(void)hal_drain(buf, sizeof buf);
+
+	spi_slave_rx_fault();
+	size_t n = hal_drain(buf, sizeof buf);
+
+	zassert_equal(n, 4u, "error reply is the empty envelope");
+	zassert_equal(buf[0], 0xA5u, "SOF");
+	zassert_equal(buf[1], 0x05u, "STATUS_IO");
+	const uint16_t crc = crc16_ccitt_false(buf, 2u);
+	zassert_equal(buf[2], (uint8_t)(crc & 0xFFu), "CRC lo");
+	zassert_equal(buf[3], (uint8_t)(crc >> 8), "CRC hi");
+}
+
 /* ------------------------------------------------------------------ */
 /* v0.7 STATUS_SEQ -- the stale-reply kill (silicon-fingerprinted      */
 /* 2026-06-06: byte-exact replays on back-to-back identical frames).   */
@@ -208,8 +231,7 @@ static void negotiate(uint8_t feat)
 ZTEST(gd32_bridge_transport, test_status_seq_stamp_contract)
 {
 	uint8_t       buf[80];
-	const uint8_t zeros[4]   = { 0 };
-	const uint8_t garbage[5] = { 0x00u, 0xA5u, 0x12u, 0x34u, 0x56u };
+	const uint8_t zeros[4] = { 0 };
 
 	transport_spi_init();
 
@@ -245,8 +267,8 @@ ZTEST(gd32_bridge_transport, test_status_seq_stamp_contract)
 	n = hal_drain(buf, sizeof buf);
 	zassert_equal(buf[1], 0x30u, "stamp=3 after the next decode");
 
-	/* ...and a framing-error envelope is a fresh decode too. */
-	transaction(garbage, sizeof garbage);
+	/* ...and an RX-fault envelope is fresh too. */
+	spi_slave_rx_fault();
 	n = hal_drain(buf, sizeof buf);
 	zassert_equal(n, 4u, "error envelope");
 	zassert_equal(buf[1], 0x45u, "stamp=4, code=STATUS_IO");
