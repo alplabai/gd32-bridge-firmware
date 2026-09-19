@@ -45,11 +45,9 @@
 /*   owner is adopted alongside a CI-enforced single-writer rule.   */
 /*                                                                  */
 /* * Both DMA controllers (DMA0 + DMA1, 7 channels each) are        */
-/*   available -- bind one ADC stream's DMA to DMA0 channel 1 and   */
-/*   the other to DMA1 channel 1 so they can run truly concurrently.*/
-/*   The bridge transports themselves (SPI / I2C) can also DMA-back */
-/*   their RX/TX FIFOs to free the CPU during bridge handler        */
-/*   bodies.                                                         */
+/*   available.  As built, ADC stream 0 owns DMA0 CH0 and stream 1  */
+/*   owns DMA1 CH0, so they run concurrently; the SPI transport owns */
+/*   DMA0 CH2 (TX) and CH3 (RX), while I2C remains interrupt-driven. */
 /* --------------------------------------------------------------- */
 
 /* Negative return values from any bridge_hw_* call.  Positive return
@@ -404,9 +402,9 @@ int bridge_hw_adc_dsp_chain_open(uint8_t *chain_id);
  * named chain at @p stage_index.  @p kind is one of FIR=0, IIR=1,
  * WINDOW=2, FFT=3 (mirrors @c alp_dsp_stage_kind_t).  The firmware
  * accumulates chunks at @p chunk_offset byte positions within an
- * internal `[chain_id][stage_index]` buffer of size
- * `GD32G553_BRIDGE_ADC_DSP_MAX_STAGE_BYTES`; the per-stage assembly
- * is complete when the host has covered `[0, chunk_total_size)`.
+ * internal `[chain_id][stage_index]` buffer of 260 bytes
+ * (`BRIDGE_DSP_MAX_STAGE_BYTES` in hal/gd32/adc_stream.c); the per-stage
+ * assembly is complete when the host has covered `[0, chunk_total_size)`.
  * The eventual per-kind layouts the firmware decodes are documented
  * in alp-sdk `docs/gd32-bridge-protocol.md` §3.x. */
 int bridge_hw_adc_dsp_stage_push(uint8_t        chain_id,

@@ -145,15 +145,11 @@
 
 #include "bridge_hw.h"
 
-/* The GigaDevice library headers are available via the wrapper's
- * PUBLIC include directories.  Including the device header here --
- * even when nothing below references its symbols yet -- gives us a
- * compile-time check that the submodule is in place and the include
- * path resolves.  Subsequent commits adding real hook bodies will
- * additionally include the matching peripheral header (e.g.
- * gd32g5x3_trng.h, gd32g5x3_tmu.h, gd32g5x3_gpio.h, ...) and
- * gd32-bridge will gain its own per-project libopt.h to pin which
- * standard-peripheral driver units actually link. */
+/* The wrapper's PUBLIC include directories expose the GigaDevice device
+ * header.  It supplies the CMSIS/core definitions and pulls this project's
+ * hal/gd32g5x3_libopt.h selector, which exposes the peripheral declarations
+ * used by the real backend.  The vendor wrapper compiles its driver archive
+ * independently; libopt controls declarations, not which driver units link. */
 #include "gd32g5x3.h"
 #include "gd32_common.h"
 
@@ -161,11 +157,12 @@
 /* Boot hooks (overrides of the weak defaults in src/main.c)         */
 /* ----------------------------------------------------------------- */
 
-/* Called once on entry to main() before the transport ISRs come
- * online.  Future commits also wire up the remaining peripherals
- * the bridge uses (TMU, ADC0..ADC3, DAC, TIMER0/7/19, SysTick, etc.).
- * NOTE: no DA9292 wiring exists on this SoM rev -- the fault nets
- * reach only the Renesas (P37/P36); see bridge_hw_da9292_status_cached. */
+/* Called once on entry to main() before the transport ISRs come online.
+ * This brings up the backend's boot-global clocks, pads and peripheral
+ * state; request-time operations live in the per-peripheral TUs.  There is
+ * no SysTick handler -- base-level housekeeping runs after each main-loop
+ * wake.  No DA9292 wiring exists on this SoM rev; see
+ * bridge_hw_da9292_status_cached(). */
 /* Sampled at the head of bridge_hw_init (#127); see gd32_common.h for
  * what reads them and why nothing acts on a mismatch yet.  Initialised to
  * the value the constants ASSUME so a debugger attaching before
@@ -429,16 +426,14 @@ void bridge_hw_init(void)
 	}
 }
 
-/* Called from the SysTick handler (or the main loop's idle path) on a
- * fixed cadence.  Intentionally a no-op on this SoM revision: the
- * DA9292 fault nets (DA9292_INT/DA9292_TW) reach only the Renesas
- * (P37/P36) -- the GD32 has no pin to sample and no I2C path to the
- * PMIC.  When a future HW rev mirrors the fault nets onto GD32
- * inputs, this hook samples them and updates the byte returned by
- * bridge_hw_da9292_status_cached(). */
+/* Called at base level after every main-loop wake.  This backend uses the
+ * hook to advance work deliberately kept out of the transport ISRs.  The
+ * DA9292 fault nets still reach only the Renesas, so no PMIC sampling is
+ * performed here and bridge_hw_da9292_status_cached() retains its 0xFF
+ * "no sample" sentinel. */
 /* Base-level DSP pump (#496): drains each bound FIR/IIR stream's raw
  * samples through the FAC into its processed ring.  Runs here, off the
- * main WFI loop -- never in the CS-EXTI stream_read path. */
+ * main loop -- never in the CS-EXTI stream_read path. */
 extern void bridge_hw_dsp_pump(void);
 /* Background OTA slot-erase pump (#770): advances a BEGIN-armed erase one
  * page-region per tick so BEGIN never blocks the SPI reply inline.  No-op
