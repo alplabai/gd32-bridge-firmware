@@ -75,6 +75,11 @@ static bool     g_erase_fail;   /* meta_commit's ota_fmc_erase_range()-fails
                                 * already pins.  The target is never the
                                 * higher-ranked page, so the rank rule
                                 * covers all three. */
+static void (*g_erase_after_hook)(void);
+static uint32_t   g_erase_calls;
+static uint32_t   g_erase_bases[2];
+volatile uint32_t g_ota_mock_primask;
+static bool       g_expect_final_erase_lock;
 
 static uint8_t *_host_ptr(uint32_t addr)
 {
@@ -93,17 +98,31 @@ bool ota_fmc_supported(void)
 
 bool ota_fmc_erase_range(uint32_t base, uint32_t len)
 {
-	if (g_erase_fail) {
+	zassert_equal(
+	    g_ota_mock_primask, 0u, "ota_erase_tick must not mask transport IRQs across FMC work");
+	const bool erased = !g_erase_fail;
+	if (!erased) {
 		/* Models the erase failing with the target untouched (e.g. a
 		 * latched FMC error the caller cannot clear), matching
 		 * hal/fmc_ota.c's erase_one_page() aborting before
 		 * FMC_CTL_START on the first non-FMC_READY wait.  The shapes
 		 * that tear the target instead are covered by the power-cut
 		 * case -- see g_erase_fail's declaration. */
-		return false;
+	} else {
+		memset(_host_ptr(base), 0xFF, len);
 	}
-	memset(_host_ptr(base), 0xFF, len);
-	return true;
+	if (g_erase_calls < 2u) {
+		g_erase_bases[g_erase_calls] = base;
+	}
+	g_erase_calls++;
+	/* The FMC operation completed, but ota_erase_tick() has not published
+	 * its cursor/state writeback. Run one injected transport ISR here. */
+	void (*hook)(void) = g_erase_after_hook;
+	g_erase_after_hook = NULL;
+	if (hook != NULL) {
+		hook();
+	}
+	return erased;
 }
 
 bool ota_fmc_program(uint32_t addr, const uint8_t *data, size_t len)
@@ -130,6 +149,16 @@ void ota_system_reset(void)
 {
 }
 
+void ota_test_after_erase_lock(void)
+{
+	if (g_expect_final_erase_lock) {
+		zassert_equal(g_ota_mock_primask,
+		              1u,
+		              "final erase state check and publication must run under PRIMASK");
+		g_expect_final_erase_lock = false;
+	}
+}
+
 /* ---- helpers -------------------------------------------------------- */
 
 static void wr_u32(uint8_t *p, uint32_t v)
@@ -145,8 +174,8 @@ static uint32_t rd_u32(const uint8_t *p)
 	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
-/* Open a fresh OTA session; leaves the state machine READY. */
-static void begin_session(uint32_t img_len)
+/* Open a fresh OTA session and leave its background erase armed. */
+static void begin_pending(uint32_t img_len)
 {
 	uint8_t req[8];
 	wr_u32(&req[0], img_len);
@@ -155,6 +184,12 @@ static void begin_session(uint32_t img_len)
 	size_t  rlen = 0u;
 	zassert_equal(ota_dispatch(CMD_OTA_BEGIN, req, sizeof(req), reply, sizeof(reply), &rlen),
 	              STATUS_OK);
+}
+
+/* Open a fresh OTA session; leaves the state machine READY. */
+static void begin_session(uint32_t img_len)
+{
+	begin_pending(img_len);
 	/* BEGIN now arms a BACKGROUND erase and acks immediately (#770): the
 	 * slot is not erased inline, so pump ota_erase_tick() the way the main
 	 * loop would until the erase drains and the state reaches READY. */
@@ -170,6 +205,28 @@ static uint8_t ota_state_now(void)
 	zassert_equal(ota_dispatch(CMD_OTA_GET_STATE, NULL, 0u, reply, sizeof(reply), &rlen),
 	              STATUS_OK);
 	return reply[0]; /* state:u8 */
+}
+
+static void abort_from_erase_hook(void)
+{
+	uint8_t reply[8];
+	size_t  rlen = 0u;
+	zassert_equal(ota_dispatch(CMD_OTA_ABORT, NULL, 0u, reply, sizeof(reply), &rlen), STATUS_OK);
+}
+
+static void begin_from_erase_hook(void)
+{
+	begin_pending(128u);
+	zassert_equal(ota_state_now(), 2u /* OTA_ST_BUSY */, "fresh BEGIN must remain armed");
+}
+
+static void rejected_begin_from_erase_hook(void)
+{
+	uint8_t req[8] = { 0 };
+	uint8_t reply[8];
+	size_t  rlen = 0u;
+	zassert_equal(ota_dispatch(CMD_OTA_BEGIN, req, sizeof(req), reply, sizeof(reply), &rlen),
+	              STATUS_OUT_OF_RANGE);
 }
 
 /* Keep dlen and span_len independent: malformed-frame tests need to
@@ -200,9 +257,14 @@ write_chunk(uint32_t off, const uint8_t *data, uint8_t dlen, uint8_t *reply, siz
 static void reset_model(void)
 {
 	memset(g_flash, 0, sizeof(g_flash)); /* zeroed meta -> no valid record */
-	g_program_calls = 0u;
-	g_program_fail  = false;
-	g_erase_fail    = false;
+	g_program_calls           = 0u;
+	g_program_fail            = false;
+	g_erase_fail              = false;
+	g_erase_after_hook        = NULL;
+	g_erase_calls             = 0u;
+	g_ota_mock_primask        = 0u;
+	g_expect_final_erase_lock = false;
+	memset(g_erase_bases, 0, sizeof(g_erase_bases));
 
 	/* Reset src/ota.c's OWN state machine too, not just the flash model.
 	 * Its statics (s_state, s_erasing, s_img_len, ...) are file-scope with
@@ -501,6 +563,82 @@ ZTEST(gd32_bridge_ota, test_begin_arms_background_erase)
 	/* Now a chunk is accepted. */
 	zassert_equal(
 	    write_chunk(0u, data, sizeof(data), wr, &wrl), STATUS_OK, "chunk after READY must program");
+}
+
+/* #9: inject a transport command after the FMC seam returns but before the
+ * base-level pump commits its cursor/state writeback. */
+ZTEST(gd32_bridge_ota, test_erase_tick_does_not_resurrect_aborted_session)
+{
+	reset_model();
+	begin_pending(64u);
+	const unsigned regions = OTA_SLOT_SIZE / OTA_PAGE_SIZE;
+	for (unsigned i = 0u; i + 1u < regions; ++i) {
+		ota_erase_tick();
+	}
+
+	g_erase_after_hook = abort_from_erase_hook;
+	ota_erase_tick();
+	zassert_equal(ota_state_now(), 0u /* OTA_ST_IDLE */, "ABORT must not become READY");
+	const uint32_t calls_after_abort = g_erase_calls;
+	ota_erase_tick();
+	zassert_equal(g_erase_calls, calls_after_abort, "ABORT must disarm the pump");
+
+	const uint8_t data[8] = { 0 };
+	uint8_t       reply[8];
+	size_t        rlen = 0u;
+	zassert_equal(write_chunk(0u, data, sizeof(data), reply, &rlen),
+	              STATUS_NOT_READY,
+	              "write after ABORT must stay rejected");
+}
+
+ZTEST(gd32_bridge_ota, test_erase_tick_does_not_report_error_after_abort)
+{
+	reset_model();
+	begin_pending(64u);
+	g_erase_fail       = true;
+	g_erase_after_hook = abort_from_erase_hook;
+	ota_erase_tick();
+	zassert_equal(ota_state_now(), 0u /* OTA_ST_IDLE */, "ABORT must beat stale FMC failure");
+}
+
+ZTEST(gd32_bridge_ota, test_erase_tick_does_not_advance_fresh_begin_cursor)
+{
+	reset_model();
+	begin_pending(64u);
+	uint32_t inactive_base = 0u;
+	zassert_true(ota_slot_base_checked(TEST_OTHER_SLOT, &inactive_base));
+
+	g_erase_after_hook = begin_from_erase_hook;
+	ota_erase_tick();
+	zassert_equal(ota_state_now(), 2u /* OTA_ST_BUSY */, "fresh BEGIN must remain BUSY");
+	ota_erase_tick();
+	zassert_equal(g_erase_calls, 2u, "two physical erase calls expected");
+	zassert_equal(g_erase_bases[0], inactive_base, "old sweep starts at slot base");
+	zassert_equal(
+	    g_erase_bases[1], inactive_base, "fresh sweep must re-erase its first region, not skip it");
+}
+
+ZTEST(gd32_bridge_ota, test_erase_tick_does_not_resurrect_rejected_begin)
+{
+	reset_model();
+	begin_pending(64u);
+	const unsigned regions = OTA_SLOT_SIZE / OTA_PAGE_SIZE;
+	for (unsigned i = 0u; i + 1u < regions; ++i) {
+		ota_erase_tick();
+	}
+
+	g_erase_after_hook = rejected_begin_from_erase_hook;
+	ota_erase_tick();
+	zassert_equal(ota_state_now(), 4u /* OTA_ST_ERROR */, "rejected BEGIN must not become READY");
+}
+
+ZTEST(gd32_bridge_ota, test_erase_tick_locks_final_check_and_publication)
+{
+	reset_model();
+	begin_pending(64u);
+	g_expect_final_erase_lock = true;
+	ota_erase_tick();
+	zassert_false(g_expect_final_erase_lock, "final publication hook must run");
 }
 
 /* ---- #733: on-flash layout / byte-representation guard --------------- */
@@ -1180,12 +1318,10 @@ ZTEST(gd32_bridge_ota, test_meta_commit_erase_fail_preserves_both_records)
  *
  * h_begin used to assign s_img_len / s_expected_crc / s_fw_version from
  * the wire and range-check afterwards, so a rejected BEGIN left the bad
- * length live.  The reject sets OTA_ST_ERROR -- but a background erase
- * armed by an EARLIER, valid BEGIN is still draining, and ota_erase_tick's
- * completion writeback overwrites that ERROR with OTA_ST_READY (#9's
- * mechanism).  h_verify's only guard is `s_state != OTA_ST_READY`, so it
- * then handed the rejected length to ota_crc32, which has no bound of its
- * own, and walked past the end of the slot.
+ * length live. A prior erase could then turn its ERROR into READY (#9),
+ * making h_verify hand that unvalidated length to ota_crc32. The #131
+ * local-validation rule and #9's epoch-protected error publication close
+ * those two parts together.
  *
  * The bad length here is OTA_SLOT_SIZE + 1 rather than the 0xFFFFFFFF or
  * 0x00040000 of the report.  It is the smallest value h_begin rejects, so
@@ -1193,7 +1329,7 @@ ZTEST(gd32_bridge_ota, test_meta_commit_erase_fail_preserves_both_records)
  * to one byte past g_flash[] -- a host harness reading 20 KB or 4 GB past
  * a .bss array to prove a point is not a test, it is a crash.
  * ===================================================================== */
-ZTEST(gd32_bridge_ota, test_rejected_begin_does_not_overwrite_session_length)
+ZTEST(gd32_bridge_ota, test_oversize_begin_stays_error_after_erase_drains)
 {
 	reset_model();
 
@@ -1228,38 +1364,23 @@ ZTEST(gd32_bridge_ota, test_rejected_begin_does_not_overwrite_session_length)
 	              STATUS_OUT_OF_RANGE,
 	              "an out-of-range BEGIN must be refused");
 
-	/* 4. The armed erase drains and writes OTA_ST_READY over the ERROR the
-	 *    reject just set.  This writeback is #9's mechanism and is NOT
-	 *    fixed here -- it is the vehicle that makes the stale length
-	 *    reachable, which is why it is reproduced rather than avoided. */
+	/* 4. The physical erase still drains, but its late completion must not
+	 *    overwrite the rejected BEGIN's host-visible ERROR (#9). */
 	for (unsigned i = 0u; i < (OTA_SLOT_SIZE / OTA_PAGE_SIZE) + 4u; ++i) {
 		ota_erase_tick();
 	}
+	zassert_equal(ota_state_now(), 4u /* OTA_ST_ERROR */, "rejected BEGIN must remain ERROR");
 
 	uint8_t wr[8];
 	size_t  wrl = 0u;
 	zassert_equal(write_chunk(0u, img, (uint8_t)img_len, wr, &wrl),
-	              STATUS_OK,
-	              "the erase writeback leaves the session writable");
-
-	/* 5. VERIFY must walk the FIRST BEGIN's 8 bytes, not the rejected
-	 *    length.  Before the fix this returns the CRC of OTA_SLOT_SIZE + 1
-	 *    bytes -- one past the end of the slot -- and does not match. */
-	rlen = 0u;
-	zassert_equal(ota_dispatch(CMD_OTA_VERIFY, NULL, 0u, reply, sizeof(reply), &rlen),
-	              STATUS_OK,
-	              "VERIFY dispatches");
-	zassert_equal(rd_u32(&reply[0]),
-	              good_crc,
-	              "the rejected BEGIN's length must not have replaced the session's");
-	zassert_equal(reply[4], 1u, "the image must still verify against the first BEGIN's CRC");
+	              STATUS_NOT_READY,
+	              "a rejected BEGIN must not leave the old session writable");
 }
 
-/* The rejected BEGIN must not have replaced the expected CRC either --
- * a separate field, a separate assignment, and a mismatch there would
- * fail the session in the opposite direction (a good image reported
- * unverified) rather than overreading. */
-ZTEST(gd32_bridge_ota, test_rejected_begin_does_not_overwrite_expected_crc)
+/* Zero length takes the same rejection path as an oversize image, but
+ * verifies the lower bound independently. */
+ZTEST(gd32_bridge_ota, test_zero_length_begin_stays_error_after_erase_drains)
 {
 	reset_model();
 
@@ -1290,14 +1411,12 @@ ZTEST(gd32_bridge_ota, test_rejected_begin_does_not_overwrite_expected_crc)
 	for (unsigned i = 0u; i < (OTA_SLOT_SIZE / OTA_PAGE_SIZE) + 4u; ++i) {
 		ota_erase_tick();
 	}
+	zassert_equal(ota_state_now(), 4u /* OTA_ST_ERROR */, "zero-length BEGIN must remain ERROR");
 	uint8_t wr[8];
 	size_t  wrl = 0u;
-	zassert_equal(write_chunk(0u, img, (uint8_t)img_len, wr, &wrl), STATUS_OK);
-
-	rlen = 0u;
-	zassert_equal(ota_dispatch(CMD_OTA_VERIFY, NULL, 0u, reply, sizeof(reply), &rlen), STATUS_OK);
-	zassert_equal(
-	    reply[4], 1u, "the rejected BEGIN's 0xDEADBEEF must not have replaced the expected CRC");
+	zassert_equal(write_chunk(0u, img, (uint8_t)img_len, wr, &wrl),
+	              STATUS_NOT_READY,
+	              "old session must not revive");
 }
 
 /* ===================================================================== *
