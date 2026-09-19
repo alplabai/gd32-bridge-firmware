@@ -640,6 +640,12 @@ static gd32_bridge_status_t h_rollback(void)
 	if (!meta_current(&cur, &which)) {
 		return STATUS_INVAL;
 	}
+	/* Metadata CRC proves only a coherent record, not that an enum field is
+	 * in range. Refuse an invalid active_slot before the A-or-not-A ternary
+	 * below can silently reinterpret it as slot B. */
+	if (cur.active_slot != OTA_SLOT_A && cur.active_slot != OTA_SLOT_B) {
+		return STATUS_INVAL;
+	}
 	/* Deliberately METADATA's cur.active_slot -- already read above by the
      * meta_current() guard this function returns on -- not OTA_RUNNING_SLOT
      * (#3).  ROLLBACK is an operation ON the metadata state machine ("flip

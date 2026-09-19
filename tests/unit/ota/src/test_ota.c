@@ -48,6 +48,7 @@
 
 static uint8_t  g_flash[FL_SIZE];
 static uint32_t g_program_calls;
+static uint32_t g_reset_calls;
 static bool     g_program_fail; /* #74: models a PGERR-with-power-ON write
                                   * failure -- ota_fmc_program() returns
                                   * false having written nothing.  A REAL
@@ -128,6 +129,7 @@ const void *ota_fmc_flash_ptr(uint32_t addr)
 
 void ota_system_reset(void)
 {
+	g_reset_calls++;
 }
 
 /* ---- helpers -------------------------------------------------------- */
@@ -201,6 +203,7 @@ static void reset_model(void)
 {
 	memset(g_flash, 0, sizeof(g_flash)); /* zeroed meta -> no valid record */
 	g_program_calls = 0u;
+	g_reset_calls   = 0u;
 	g_program_fail  = false;
 	g_erase_fail    = false;
 
@@ -756,6 +759,45 @@ ZTEST(gd32_bridge_ota, test_rollback_still_uses_metadata_active_slot)
 	zassert_equal(rec1.active_slot,
 	              TEST_RUNNING_SLOT,
 	              "ROLLBACK must flip metadata's active_slot, not OTA_RUNNING_SLOT's");
+}
+
+/* #221: meta_read() establishes only a CRC-valid byte record; it does not
+ * validate active_slot's enum. Make slot A itself bootable so the test fails
+ * if this guard is removed even when rollback's fallback-image validation is
+ * also present. */
+ZTEST(gd32_bridge_ota, test_rollback_rejects_invalid_metadata_active_slot)
+{
+	reset_model();
+
+	uint32_t slot_a_base = 0u;
+	zassert_true(ota_slot_base_checked(OTA_SLOT_A, &slot_a_base));
+	uint8_t *slot_a = _host_ptr(slot_a_base);
+	wr_u32(&slot_a[0], 0x20010000u);
+	wr_u32(&slot_a[4], slot_a_base | 1u);
+
+	ota_meta_record_t rec;
+	memset(&rec, 0, sizeof(rec));
+	rec.magic                 = OTA_META_MAGIC;
+	rec.struct_version        = OTA_META_STRUCT_VER;
+	rec.counter               = 3u;
+	rec.active_slot           = 2u; /* not OTA_SLOT_A/B, but CRC-valid */
+	rec.slot_valid            = (uint8_t)(1u << OTA_SLOT_A);
+	rec.img_len[OTA_SLOT_A]   = OTA_IMG_MIN_LEN;
+	rec.img_crc32[OTA_SLOT_A] = ota_crc32(0u, slot_a, OTA_IMG_MIN_LEN);
+	rec.rec_crc32 = ota_crc32(0u, (const uint8_t *)&rec, offsetof(ota_meta_record_t, rec_crc32));
+	memcpy(_host_ptr(OTA_META_REC0), &rec, sizeof(rec));
+
+	uint8_t rec0_before[OTA_PAGE_SIZE];
+	uint8_t rec1_before[OTA_PAGE_SIZE];
+	memcpy(rec0_before, _host_ptr(OTA_META_REC0), sizeof(rec0_before));
+	memcpy(rec1_before, _host_ptr(OTA_META_REC1), sizeof(rec1_before));
+	uint8_t reply[8];
+	size_t  rlen = 0u;
+	zassert_equal(ota_dispatch(CMD_OTA_ROLLBACK, NULL, 0u, reply, sizeof(reply), &rlen),
+	              STATUS_INVAL);
+	zassert_mem_equal(rec0_before, _host_ptr(OTA_META_REC0), sizeof(rec0_before));
+	zassert_mem_equal(rec1_before, _host_ptr(OTA_META_REC1), sizeof(rec1_before));
+	zassert_equal(g_reset_calls, 0u, "invalid active_slot must not reset");
 }
 
 /* ---- #74: meta_commit must preserve the record that BOOTS THE PART, not
