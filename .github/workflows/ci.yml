@@ -388,3 +388,44 @@ jobs:
 
       - name: build (full-flash)
         run: cmake --build build-gd32-flash -j"$(nproc)"
+
+      # The vendor Reset_Handler copies .data and zeroes .bss only.  Until it
+      # grows an explicit TCMSRAM initialiser, every linker script must reject
+      # .tcmsram input rather than emit an image that boots with garbage there.
+      # KEEP() in each script makes this canary survive --gc-sections; checking
+      # the diagnostic as well as the exit code proves the intended ASSERT was
+      # responsible for the failure.
+      - name: reject uninitialised TCMSRAM input in every image
+        run: |
+          set -euo pipefail
+          cat >/tmp/tcmsram-canary.c <<'EOF'
+          __attribute__((section(".tcmsram_canary"), used))
+          volatile unsigned tcmsram_canary = 0x54434d21u;
+          void Reset_Handler(void) {}
+          EOF
+          arm-none-eabi-gcc -mcpu=cortex-m33 -mthumb \
+            -ffunction-sections -fdata-sections \
+            -c /tmp/tcmsram-canary.c -o /tmp/tcmsram-canary.o
+
+          for script in \
+            toolchain/gd32g553_flash.ld \
+            toolchain/gd32g553_bootloader.ld \
+            build-gd32/gd32g553_slot_a.ld \
+            build-gd32/gd32g553_slot_b.ld; do
+            name="$(basename "$script" .ld)"
+            if out=$(arm-none-eabi-gcc -mcpu=cortex-m33 -mthumb \
+                -nostartfiles -Wl,--gc-sections -T"$script" \
+                /tmp/tcmsram-canary.o -o "/tmp/$name.elf" 2>&1); then
+              echo "$out"
+              echo "::error::$script accepted uninitialised .tcmsram input"
+              exit 1
+            fi
+            if ! grep -Fq \
+                'TCMSRAM sections require startup copy/zero initialization' \
+                <<<"$out"; then
+              echo "$out"
+              echo "::error::$script failed without the TCMSRAM guard diagnostic"
+              exit 1
+            fi
+            echo "$script: guard OK"
+          done
