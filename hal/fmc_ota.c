@@ -13,7 +13,8 @@
  * default full-flash build leaves the attribute empty (OTA is inert
  * there, so the loop never runs).  SILICON-VALIDATED 2026-06-04: full
  * dual-bank erase + 760-chunk program + commit/rollback cycle on the
- * bench.
+ * bench for the A→B update + rollback direction; a fresh B→A update has
+ * NOT been exercised.
  *
  * The RAMFUNC bodies are deliberately SELF-CONTAINED register-level
  * mirrors of the vendor fmc_page_erase / fmc_doubleword_program
