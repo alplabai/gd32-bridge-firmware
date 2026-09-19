@@ -165,12 +165,11 @@ typedef struct {
 #define ADC_RES_BITS_DEFAULT     12u
 #define ADC_OVERSAMPLE_RATIO_MAX 256u /* power-of-two ratios 1..256 */
 
-/* Default sample time used for single-shot reads.  240 cycles is
- * the most conservative setting in the vendor's range -- gives the
- * external source plenty of settling time for a high-impedance
- * input divider, at the cost of slower conversion (~1 us per
- * sample at ADC_CLK_SYNC_HCLK_DIV6 with HCLK=216 MHz: 240 ADCCK
- * sample + 12.5 ADCCK conversion ~= 7.0 us). */
+/* Default sample time used for single-shot reads.  240 cycles gives
+ * an external source plenty of settling time for a high-impedance
+ * input divider, at the cost of slower conversion: at
+ * ADC_CLK_SYNC_HCLK_DIV6 with HCLK=216 MHz, 240 ADCCK sample cycles
+ * plus 12.5 ADCCK conversion cycles take about 7.0 us. */
 #define ADC_DEFAULT_SAMPLE_CYCLES 240u
 
 /* Handler-residency budget for one CMD_ADC_READ (#135).

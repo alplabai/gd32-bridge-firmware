@@ -505,10 +505,10 @@ static gd32_bridge_status_t handle_adc_configure(const uint8_t *req,
 	const uint16_t oversample_ratio = (uint16_t)req[2] | ((uint16_t)req[3] << 8);
 	const uint16_t sample_cycles    = (uint16_t)req[4] | ((uint16_t)req[5] << 8);
 	const uint8_t  resolution_bits  = req[6];
-	/* Resolution is one of 6/8/10/12/14/16 per the GD32G5
-     * datasheet's effective-resolution table; the firmware rejects
-     * other values rather than silently rounding so callers find
-     * out at protocol time. */
+	/* The GD32G5 effective-resolution table also lists 14/16 bits.
+	 * Accept those values here so the HAL can report their deliberate
+	 * lack of implementation as STATUS_NOSUPPORT; reject all other
+	 * values rather than silently rounding them. */
 	switch (resolution_bits) {
 	case 0u: /* "use the firmware default" */
 	case 6u:
