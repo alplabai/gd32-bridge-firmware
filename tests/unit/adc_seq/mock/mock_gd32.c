@@ -183,6 +183,7 @@ void mock_adc_set_routine_data(uint32_t code)
 /* --- DMA -----------------------------------------------------------------*/
 
 static uint32_t mock_dma_remaining[2][1]; /* [dma_periph][channel] */
+static uint32_t mock_dma_interrupt_flags[2][1];
 
 void dma_deinit(uint32_t dma_periph, dma_channel_enum channelx)
 {
@@ -243,20 +244,29 @@ void dma_interrupt_disable(uint32_t dma_periph, dma_channel_enum channelx, uint3
 }
 FlagStatus dma_interrupt_flag_get(uint32_t dma_periph, dma_channel_enum channelx, uint32_t int_flag)
 {
-	(void)dma_periph;
-	(void)channelx;
-	(void)int_flag;
-	return RESET;
+	return (mock_dma_interrupt_flags[dma_periph][channelx] & int_flag) ? SET : RESET;
 }
 void dma_interrupt_flag_clear(uint32_t dma_periph, dma_channel_enum channelx, uint32_t int_flag)
 {
-	(void)channelx;
+	mock_dma_interrupt_flags[dma_periph][channelx] &= ~int_flag;
 	mock_seq_log("dma_interrupt_flag_clear", dma_periph, int_flag);
 }
 
 void mock_dma_set_remaining(uint32_t dma_periph, dma_channel_enum channelx, uint32_t remaining)
 {
 	mock_dma_remaining[dma_periph][channelx] = remaining;
+}
+
+void mock_dma_set_interrupt_flag(uint32_t         dma_periph,
+                                 dma_channel_enum channelx,
+                                 uint32_t         flag,
+                                 FlagStatus       state)
+{
+	if (state == SET) {
+		mock_dma_interrupt_flags[dma_periph][channelx] |= flag;
+	} else {
+		mock_dma_interrupt_flags[dma_periph][channelx] &= ~flag;
+	}
 }
 
 /* --- RCU / TRIGSEL / TIMER / NVIC: logged no-ops --------------------------*/

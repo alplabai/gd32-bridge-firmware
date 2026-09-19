@@ -635,7 +635,7 @@ static gd32_bridge_status_t handle_adc_spectrum_read(const uint8_t *req,
 	const int rv =
 	    bridge_hw_adc_spectrum_read(stream_id, bin_offset, max_bins, &seq, &total, &got, bins);
 	if (rv == BRIDGE_HW_ERR_NOTIMPL) return STATUS_NOSUPPORT; /* not FFT-bound */
-	if (rv == BRIDGE_HW_ERR_IO) return STATUS_BUSY;           /* no frame yet -> poll */
+	if (rv == BRIDGE_HW_ERR_BUSY) return STATUS_BUSY;         /* no frame yet -> poll */
 	if (rv < 0) return STATUS_IO;
 	if (got > max_bins) return STATUS_IO; /* HAL contract violation */
 

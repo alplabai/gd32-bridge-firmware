@@ -112,6 +112,10 @@ typedef struct {
 	 * volatile: written in ISR context, read from the CS-EXTI-driven
 	 * stream_read path. */
 	volatile uint32_t lap_count;
+	/* Set by the DMA ERRIF ISR.  A transfer error stops the channel, so
+	 * stream_read must fail loudly instead of reporting a permanently empty
+	 * but apparently healthy ring. */
+	volatile uint32_t dma_error_count;
 	uint32_t          total_read;
 	uint8_t           dsp_chain_id;
 	bool              dsp_bound;

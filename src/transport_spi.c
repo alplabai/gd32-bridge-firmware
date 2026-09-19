@@ -238,6 +238,15 @@ void spi_slave_cs_high(void)
 	decode_and_dispatch();
 }
 
+/* Hardware-side faults which make the captured byte run untrustworthy (for
+ * example a DMA ERRIF) use the same loud, CRC-valid error envelope as a
+ * malformed request.  The next CS transaction returns it to the host. */
+void spi_slave_transport_error(void)
+{
+	spi_rx_len = 0u;
+	stage_error_reply(STATUS_IO);
+}
+
 /* Returns the next staged reply byte.  On the gd32 backend the drain
  * loop is gated on spi_slave_tx_pending(), so the 0xFF tail below is
  * reachable only from the stub backend and the unit tests -- hosts
