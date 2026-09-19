@@ -915,7 +915,8 @@ void bridge_hw_dsp_pump(void)
  * buffers automatically. */
 #define ADC_DSP_FFT_MAX_POINTS BRIDGE_DSP_MAX_FFT_POINTS
 
-/* Active stream ID, negative configuration/publication token, or idle. */
+/* Active stream ID, negative configuration/publication token, or
+ * idle. */
 static volatile int8_t   adc_dsp_fft_owner = ADC_DSP_OWNER_NONE;
 static uint16_t          adc_dsp_fft_points;
 static uint8_t           adc_dsp_fft_outfmt; /* 0 complex / 1 mag / 2 mag-onesided */
