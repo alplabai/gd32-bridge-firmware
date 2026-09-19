@@ -27,6 +27,21 @@
 #include "fmc_ota.h"
 #include "bootloader/bootloader.h" /* CMD_OTA_* */
 
+/* The partitioned image only exists with the GD32 backend, where this
+ * nesting-safe PRIMASK helper is available.  Host OTA tests provide a tiny
+ * vendor-header double so they exercise the same lock boundaries. */
+#if defined(GD32G553)
+#include "gd32/bridge_critical.h"
+#endif
+
+/* Unit tests pin the final check-and-publish boundary below. Production
+ * builds compile this out completely: it is not an OTA wire or HAL seam. */
+#if defined(BRIDGE_OTA_TEST_HOOKS)
+void ota_test_after_erase_lock(void);
+#else
+#define ota_test_after_erase_lock() ((void)0)
+#endif
+
 /* ---- Weak flash seam (overridden by hal/fmc_ota.c on the gd32 backend) - */
 __attribute__((weak)) bool ota_fmc_supported(void)
 {
@@ -97,16 +112,19 @@ enum {
 #define OTA_RUNNING_SLOT_BASE ((uint32_t)(BRIDGE_APP_SLOT_BASE))
 #define OTA_RUNNING_SLOT_END  (OTA_RUNNING_SLOT_BASE + OTA_SLOT_SIZE)
 
-static uint8_t  s_state    = OTA_ST_IDLE;
-static uint8_t  s_inactive = (OTA_RUNNING_SLOT == OTA_SLOT_A) ? OTA_SLOT_B : OTA_SLOT_A;
-static uint32_t s_img_len;
-static uint32_t s_last_off;
-static uint32_t s_expected_crc; /* from OTA_BEGIN (host supplies CRC up front) */
-static uint32_t s_img_crc;      /* computed at OTA_VERIFY, reused at COMMIT */
-static uint32_t s_fw_version;   /* from OTA_BEGIN v0.7 form (packed
-                                 * major<<16|minor<<8|patch); 0 = host
-                                 * sent the legacy 8-byte form = unknown */
-static uint8_t  s_err;
+/* ota_dispatch() runs in either transport ISR while ota_erase_tick() runs
+ * at base level. Volatile keeps cross-context values observable; the short
+ * ota_session_lock() sections below make compound publications atomic. */
+static volatile uint8_t  s_state    = OTA_ST_IDLE;
+static volatile uint8_t  s_inactive = (OTA_RUNNING_SLOT == OTA_SLOT_A) ? OTA_SLOT_B : OTA_SLOT_A;
+static volatile uint32_t s_img_len;
+static volatile uint32_t s_last_off;
+static volatile uint32_t s_expected_crc; /* from OTA_BEGIN (host supplies CRC up front) */
+static volatile uint32_t s_img_crc;      /* computed at OTA_VERIFY, reused at COMMIT */
+static volatile uint32_t s_fw_version;   /* from OTA_BEGIN v0.7 form (packed
+                                          * major<<16|minor<<8|patch); 0 = host
+                                          * sent the legacy 8-byte form = unknown */
+static volatile uint8_t  s_err;
 
 /* Background slot-erase progress (#770).  BEGIN must NOT erase the whole
  * 236 KB slot inline: that can be a 4.72 s RAMFUNC loop in dual-bank mode
@@ -117,9 +135,43 @@ static uint8_t  s_err;
  * tERASE is 20 ms maximum per page (Datasheet Rev2.0 p.126), and a 2 KB
  * region spans two 1 KB pages in dual-bank mode.  The host polls GET_STATE
  * for READY before streaming. */
-static bool     s_erasing;   /* an erase is armed + in progress */
-static uint32_t s_erase_at;  /* next flash address to erase */
-static uint32_t s_erase_end; /* one past the last address to erase */
+static volatile bool     s_erasing;   /* an erase is armed + in progress */
+static volatile uint32_t s_erase_at;  /* next flash address to erase */
+static volatile uint32_t s_erase_end; /* one past the last address to erase */
+static volatile uint32_t s_erase_epoch;
+
+/* Host unit tests are single-threaded; production uses the shared,
+ * nesting-safe PRIMASK primitive. The critical sections never contain an
+ * FMC operation: the erase itself must leave transport IRQs enabled. */
+static uint32_t ota_session_lock(void)
+{
+#if defined(GD32G553)
+	return bridge_irq_lock();
+#else
+	return 0u;
+#endif
+}
+
+static void ota_session_unlock(uint32_t primask)
+{
+#if defined(GD32G553)
+	bridge_irq_unlock(primask);
+#else
+	(void)primask;
+#endif
+}
+
+/* A rejected BEGIN must remain visible after a previously armed physical
+ * erase drains. It deliberately does not cancel that erase, but it does
+ * invalidate any tick snapshot that predates the rejection. */
+static void ota_session_reject(uint8_t err)
+{
+	const uint32_t sect = ota_session_lock();
+	s_erase_epoch++;
+	s_state = OTA_ST_ERROR;
+	s_err   = err;
+	ota_session_unlock(sect);
+}
 
 static uint32_t rd_u32(const uint8_t *p)
 {
@@ -353,28 +405,21 @@ h_begin(const uint8_t *req, size_t len, uint8_t *reply, size_t cap, size_t *rlen
 	if (len < 8u) {
 		return STATUS_INVAL;
 	}
-	/* Read the wire fields into LOCALS and validate them there; the
-     * session statics are committed only once every check below has
-     * passed (#131).  Assigning first and range-checking afterwards left
-     * a rejected BEGIN's length live in s_img_len: the reject sets
-     * OTA_ST_ERROR, but a background erase armed by an EARLIER, valid
-     * BEGIN is still draining, and its completion writeback below
-     * overwrites that ERROR with OTA_ST_READY.  h_verify's only guard is
-     * `s_state != OTA_ST_READY`, so it then handed the rejected length
-     * to ota_crc32 -- which has no bound of its own (src/crc32.c) --
-     * walking past OTA_FLASH_END into reserved space, and for a large
-     * enough value across SRAM and the 0x40000000 peripheral aperture
-     * where reads have side effects.  No fault handlers are installed
-     * (#36) and there is no watchdog (#54), so the resulting BusFault
-     * escalates to HardFault and parks in the vendor Default_Handler. */
+	/* Read the wire fields into LOCALS and validate them there; the session
+	 * statics are committed only once every check below has passed (#131).
+	 * Before #131, assigning first let a rejected BEGIN replace s_img_len;
+	 * before #9, a prior erase could then overwrite its ERROR with READY.
+	 * Together that let h_verify CRC an unvalidated length beyond the slot.
+	 * The local-validation rule prevents the bad length, while
+	 * ota_session_reject() keeps the error visible until a later valid BEGIN
+	 * deliberately starts a new session. */
 	const uint32_t img_len      = rd_u32(&req[0]);
 	const uint32_t expected_crc = rd_u32(&req[4]);
 	const uint32_t fw_version =
 	    (len >= 11u) ? (((uint32_t)req[8] << 16) | ((uint32_t)req[9] << 8) | (uint32_t)req[10])
 	                 : 0u;
 	if (img_len == 0u || img_len > OTA_SLOT_SIZE) {
-		s_state = OTA_ST_ERROR;
-		s_err   = 1u;
+		ota_session_reject(1u);
 		return STATUS_OUT_OF_RANGE;
 	}
 	/* The slot to erase is "the one I am NOT executing from", answered by
@@ -385,9 +430,9 @@ h_begin(const uint8_t *req, size_t len, uint8_t *reply, size_t cap, size_t *rlen
      * used to arm the erase against the live image, vector table first.
      * OTA_RUNNING_SLOT needs no flash read and cannot go stale, so this
      * self-heals the divergence instead of propagating it. */
-	s_inactive               = (OTA_RUNNING_SLOT == OTA_SLOT_A) ? OTA_SLOT_B : OTA_SLOT_A;
-	s_last_off               = 0u;
-	const uint32_t erase_at  = ota_inactive_base();
+	const uint8_t inactive = (OTA_RUNNING_SLOT == OTA_SLOT_A) ? OTA_SLOT_B : OTA_SLOT_A;
+	uint32_t      erase_at;
+	(void)ota_slot_base_checked(inactive, &erase_at); /* A/B above is exhaustive. */
 	const uint32_t erase_end = erase_at + OTA_SLOT_SIZE;
 	/* P3 (#3): defence in depth, NOT the primary guard -- P1 above already
      * makes s_inactive always the OTHER slot from OTA_RUNNING_SLOT by
@@ -413,8 +458,7 @@ h_begin(const uint8_t *req, size_t len, uint8_t *reply, size_t cap, size_t *rlen
      * OTA_ST_ERROR; surfacing s_err is a protocol change, tracked
      * separately. */
 	if (erase_at < OTA_RUNNING_SLOT_END && OTA_RUNNING_SLOT_BASE < erase_end) {
-		s_state = OTA_ST_ERROR;
-		s_err   = 7u;
+		ota_session_reject(7u);
 		return STATUS_INVAL;
 	}
 	/* Every check has passed: NOW commit the wire fields to the session
@@ -426,24 +470,31 @@ h_begin(const uint8_t *req, size_t len, uint8_t *reply, size_t cap, size_t *rlen
      * paths above.  All of them return before `s_erasing = true` below,
      * so a rejected BEGIN can never arm one -- it could only CANCEL an
      * erase armed by an earlier, valid BEGIN.  CMD_OTA_ABORT is the
-     * explicit host-driven cancel; letting a truncated or out-of-range
-     * frame do the same silently would add a remote erase-cancel
-     * surface.  The ERROR-then-READY writeback those rejects can still
-     * produce is #9's mechanism (the pump clobbering a state the
-     * dispatcher set), and belongs to #9's fix. */
-	s_img_len      = img_len;
-	s_expected_crc = expected_crc;
-	s_fw_version   = fw_version;
-
+	 * explicit host-driven cancel; letting a truncated or out-of-range frame
+	 * do the same silently would add a remote erase-cancel surface. The
+	 * reject does invalidate an in-flight tick's epoch so the host-visible
+	 * ERROR cannot be overwritten by its later READY writeback; the physical
+	 * erase continues to completion. */
 	/* Arm the background erase and ack NOW -- do NOT erase inline (#770).
      * ota_erase_tick() walks the slot a page-region per main-loop tick;
      * state stays BUSY until it finishes, then flips to READY.  The host
      * gets this reply immediately and polls GET_STATE for READY before it
-     * streams the first chunk (h_write rejects anything but READY). */
-	s_erasing   = true;
-	s_erase_at  = erase_at;
-	s_erase_end = erase_end;
-	s_state     = OTA_ST_BUSY;
+     * streams the first chunk (h_write rejects anything but READY).
+     *
+     * A fresh BEGIN deliberately reuses the same slot range, so the epoch
+     * lets a pre-empted old tick distinguish its snapshot from this sweep. */
+	const uint32_t sect = ota_session_lock();
+	s_erase_epoch++;
+	s_inactive     = inactive;
+	s_last_off     = 0u;
+	s_img_len      = img_len;
+	s_expected_crc = expected_crc;
+	s_fw_version   = fw_version;
+	s_erasing      = true;
+	s_erase_at     = erase_at;
+	s_erase_end    = erase_end;
+	s_state        = OTA_ST_BUSY;
+	ota_session_unlock(sect);
 	/* Host OTA_BEGIN reply: chunk_max:u16 (LE), target_slot:u8.
      * chunk_max accounts for the offset:u32 + len:u8 header (v0.6). */
 	if (cap >= 3u) {
@@ -714,20 +765,45 @@ static gd32_bridge_status_t h_get_state(uint8_t *reply, size_t cap, size_t *rlen
  * No-op unless an erase is armed. */
 void ota_erase_tick(void)
 {
+	/* Claim only to snapshot the session. A page can take 20 ms (40 ms for
+	 * a dual-bank region), so the FMC call itself must not mask transport
+	 * IRQs or the host loses its reply. */
+	uint32_t sect = ota_session_lock();
 	if (!s_erasing) {
+		ota_session_unlock(sect);
 		return;
 	}
-	if (!ota_fmc_erase_range(s_erase_at, OTA_PAGE_SIZE)) {
+	const uint32_t epoch = s_erase_epoch;
+	const uint32_t at    = s_erase_at;
+	const uint32_t end   = s_erase_end;
+	ota_session_unlock(sect);
+
+	const bool erased = ota_fmc_erase_range(at, OTA_PAGE_SIZE);
+
+	/* ABORT and a valid fresh BEGIN both bump the epoch. Re-check while
+	 * holding the publication lock: testing it before locking would leave a
+	 * final check-then-write race. */
+	sect = ota_session_lock();
+	ota_test_after_erase_lock();
+	if (!s_erasing || s_erase_epoch != epoch) {
+		ota_session_unlock(sect);
+		return;
+	}
+	if (!erased) {
 		s_erasing = false;
 		s_state   = OTA_ST_ERROR;
 		s_err     = 2u;
+		ota_session_unlock(sect);
 		return;
 	}
-	s_erase_at += OTA_PAGE_SIZE;
-	if (s_erase_at >= s_erase_end) {
+	s_erase_at = at + OTA_PAGE_SIZE;
+	if (s_erase_at >= end) {
 		s_erasing = false;
-		s_state   = OTA_ST_READY;
+		if (s_state == OTA_ST_BUSY) {
+			s_state = OTA_ST_READY;
+		}
 	}
+	ota_session_unlock(sect);
 }
 
 gd32_bridge_status_t ota_dispatch(uint8_t        cmd,
@@ -757,9 +833,16 @@ gd32_bridge_status_t ota_dispatch(uint8_t        cmd,
 	case CMD_OTA_GET_STATE:
 		return h_get_state(reply_payload, reply_payload_cap, reply_payload_len);
 	case CMD_OTA_ABORT:
-		s_erasing = false; /* cancel any in-flight background erase (#770) */
-		s_state   = OTA_ST_IDLE;
-		s_err     = 0u;
+		/* A tick may be blocked in the FMC call with IRQs enabled; epoch and
+		 * state must change together so it cannot resurrect this session. */
+		{
+			const uint32_t sect = ota_session_lock();
+			s_erase_epoch++;
+			s_erasing = false;
+			s_state   = OTA_ST_IDLE;
+			s_err     = 0u;
+			ota_session_unlock(sect);
+		}
 		return STATUS_OK;
 	default:
 		return STATUS_NOSUPPORT;
