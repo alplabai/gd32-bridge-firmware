@@ -232,8 +232,8 @@ static gd32_bridge_status_t handle_reset_reason(const uint8_t *req,
 	(void)req;
 	if (req_len != 0u) return STATUS_INVAL;
 	if (reply_cap < 1u) return STATUS_NOMEM;
-	/* bridge_hw_reset_reason() also clears the cause on read so the
-     * next caller sees UNKNOWN if no further resets have happened. */
+	/* The real HAL captures and clears sticky hardware flags during boot, so
+     * this reply is repeatable for every reader in that boot. */
 	reply[0]   = bridge_hw_reset_reason();
 	*reply_len = 1u;
 	return STATUS_OK;

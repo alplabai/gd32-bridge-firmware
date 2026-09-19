@@ -151,14 +151,12 @@
  *     IO->BUSY) are pinned in test_hal_error_mapping; INVAL/RANGE/BUSY for
  *     both opcodes are not.
  *
- *   - CMD_RESET_REASON's destructive-read contract (hal/bridge_hw.h:60-62,
- *     hal/gd32/init.c:440, src/protocol.c:139-140) IS pinned below
- *     (test_reset_reason_destructive_read) against this fixture's model --
- *     see bridge_hw_fake.h/.c and gh#56, which proposes replacing this
- *     contract with an idempotent boot-snapshot instead.  #56 is open and
- *     unimplemented in this tree, so the destructive-read case reflects
- *     current, correct behaviour, not a bug being cemented; it must move in
- *     lockstep with #56 if that lands.
+ *   - CMD_RESET_REASON's boot-snapshot contract (hal/bridge_hw.h,
+ *     hal/gd32/init.c, src/protocol.c) is pinned below
+ *     (test_reset_reason_boot_snapshot_is_idempotent) against this fixture's
+ *     model.  #56 snapshots and clears the hardware register during boot so
+ *     every later request, including requests from a different transport,
+ *     receives the same diagnostic result.
  *
  *   - #69 / #70 (both open) -- bridge_hw_adc_dsp_chain_bind's real (gd32
  *     backend) implementation accepts chain shapes the FAC/FFT runtime
@@ -1391,17 +1389,13 @@ ZTEST(protocol, test_gpio_write_then_read_roundtrip)
 }
 
 /* ------------------------------------------------------------------ */
-/* CMD_RESET_REASON: destructive-read contract (F2, gh#56).  A second    */
-/* dispatch without a fresh bridge_hw_fake_set_reset_reason() in between */
-/* must read back 0x00 (UNKNOWN), not the same cause twice -- proving    */
-/* the fake's bridge_hw_reset_reason() actually latches, matching the    */
-/* CURRENT documented hal/bridge_hw.h / hal/gd32/init.c / protocol.c     */
-/* contract.  If/when gh#56 lands and flips that contract to an          */
-/* idempotent boot-snapshot, this case (and bridge_hw_fake.c's latch)    */
-/* must change in the SAME commit, not silently disagree with it.        */
+/* CMD_RESET_REASON: boot-snapshot contract (F2, gh#56).  A second        */
+/* dispatch without a fresh bridge_hw_fake_set_reset_reason() in between  */
+/* must read back the same value.  This keeps diagnostics on either link  */
+/* from consuming a one-shot hardware reset-cause register.               */
 /* ------------------------------------------------------------------ */
 
-ZTEST(protocol, test_reset_reason_destructive_read)
+ZTEST(protocol, test_reset_reason_boot_snapshot_is_idempotent)
 {
 	uint8_t reply[REPLY_SCRATCH_CAP];
 
@@ -1413,16 +1407,15 @@ ZTEST(protocol, test_reset_reason_destructive_read)
 	        GD32_BRIDGE_LINK_SPI, CMD_RESET_REASON, NULL, 0u, reply, REPLY_SCRATCH_CAP, &reply_len),
 	    STATUS_OK,
 	    "first read succeeds");
-	zassert_equal(reply[0], 0x03u, "first read reports the seeded cause");
+	zassert_equal(reply[0], 0x03u, "first read reports the boot snapshot");
 
 	reply_len = 0u;
 	zassert_equal(
 	    protocol_dispatch(
-	        GD32_BRIDGE_LINK_SPI, CMD_RESET_REASON, NULL, 0u, reply, REPLY_SCRATCH_CAP, &reply_len),
+	        GD32_BRIDGE_LINK_I2C, CMD_RESET_REASON, NULL, 0u, reply, REPLY_SCRATCH_CAP, &reply_len),
 	    STATUS_OK,
 	    "second read succeeds");
-	zassert_equal(
-	    reply[0], 0x00u, "second read (no re-seed in between) reports UNKNOWN -- the read latched");
+	zassert_equal(reply[0], 0x03u, "I2C reader returns the same boot snapshot");
 }
 
 /* ------------------------------------------------------------------ */

@@ -68,9 +68,8 @@
 /* Reset-cause                                                       */
 /* --------------------------------------------------------------- */
 
-/* Returns the cached cause of the most recent reset.  Reading
- * latches the cause to UNKNOWN for the next reader so chains of
- * callers don't see the same event twice. */
+/* Returns the cause captured once at bridge boot.  It is idempotent within
+ * that boot, so every host or diagnostic reader sees the same result. */
 uint8_t bridge_hw_reset_reason(void);
 
 /* --------------------------------------------------------------- */

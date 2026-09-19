@@ -154,6 +154,19 @@
  * independently; libopt controls declarations, not which driver units link. */
 #include "gd32g5x3.h"
 #include "gd32_common.h"
+#include "reset_reason.h"
+
+_Static_assert(RCU_RSTSCK_OBLRSTF == BRIDGE_RESET_RSTSCK_OBLRSTF, "vendor OBLRSTF mask changed");
+_Static_assert(RCU_RSTSCK_RSTFC == BRIDGE_RESET_RSTSCK_RSTFC, "vendor RSTFC mask changed");
+_Static_assert(RCU_RSTSCK_BORRSTF == BRIDGE_RESET_RSTSCK_BORRSTF, "vendor BORRSTF mask changed");
+_Static_assert(RCU_RSTSCK_EPRSTF == BRIDGE_RESET_RSTSCK_EPRSTF, "vendor EPRSTF mask changed");
+_Static_assert(RCU_RSTSCK_PORRSTF == BRIDGE_RESET_RSTSCK_PORRSTF, "vendor PORRSTF mask changed");
+_Static_assert(RCU_RSTSCK_SWRSTF == BRIDGE_RESET_RSTSCK_SWRSTF, "vendor SWRSTF mask changed");
+_Static_assert(RCU_RSTSCK_FWDGTRSTF == BRIDGE_RESET_RSTSCK_FWDGTRSTF,
+               "vendor FWDGTRSTF mask changed");
+_Static_assert(RCU_RSTSCK_WWDGTRSTF == BRIDGE_RESET_RSTSCK_WWDGTRSTF,
+               "vendor WWDGTRSTF mask changed");
+_Static_assert(RCU_RSTSCK_LPRSTF == BRIDGE_RESET_RSTSCK_LPRSTF, "vendor LPRSTF mask changed");
 
 /* ----------------------------------------------------------------- */
 /* Boot hooks (overrides of the weak defaults in src/main.c)         */
@@ -170,11 +183,17 @@
  * the value the constants ASSUME so a debugger attaching before
  * bridge_hw_init has run does not read a spurious 0 and conclude the
  * clock tree is broken. */
-uint32_t bridge_core_clock_hz      = PWM_TIMER_CLK_HZ;
-bool     bridge_core_clock_matches = true;
+uint32_t        bridge_core_clock_hz      = PWM_TIMER_CLK_HZ;
+bool            bridge_core_clock_matches = true;
+static uint32_t s_reset_reason_snapshot;
 
 void bridge_hw_init(void)
 {
+	/* RCU_RSTSCK flags persist across system resets, and RSTFC clears all of
+	 * them.  Capture and clear before any later boot work; CMD_RESET_REASON
+	 * then reports this immutable boot snapshot to every caller. */
+	s_reset_reason_snapshot = bridge_reset_reason_latch_and_clear(&RCU_RSTSCK);
+
 #if defined(BRIDGE_OTA_PARTITIONED) && defined(BRIDGE_APP_SLOT_BASE)
 	/* OTA Path-A: the app runs from a flash slot, not 0x08000000, so move
      * the vector table off the vendor SystemInit default before any NVIC
@@ -455,46 +474,7 @@ void bridge_hw_tick(void)
 
 uint8_t bridge_hw_reset_reason(void)
 {
-	/* Read RCU_RSTSCK (reset/clock control status register, GD32G5xx
-     * Reference Manual §6.6.13) and decode the sticky reset-cause
-     * flags in the high byte: PORRSTF (bit 27), BORRSTF (25),
-     * EPRSTF (26, NRST pin), SWRSTF (28), FWDGTRSTF (29),
-     * WWDGTRSTF (30), LPRSTF (31).
-     *
-     * The hardware can latch multiple flags across nested resets, so
-     * we decode in coldest-first priority order: a power-on event
-     * dominates a brownout, which dominates an external-pin reset,
-     * which dominates a watchdog or software trigger.  Encoded byte
-     * matches the host's `gd32g553_reset_cause_t` in
-     * <alp/chips/gd32g553.h>:
-     *
-     *   0 = UNKNOWN, 1 = POWER_ON, 2 = NRST_PIN, 3 = SOFT,
-     *   4 = WDT, 5 = BROWNOUT, 6 = LOWPOWER.
-     *
-     * RSTFC (bit 24) clears every cause flag in one write; the vendor
-     * helper `rcu_all_reset_flag_clear()` is functionally identical
-     * but we keep the access inline to avoid pulling rcu.c stages we
-     * don't otherwise need.  After the write the next reader sees
-     * UNKNOWN unless something resets the chip again. */
-	const uint32_t rstsck = RCU_RSTSCK;
-	uint8_t        cause  = 0u; /* UNKNOWN */
-
-	if (rstsck & RCU_RSTSCK_PORRSTF) {
-		cause = 1u; /* POWER_ON */
-	} else if (rstsck & RCU_RSTSCK_BORRSTF) {
-		cause = 5u; /* BROWNOUT */
-	} else if (rstsck & RCU_RSTSCK_EPRSTF) {
-		cause = 2u; /* NRST_PIN */
-	} else if (rstsck & RCU_RSTSCK_LPRSTF) {
-		cause = 6u; /* LOWPOWER */
-	} else if (rstsck & (RCU_RSTSCK_FWDGTRSTF | RCU_RSTSCK_WWDGTRSTF)) {
-		cause = 4u; /* WDT */
-	} else if (rstsck & RCU_RSTSCK_SWRSTF) {
-		cause = 3u; /* SOFT */
-	}
-
-	RCU_RSTSCK |= RCU_RSTSCK_RSTFC;
-	return cause;
+	return bridge_reset_reason_decode(s_reset_reason_snapshot);
 }
 
 uint8_t bridge_hw_da9292_status_cached(void)
