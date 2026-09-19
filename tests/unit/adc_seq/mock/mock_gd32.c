@@ -7,13 +7,17 @@
 
 #include <string.h>
 
-mock_seq_evt_t mock_seq[MOCK_SEQ_MAX];
-int            mock_seq_n;
+mock_seq_evt_t    mock_seq[MOCK_SEQ_MAX];
+int               mock_seq_n;
+volatile uint32_t mock_primask;
+uint32_t          mock_rcu_lock_violations;
 
 void mock_seq_reset(void)
 {
 	mock_seq_n = 0;
 	memset(mock_seq, 0, sizeof mock_seq);
+	mock_primask             = 0u;
+	mock_rcu_lock_violations = 0u;
 }
 
 void mock_seq_log(const char *name, uint32_t periph, uint32_t arg)
@@ -263,6 +267,7 @@ void mock_dma_set_remaining(uint32_t dma_periph, dma_channel_enum channelx, uint
 
 void rcu_periph_clock_enable(uint32_t periph_clk)
 {
+	if (mock_primask != 1u) mock_rcu_lock_violations++;
 	mock_seq_log("rcu_periph_clock_enable", periph_clk, 0u);
 }
 void trigsel_init(trigsel_periph_enum target_periph, trigsel_source_enum trigger_source)

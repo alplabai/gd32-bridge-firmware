@@ -16,6 +16,7 @@
 
 #include "bridge_board_config.h" /* BRIDGE_I2C_PERIPH */
 #include "gd32_common.h"
+#include "bridge_critical.h"
 #include "transport.h" /* bridge_transport_i2c_hw_init() */
 
 /* ----------------------------------------------------------------- */
@@ -98,10 +99,10 @@ static bool rtc_wakeup_init_once(void)
 	}
 	if (to == 0u) return false;
 
-	rcu_periph_clock_enable(RCU_PMU);
+	bridge_rcu_periph_clock_enable(RCU_PMU);
 	pmu_backup_write_enable();
 	rcu_rtc_clock_config(RCU_RTCSRC_IRC32K);
-	rcu_periph_clock_enable(RCU_RTC);
+	bridge_rcu_periph_clock_enable(RCU_RTC);
 
 	rtc_wakeup_ready = true;
 	return true;
@@ -160,7 +161,7 @@ int bridge_hw_power_mode_set(uint8_t mode, uint32_t wake_bitmap, uint32_t wake_a
 	case 1u: /* sleep -- already in WFI between transport ISRs */
 		return BRIDGE_HW_OK;
 	case 2u: /* deep-sleep */
-		rcu_periph_clock_enable(RCU_PMU);
+		bridge_rcu_periph_clock_enable(RCU_PMU);
 		power_wake_pins_enable(wake_bitmap);
 		if (wake_after_ms != 0u || (wake_bitmap & (POWER_WAKE_RTC | POWER_WAKE_TIMER)) != 0u) {
 			const uint32_t ms = (wake_after_ms != 0u) ? wake_after_ms : POWER_WAKE_TIMER_MAX_MS;
@@ -208,7 +209,7 @@ int bridge_hw_power_mode_set(uint8_t mode, uint32_t wake_bitmap, uint32_t wake_a
          * transition that left the I2C bridge transport down. */
 		return bridge_transport_i2c_hw_init();
 	case 3u: /* standby */
-		rcu_periph_clock_enable(RCU_PMU);
+		bridge_rcu_periph_clock_enable(RCU_PMU);
 		power_wake_pins_enable(wake_bitmap);
 		if (wake_after_ms != 0u || (wake_bitmap & (POWER_WAKE_RTC | POWER_WAKE_TIMER)) != 0u) {
 			const uint32_t ms = (wake_after_ms != 0u) ? wake_after_ms : POWER_WAKE_TIMER_MAX_MS;

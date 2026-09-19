@@ -15,6 +15,7 @@
 #include "gd32g5x3.h"
 
 #include "gd32_common.h"
+#include "bridge_critical.h"
 
 /* ----------------------------------------------------------------- */
 /* TRNG (NIST SP800-90B) state + bring-up.                            */
@@ -62,7 +63,7 @@ bool trng_start(void)
 	if (to == 0u) return false;
 
 	rcu_trng_clock_config(RCU_TRNG_CKPLLQ_DIV2);
-	rcu_periph_clock_enable(RCU_TRNG);
+	bridge_rcu_periph_clock_enable(RCU_TRNG);
 
 	/* Self-tests on the analog noise source.  trng_clockerror_detection
      * arms the CECS flag so we'd see a clock outage during runtime. */
