@@ -163,16 +163,38 @@ static void begin_session(uint32_t img_len)
 	}
 }
 
-static gd32_bridge_status_t
-write_chunk(uint32_t off, const uint8_t *data, uint8_t dlen, uint8_t *reply, size_t *rlen)
+static uint8_t ota_state_now(void)
 {
-	uint8_t req[5 + 255];
+	uint8_t reply[8] = { 0 };
+	size_t  rlen     = 0u;
+	zassert_equal(ota_dispatch(CMD_OTA_GET_STATE, NULL, 0u, reply, sizeof(reply), &rlen),
+	              STATUS_OK);
+	return reply[0]; /* state:u8 */
+}
+
+/* Keep dlen and span_len independent: malformed-frame tests need to
+ * exercise h_write's load-bearing cross-check instead of constructing a
+ * self-consistent request by definition (#145). */
+static gd32_bridge_status_t write_chunk_raw(uint32_t       off,
+                                            const uint8_t *data,
+                                            uint8_t        dlen,
+                                            size_t         span_len,
+                                            uint8_t       *reply,
+                                            size_t        *rlen)
+{
+	uint8_t req[5 + 255] = { 0 };
 	wr_u32(&req[0], off);
 	req[4] = dlen;
 	if (dlen > 0u) {
 		memcpy(&req[5], data, dlen);
 	}
-	return ota_dispatch(CMD_OTA_WRITE_CHUNK, req, (size_t)(5u + dlen), reply, 8u, rlen);
+	return ota_dispatch(CMD_OTA_WRITE_CHUNK, req, span_len, reply, 8u, rlen);
+}
+
+static gd32_bridge_status_t
+write_chunk(uint32_t off, const uint8_t *data, uint8_t dlen, uint8_t *reply, size_t *rlen)
+{
+	return write_chunk_raw(off, data, dlen, (size_t)(5u + dlen), reply, rlen);
 }
 
 static void reset_model(void)
@@ -262,6 +284,57 @@ ZTEST(gd32_bridge_ota, test_begin_then_normal_chunk_programs)
 	zassert_equal(g_program_calls, 1u, "ota_fmc_program must be called once");
 	zassert_equal(rlen, 4u);
 	zassert_equal(rd_u32(reply), 4u, "high-water = received bytes");
+}
+
+/* ---- #145: embedded WRITE_CHUNK length must match dispatch span ----- */
+
+ZTEST(gd32_bridge_ota, test_overlong_chunk_span_rejected_without_program)
+{
+	reset_model();
+	begin_session(64u);
+	g_program_calls            = 0u;
+	const uint8_t state_before = ota_state_now();
+
+	const uint8_t        data[4] = { 0x11, 0x22, 0x33, 0x44 };
+	uint8_t              reply[8];
+	size_t               rlen = 0u;
+	gd32_bridge_status_t st =
+	    write_chunk_raw(0u, data, sizeof(data), 5u + sizeof(data) + 1u, reply, &rlen);
+	zassert_equal(st, STATUS_INVAL, "zero-extended chunk span must be rejected, got %d", st);
+	zassert_equal(ota_state_now(), state_before, "zero-extended chunk must leave state untouched");
+	zassert_equal(g_program_calls, 0u, "zero-extended chunk must not program flash");
+}
+
+ZTEST(gd32_bridge_ota, test_truncated_chunk_span_rejected_without_program)
+{
+	reset_model();
+	begin_session(64u);
+	g_program_calls            = 0u;
+	const uint8_t state_before = ota_state_now();
+
+	const uint8_t        data[4] = { 0x11, 0x22, 0x33, 0x44 };
+	uint8_t              reply[8];
+	size_t               rlen = 0u;
+	gd32_bridge_status_t st =
+	    write_chunk_raw(0u, data, sizeof(data), 5u + sizeof(data) - 1u, reply, &rlen);
+	zassert_equal(st, STATUS_INVAL, "truncated chunk span must be rejected, got %d", st);
+	zassert_equal(ota_state_now(), state_before, "truncated chunk must leave state untouched");
+	zassert_equal(g_program_calls, 0u, "truncated chunk must not program flash");
+}
+
+ZTEST(gd32_bridge_ota, test_zero_chunk_length_rejected_without_program)
+{
+	reset_model();
+	begin_session(64u);
+	g_program_calls            = 0u;
+	const uint8_t state_before = ota_state_now();
+
+	uint8_t              reply[8];
+	size_t               rlen = 0u;
+	gd32_bridge_status_t st   = write_chunk_raw(0u, NULL, 0u, 5u, reply, &rlen);
+	zassert_equal(st, STATUS_INVAL, "zero-length chunk must be rejected, got %d", st);
+	zassert_equal(ota_state_now(), state_before, "zero-length chunk must leave state untouched");
+	zassert_equal(g_program_calls, 0u, "zero-length chunk must not program flash");
 }
 
 ZTEST(gd32_bridge_ota, test_wrapped_offset_rejected_without_program)
@@ -392,15 +465,6 @@ ZTEST(gd32_bridge_ota, test_image_bootable_validates_vector_head)
 }
 
 /* ---- #770: BEGIN arms a background erase, acks immediately ---------- */
-
-static uint8_t ota_state_now(void)
-{
-	uint8_t reply[8] = { 0 };
-	size_t  rlen     = 0u;
-	zassert_equal(ota_dispatch(CMD_OTA_GET_STATE, NULL, 0u, reply, sizeof(reply), &rlen),
-	              STATUS_OK);
-	return reply[0]; /* state:u8 */
-}
 
 /* BEGIN must NOT erase the slot inline (that stalled the SPI reply ~1 s and
  * hung the host's ota_begin -- #770).  It acks at once with state BUSY;
