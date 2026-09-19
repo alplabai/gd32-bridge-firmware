@@ -637,6 +637,15 @@ void BRIDGE_I2C_ER_HANDLER(void)
 		i2c_interrupt_flag_clear(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_OUERR);
 		bus_error = true;
 	}
+	if (RESET != i2c_interrupt_flag_get(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_TIMEOUT)) {
+		/* A timeout leaves the request/reply framing untrustworthy even
+		 * though the IP only exposes it as a status flag. Clear it and use
+		 * the same portable-side resynchronisation as a bus error; otherwise
+		 * the next address match can append to a transaction that timed out
+		 * while this handler was pre-empted. */
+		i2c_interrupt_flag_clear(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_TIMEOUT);
+		bus_error = true;
+	}
 
 	/* Catch-all: blanket-clear every software-clearable ERROR-domain
      * status bit the snapshot shows set -- the safety net for a source
