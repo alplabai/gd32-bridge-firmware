@@ -14,7 +14,9 @@
 #include "bridge_hw.h"
 #include "gd32g5x3.h"
 
+#include "bridge_critical.h"
 #include "timer_sync_iti.h"
+#include "timer_sync_master.h"
 
 /* Master/slave id (host-side enum) -> GD32 peripheral base address.
  * The protocol-level contract numbers the two initialised PWM timers
@@ -91,12 +93,14 @@ int bridge_hw_timer_sync(uint8_t master, uint8_t slave, uint8_t mode)
 	 *
 	 * CAUTION (gd32-bridge-firmware#89): TIMER_TRI_OUT0_SRC_UPDATE
 	 * fires TRGO0 on ANY update event, including the software-forced
-	 * UPG that PR #82 adds unconditionally to bridge_hw_pwm_set /
+	 * UPG that bridge_hw_pwm_set /
 	 * bridge_hw_pwm_single_pulse on TIMER0/TIMER7.  A PWM_SET or
 	 * PWM_SINGLE_PULSE call on a timer currently acting as a sync
-	 * master glitches its slave's trigger timing.  Not fixed here --
-	 * narrowing the TRGO0 source is a design decision spanning both
-	 * PRs; see #89. */
+	 * master would glitch its slave's trigger timing.  The broad source
+	 * remains necessary for documented rollover synchronization; the
+	 * state update below instead makes pwm.c refuse only operations that
+	 * must force an update event while this route is live. */
+	const uint32_t sect = bridge_irq_lock();
 	timer_master_output0_trigger_source_select(mp, TIMER_TRI_OUT0_SRC_UPDATE);
 	timer_master_slave_mode_config(mp, TIMER_MASTER_SLAVE_MODE_ENABLE);
 
@@ -105,5 +109,7 @@ int bridge_hw_timer_sync(uint8_t master, uint8_t slave, uint8_t mode)
 	 * doesn't act on a stale TRGI source. */
 	timer_input_trigger_source_select(sp, iti);
 	timer_slave_mode_select(sp, slave_mode);
+	timer_sync_master_set(master, mode != 0u);
+	bridge_irq_unlock(sect);
 	return BRIDGE_HW_OK;
 }

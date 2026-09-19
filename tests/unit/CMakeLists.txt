@@ -189,6 +189,7 @@ add_executable(test_timer_sync
     timer_sync/src/test_timer_sync.c
     ${FW}/hal/gd32/timer_sync.c
     ${FW}/hal/gd32/timer_sync_iti.c
+    ${FW}/hal/gd32/timer_sync_master.c
 )
 target_include_directories(test_timer_sync PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/timer_sync/mock

@@ -28,4 +28,18 @@ void timer_master_slave_mode_config(uint32_t timer_periph, uint32_t masterslave)
 void timer_input_trigger_source_select(uint32_t timer_periph, uint32_t intrigger);
 void timer_slave_mode_select(uint32_t timer_periph, uint32_t slavemode);
 
+static inline uint32_t __get_PRIMASK(void)
+{
+	return 0u;
+}
+
+static inline void __disable_irq(void)
+{
+}
+
+static inline void __set_PRIMASK(uint32_t primask)
+{
+	(void)primask;
+}
+
 #endif /* GD32_BRIDGE_TIMER_SYNC_MOCK_GD32G5X3_H */

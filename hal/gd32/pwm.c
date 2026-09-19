@@ -16,6 +16,7 @@
 
 #include "bridge_critical.h"
 #include "gd32_common.h"
+#include "timer_sync_master.h"
 
 /* ----------------------------------------------------------------- */
 /* PWM channels (TIMER0 + TIMER7).                                    */
@@ -199,29 +200,13 @@ int bridge_hw_pwm_set(uint8_t channel, uint32_t period_ns, uint32_t duty_ns)
 	if (channel >= PWM_CHANNEL_COUNT) return BRIDGE_HW_ERR_RANGE;
 	if (duty_ns > period_ns) return BRIDGE_HW_ERR_INVAL;
 
-	/* Clear OPM if a prior bridge_hw_pwm_single_pulse left the timer
-     * in one-pulse mode -- per the contract, a subsequent PWM_SET
-     * returns the channel (and any other channels on the same timer)
-     * to continuous output. */
-	timer_single_pulse_mode_config(pwm_channels[channel].periph, TIMER_SP_MODE_REPETITIVE);
-	/* ...and restore PWM0 if that one-shot also left the channel in the
-     * inverted compare mode it needs to return the pad to idle (#129).
-     * Same contract clause as the SPM clear above: a PWM_SET returns the
-     * channel to continuous output, which has to include the sense of the
-     * comparison, not just the halt behaviour.  Unconditional rather than
-     * guarded on pwm_one_shot[]: re-asserting the mode a channel is
-     * already in is a plain register write with no edge, and it also
-     * repairs a channel left in PWM1 by anything this array did not see. */
-	timer_channel_output_mode_config(
-	    pwm_channels[channel].periph, pwm_channels[channel].channel, TIMER_OC_MODE_PWM0);
-	pwm_one_shot[channel] = false;
-
 	/* Round period + duty to whole microseconds (the timer tick). */
 	uint32_t period_us = period_ns / PWM_TIMER_TICK_NS;
 	uint32_t duty_us   = duty_ns / PWM_TIMER_TICK_NS;
 	if (period_us == 0u) return BRIDGE_HW_ERR_RANGE;
 
-	const gd32_pwm_ch_t *ch = &pwm_channels[channel];
+	const gd32_pwm_ch_t *ch        = &pwm_channels[channel];
+	const uint8_t        timer_idx = pwm_timer_index(ch->periph);
 
 	/* Snapshot CEN before the write block below decides whether to
 	 * force a software update event.  Read here, before anything in
@@ -239,7 +224,7 @@ int bridge_hw_pwm_set(uint8_t channel, uint32_t period_ns, uint32_t duty_ns)
 	 * halved.  ARR must fit in 16 bits either way; clamp on over-range
 	 * so the timer never gets an invalid reload. */
 	uint32_t arr, cmp;
-	if (pwm_align_mode[pwm_timer_index(ch->periph)] == 0u) {
+	if (pwm_align_mode[timer_idx] == 0u) {
 		if (period_us > PWM_TIMER_ARR_MAX + 1u) period_us = PWM_TIMER_ARR_MAX + 1u;
 		if (duty_us > period_us) duty_us = period_us;
 		arr = period_us - 1u;
@@ -267,6 +252,28 @@ int bridge_hw_pwm_set(uint8_t channel, uint32_t period_ns, uint32_t duty_ns)
 	 * this single write site so neither branch can reintroduce the
 	 * truncation. */
 	if (cmp > PWM_TIMER_ARR_MAX) return BRIDGE_HW_ERR_RANGE;
+
+	/* A halted timer needs UPG to promote its new ARR/compare preload.
+	 * TIMER_TRI_OUT0_SRC_UPDATE exposes that forced event to a configured
+	 * sync slave, so guard the whole destructive sequence against a route
+	 * being enabled between this check and UPG.  A running PWM_SET never
+	 * forces UPG and remains valid for a sync master. */
+	uint32_t sync_guard = 0u;
+	if (!was_running) {
+		sync_guard = bridge_irq_lock();
+		if (timer_sync_master_active(timer_idx)) {
+			bridge_irq_unlock(sync_guard);
+			return BRIDGE_HW_ERR_BUSY;
+		}
+	}
+
+	/* Clear OPM if a prior bridge_hw_pwm_single_pulse left the timer
+	 * in one-pulse mode, then restore PWM0 on this channel.  These writes
+	 * occur only after the halted-master guard so BUSY leaves every timer
+	 * register unchanged. */
+	timer_single_pulse_mode_config(ch->periph, TIMER_SP_MODE_REPETITIVE);
+	timer_channel_output_mode_config(ch->periph, ch->channel, TIMER_OC_MODE_PWM0);
+	pwm_one_shot[channel] = false;
 
 	/* Updates ALL channels of the same timer -- the contract documents
 	 * this shared-ARR constraint.  CHxCOMSEN + ARSE are enabled
@@ -315,6 +322,7 @@ int bridge_hw_pwm_set(uint8_t channel, uint32_t period_ns, uint32_t duty_ns)
 	timer_enable(ch->periph); /* idempotent if already running; re-arms
 	                            * CEN after a prior single-pulse left it
 	                            * clear (#8) */
+	if (!was_running) bridge_irq_unlock(sync_guard);
 	return BRIDGE_HW_OK;
 }
 
@@ -502,6 +510,16 @@ int bridge_hw_pwm_single_pulse(uint8_t channel, uint32_t pulse_ns)
      * scope. */
 	if (pulse_us > PWM_TIMER_ARR_MAX) return BRIDGE_HW_ERR_RANGE;
 
+	/* The preload transfer below requires a forced UPG.  While this timer
+	 * is a live TRGO0 sync master, that UPG would be an unrequested slave
+	 * trigger; hold the state lock through the event so an overlapping
+	 * TIMER_SYNC cannot create that route halfway through this sequence. */
+	const uint32_t sync_guard = bridge_irq_lock();
+	if (timer_sync_master_active(pwm_timer_index(ch->periph))) {
+		bridge_irq_unlock(sync_guard);
+		return BRIDGE_HW_ERR_BUSY;
+	}
+
 	/* Halt the counter before reprogramming.  A prior one-shot already
      * left CEN clear, but a running continuous PWM has not, and
      * rewriting OCxM/ARR/CHxCV underneath a live counter can emit a runt
@@ -555,6 +573,7 @@ int bridge_hw_pwm_single_pulse(uint8_t channel, uint32_t pulse_ns)
      * Pre-existing, out of scope here; tracked as #87. */
 	timer_single_pulse_mode_config(ch->periph, TIMER_SP_MODE_SINGLE);
 	timer_enable(ch->periph);
+	bridge_irq_unlock(sync_guard);
 
 	/* A follow-up bridge_hw_pwm_get reports the PULSE width, not the
      * lead-in: it inverts its duty arithmetic while pwm_one_shot[] is set

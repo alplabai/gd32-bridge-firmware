@@ -12,6 +12,7 @@
 
 #include "bridge_hw.h"
 #include "gd32g5x3.h"
+#include "timer_sync_master.h"
 
 enum mock_call_kind {
 	MOCK_MASTER_TRIGGER,
@@ -58,6 +59,8 @@ void timer_slave_mode_select(uint32_t timer_periph, uint32_t slavemode)
 static void reset_calls(void)
 {
 	call_count = 0u;
+	timer_sync_master_set(0u, false);
+	timer_sync_master_set(1u, false);
 }
 
 ZTEST(timer_sync, test_compact_ids_configure_timer0_to_timer7)
@@ -77,6 +80,8 @@ ZTEST(timer_sync, test_compact_ids_configure_timer0_to_timer7)
 	zassert_equal(calls[3].kind, MOCK_SLAVE_MODE);
 	zassert_equal(calls[3].periph, TIMER7);
 	zassert_equal(calls[3].arg, TIMER_SLAVE_MODE_RESTART);
+	zassert_true(timer_sync_master_active(0u));
+	zassert_false(timer_sync_master_active(1u));
 }
 
 ZTEST(timer_sync, test_disable_writes_disabled_slave_mode)
@@ -89,6 +94,22 @@ ZTEST(timer_sync, test_disable_writes_disabled_slave_mode)
 	zassert_equal(calls[2].arg, 0x0Au); /* TIMER0 ITI5 <- TIMER7_TRGO0 */
 	zassert_equal(calls[3].kind, MOCK_SLAVE_MODE);
 	zassert_equal(calls[3].arg, TIMER_SLAVE_MODE_DISABLE);
+	zassert_false(timer_sync_master_active(1u));
+}
+
+ZTEST(timer_sync, test_disabling_one_route_preserves_the_other_master)
+{
+	reset_calls();
+	zassert_equal(bridge_hw_timer_sync(0u, 1u, 1u), BRIDGE_HW_OK);
+	call_count = 0u; /* retain the state above; discard its vendor-call log */
+	zassert_equal(bridge_hw_timer_sync(1u, 0u, 1u), BRIDGE_HW_OK);
+	zassert_true(timer_sync_master_active(0u));
+	zassert_true(timer_sync_master_active(1u));
+
+	call_count = 0u; /* same: state persists, call log is per operation */
+	zassert_equal(bridge_hw_timer_sync(0u, 1u, 0u), BRIDGE_HW_OK);
+	zassert_false(timer_sync_master_active(0u));
+	zassert_true(timer_sync_master_active(1u));
 }
 
 ZTEST(timer_sync, test_timer19_id_rejected_before_register_writes)
@@ -104,6 +125,8 @@ ZTEST(timer_sync, test_timer19_id_rejected_before_register_writes)
 		              "TIMER19 pair %zu must fail as out of range",
 		              i);
 		zassert_equal(call_count, 0u, "rejected TIMER19 pair %zu touched hardware", i);
+		zassert_false(timer_sync_master_active(0u));
+		zassert_false(timer_sync_master_active(1u));
 	}
 }
 
@@ -112,6 +135,8 @@ ZTEST(timer_sync, test_other_invalid_inputs_fail_before_register_writes)
 	reset_calls();
 	zassert_equal(bridge_hw_timer_sync(0u, 0u, 1u), BRIDGE_HW_ERR_INVAL);
 	zassert_equal(call_count, 0u);
+	zassert_false(timer_sync_master_active(0u));
+	zassert_false(timer_sync_master_active(1u));
 
 	reset_calls();
 	zassert_equal(bridge_hw_timer_sync(3u, 0u, 1u), BRIDGE_HW_ERR_RANGE);
