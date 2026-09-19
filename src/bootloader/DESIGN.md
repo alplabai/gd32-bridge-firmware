@@ -57,11 +57,13 @@ outside this repo; this file documents the recoverable public bootloader path.
 | `CMD_OTA_GET_STATE`   | 0xF5 |
 | `CMD_OTA_ABORT`       | 0xF6 |
 
-Host driver code that talks to the bridge can call these opcodes
-today; the scaffold will reply `STATUS_NOSUPPORT` against any
-firmware build that lacks the body.  This is the same degradation
-path the protocol uses for any reserved-but-unimplemented opcode
-(see alp-sdk `docs/gd32-bridge-protocol.md` §6).
+`bl_dispatch_ota()` forwards these commands to the implemented OTA state
+machine. They execute only in a partitioned build with an FMC backend;
+the default full-flash/non-partitioned image, a build without FMC support,
+and the reserved `0xF7..0xFF` range return `STATUS_NOSUPPORT` without
+touching flash. This is the same degradation path the protocol uses for
+reserved-but-unimplemented opcodes (see alp-sdk
+`docs/gd32-bridge-protocol.md` §6).
 
 ## See also
 
