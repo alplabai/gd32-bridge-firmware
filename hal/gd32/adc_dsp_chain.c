@@ -109,6 +109,16 @@ int bridge_hw_adc_dsp_chain_open(uint8_t *chain_id)
      * function is the natural place to add a free-list head. */
 	for (uint8_t i = 0u; i < BRIDGE_DSP_MAX_CHAINS; ++i) {
 		if (!adc_dsp_chains[i].in_use) {
+			/* Claim FIRST.  CHAIN_OPEN runs from both pre-emptible transport
+			 * handlers, so clearing the four stages before this store let a
+			 * nested call select and return the same id (#139).  The single
+			 * aligned store is the ownership publication; the following clear
+			 * is safe with interrupts enabled because every other allocator
+			 * now skips this slot.  The id is not returned to this caller
+			 * until the clear completes, so no legitimate user can observe
+			 * partially-reset stage metadata. */
+			adc_dsp_chains[i].in_use = true;
+			adc_dsp_chains[i].bound  = false;
 			/* Zero the chain state so a previously-released chain
              * doesn't leak stale stage data into the new allocation. */
 			for (uint8_t s = 0u; s < BRIDGE_DSP_MAX_STAGES; ++s) {
@@ -117,9 +127,7 @@ int bridge_hw_adc_dsp_chain_open(uint8_t *chain_id)
 				adc_dsp_chains[i].stages[s].bytes_received = 0u;
 				adc_dsp_chains[i].stages[s].complete       = false;
 			}
-			adc_dsp_chains[i].in_use = true;
-			adc_dsp_chains[i].bound  = false;
-			*chain_id                = i;
+			*chain_id = i;
 			return BRIDGE_HW_OK;
 		}
 	}
