@@ -86,6 +86,7 @@
  * being retyped.
  */
 
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 #include <zephyr/ztest.h>
@@ -229,6 +230,71 @@ static const pv_case_t SPI_CASES[] = {
 /* clang-format on */
 
 #define N_SPI_CASES (sizeof(SPI_CASES) / sizeof(SPI_CASES[0]))
+
+/* Request vectors exercised by dedicated tests instead of SPI_CASES.  Keep
+ * this list minimal: the completeness test below rejects entries duplicated
+ * in SPI_CASES, and every exclusion must resolve to a committed request.
+ * GET_BUILD_ID has a build-time payload; LINK_FEATURES mutates link state. */
+static const char *const DEDICATED_SPI_REQUESTS[] = {
+	"spi_get_build_id_request",  /* test_get_build_id_request_accepted */
+	"spi_link_features_request", /* test_link_features_request_matches_committed_vector */
+};
+
+#define N_DEDICATED_SPI_REQUESTS \
+	(sizeof(DEDICATED_SPI_REQUESTS) / sizeof(DEDICATED_SPI_REQUESTS[0]))
+
+static bool pv_name_ends_with_request(const char *name)
+{
+	static const char suffix[]   = "_request";
+	const size_t      name_len   = strlen(name);
+	const size_t      suffix_len = sizeof suffix - 1u;
+
+	return name_len >= suffix_len && strcmp(name + name_len - suffix_len, suffix) == 0;
+}
+
+static bool pv_is_spi_case_request(const char *name)
+{
+	for (size_t i = 0; i < N_SPI_CASES; i++) {
+		if (strcmp(SPI_CASES[i].req_name, name) == 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool pv_is_dedicated_spi_request(const char *name)
+{
+	for (size_t i = 0; i < N_DEDICATED_SPI_REQUESTS; i++) {
+		if (strcmp(DEDICATED_SPI_REQUESTS[i], name) == 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
+ZTEST(protocol_vectors, test_every_spi_request_vector_has_a_test)
+{
+	for (size_t i = 0; i < PV_VECTOR_COUNT; i++) {
+		const char *name = pv_vectors[i].name;
+
+		if (!pv_name_ends_with_request(name)) {
+			continue;
+		}
+		zassert_true(pv_is_spi_case_request(name) || pv_is_dedicated_spi_request(name),
+		             "%s is not in SPI_CASES or DEDICATED_SPI_REQUESTS",
+		             name);
+	}
+
+	for (size_t i = 0; i < N_DEDICATED_SPI_REQUESTS; i++) {
+		const char *name = DEDICATED_SPI_REQUESTS[i];
+
+		zassert_true(
+		    pv_name_ends_with_request(pv_find(name)->name), "%s is not a request vector", name);
+		zassert_false(pv_is_spi_case_request(name),
+		              "%s is already in SPI_CASES; remove its dedicated exclusion",
+		              name);
+	}
+}
 
 ZTEST(protocol_vectors, test_spi_requests_match_committed_replies)
 {

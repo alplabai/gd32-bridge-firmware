@@ -85,56 +85,218 @@ def i2c_read(status: int, payload: bytes = b"") -> bytes:
 
 
 # ---------------------------------------------------------------------
-# Constants -- keep aligned with firmware/gd32-bridge/src/protocol.h.
+# Protocol constants -- parsed from src/protocol.h, the wire source of truth.
 # ---------------------------------------------------------------------
 
 SOF = 0xA5
-CMD_PING                     = 0x00
-CMD_GET_VERSION              = 0x01
-CMD_GET_BUILD_ID             = 0x02
-CMD_RESET_REASON             = 0x03
-CMD_GPIO_READ                = 0x10
-CMD_GPIO_WRITE               = 0x11
-CMD_PWM_SET                  = 0x20
-CMD_PWM_GET                  = 0x21
-CMD_PWM_CONFIGURE            = 0x22
-CMD_ADC_READ                 = 0x30
-CMD_ADC_CONFIGURE            = 0x32
-CMD_ADC_STREAM_BEGIN         = 0x33
-CMD_ADC_STREAM_READ          = 0x34
-CMD_ADC_STREAM_END           = 0x35
-CMD_ADC_STREAM_CONFIGURE_DSP = 0x36
-CMD_ADC_DSP_CHAIN_OPEN       = 0x37
-CMD_ADC_DSP_STAGE_PUSH       = 0x38
-CMD_ADC_DSP_CHAIN_BIND       = 0x39
-CMD_ADC_SPECTRUM_READ        = 0x3A
-CMD_PWM_CAPTURE_BEGIN        = 0x23
-CMD_PWM_CAPTURE_READ         = 0x24
-CMD_PWM_CAPTURE_END          = 0x25
-CMD_PWM_SINGLE_PULSE         = 0x26
-CMD_TIMER_SYNC               = 0x27
-CMD_POWER_MODE_SET           = 0x28
-CMD_TRNG_READ                = 0x80
-CMD_TMU_COMPUTE              = 0x90
-CMD_DAC_SET                  = 0x50
-CMD_DAC_GET                  = 0x51
-CMD_QENC_READ                = 0x60
-CMD_QENC_RESET               = 0x61
-CMD_COUNTER_READ             = 0x70
-CMD_SE_RESET                 = 0x41
-CMD_DA9292_STATUS_FORWARD    = 0x40
-CMD_LINK_FEATURES            = 0x81
-CMD_OTA_BEGIN                = 0xF0
-CMD_OTA_WRITE_CHUNK          = 0xF1
-CMD_OTA_VERIFY               = 0xF2
-CMD_OTA_COMMIT               = 0xF3
-CMD_OTA_ROLLBACK             = 0xF4
-CMD_OTA_GET_STATE            = 0xF5
-CMD_OTA_ABORT                = 0xF6
-STATUS_OK                    = 0x00
-STATUS_NOT_READY             = 0x02
-STATUS_IO                    = 0x05
-STATUS_NOSUPPORT             = 0x06
+PROTOCOL_HEADER = pathlib.Path(__file__).resolve().parent.parent / "src" / "protocol.h"
+BOOTLOADER_HEADER = PROTOCOL_HEADER.parent / "bootloader" / "bootloader.h"
+
+_REQUIRED_CMD_NAMES = (
+    "CMD_PING",
+    "CMD_GET_VERSION",
+    "CMD_GET_BUILD_ID",
+    "CMD_RESET_REASON",
+    "CMD_GPIO_READ",
+    "CMD_GPIO_WRITE",
+    "CMD_PWM_SET",
+    "CMD_PWM_GET",
+    "CMD_PWM_CONFIGURE",
+    "CMD_ADC_READ",
+    "CMD_ADC_CONFIGURE",
+    "CMD_ADC_STREAM_BEGIN",
+    "CMD_ADC_STREAM_READ",
+    "CMD_ADC_STREAM_END",
+    "CMD_ADC_STREAM_CONFIGURE_DSP",
+    "CMD_ADC_DSP_CHAIN_OPEN",
+    "CMD_ADC_DSP_STAGE_PUSH",
+    "CMD_ADC_DSP_CHAIN_BIND",
+    "CMD_ADC_SPECTRUM_READ",
+    "CMD_PWM_CAPTURE_BEGIN",
+    "CMD_PWM_CAPTURE_READ",
+    "CMD_PWM_CAPTURE_END",
+    "CMD_PWM_SINGLE_PULSE",
+    "CMD_TIMER_SYNC",
+    "CMD_POWER_MODE_SET",
+    "CMD_TRNG_READ",
+    "CMD_TMU_COMPUTE",
+    "CMD_DAC_SET",
+    "CMD_DAC_GET",
+    "CMD_QENC_READ",
+    "CMD_QENC_RESET",
+    "CMD_COUNTER_READ",
+    "CMD_SE_RESET",
+    "CMD_DA9292_STATUS_FORWARD",
+    "CMD_LINK_FEATURES",
+)
+_REQUIRED_STATUS_NAMES = (
+    "STATUS_OK",
+    "STATUS_NOT_READY",
+    "STATUS_IO",
+    "STATUS_NOSUPPORT",
+)
+_REQUIRED_OTA_CMD_NAMES = (
+    "CMD_OTA_BEGIN",
+    "CMD_OTA_WRITE_CHUNK",
+    "CMD_OTA_VERIFY",
+    "CMD_OTA_COMMIT",
+    "CMD_OTA_ROLLBACK",
+    "CMD_OTA_GET_STATE",
+    "CMD_OTA_ABORT",
+)
+
+
+def _strip_c_comments(text: str) -> str:
+    """Remove C block and line comments before parsing enum declarations."""
+    return re.sub(r"/\*.*?\*/|//[^\r\n]*", "", text, flags=re.DOTALL)
+
+
+def _required_enum_values(
+    header_text: str,
+    header_path: pathlib.Path,
+    enum_name: str,
+    required_names: tuple[str, ...],
+) -> dict[str, int]:
+    """Return required direct-integer enumerators from one named typedef enum."""
+    uncommented = _strip_c_comments(header_text)
+    enum_match = re.search(
+        rf"\btypedef\s+enum(?:\s+[A-Za-z_]\w*)?\s*\{{(?P<body>[^}}]*)\}}\s*{re.escape(enum_name)}\s*;",
+        uncommented,
+        flags=re.DOTALL,
+    )
+    if enum_match is None:
+        sys.exit(
+            f"gen_protocol_vectors.py: could not find typedef enum {enum_name} "
+            f"in {header_path}"
+        )
+
+    expressions: dict[str, str | None] = {}
+    for entry in enum_match.group("body").split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        item_match = re.fullmatch(
+            r"(?P<name>[A-Za-z_]\w*)(?:\s*=\s*(?P<expression>.*))?",
+            entry,
+            flags=re.DOTALL,
+        )
+        if item_match is not None:
+            name = item_match.group("name")
+            if name in expressions:
+                sys.exit(
+                    f"gen_protocol_vectors.py: duplicate enumerator {enum_name}.{name} "
+                    f"in {header_path}"
+                )
+            expressions[name] = item_match.group("expression")
+
+    missing = [name for name in required_names if name not in expressions]
+    if missing:
+        sys.exit(
+            f"gen_protocol_vectors.py: {enum_name} in {header_path} is missing "
+            f"required enumerator(s): {', '.join(missing)}"
+        )
+
+    values: dict[str, int] = {}
+    integer_literal = re.compile(
+        r"(?P<value>0[xX][0-9A-Fa-f]+|0[bB][01]+|0[0-7]*|[1-9][0-9]*)(?:[uUlL]+)?"
+    )
+    for name in required_names:
+        expression = expressions[name]
+        literal_match = integer_literal.fullmatch(expression or "")
+        if literal_match is None:
+            rendered = expression.strip() if expression is not None else "<implicit>"
+            sys.exit(
+                f"gen_protocol_vectors.py: {enum_name}.{name} in {header_path} "
+                f"must be a simple integer enumerator, got {rendered!r}"
+            )
+        literal = literal_match.group("value")
+        base = (
+            8
+            if len(literal) > 1
+            and literal.startswith("0")
+            and not literal.lower().startswith(("0x", "0b"))
+            else 0
+        )
+        values[name] = int(literal, base)
+    return values
+
+
+def _required_macro_values(
+    header_text: str,
+    header_path: pathlib.Path,
+    required_names: tuple[str, ...],
+) -> dict[str, int]:
+    """Return required direct-integer object macros from one header."""
+    uncommented = _strip_c_comments(header_text)
+    definitions: dict[str, str] = {}
+    required = set(required_names)
+    for match in re.finditer(
+        r"^\s*#\s*define\s+(?P<name>[A-Za-z_]\w*)\s+(?P<expression>[^\r\n]+)",
+        uncommented,
+        flags=re.MULTILINE,
+    ):
+        name = match.group("name")
+        if name not in required:
+            continue
+        if name in definitions:
+            sys.exit(f"gen_protocol_vectors.py: duplicate macro {name} in {header_path}")
+        definitions[name] = match.group("expression").strip()
+
+    missing = [name for name in required_names if name not in definitions]
+    if missing:
+        sys.exit(
+            f"gen_protocol_vectors.py: {header_path} is missing required macro(s): "
+            f"{', '.join(missing)}"
+        )
+
+    values: dict[str, int] = {}
+    integer_literal = re.compile(
+        r"(?P<value>0[xX][0-9A-Fa-f]+|0[bB][01]+|0[0-7]*|[1-9][0-9]*)(?:[uUlL]+)?"
+    )
+    for name in required_names:
+        expression = definitions[name]
+        literal_match = integer_literal.fullmatch(expression)
+        if literal_match is None:
+            sys.exit(
+                f"gen_protocol_vectors.py: {name} in {header_path} must be a simple "
+                f"integer macro, got {expression!r}"
+            )
+        literal = literal_match.group("value")
+        base = (
+            8
+            if len(literal) > 1
+            and literal.startswith("0")
+            and not literal.lower().startswith(("0x", "0b"))
+            else 0
+        )
+        values[name] = int(literal, base)
+    return values
+
+
+def _protocol_constants_from_headers() -> dict[str, int]:
+    try:
+        header_text = PROTOCOL_HEADER.read_text(encoding="utf-8")
+    except OSError as exc:
+        sys.exit(f"gen_protocol_vectors.py: cannot read {PROTOCOL_HEADER}: {exc}")
+    try:
+        bootloader_text = BOOTLOADER_HEADER.read_text(encoding="utf-8")
+    except OSError as exc:
+        sys.exit(f"gen_protocol_vectors.py: cannot read {BOOTLOADER_HEADER}: {exc}")
+
+    return {
+        **_required_enum_values(
+            header_text, PROTOCOL_HEADER, "gd32_bridge_cmd_t", _REQUIRED_CMD_NAMES
+        ),
+        **_required_enum_values(
+            header_text, PROTOCOL_HEADER, "gd32_bridge_status_t", _REQUIRED_STATUS_NAMES
+        ),
+        # OTA is deliberately owned by the bootloader header rather than
+        # gd32_bridge_cmd_t; parse that real source instead of copying it.
+        **_required_macro_values(bootloader_text, BOOTLOADER_HEADER, _REQUIRED_OTA_CMD_NAMES),
+    }
+
+
+globals().update(_protocol_constants_from_headers())
 
 # Firmware-declared version triple. Parsed out of src/protocol.h at run
 # time -- not a private literal -- because a hard-coded copy is exactly
@@ -143,18 +305,17 @@ STATUS_NOSUPPORT             = 0x06
 # green even when the constant is stale. Do not "simplify" this back
 # into a tuple; that reopens #22.
 def _fw_version_from_header() -> tuple[int, int, int]:
-    header = pathlib.Path(__file__).resolve().parent.parent / "src" / "protocol.h"
     try:
-        text = header.read_text()
+        text = PROTOCOL_HEADER.read_text(encoding="utf-8")
     except OSError as exc:
-        sys.exit(f"gen_protocol_vectors.py: cannot read {header}: {exc}")
+        sys.exit(f"gen_protocol_vectors.py: cannot read {PROTOCOL_HEADER}: {exc}")
     parts = []
     for field in ("MAJOR", "MINOR", "PATCH"):
         m = re.search(rf"#define\s+PROTOCOL_VERSION_{field}\s+(\d+)[uU]?\b", text)
         if m is None:
             sys.exit(
                 f"gen_protocol_vectors.py: could not parse "
-                f"PROTOCOL_VERSION_{field} out of {header}"
+                f"PROTOCOL_VERSION_{field} out of {PROTOCOL_HEADER}"
             )
         parts.append(int(m.group(1)))
     return (parts[0], parts[1], parts[2])
