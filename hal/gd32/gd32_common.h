@@ -255,11 +255,10 @@ typedef struct {
  * 216MHz").  NOTE 2026-06-04: this was wrongly coded as 240 MHz
  * through v0.2.3 -- every PWM period was ~11 % long (a commanded
  * 1 kHz physically ran ~900 Hz).  1 ns LSB resolution would need a
- * faster counter; we instead round period_ns + duty_ns to the
- * nearest 1 us cycle by fixing the prescaler at (216 - 1) so the
- * counter ticks at exactly 1 MHz.  ARR is then `period_us - 1`,
- * fitting in 16 bits for periods up to ~65 ms which covers every
- * realistic control PWM frequency (>=15 Hz). */
+ * faster counter; we instead round period_ns + duty_ns down to a
+ * 1 us cycle by fixing the prescaler at (216 - 1) so the
+ * counter ticks at exactly 1 MHz.  ARR fits edge-aligned periods up
+ * to 65.536 ms and center-aligned periods up to 131.070 ms. */
 #define PWM_TIMER_CLK_HZ    216000000u
 #define PWM_TIMER_PRESCALER (216u - 1u) /* 216 MHz -> 1 MHz tick    */
 #define PWM_TIMER_TICK_NS   1000u       /* 1 us per timer tick      */
