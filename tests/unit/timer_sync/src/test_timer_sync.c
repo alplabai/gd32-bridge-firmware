@@ -61,6 +61,8 @@ static void reset_calls(void)
 	call_count = 0u;
 	timer_sync_master_set(0u, false);
 	timer_sync_master_set(1u, false);
+	zassert_true(timer_sync_forced_update_allowed(0u));
+	zassert_true(timer_sync_forced_update_allowed(1u));
 }
 
 ZTEST(timer_sync, test_compact_ids_configure_timer0_to_timer7)
@@ -82,6 +84,8 @@ ZTEST(timer_sync, test_compact_ids_configure_timer0_to_timer7)
 	zassert_equal(calls[3].arg, TIMER_SLAVE_MODE_RESTART);
 	zassert_true(timer_sync_master_active(0u));
 	zassert_false(timer_sync_master_active(1u));
+	zassert_false(timer_sync_forced_update_allowed(0u));
+	zassert_true(timer_sync_forced_update_allowed(1u));
 }
 
 ZTEST(timer_sync, test_disable_writes_disabled_slave_mode)
@@ -95,6 +99,7 @@ ZTEST(timer_sync, test_disable_writes_disabled_slave_mode)
 	zassert_equal(calls[3].kind, MOCK_SLAVE_MODE);
 	zassert_equal(calls[3].arg, TIMER_SLAVE_MODE_DISABLE);
 	zassert_false(timer_sync_master_active(1u));
+	zassert_true(timer_sync_forced_update_allowed(1u));
 }
 
 ZTEST(timer_sync, test_disabling_one_route_preserves_the_other_master)
@@ -110,6 +115,8 @@ ZTEST(timer_sync, test_disabling_one_route_preserves_the_other_master)
 	zassert_equal(bridge_hw_timer_sync(0u, 1u, 0u), BRIDGE_HW_OK);
 	zassert_false(timer_sync_master_active(0u));
 	zassert_true(timer_sync_master_active(1u));
+	zassert_true(timer_sync_forced_update_allowed(0u));
+	zassert_false(timer_sync_forced_update_allowed(1u));
 }
 
 ZTEST(timer_sync, test_timer19_id_rejected_before_register_writes)

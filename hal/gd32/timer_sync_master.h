@@ -18,4 +18,9 @@
 bool timer_sync_master_active(uint8_t timer_id);
 void timer_sync_master_set(uint8_t timer_id, bool active);
 
+/* True only when PWM may issue a software-forced update event on @p timer_id
+ * without injecting TRGO0 into an enabled sync slave.  The caller must hold
+ * the same bridge_irq_lock() required for the state query above. */
+bool timer_sync_forced_update_allowed(uint8_t timer_id);
+
 #endif /* GD32_BRIDGE_TIMER_SYNC_MASTER_H */

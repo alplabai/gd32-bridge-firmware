@@ -261,7 +261,7 @@ int bridge_hw_pwm_set(uint8_t channel, uint32_t period_ns, uint32_t duty_ns)
 	uint32_t sync_guard = 0u;
 	if (!was_running) {
 		sync_guard = bridge_irq_lock();
-		if (timer_sync_master_active(timer_idx)) {
+		if (!timer_sync_forced_update_allowed(timer_idx)) {
 			bridge_irq_unlock(sync_guard);
 			return BRIDGE_HW_ERR_BUSY;
 		}
@@ -515,7 +515,7 @@ int bridge_hw_pwm_single_pulse(uint8_t channel, uint32_t pulse_ns)
 	 * trigger; hold the state lock through the event so an overlapping
 	 * TIMER_SYNC cannot create that route halfway through this sequence. */
 	const uint32_t sync_guard = bridge_irq_lock();
-	if (timer_sync_master_active(pwm_timer_index(ch->periph))) {
+	if (!timer_sync_forced_update_allowed(pwm_timer_index(ch->periph))) {
 		bridge_irq_unlock(sync_guard);
 		return BRIDGE_HW_ERR_BUSY;
 	}

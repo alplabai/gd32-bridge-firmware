@@ -29,3 +29,8 @@ void timer_sync_master_set(uint8_t timer_id, bool active)
 		timer_sync_master_mask &= (uint8_t)~bit;
 	}
 }
+
+bool timer_sync_forced_update_allowed(uint8_t timer_id)
+{
+	return !timer_sync_master_active(timer_id);
+}
