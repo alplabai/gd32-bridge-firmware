@@ -199,6 +199,24 @@ target_compile_options(test_timer_sync PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_timer_sync PRIVATE ztest_shim)
 add_test(NAME timer_sync COMMAND test_timer_sync)
 
+# --- gpio_grouped: production GPIO port grouping + promotion order (#198) --
+#
+# Links the real hal/gd32/gpio.c against a minimal register/API mock.  This
+# pins the one-ISTAT-snapshot/one-final-BOP-write policy per touched port and
+# proves that newly promoted pins are preloaded before their mode changes.
+add_executable(test_gpio_grouped
+    gpio_grouped/src/test_gpio_grouped.c
+    ${FW}/hal/gd32/gpio.c
+)
+target_include_directories(test_gpio_grouped PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/gpio_grouped/mock
+    ${FW}/hal
+    ${FW}/hal/gd32
+)
+target_compile_options(test_gpio_grouped PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_gpio_grouped PRIVATE ztest_shim)
+add_test(NAME gpio_grouped COMMAND test_gpio_grouped)
+
 # --- tmu_q31_scale: Q31 FACTOR band-selection logic (gd32-bridge#46) -------
 #
 # hal/gd32/tmu.c itself needs the Cortex-M33 vendor register headers and is
