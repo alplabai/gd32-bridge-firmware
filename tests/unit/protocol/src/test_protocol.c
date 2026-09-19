@@ -74,14 +74,12 @@
  * (via `gh issue view`) before writing this file, each of them left
  * deliberately UNCOVERED rather than pinned either way (a case asserting the
  * documented/corrected mapping would be red today; a case asserting today's
- * mapping would cement the bug and fight the eventual fix).  #23's B2/B3/B4
- * are now FIXED (see below); B5 is still open.
+ * mapping would cement the bug and fight the eventual fix).  #23's B2-B5
+ * are now fixed (see below).
  *
  *   - #23 -- several handlers flattened distinct HAL errors to STATUS_IO
  *     instead of running them through the central status_from_hw() mapper
- *     every other handler uses.  B2/B3/B4 are fixed as of this change; B5
- *     is a separate, still-open defect this suite continues to leave
- *     uncovered:
+ *     every other handler uses.  B2-B5 are fixed:
  *       * handle_adc_read (src/protocol.c) now routes its whole
  *         BRIDGE_HW_ERR_* -> STATUS_* translation through status_from_hw()
  *         (issue's B2, FIXED).  RANGE, BUSY, INVAL and the generic IO
@@ -98,30 +96,12 @@
  *         previously-swallowed INVAL and RANGE -- through status_from_hw()
  *         (issue's B4, FIXED).  NOTIMPL, BUSY, INVAL and RANGE are all
  *         pinned below.
- *       * handle_pwm_capture_read (src/protocol.c:691) routes through
- *         status_from_hw() -- correct plumbing -- but the HAL contract it
- *         is fed (hal/bridge_hw.h:279-281, hal/gd32/pwm_capture.c:248)
- *         overloads BRIDGE_HW_ERR_NOTIMPL to also mean "capture ring empty,
- *         poll again", the same code every OTHER opcode uses for "this HAL
- *         body doesn't exist" (issue's B5, STILL OPEN).  The correct wire
- *         code is STATUS_NOT_READY (0x02): <alp/pwm.h>'s
- *         alp_pwm_capture_read() ALREADY documents "if no edge has been
- *         seen since the last call, returns ALP_ERR_NOT_READY", which is
- *         exactly the status_from_wire() mapping of wire STATUS_NOT_READY
- *         -- so the host-side contract this firmware must satisfy is
- *         already written down and is NOT STATUS_BUSY.  Fixing this needs
- *         a HAL-side change (hal/gd32/pwm_capture.c:248's ring-empty return
- *         must stop reusing BRIDGE_HW_ERR_NOTIMPL, which hal/bridge_hw_stub.c
- *         also returns for "this build has no capture HAL at all" -- the
- *         two meanings need two different BRIDGE_HW_ERR_* codes so a live,
- *         merely-empty channel stays distinguishable on the wire from a
- *         stub build) plus a hal/bridge_hw.h doc update, neither of which
- *         is in scope for this change (hal/gd32/pwm_capture.c is owned by
- *         another in-flight branch; hal/bridge_hw.h is owned by several).
- *         This suite pins pwm_capture_read's INVAL, RANGE, BUSY and IO rows
- *         (all unambiguous) and leaves its NOTIMPL row untested rather than
- *         assert today's NOTIMPL->STATUS_NOSUPPORT only for it to need to
- *         become something->STATUS_NOT_READY later.
+ *       * handle_pwm_capture_read (src/protocol.c) routes through
+ *         status_from_hw().  An armed channel with no complete edge pair
+ *         returns BRIDGE_HW_ERR_NOT_READY, distinct from the stub HAL's
+ *         BRIDGE_HW_ERR_NOTIMPL.  The former maps to STATUS_NOT_READY
+ *         (0x02), matching <alp/pwm.h>'s ALP_ERR_NOT_READY contract; the
+ *         latter remains STATUS_NOSUPPORT for a build without capture.
  *
  *   - Unnumbered "stub/contract mismatch": CMD_GPIO_READ and CMD_GPIO_WRITE
  *     never special-case BRIDGE_HW_ERR_NOTIMPL (src/protocol.c:157, :175)
@@ -672,16 +652,17 @@ static const hal_map_case_t HAL_MAP_CASES[] = {
 	{ "ADC_STREAM_END/IO",      CMD_ADC_STREAM_END, req_adc_stream_end, 1u, FAKE_FN_ADC_STREAM_END, BRIDGE_HW_ERR_IO,      STATUS_IO },
 
 	/* --- Centralised status_from_hw() mapper: full, correct coverage
-	 * (INVAL/RANGE/NOTIMPL/BUSY/IO) -- no known defect. */
+	 * (INVAL/RANGE/NOTIMPL/BUSY/NOT_READY/IO) -- no known defect. */
 	{ "PWM_CAPTURE_BEGIN/INVAL",   CMD_PWM_CAPTURE_BEGIN, req_pwm_capture_begin, 2u, FAKE_FN_PWM_CAPTURE_BEGIN, BRIDGE_HW_ERR_INVAL,   STATUS_INVAL },
 	{ "PWM_CAPTURE_BEGIN/RANGE",   CMD_PWM_CAPTURE_BEGIN, req_pwm_capture_begin, 2u, FAKE_FN_PWM_CAPTURE_BEGIN, BRIDGE_HW_ERR_RANGE,   STATUS_OUT_OF_RANGE },
 	{ "PWM_CAPTURE_BEGIN/NOTIMPL", CMD_PWM_CAPTURE_BEGIN, req_pwm_capture_begin, 2u, FAKE_FN_PWM_CAPTURE_BEGIN, BRIDGE_HW_ERR_NOTIMPL, STATUS_NOSUPPORT },
 	{ "PWM_CAPTURE_BEGIN/BUSY",    CMD_PWM_CAPTURE_BEGIN, req_pwm_capture_begin, 2u, FAKE_FN_PWM_CAPTURE_BEGIN, BRIDGE_HW_ERR_BUSY,    STATUS_BUSY },
 	{ "PWM_CAPTURE_BEGIN/IO",      CMD_PWM_CAPTURE_BEGIN, req_pwm_capture_begin, 2u, FAKE_FN_PWM_CAPTURE_BEGIN, BRIDGE_HW_ERR_IO,      STATUS_IO },
-	/* PWM_CAPTURE_READ: NOTIMPL is the #23 B5 ring-empty overload --
-	 * not injected here (see this file's header comment). */
+	/* PWM_CAPTURE_READ: an active capture channel with no edge pair yet
+	 * returns NOT_READY; absent capture hardware still returns NOTIMPL. */
 	{ "PWM_CAPTURE_READ/INVAL", CMD_PWM_CAPTURE_READ, req_pwm_capture_read, 1u, FAKE_FN_PWM_CAPTURE_READ, BRIDGE_HW_ERR_INVAL, STATUS_INVAL },
 	{ "PWM_CAPTURE_READ/RANGE", CMD_PWM_CAPTURE_READ, req_pwm_capture_read, 1u, FAKE_FN_PWM_CAPTURE_READ, BRIDGE_HW_ERR_RANGE, STATUS_OUT_OF_RANGE },
+	{ "PWM_CAPTURE_READ/NOT_READY", CMD_PWM_CAPTURE_READ, req_pwm_capture_read, 1u, FAKE_FN_PWM_CAPTURE_READ, BRIDGE_HW_ERR_NOT_READY, STATUS_NOT_READY },
 	{ "PWM_CAPTURE_READ/BUSY",  CMD_PWM_CAPTURE_READ, req_pwm_capture_read, 1u, FAKE_FN_PWM_CAPTURE_READ, BRIDGE_HW_ERR_BUSY,  STATUS_BUSY },
 	{ "PWM_CAPTURE_READ/IO",    CMD_PWM_CAPTURE_READ, req_pwm_capture_read, 1u, FAKE_FN_PWM_CAPTURE_READ, BRIDGE_HW_ERR_IO,    STATUS_IO },
 	{ "PWM_CAPTURE_END/INVAL",   CMD_PWM_CAPTURE_END, req_pwm_capture_end, 1u, FAKE_FN_PWM_CAPTURE_END, BRIDGE_HW_ERR_INVAL,   STATUS_INVAL },

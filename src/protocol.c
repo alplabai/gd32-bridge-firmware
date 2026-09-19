@@ -747,6 +747,7 @@ static gd32_bridge_status_t status_from_hw(int rv)
 	if (rv == BRIDGE_HW_ERR_RANGE) return STATUS_OUT_OF_RANGE;
 	if (rv == BRIDGE_HW_ERR_NOTIMPL) return STATUS_NOSUPPORT;
 	if (rv == BRIDGE_HW_ERR_BUSY) return STATUS_BUSY;
+	if (rv == BRIDGE_HW_ERR_NOT_READY) return STATUS_NOT_READY;
 	return STATUS_IO;
 }
 
