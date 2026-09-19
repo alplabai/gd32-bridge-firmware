@@ -55,6 +55,7 @@
 #include "gd32g5x3.h"
 
 #include "bridge_board_config.h"
+#include "gd32/bridge_critical.h"
 #include "bridge_hw.h" /* BRIDGE_HW_OK / BRIDGE_HW_ERR_RANGE */
 #include "protocol.h"  /* GD32_BRIDGE_DEFAULT_I2C_ADDR */
 #include "transport.h" /* the seams we drive */
@@ -113,8 +114,8 @@ static void spi_dma_init(void)
 {
 	dma_parameter_struct d;
 
-	rcu_periph_clock_enable(BRIDGE_SPI_DMA_RCU);
-	rcu_periph_clock_enable(RCU_DMAMUX);
+	bridge_rcu_periph_clock_enable(BRIDGE_SPI_DMA_RCU);
+	bridge_rcu_periph_clock_enable(RCU_DMAMUX);
 
 	/* RX: SPI1 DATA -> spi_rx_dma_buf, byte-by-byte (BYTEN makes one 8-bit
      * peripheral access == one frame), memory incrementing. */
@@ -182,7 +183,7 @@ static void spi_dma_arm_tx(uint32_t len)
 
 static void spi_cs_exti_init(void)
 {
-	rcu_periph_clock_enable(RCU_SYSCFG);
+	bridge_rcu_periph_clock_enable(RCU_SYSCFG);
 	syscfg_exti_line_config(BRIDGE_SPI_CS_EXTI_PORT, BRIDGE_SPI_CS_EXTI_PIN);
 	exti_init(BRIDGE_SPI_CS_EXTI_LINE, EXTI_INTERRUPT, EXTI_TRIG_BOTH);
 	exti_interrupt_flag_clear(BRIDGE_SPI_CS_EXTI_LINE);
@@ -234,7 +235,7 @@ static void bridge_spi_periph_config(void)
 
 void bridge_transport_spi_hw_init(void)
 {
-	rcu_periph_clock_enable(BRIDGE_SPI_RCU);
+	bridge_rcu_periph_clock_enable(BRIDGE_SPI_RCU);
 	spi_gpio_init();
 	spi_dma_init();
 	bridge_spi_periph_config();
@@ -457,7 +458,7 @@ i2c_timing_derive(uint32_t apb1_hz, uint32_t *psc, uint32_t *scl_dely, uint32_t 
 int bridge_transport_i2c_hw_init(void)
 {
 	rcu_i2c_clock_config(BRIDGE_I2C_RCU_IDX, BRIDGE_I2C_CK_SRC);
-	rcu_periph_clock_enable(BRIDGE_I2C_RCU);
+	bridge_rcu_periph_clock_enable(BRIDGE_I2C_RCU);
 	i2c_gpio_init();
 
 	uint32_t psc, scl_dely, sda_dely;

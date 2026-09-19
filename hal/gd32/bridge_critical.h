@@ -75,4 +75,14 @@ static inline void bridge_irq_unlock(uint32_t primask)
 	__set_PRIMASK(primask);
 }
 
+/* The vendor's rcu_periph_clock_enable() is a register read-modify-write.
+ * Runtime callers can be pre-empted by the other transport ISR, so protect
+ * that one RMW without making peripheral initialisation itself atomic. */
+static inline void bridge_rcu_periph_clock_enable(rcu_periph_enum periph)
+{
+	const uint32_t primask = bridge_irq_lock();
+	rcu_periph_clock_enable(periph);
+	bridge_irq_unlock(primask);
+}
+
 #endif /* GD32_BRIDGE_HAL_GD32_BRIDGE_CRITICAL_H */

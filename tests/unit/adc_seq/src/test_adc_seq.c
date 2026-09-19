@@ -99,6 +99,10 @@ ZTEST(gd32_adc_seq, test_stream_begin_recalibrates_after_enable)
 	zassert_true(enable_i >= 0, "adc_enable was called");
 	zassert_true(calib_i >= 0, "the calibration FSM (ADC_CTL1) was touched");
 	zassert_true(calib_i > enable_i, "calibration must run AFTER adc_enable, not before (#34)");
+	zassert_equal(mock_rcu_lock_violations,
+	              0u,
+	              "every runtime ADC-stream clock enable must hold PRIMASK (#148)");
+	zassert_equal(mock_primask, 0u, "clock-enable critical sections must restore PRIMASK");
 }
 
 /* #183 -- dma_init() must reload the DMA count for a new session.  Without

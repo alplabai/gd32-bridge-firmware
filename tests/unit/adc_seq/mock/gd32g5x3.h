@@ -34,8 +34,10 @@ typedef struct {
 	uint32_t    arg;    /* a secondary argument (e.g. a flag mask) */
 } mock_seq_evt_t;
 
-extern mock_seq_evt_t mock_seq[MOCK_SEQ_MAX];
-extern int            mock_seq_n;
+extern mock_seq_evt_t    mock_seq[MOCK_SEQ_MAX];
+extern int               mock_seq_n;
+extern volatile uint32_t mock_primask;
+extern uint32_t          mock_rcu_lock_violations;
 
 void mock_seq_reset(void);
 void mock_seq_log(const char *name, uint32_t periph, uint32_t arg);
@@ -224,7 +226,8 @@ void mock_dma_set_remaining(uint32_t dma_periph, dma_channel_enum channelx, uint
 #define RCU_TIMER6  5u
 #define RCU_FAC     6u
 #define RCU_FFT     7u
-void rcu_periph_clock_enable(uint32_t periph_clk);
+typedef uint32_t rcu_periph_enum;
+void             rcu_periph_clock_enable(uint32_t periph_clk);
 
 /* ------------------------------------------------------------------ */
 /* TRIGSEL -- routing only, no register semantics needed by the tests. */
@@ -365,28 +368,21 @@ FlagStatus fft_flag_get(uint32_t flag);
  * single MRS / CPSID i / MSR instructions; the vendor header gets them
  * from core_cm33.h, which this mock does not model.
  *
- * Modelled as a no-op mask that always reads "interrupts were enabled".
- * That is honest for this suite rather than a shortcut: the host test is
- * single-threaded with no interrupt to mask, so what the interlock's
- * critical section protects against cannot occur here.  What the suite
- * DOES still exercise is the claim/release bookkeeping around it -- that
- * every path which claims a converter also releases it, which is exactly
- * the defect the #80 x #133 merge introduced and this file's build caught.
- *
- * If a future case needs to observe masking, give g_primask a real
- * setter/getter here and assert on it; do not weaken bridge_critical.h. */
+ * Model the nesting-safe PRIMASK protocol so runtime RCU clock writes can
+ * prove they happen under the shared critical-section primitive. */
 static inline uint32_t __get_PRIMASK(void)
 {
-	return 0u;
+	return mock_primask;
 }
 
 static inline void __disable_irq(void)
 {
+	mock_primask = 1u;
 }
 
 static inline void __set_PRIMASK(uint32_t primask)
 {
-	(void)primask;
+	mock_primask = primask;
 }
 
 #endif /* GD32_BRIDGE_MOCK_GD32G5X3_H */
