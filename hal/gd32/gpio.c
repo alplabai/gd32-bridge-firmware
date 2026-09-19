@@ -106,15 +106,35 @@ _Static_assert(sizeof(gpio_pad_map) / sizeof(gpio_pad_map[0]) == GPIO_PAD_MAP_CO
  * pad level regardless of this flag (gh#62). */
 bool gpio_is_output[GPIO_PAD_MAP_COUNT];
 
+#define GPIO_MAPPED_PORT_COUNT 6u
+
+static const uint32_t gpio_mapped_ports[GPIO_MAPPED_PORT_COUNT] = {
+	GPIOA, GPIOB, GPIOC, GPIOD, GPIOE, GPIOF,
+};
+
+static size_t gpio_mapped_port_index(uint32_t periph)
+{
+	for (size_t i = 0; i < GPIO_MAPPED_PORT_COUNT; ++i) {
+		if (gpio_mapped_ports[i] == periph) return i;
+	}
+	return GPIO_MAPPED_PORT_COUNT;
+}
+
 int bridge_hw_gpio_read(uint32_t mask, uint32_t *levels)
 {
 	if (levels == 0) return BRIDGE_HW_ERR_INVAL;
-	*levels = 0u;
+	*levels                                       = 0u;
+	uint16_t port_inputs[GPIO_MAPPED_PORT_COUNT]  = { 0u };
+	bool     port_sampled[GPIO_MAPPED_PORT_COUNT] = { false };
+
 	/* Bits above `GPIO_PAD_MAP_COUNT` are silently ignored -- the
      * host header documents the mapping as opaque, so out-of-range
      * bits are treated as "no pad selected" rather than an error. */
 	for (size_t i = 0; i < GPIO_PAD_MAP_COUNT; ++i) {
 		if ((mask & ((uint32_t)1u << i)) == 0u) continue;
+		const size_t port = gpio_mapped_port_index(gpio_pad_map[i].periph);
+		if (port == GPIO_MAPPED_PORT_COUNT) return BRIDGE_HW_ERR_IO;
+
 		/* GPIOx_ISTAT (offset 0x10) is read-only, hardware-updated
          * every AHB cycle, and stays valid in output mode: UM
          * Rev1.2 p.269 §7.3.6 "A read access to the port input
@@ -124,8 +144,11 @@ int bridge_hw_gpio_read(uint32_t mask, uint32_t *levels)
          * to output but that is shorted, contended, or open on the
          * carrier must read back what the pad actually does, not
          * what CMD_GPIO_WRITE last commanded (gh#62). */
-		const FlagStatus s = gpio_input_bit_get(gpio_pad_map[i].periph, gpio_pad_map[i].pin);
-		if (s == SET) {
+		if (!port_sampled[port]) {
+			port_inputs[port]  = gpio_input_port_get(gpio_pad_map[i].periph);
+			port_sampled[port] = true;
+		}
+		if ((port_inputs[port] & gpio_pad_map[i].pin) != 0u) {
 			*levels |= ((uint32_t)1u << i);
 		}
 	}
@@ -134,50 +157,53 @@ int bridge_hw_gpio_read(uint32_t mask, uint32_t *levels)
 
 int bridge_hw_gpio_write(uint32_t mask, uint32_t levels)
 {
+	uint32_t bop_words[GPIO_MAPPED_PORT_COUNT]    = { 0u };
+	uint32_t promote_pins[GPIO_MAPPED_PORT_COUNT] = { 0u };
+
 	/* Out-of-range bits silently ignored, same policy as
      * bridge_hw_gpio_read(). */
 	for (size_t i = 0; i < GPIO_PAD_MAP_COUNT; ++i) {
 		if ((mask & ((uint32_t)1u << i)) == 0u) continue;
-		if (!gpio_is_output[i]) {
-			/* First write to this pad since boot: promote
-             * INPUT+PULL_UP to OUTPUT push-pull.  12 MHz is the
-             * GD32G5's slowest output speed (datasheet §7.4.1);
-             * adequate for control lines, low EMI.  The bridge
-             * dispatcher is single-threaded so no locking is
-             * needed around the mode flip + the flag write.
-             *
-             * Preload the commanded level into GPIOx_OCTL via BOP
-             * (offset 0x18, write-only set/clear -- UM Rev1.2 p.283
-             * §7.4.7) BEFORE flipping the direction bits, while the
-             * pad is still INPUT+PULL_UP.  GPIOx_OCTL resets to
-             * 0x0000 0000 (UM Rev1.2 p.282 §7.4.6), so promoting the
-             * pad to OUTPUT first -- as this code used to -- drives
-             * it LOW for the gap until the level write below caught
-             * up, glitching every pad on its first commanded HIGH
-             * (gh#61). Writing OCTL while the pad is still an input
-             * is harmless (push-pull mode is not active yet), so
-             * this preload is a pure reordering with no new
-             * register access. */
-			if (levels & ((uint32_t)1u << i)) {
-				gpio_bit_set(gpio_pad_map[i].periph, gpio_pad_map[i].pin);
-			} else {
-				gpio_bit_reset(gpio_pad_map[i].periph, gpio_pad_map[i].pin);
-			}
-			gpio_output_options_set(
-			    gpio_pad_map[i].periph, GPIO_OTYPE_PP, GPIO_OSPEED_12MHZ, gpio_pad_map[i].pin);
-			gpio_mode_set(
-			    gpio_pad_map[i].periph, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, gpio_pad_map[i].pin);
-			gpio_is_output[i] = true;
-		}
-		/* Unconditional on every call (not just the first): a
-         * no-op immediately after the preload above, and the only
-         * level write on every subsequent call to an already-output
-         * pad. */
-		if (levels & ((uint32_t)1u << i)) {
-			gpio_bit_set(gpio_pad_map[i].periph, gpio_pad_map[i].pin);
+		const size_t port = gpio_mapped_port_index(gpio_pad_map[i].periph);
+		if (port == GPIO_MAPPED_PORT_COUNT) return BRIDGE_HW_ERR_IO;
+
+		if ((levels & ((uint32_t)1u << i)) != 0u) {
+			bop_words[port] |= gpio_pad_map[i].pin;
 		} else {
-			gpio_bit_reset(gpio_pad_map[i].periph, gpio_pad_map[i].pin);
+			bop_words[port] |= gpio_pad_map[i].pin << 16;
 		}
+		if (!gpio_is_output[i]) {
+			promote_pins[port] |= gpio_pad_map[i].pin;
+		}
+	}
+
+	/* Promote newly written pads by physical port.  Preload only those
+     * pins through GPIOx_BOP before changing their mode, preserving the
+     * no-low-glitch rule from gh#61.  The SPL accepts a pin mask, so every
+     * new pin on a port changes output options and direction together. */
+	for (size_t port = 0; port < GPIO_MAPPED_PORT_COUNT; ++port) {
+		if (promote_pins[port] == 0u) continue;
+		const uint32_t preload_mask       = promote_pins[port] | (promote_pins[port] << 16);
+		GPIO_BOP(gpio_mapped_ports[port]) = bop_words[port] & preload_mask;
+		gpio_output_options_set(
+		    gpio_mapped_ports[port], GPIO_OTYPE_PP, GPIO_OSPEED_12MHZ, promote_pins[port]);
+		gpio_mode_set(
+		    gpio_mapped_ports[port], GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, promote_pins[port]);
+	}
+
+	for (size_t i = 0; i < GPIO_PAD_MAP_COUNT; ++i) {
+		if ((mask & ((uint32_t)1u << i)) != 0u) gpio_is_output[i] = true;
+	}
+
+	/* GPIOx_BOP atomically sets its low-half mask and clears its high-half
+     * mask (UM Rev1.2 p.283).  One final write per touched port prevents
+     * same-port pins from exposing the per-pad intermediate states that
+     * the old gpio_bit_set()/gpio_bit_reset() walk produced (gh#198).
+     * Atomicity is per physical port, not across all six ports; the
+     * pre-existing cross-transport dispatch interleaving is tracked by
+     * gh#19 and its protocol-wide serialization fix. */
+	for (size_t port = 0; port < GPIO_MAPPED_PORT_COUNT; ++port) {
+		if (bop_words[port] != 0u) GPIO_BOP(gpio_mapped_ports[port]) = bop_words[port];
 	}
 	return BRIDGE_HW_OK;
 }

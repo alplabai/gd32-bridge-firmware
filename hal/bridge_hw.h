@@ -88,9 +88,11 @@ uint8_t bridge_hw_reset_reason(void);
  * transport error. */
 int bridge_hw_gpio_read(uint32_t mask, uint32_t *levels);
 
-/* Atomically set/clear the pad outputs selected by @p mask to the
- * corresponding bit in @p levels.  IO24/IO25 (GD32 PC14/PC15) share a
- * backup-domain power switch with SE_RST (PC13, see
+/* Set/clear the pad outputs selected by @p mask to the corresponding
+ * bit in @p levels.  Pins on the same physical GPIO port change in one
+ * atomic GPIOx_BOP write; requests spanning ports commit one port at a
+ * time.  IO24/IO25 (GD32 PC14/PC15) share a backup-domain power switch
+ * with SE_RST (PC13, see
  * bridge_hw_se_reset()) budgeted at 3 mA / 2 MHz / 30 pF (GD32G553xx
  * Datasheet Rev2.0 p.130 Table 4-29 footnote 2; UM Rev1.2 p.133
  * §3.3.1).  Nothing on this line enforces that budget -- the HOST
