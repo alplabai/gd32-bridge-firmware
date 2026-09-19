@@ -56,6 +56,7 @@
 
 #include "bridge_board_config.h"
 #include "bridge_hw.h" /* BRIDGE_HW_OK / BRIDGE_HW_ERR_RANGE */
+#include "gd32/i2c_event_priority.h"
 #include "protocol.h"  /* GD32_BRIDGE_DEFAULT_I2C_ADDR */
 #include "transport.h" /* the seams we drive */
 
@@ -512,6 +513,11 @@ int bridge_transport_i2c_hw_init(void)
 /* I2C0 event ISR: address match (direction-aware), RX during a write,
  * STOP, and TX during a read.
  *
+ * RBNE is tested AHEAD of ADDSEND.  At a combined write/repeated-START
+ * read boundary, the final write byte can still be pending in RDATA while
+ * the new address match is pending.  Drain that byte before ADDSEND calls
+ * i2c_slave_write_end(), so the staged reply validates the full frame.
+ *
  * STPDET is tested AHEAD of TI.  At the end of a normal read, the last
  * envelope byte drains I2C_TDATA (setting TI) and the master then NACKs
  * and issues STOP (setting STPDET) essentially back-to-back, so both
@@ -522,7 +528,15 @@ int bridge_transport_i2c_hw_init(void)
  * for what happens if one gets written anyway). */
 void BRIDGE_I2C_EV_HANDLER(void)
 {
-	if (RESET != i2c_interrupt_flag_get(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_ADDSEND)) {
+	const bridge_i2c_event_t event = bridge_i2c_event_select(
+	    RESET != i2c_interrupt_flag_get(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_RBNE),
+	    RESET != i2c_interrupt_flag_get(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_ADDSEND),
+	    RESET != i2c_interrupt_flag_get(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_STPDET),
+	    RESET != i2c_interrupt_flag_get(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_TI));
+
+	if (event == BRIDGE_I2C_EVENT_RBNE) {
+		i2c_slave_rx_byte((uint8_t)i2c_data_receive(BRIDGE_I2C_PERIPH));
+	} else if (event == BRIDGE_I2C_EVENT_ADDSEND) {
 		const bool is_transmitter = (RESET != i2c_flag_get(BRIDGE_I2C_PERIPH, I2C_FLAG_TR));
 		i2c_interrupt_flag_clear(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_ADDSEND);
 		if (is_transmitter) {
@@ -544,9 +558,7 @@ void BRIDGE_I2C_EV_HANDLER(void)
 		} else {
 			i2c_slave_write_start();
 		}
-	} else if (RESET != i2c_interrupt_flag_get(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_RBNE)) {
-		i2c_slave_rx_byte((uint8_t)i2c_data_receive(BRIDGE_I2C_PERIPH));
-	} else if (RESET != i2c_interrupt_flag_get(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_STPDET)) {
+	} else if (event == BRIDGE_I2C_EVENT_STPDET) {
 		i2c_interrupt_flag_clear(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_STPDET);
 		/* The master NACKs the last byte of every read before STOP, so
          * NACKF is routinely set here.  It raises no interrupt now that
@@ -563,7 +575,7 @@ void BRIDGE_I2C_EV_HANDLER(void)
 		/* STOP after a write with no read: stage the reply so a later
          * separate read transaction can fetch it. */
 		(void)i2c_slave_write_end();
-	} else if (RESET != i2c_interrupt_flag_get(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_TI)) {
+	} else if (event == BRIDGE_I2C_EVENT_TI) {
 		i2c_data_transmit(BRIDGE_I2C_PERIPH, i2c_slave_tx_next_byte());
 	} else {
 		/* Terminating arm (#128).  An ISR that can return having cleared
