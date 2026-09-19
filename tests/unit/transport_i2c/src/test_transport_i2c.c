@@ -8,11 +8,11 @@
  *
  * This suite links the REAL transport and dispatcher, not mocks:
  * src/transport_i2c.c, src/protocol.c, src/bootloader/bootloader.c,
- * src/ota.c, src/crc32.c and hal/bridge_hw_stub.c (see
- * tests/unit/CMakeLists.txt's test_transport_i2c target) -- the exact
- * same code paths the device runs, minus the GigaDevice I2C0 ISR
- * wiring in hal/transport_hw_gd32.c, which is out of scope for a
- * hardware-less host build.
+ * src/ota.c and src/crc32.c (see tests/unit/CMakeLists.txt's
+ * test_transport_i2c target) -- the exact same code paths the device
+ * runs, minus the GigaDevice I2C0 ISR wiring in
+ * hal/transport_hw_gd32.c.  The HAL is the injectable host fake so a
+ * non-idempotent command can reveal duplicate dispatches.
  *
  * Per the project rule "one framing format, one command set, one set
  * of reply codes; only the transport layer differs" (src/protocol.c),
@@ -20,83 +20,17 @@
  * SPI suite (tests/unit/transport_spi/src/test_transport_spi.c) pins
  * -- only the wire framing around it changes.
  *
- * NOT-YET-WRITTEN cases (deliberate omissions, not silent gaps):
- *
- *   1. i2c_slave_write_end() driven a SECOND time off the same
- *      write_start()/rx_byte() sequence, mirroring the real HAL's
- *      call sites (hal/transport_hw_gd32.c fires write_end() from
- *      BOTH the ADDSEND-read branch and the STOP branch of one
- *      transaction).  Tracked as issue #4: write_end() has no
- *      once-only guard and never consumes/clears i2c_rx_buf, so the
- *      second call re-validates the same buffered bytes and
- *      re-dispatches protocol_dispatch() a second (or third) time for
- *      a command the host sent exactly once.  A case asserting
- *      CORRECT behaviour here would be red today; a case asserting
- *      the double-dispatch would cement the bug.  Once #4 is fixed,
- *      this case would assert that a second write_end() call with no
- *      intervening i2c_slave_write_start() returns false (or
- *      otherwise does not re-invoke protocol_dispatch()) instead of
- *      re-staging a fresh reply for the same command.
- *   2. The "stale re-dispatch" read-side twin of #1: an I2C read
- *      phase with NO new write since the last staged reply was
- *      consumed re-runs write_end() over the stale i2c_rx_buf/rx_len
- *      and returns a CRC-valid reply for a command the host never
- *      re-sent.  Same root cause as #4, same reason it is not written
- *      here.  Once fixed, this case would assert that a repeated
- *      read-phase after a fully-drained reply does NOT trigger a
- *      second protocol_dispatch() call (observable once the fix adds
- *      a dispatch-counting or one-shot-consumed seam) and instead
- *      returns the idle 0xFF pattern (see
- *      test_read_past_reply_returns_idle_0xff below, which pins the
- *      boundary of what IS safe to assert today: repeated
- *      i2c_slave_tx_next_byte() calls alone, without a second
- *      write_end(), are idle-safe).
- *   3. A real STATUS_OK maximum-length (GD32_BRIDGE_MAX_PAYLOAD_BYTES)
- *      REPLY is not exercised end-to-end.  Not an impossibility -- it is
- *      a SCOPING decision.  This suite deliberately links the STUB HAL
- *      (hal/bridge_hw_stub.c, see tests/unit/CMakeLists.txt's
- *      test_transport_i2c target), which answers every HW-backed
- *      handler with an unconditional BRIDGE_HW_ERR_NOTIMPL, so the only
- *      command whose reply could reach GD32_BRIDGE_MAX_PAYLOAD_BYTES
- *      (CMD_ADC_STREAM_READ at max_samples == GD32_BRIDGE_ADC_STREAM_READ_MAX)
- *      short-circuits to STATUS_NOSUPPORT before ever touching the reply
- *      buffer here.  tests/unit/fake/bridge_hw_fake.c -- a test-only fake
- *      with a real queued-sample backing store
- *      (bridge_hw_fake_adc_stream_queue_push() /
- *      bridge_hw_adc_stream_read()) -- CAN produce that data and already
- *      exists in this tree, but swapping this suite's link target from
- *      the stub to the fake is a build-target change (tests/unit/CMakeLists.txt)
- *      outside this file, which this suite does not own.  This suite
- *      instead pins the maximum-length REQUEST boundary
- *      (test_max_length_request_dispatches), which IS reachable without
- *      live hardware or a different link target.  The real STATUS_OK
- *      max-length REPLY case belongs in a fake-backed suite (see
- *      tests/unit/protocol/src/test_protocol.c's test_protocol target,
- *      which already links fake/bridge_hw_fake.c) -- not here.
- *   4. This suite deliberately CONTRADICTS the MSB-first CRC byte order
- *      committed in tests/protocol_vectors.txt:43 (`i2c_ping_write =
- *      0000E1F0`) and :45 (`i2c_ping_read_ok = 00E1F0`).  Every
- *      assertion below pins the CRC LSB-first, matching what
- *      src/transport_i2c.c:62-63,115-116 actually ships (and what the
- *      interoperating alp-sdk host driver parses) -- see issue #68,
- *      which is open precisely to decide which side (the shipping
- *      firmware/host pairing, or the vector-file generator + the
- *      alp-sdk spec sentence it followed) is normative, and holds that
- *      the firmware must NOT move.  Resolving #68 changes the
- *      generator and the committed vectors, not this suite's
- *      assertions; the follow-on step named in #68 is a
- *      tests/unit/protocol_vectors/ suite that replays
- *      tests/protocol_vectors.txt's i2c_* vectors through these same
- *      seams -- once that lands, this file's hand-built frames
- *      (build_write() and the hardcoded literals below) should be
- *      retired in favour of consuming that vector file directly, so
- *      the wire byte order can never again drift between the generator
- *      and the firmware unnoticed.
+ * One deliberate wire-format difference remains: the literal assertions
+ * below pin the shipped LSB-first I2C CRC byte order, while issue #68 tracks
+ * the MSB-first order in tests/protocol_vectors.txt and the specification.
+ * Resolving #68 changes those generated vectors, not this suite's shipping-
+ * behavior assertions.
  */
 
 #include <string.h>
 #include <zephyr/ztest.h>
 
+#include "bridge_hw_fake.h"
 #include "protocol.h"
 #include "transport.h"
 
@@ -164,7 +98,7 @@ static void read_phase(uint8_t *out, size_t n)
  * the same poly/init/xor-out by hand over one 0x00 byte.  Byte order is
  * LSB first -- the firmware's SHIPPING order, which this suite pins on
  * purpose against tests/protocol_vectors.txt's MSB-first vectors; see
- * the file-header declared omission #4 (issue #68). */
+ * the file-header note about issue #68. */
 static const uint8_t ping_write_frame[] = { GD32_BRIDGE_I2C_REG_CMD, CMD_PING, 0xF0u, 0xE1u };
 static const uint8_t ping_reply_frame[] = { STATUS_OK, 0xF0u, 0xE1u };
 
@@ -201,6 +135,74 @@ ZTEST(gd32_bridge_transport_i2c, test_ping_stages_reply)
 	    ping_reply_frame,
 	    sizeof ping_reply_frame,
 	    "PING reply is byte-identical to the hardcoded literal (independent CRC oracle)");
+}
+
+/* The GD32 event ISR calls write_end() at the repeated-START read edge and
+ * again at STOP.  CMD_SE_RESET makes duplicate dispatch observable: unlike
+ * PING, each execution increments a fake-HAL call counter. */
+ZTEST(gd32_bridge_transport_i2c, test_write_end_dispatches_non_idempotent_command_once)
+{
+	const uint8_t payload[] = { 1u };
+	uint8_t       req[5];
+	uint8_t       reply[3];
+	uint8_t       no_pending[3];
+
+	transport_i2c_init();
+	bridge_hw_fake_reset();
+
+	const size_t req_len = build_write(req, CMD_SE_RESET, payload, sizeof(payload));
+	i2c_slave_write_start();
+	for (size_t i = 0u; i < req_len; i++) {
+		i2c_slave_rx_byte(req[i]);
+	}
+
+	zassert_true(i2c_slave_write_end(), "first write_end dispatches and stages the reply");
+	zassert_equal(bridge_hw_fake_se_reset_call_count(), 1u);
+	zassert_equal(bridge_hw_fake_se_reset_last_assert(), 1u);
+
+	zassert_true(i2c_slave_write_end(), "repeated-START write_end preserves the staged reply");
+	zassert_equal(bridge_hw_fake_se_reset_call_count(), 1u, "request dispatched exactly once");
+
+	read_phase(reply, sizeof(reply));
+	zassert_equal(reply[0], STATUS_OK);
+	const uint16_t reply_crc = crc16_ccitt_false(reply, 1u);
+	zassert_equal(reply[1], (uint8_t)(reply_crc & 0xFFu));
+	zassert_equal(reply[2], (uint8_t)(reply_crc >> 8));
+
+	zassert_true(i2c_slave_write_end(), "STOP after the drained read stages NO_PENDING");
+	zassert_equal(bridge_hw_fake_se_reset_call_count(), 1u, "STOP must not redispatch");
+	read_phase(no_pending, sizeof(no_pending));
+	zassert_equal(no_pending[0], STATUS_NO_PENDING);
+	const uint16_t no_pending_crc = crc16_ccitt_false(no_pending, 1u);
+	zassert_equal(no_pending[1], (uint8_t)(no_pending_crc & 0xFFu));
+	zassert_equal(no_pending[2], (uint8_t)(no_pending_crc >> 8));
+}
+
+/* Switching this suite to the injectable fake also makes the largest valid
+ * STATUS_OK reply reachable end-to-end through the I2C staging buffer. */
+ZTEST(gd32_bridge_transport_i2c, test_max_length_reply_is_staged_intact)
+{
+	const uint8_t payload[] = { 0u, GD32_BRIDGE_ADC_STREAM_READ_MAX };
+	uint8_t       req[6];
+	uint8_t       reply[1u + GD32_BRIDGE_MAX_PAYLOAD_BYTES + 2u];
+
+	transport_i2c_init();
+	bridge_hw_fake_reset();
+
+	const size_t req_len = build_write(req, CMD_ADC_STREAM_READ, payload, sizeof(payload));
+	zassert_true(write_phase(req, req_len));
+	read_phase(reply, sizeof(reply));
+
+	zassert_equal(reply[0], STATUS_OK);
+	zassert_equal(reply[1], 0u, "empty fake stream reports zero valid samples");
+	for (size_t i = 2u; i < 1u + GD32_BRIDGE_MAX_PAYLOAD_BYTES; i++) {
+		zassert_equal(reply[i], 0u, "unused sample slots are zero-padded");
+	}
+
+	const size_t   crc_covered = 1u + GD32_BRIDGE_MAX_PAYLOAD_BYTES;
+	const uint16_t crc         = crc16_ccitt_false(reply, crc_covered);
+	zassert_equal(reply[crc_covered], (uint8_t)(crc & 0xFFu));
+	zassert_equal(reply[crc_covered + 1u], (uint8_t)(crc >> 8));
 }
 
 /* Closes the CRC-algorithm-mutation gap directly: crc16_ccitt_false()
@@ -413,11 +415,7 @@ ZTEST(gd32_bridge_transport_i2c, test_request_payload_pointer_is_pinned)
 }
 
 /* Bytes read PAST the staged reply's end must return the 0xFF idle
- * pattern -- not garbage, not a wrapped repeat of the reply, and (see
- * the file header's omission #2) NOT a re-dispatch of the buffered
- * request.  This is exactly the boundary that IS safe to assert today:
- * repeated i2c_slave_tx_next_byte() calls alone, without a second
- * i2c_slave_write_end(), never touch protocol_dispatch() again. */
+ * pattern -- not garbage and not a wrapped repeat of the reply. */
 ZTEST(gd32_bridge_transport_i2c, test_read_past_reply_returns_idle_0xff)
 {
 	uint8_t req[4];
@@ -569,9 +567,8 @@ ZTEST(gd32_bridge_transport_i2c, test_short_write_below_minimum_rejected)
  * i2c_slave_write_end() with NO i2c_slave_rx_byte() calls in between --
  * is the I2C-only twin of the SPI suite's test_empty_transaction_rewinds
  * (tests/unit/transport_spi/src/test_transport_spi.c:117): writable and
- * reachable today, does NOT depend on issue #4 (the double-write_end()
- * bug the file header's omissions #1/#2 track).  I2C has no rewind
- * concept (nothing was ever staged to rewind to) -- the correct
+ * reachable today.  I2C has no rewind concept (nothing was ever staged
+ * to rewind to) -- the correct
  * response is the same NO_PENDING rejection as any other envelope short
  * of the 4-byte minimum. */
 ZTEST(gd32_bridge_transport_i2c, test_zero_byte_write_stages_no_pending)
