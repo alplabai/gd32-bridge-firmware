@@ -19,7 +19,10 @@
 #     and links every hal/gd32/*.c file, hal/transport_hw_gd32.c,
 #     hal/fmc_ota.c, src/ota.c's real armed state machine, and
 #     src/boot/boot_main.c -- the layer no other job here touches.
-#     Compile-and-link only; it proves nothing about on-silicon behaviour.
+#     It also verifies that every real image's fault vectors resolve to the
+#     strong diagnostic handlers rather than the vendor weak aliases.
+#     Compile-and-link/static inspection only; it proves nothing about
+#     on-silicon behaviour.
 #   * On-silicon behaviour is NOT covered by any job here.  The bridge talks
 #     SPI and I2C to a Renesas RZ/V2N on a real SoM; nothing here substitutes
 #     for a bench run.
@@ -322,9 +325,10 @@ jobs:
       # / VERIFY / COMMIT / ROLLBACK / GET_STATE / ABORT machine, since
       # BRIDGE_OTA_PARTITIONED is defined for them and src/ota.c:56-482 is no
       # longer preprocessed out), and gd32-bootloader (the only target that
-      # compiles src/boot/boot_main.c).  All three share
-      # CMakeLists.txt's GD32_BRIDGE_SOURCES list, so this single configure
-      # also compiles every hal/gd32/*.c file and hal/transport_hw_gd32.c.
+      # compiles src/boot/boot_main.c). The two app targets share
+      # CMakeLists.txt's GD32_BRIDGE_SOURCES list; the bootloader deliberately
+      # has a smaller source list, including the fault recorder it needs
+      # before either app is reached.
       # -DGD32_VENDOR_DIR points at the tree staged above -- the positive
       # path (Refs #110): this is the flag itself doing the work, not the
       # CMakeLists.txt fallback.
@@ -388,3 +392,14 @@ jobs:
 
       - name: build (full-flash)
         run: cmake --build build-gd32-flash -j"$(nproc)"
+
+      # A link can succeed while the startup file's weak aliases still send
+      # these exceptions to Default_Handler. Check both the symbol binding
+      # and the actual vector words in every real image (#100).
+      - name: verify core-fault vector ownership
+        run: |
+          python3 tools/check_fault_vectors.py \
+            build-gd32/gd32-bootloader.elf \
+            build-gd32/gd32-bridge-slot-a.elf \
+            build-gd32/gd32-bridge-slot-b.elf \
+            build-gd32-flash/gd32-bridge.elf

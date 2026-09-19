@@ -56,6 +56,7 @@
 
 #include "bridge_board_config.h"
 #include "bridge_hw.h" /* BRIDGE_HW_OK / BRIDGE_HW_ERR_RANGE */
+#include "gd32/fault_handlers.h"
 #include "protocol.h"  /* GD32_BRIDGE_DEFAULT_I2C_ADDR */
 #include "transport.h" /* the seams we drive */
 
@@ -506,6 +507,10 @@ int bridge_transport_i2c_hw_init(void)
 	nvic_irq_enable(BRIDGE_I2C_ER_IRQN, BRIDGE_I2C_IRQ_PRIO, BRIDGE_I2C_IRQ_SUBPRIO);
 
 	i2c_enable(BRIDGE_I2C_PERIPH);
+	/* SPI initialisation runs before I2C during cold boot. Reaching this
+	 * successful tail therefore marks the whole transport layer healthy;
+	 * the range-error exit above deliberately leaves the fault-loop count. */
+	fault_reset_loop_mark_healthy();
 	return BRIDGE_HW_OK;
 }
 

@@ -295,4 +295,8 @@ else()
 
     add_executable(gd32-bootloader src/boot/boot_main.c src/crc32.c hal/gd32_libc_stubs.c)
     gd32_firmware_target(gd32-bootloader ${CMAKE_SOURCE_DIR}/toolchain/gd32g553_bootloader.ld)
+    # This target intentionally does not consume GD32_BRIDGE_SOURCES. Keep the
+    # core-fault recorder explicit so boot-time faults cannot fall back to the
+    # vendor startup's weak Default_Handler aliases (#100).
+    target_sources(gd32-bootloader PRIVATE hal/gd32/fault_diag.c hal/gd32/fault_handlers.c)
 endif()
