@@ -274,6 +274,8 @@ static void bind_test_fir_chain(uint8_t stream_id)
 
 static int fft_init_end_result;
 static int fac_init_end_result;
+static int replacement_end_result;
+static int replacement_begin_result;
 
 static void end_stream_during_fft_init(void)
 {
@@ -283,6 +285,28 @@ static void end_stream_during_fft_init(void)
 static void end_stream_during_fac_init(void)
 {
 	fac_init_end_result = bridge_hw_adc_stream_end(0u);
+}
+
+static void replace_stream_with_fft(void)
+{
+	replacement_end_result   = bridge_hw_adc_stream_end(0u);
+	replacement_begin_result = bridge_hw_adc_stream_begin(0u, BRIDGE_ADC_CH0, 1000u);
+	if (replacement_begin_result != BRIDGE_HW_OK) return;
+	bind_test_fft_chain(0u);
+	for (uint16_t i = 0u; i < 32u; ++i)
+		adc_streams[0].ring[i] = (uint16_t)(100u + i);
+	mock_dma_set_remaining(DMA0, DMA_CH0, BRIDGE_ADC_STREAM_RING_SAMPLES - 32u);
+	mock_fft_set_flag(SET);
+}
+
+static void replace_stream_with_fir(void)
+{
+	replacement_end_result   = bridge_hw_adc_stream_end(0u);
+	replacement_begin_result = bridge_hw_adc_stream_begin(0u, BRIDGE_ADC_CH0, 1000u);
+	if (replacement_begin_result != BRIDGE_HW_OK) return;
+	bind_test_fir_chain(0u);
+	adc_streams[0].ring[0] = 1024u;
+	mock_dma_set_remaining(DMA0, DMA_CH0, BRIDGE_ADC_STREAM_RING_SAMPLES - 1u);
 }
 
 ZTEST(gd32_adc_seq, test_fft_rebind_rejects_previous_sequence_until_new_frame)
@@ -421,6 +445,169 @@ ZTEST(gd32_adc_seq, test_fac_config_preemption_cannot_resurrect_ended_stream)
 	zassert_true(mock_seq_find_from("fac_init", 0u, before_replacement_pump) >= 0,
 	             "replacement session configures FAC again");
 	zassert_equal(adc_streams[0].proc_write, 1u, "replacement session processes its own sample");
+	zassert_equal(bridge_hw_adc_stream_end(0u), BRIDGE_HW_OK, "replacement stream ends cleanly");
+}
+
+ZTEST(gd32_adc_seq, test_fac_post_commit_preemption_cannot_drain_replacement)
+{
+	adc_seq_reset();
+	replacement_end_result   = BRIDGE_HW_ERR_IO;
+	replacement_begin_result = BRIDGE_HW_ERR_IO;
+
+	zassert_equal(
+	    bridge_hw_adc_stream_begin(0u, BRIDGE_ADC_CH0, 1000u), BRIDGE_HW_OK, "stream begins");
+	bind_test_fir_chain(0u);
+	adc_streams[0].ring[0] = 2048u;
+	mock_dma_set_remaining(DMA0, DMA_CH0, BRIDGE_ADC_STREAM_RING_SAMPLES - 1u);
+
+	/* dma_transfer_number_get() is the first interruptible call after the
+	 * configuring token has committed to an active FAC owner. Replace the
+	 * same stream ID there, then return the old DMA snapshot to the suspended
+	 * pump: without a guarded FAC transaction it drains replacement data
+	 * through the previous session's configuration. */
+	const int before_stale_pump = mock_seq_n;
+	mock_dma_set_transfer_get_hook(replace_stream_with_fir);
+	bridge_hw_dsp_pump();
+
+	zassert_equal(replacement_end_result, BRIDGE_HW_OK, "post-commit END succeeds");
+	zassert_equal(replacement_begin_result, BRIDGE_HW_OK, "same-ID replacement begins");
+	zassert_equal(adc_streams[0].proc_write, 0u, "suspended pump publishes no replacement sample");
+	zassert_true(mock_seq_find_from("fac_fixed_data_write", 0u, before_stale_pump) < 0,
+	             "revoked FAC owner performs no post-END MMIO");
+
+	const int before_replacement_pump = mock_seq_n;
+	bridge_hw_dsp_pump();
+	zassert_true(mock_seq_find_from("fac_init", 0u, before_replacement_pump) >= 0,
+	             "next main-loop pump configures the replacement FAC session");
+	zassert_true(mock_seq_find_from("fac_fixed_data_write", 0u, before_replacement_pump) >= 0,
+	             "replacement session processes its own sample");
+	zassert_equal(adc_streams[0].proc_write, 1u, "replacement publishes exactly one sample");
+	zassert_equal(bridge_hw_adc_stream_end(0u), BRIDGE_HW_OK, "replacement stream ends cleanly");
+}
+
+ZTEST(gd32_adc_seq, test_fft_post_commit_preemption_cannot_drain_replacement)
+{
+	adc_seq_reset();
+	replacement_end_result   = BRIDGE_HW_ERR_IO;
+	replacement_begin_result = BRIDGE_HW_ERR_IO;
+
+	zassert_equal(
+	    bridge_hw_adc_stream_begin(0u, BRIDGE_ADC_CH0, 1000u), BRIDGE_HW_OK, "stream begins");
+	bind_test_fft_chain(0u);
+	for (uint16_t i = 0u; i < 32u; ++i)
+		adc_streams[0].ring[i] = i;
+	mock_dma_set_remaining(DMA0, DMA_CH0, BRIDGE_ADC_STREAM_RING_SAMPLES - 32u);
+	mock_fft_set_flag(SET);
+
+	const int before_stale_pump = mock_seq_n;
+	mock_dma_set_transfer_get_hook(replace_stream_with_fft);
+	bridge_hw_dsp_pump();
+
+	zassert_equal(replacement_end_result, BRIDGE_HW_OK, "post-commit END succeeds");
+	zassert_equal(replacement_begin_result, BRIDGE_HW_OK, "same-ID replacement begins");
+	zassert_equal(
+	    adc_streams[0].pump_raw_read, 0u, "suspended pump consumes no replacement samples");
+	zassert_true(mock_seq_find_from("fft_calculation_start", 0u, before_stale_pump) < 0,
+	             "revoked FFT owner cannot start a replacement frame");
+
+	const int before_replacement_pump = mock_seq_n;
+	bridge_hw_dsp_pump();
+	zassert_true(mock_seq_find_from("fft_calculation_start", 0u, before_replacement_pump) >= 0,
+	             "next main-loop pump calculates the replacement frame");
+	uint32_t seq   = 0u;
+	uint16_t total = 0u;
+	uint8_t  got   = 0u;
+	float    bin   = -1.0f;
+	zassert_equal(bridge_hw_adc_spectrum_read(0u, 0u, 1u, &seq, &total, &got, &bin),
+	              BRIDGE_HW_OK,
+	              "replacement publishes its own frame");
+	zassert_equal(seq, 1u, "replacement frame sequence starts at one");
+	zassert_equal(bridge_hw_adc_stream_end(0u), BRIDGE_HW_OK, "replacement stream ends cleanly");
+}
+
+ZTEST(gd32_adc_seq, test_fft_wait_preemption_cannot_publish_ended_session)
+{
+	adc_seq_reset();
+	replacement_end_result   = BRIDGE_HW_ERR_IO;
+	replacement_begin_result = BRIDGE_HW_ERR_IO;
+
+	zassert_equal(
+	    bridge_hw_adc_stream_begin(0u, BRIDGE_ADC_CH0, 1000u), BRIDGE_HW_OK, "stream begins");
+	bind_test_fft_chain(0u);
+	/* First tick establishes the active FFT owner without a frame. */
+	mock_dma_set_remaining(DMA0, DMA_CH0, BRIDGE_ADC_STREAM_RING_SAMPLES);
+	bridge_hw_dsp_pump();
+
+	for (uint16_t i = 0u; i < 32u; ++i)
+		adc_streams[0].ring[i] = i;
+	mock_dma_set_remaining(DMA0, DMA_CH0, BRIDGE_ADC_STREAM_RING_SAMPLES - 32u);
+	mock_fft_set_flag(SET);
+	mock_fft_set_poll_hook(replace_stream_with_fft);
+	bridge_hw_dsp_pump();
+
+	zassert_equal(replacement_end_result, BRIDGE_HW_OK, "END during FFT wait succeeds");
+	zassert_equal(replacement_begin_result, BRIDGE_HW_OK, "replacement begins during FFT wait");
+	uint32_t seq   = 0xDEADBEEFu;
+	uint16_t total = 0xFFFFu;
+	uint8_t  got   = 0xFFu;
+	float    bin   = -1.0f;
+	zassert_equal(bridge_hw_adc_spectrum_read(0u, 0u, 1u, &seq, &total, &got, &bin),
+	              BRIDGE_HW_ERR_IO,
+	              "ended session's completed hardware result remains unpublished");
+	zassert_equal(got, 0u, "no stale bins are exposed");
+
+	bridge_hw_dsp_pump();
+	zassert_equal(bridge_hw_adc_spectrum_read(0u, 0u, 1u, &seq, &total, &got, &bin),
+	              BRIDGE_HW_OK,
+	              "replacement can publish its own frame on the next tick");
+	zassert_equal(seq, 1u, "replacement publication starts a fresh sequence");
+	zassert_equal(bridge_hw_adc_stream_end(0u), BRIDGE_HW_OK, "replacement stream ends cleanly");
+}
+
+ZTEST(gd32_adc_seq, test_fft_publish_commit_preemption_cannot_expose_stale_frame)
+{
+	adc_seq_reset();
+	replacement_end_result   = BRIDGE_HW_ERR_IO;
+	replacement_begin_result = BRIDGE_HW_ERR_IO;
+
+	zassert_equal(
+	    bridge_hw_adc_stream_begin(0u, BRIDGE_ADC_CH0, 1000u), BRIDGE_HW_OK, "stream begins");
+	bind_test_fft_chain(0u);
+	/* Establish the active owner without producing a frame. */
+	mock_dma_set_remaining(DMA0, DMA_CH0, BRIDGE_ADC_STREAM_RING_SAMPLES);
+	bridge_hw_dsp_pump();
+
+	for (uint16_t i = 0u; i < 32u; ++i)
+		adc_streams[0].ring[i] = i;
+	mock_dma_set_remaining(DMA0, DMA_CH0, BRIDGE_ADC_STREAM_RING_SAMPLES - 32u);
+	mock_fft_set_flag(SET);
+
+	/* Each sample takes one lease-protected capture and one protected
+	 * append (64 locks); lock 65 claims the unreadable publishing token.
+	 * Inject END -> BEGIN -> BIND on lock 66, immediately before the final
+	 * metadata/owner commit. The callback runs from __get_PRIMASK(), before
+	 * interrupts become masked, so this is a silicon-reachable boundary. */
+	mock_irq_set_lock_hook(66u, replace_stream_with_fft);
+	bridge_hw_dsp_pump();
+
+	zassert_equal(replacement_end_result, BRIDGE_HW_OK, "END before publish commit succeeds");
+	zassert_equal(replacement_begin_result, BRIDGE_HW_OK, "same-ID replacement begins");
+	uint32_t seq   = 0xDEADBEEFu;
+	uint16_t total = 0xFFFFu;
+	uint8_t  got   = 0xFFu;
+	float    bin   = -1.0f;
+	zassert_equal(bridge_hw_adc_spectrum_read(0u, 0u, 1u, &seq, &total, &got, &bin),
+	              BRIDGE_HW_ERR_IO,
+	              "revoked publisher cannot expose its frame through the replacement owner");
+	zassert_equal(got, 0u, "no stale bins are exposed after publish revocation");
+	zassert_equal(
+	    adc_streams[0].pump_raw_read, 0u, "publish revocation leaves replacement cursor fresh");
+
+	bridge_hw_dsp_pump();
+	zassert_equal(bridge_hw_adc_spectrum_read(0u, 0u, 1u, &seq, &total, &got, &bin),
+	              BRIDGE_HW_OK,
+	              "replacement publishes its own frame on the next tick");
+	zassert_equal(seq, 1u, "replacement publication starts at sequence one");
 	zassert_equal(bridge_hw_adc_stream_end(0u), BRIDGE_HW_OK, "replacement stream ends cleanly");
 }
 

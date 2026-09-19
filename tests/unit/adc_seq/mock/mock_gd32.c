@@ -10,13 +10,36 @@
 mock_seq_evt_t mock_seq[MOCK_SEQ_MAX];
 int            mock_seq_n;
 
+static mock_hook_t mock_irq_lock_hook;
+static uint32_t    mock_irq_locks_until_hook;
+
+void mock_irq_set_lock_hook(uint32_t locks_until_hook, mock_hook_t hook)
+{
+	mock_irq_locks_until_hook = locks_until_hook;
+	mock_irq_lock_hook        = hook;
+}
+
+uint32_t mock_irq_get_primask(void)
+{
+	if (mock_irq_lock_hook != 0 && mock_irq_locks_until_hook > 0u &&
+	    --mock_irq_locks_until_hook == 0u) {
+		mock_hook_t hook = mock_irq_lock_hook;
+		mock_irq_set_lock_hook(0u, 0);
+		hook();
+	}
+	return 0u;
+}
+
 void mock_seq_reset(void)
 {
 	mock_seq_n = 0;
 	memset(mock_seq, 0, sizeof mock_seq);
+	mock_irq_set_lock_hook(0u, 0);
+	mock_dma_set_transfer_get_hook(0);
 	mock_fac_set_init_hook(0);
 	mock_fft_set_flag(RESET);
 	mock_fft_set_init_hook(0);
+	mock_fft_set_poll_hook(0);
 }
 
 void mock_seq_log(const char *name, uint32_t periph, uint32_t arg)
@@ -185,7 +208,8 @@ void mock_adc_set_routine_data(uint32_t code)
 
 /* --- DMA -----------------------------------------------------------------*/
 
-static uint32_t mock_dma_remaining[2][1]; /* [dma_periph][channel] */
+static uint32_t    mock_dma_remaining[2][1]; /* [dma_periph][channel] */
+static mock_hook_t mock_dma_transfer_get_hook;
 
 void dma_deinit(uint32_t dma_periph, dma_channel_enum channelx)
 {
@@ -227,7 +251,13 @@ void dma_transfer_number_config(uint32_t dma_periph, dma_channel_enum channelx, 
 uint32_t dma_transfer_number_get(uint32_t dma_periph, dma_channel_enum channelx)
 {
 	mock_seq_log("dma_transfer_number_get", dma_periph, 0u);
-	return mock_dma_remaining[dma_periph][channelx];
+	const uint32_t remaining = mock_dma_remaining[dma_periph][channelx];
+	if (mock_dma_transfer_get_hook != 0) {
+		mock_hook_t hook           = mock_dma_transfer_get_hook;
+		mock_dma_transfer_get_hook = 0;
+		hook();
+	}
+	return remaining;
 }
 void dma_flag_clear(uint32_t dma_periph, dma_channel_enum channelx, uint32_t flag)
 {
@@ -260,6 +290,11 @@ void dma_interrupt_flag_clear(uint32_t dma_periph, dma_channel_enum channelx, ui
 void mock_dma_set_remaining(uint32_t dma_periph, dma_channel_enum channelx, uint32_t remaining)
 {
 	mock_dma_remaining[dma_periph][channelx] = remaining;
+}
+
+void mock_dma_set_transfer_get_hook(mock_hook_t hook)
+{
+	mock_dma_transfer_get_hook = hook;
 }
 
 /* --- RCU / TRIGSEL / TIMER / NVIC: logged no-ops --------------------------*/
@@ -352,7 +387,7 @@ void fac_stop(void)
 }
 void fac_fixed_data_write(int16_t data)
 {
-	(void)data;
+	mock_seq_log("fac_fixed_data_write", 0u, (uint32_t)(uint16_t)data);
 }
 int16_t fac_fixed_data_read(void)
 {
@@ -388,13 +423,21 @@ void fft_init(fft_parameter_struct *p)
 }
 void fft_calculation_start(void)
 {
+	mock_seq_log("fft_calculation_start", 0u, 0u);
 }
-static FlagStatus mock_fft_status;
+static FlagStatus  mock_fft_status;
+static mock_hook_t mock_fft_poll_hook;
 
 FlagStatus fft_flag_get(uint32_t flag)
 {
 	(void)flag;
-	return mock_fft_status;
+	const FlagStatus status = mock_fft_status;
+	if (mock_fft_poll_hook != 0) {
+		mock_hook_t hook   = mock_fft_poll_hook;
+		mock_fft_poll_hook = 0;
+		hook();
+	}
+	return status;
 }
 void mock_fft_set_flag(FlagStatus status)
 {
@@ -403,6 +446,11 @@ void mock_fft_set_flag(FlagStatus status)
 void mock_fft_set_init_hook(mock_dsp_init_hook_t hook)
 {
 	mock_fft_init_hook = hook;
+}
+
+void mock_fft_set_poll_hook(mock_hook_t hook)
+{
+	mock_fft_poll_hook = hook;
 }
 
 /* --- gd32_common.h externs the driver needs but this suite doesn't use ---*/

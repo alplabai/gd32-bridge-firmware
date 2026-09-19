@@ -39,6 +39,11 @@ extern int            mock_seq_n;
 
 void mock_seq_reset(void);
 void mock_seq_log(const char *name, uint32_t periph, uint32_t arg);
+typedef void (*mock_hook_t)(void);
+/* Fire a one-shot callback on the Nth subsequent bridge_irq_lock() entry,
+ * before the mock marks interrupts disabled. */
+void     mock_irq_set_lock_hook(uint32_t locks_until_hook, mock_hook_t hook);
+uint32_t mock_irq_get_primask(void);
 /* First/last index of an event matching name (+ periph if periph !=
  * MOCK_ANY_PERIPH), searched over [from, mock_seq_n).  Returns -1 if
  * not found. */
@@ -211,6 +216,10 @@ void dma_interrupt_flag_clear(uint32_t dma_periph, dma_channel_enum channelx, ui
  * "remaining" countdown), so the write-index math in adc_stream_write_
  * index resolves to a safe, in-range value without a real DMA. */
 void mock_dma_set_remaining(uint32_t dma_periph, dma_channel_enum channelx, uint32_t remaining);
+/* One-shot callback from dma_transfer_number_get(), after the old count is
+ * snapshotted but before it is returned. Models an ISR pre-empting the DSP
+ * pump after owner commit and before its first data-plane mutation. */
+void mock_dma_set_transfer_get_hook(mock_hook_t hook);
 
 /* ------------------------------------------------------------------ */
 /* RCU -- every clock-gate call is a no-op tag; only logged.           */
@@ -361,6 +370,9 @@ void       fft_calculation_start(void);
 FlagStatus fft_flag_get(uint32_t flag);
 void       mock_fft_set_flag(FlagStatus status);
 void       mock_fft_set_init_hook(mock_dsp_init_hook_t hook);
+/* One-shot callback after fft_flag_get() snapshots the completion flag.
+ * Models teardown during the pump's interruptible hardware wait. */
+void mock_fft_set_poll_hook(mock_hook_t hook);
 
 /* ---- CMSIS core intrinsics -------------------------------------------- *
  *
@@ -370,19 +382,13 @@ void       mock_fft_set_init_hook(mock_dsp_init_hook_t hook);
  * single MRS / CPSID i / MSR instructions; the vendor header gets them
  * from core_cm33.h, which this mock does not model.
  *
- * Modelled as a no-op mask that always reads "interrupts were enabled".
- * That is honest for this suite rather than a shortcut: the host test is
- * single-threaded with no interrupt to mask, so what the interlock's
- * critical section protects against cannot occur here.  What the suite
- * DOES still exercise is the claim/release bookkeeping around it -- that
- * every path which claims a converter also releases it, which is exactly
- * the defect the #80 x #133 merge introduced and this file's build caught.
- *
- * If a future case needs to observe masking, give g_primask a real
- * setter/getter here and assert on it; do not weaken bridge_critical.h. */
+ * Modelled as a no-op mask that reads "interrupts were enabled". A one-shot
+ * hook on __get_PRIMASK() lets lifecycle tests inject an ISR immediately
+ * before a chosen critical section; callbacks are never fired after
+ * __disable_irq(), where an interrupt would be impossible on silicon. */
 static inline uint32_t __get_PRIMASK(void)
 {
-	return 0u;
+	return mock_irq_get_primask();
 }
 
 static inline void __disable_irq(void)
