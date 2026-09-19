@@ -380,9 +380,11 @@ int bridge_hw_timer_sync(uint8_t master, uint8_t slave, uint8_t mode);
  * 1 = sleep, 2 = deep-sleep, 3 = standby.  @p wake_bitmap selects which
  * wake sources the firmware should arm (ALP_POWER_WAKE_* bits;
  * platform-specific).  @p wake_after_ms is a max wall-clock wait, or 0
- * for "no timer wake".  The GD32 prepares the V2N supervisor handshake
- * + signals the Renesas SoC to enter the matching mode, then re-runs
- * the bridge handshake on wakeup so the host can resume bridge calls. */
+ * for "no timer wake".  A bitmap containing any source this backend
+ * cannot arm returns BRIDGE_HW_ERR_NOTIMPL and does not enter the requested
+ * low-power mode.  The GD32 prepares the V2N supervisor handshake + signals
+ * the Renesas SoC to enter the matching mode, then re-runs the bridge
+ * handshake on wakeup so the host can resume bridge calls. */
 int bridge_hw_power_mode_set(uint8_t mode, uint32_t wake_bitmap, uint32_t wake_after_ms);
 
 /* --------------------------------------------------------------- */

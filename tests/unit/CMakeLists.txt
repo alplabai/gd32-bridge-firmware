@@ -181,6 +181,27 @@ target_compile_options(test_timer_sync_iti PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_timer_sync_iti PRIVATE ztest_shim)
 add_test(NAME timer_sync_iti COMMAND test_timer_sync_iti)
 
+# --- power_wake: fail-closed wake-bitmap validation (gh#107) --------------
+#
+# Link the real power.c against the smallest possible PMU/RTC mock.  The mock
+# counts every vendor/transport call, so the suite proves unsupported bits
+# return before any hardware side effect -- and fails if production stops
+# calling the vendor-independent predicate in power_wake.h.
+add_executable(test_power_wake
+    power_wake/src/test_power_wake.c
+    power_wake/mock/mock_power.c
+    ${FW}/hal/gd32/power.c
+)
+target_include_directories(test_power_wake PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/power_wake/mock
+    ${FW}/hal/gd32
+    ${FW}/hal
+    ${FW}/src
+)
+target_compile_options(test_power_wake PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_power_wake PRIVATE ztest_shim)
+add_test(NAME power_wake COMMAND test_power_wake)
+
 # --- tmu_q31_scale: Q31 FACTOR band-selection logic (gd32-bridge#46) -------
 #
 # hal/gd32/tmu.c itself needs the Cortex-M33 vendor register headers and is
