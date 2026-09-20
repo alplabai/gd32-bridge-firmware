@@ -187,7 +187,7 @@ void adc_apply_conv_format(uint32_t periph, uint8_t channel)
 /* Bounded reimplementation of the vendor's adc_calibration_enable().
  * The SPL body spins `while (RSTCLB)` then `while (CLB)` with NO
  * timeout -- and the calibration FSM only advances on a healthy,
- * clocked converter.  adc_periph_init() is reachable from the CS-EXTI
+ * clocked converter.  adc_periph_restore() is reachable from the CS-EXTI
  * request handler (bridge_hw_adc_read's timeout self-heal and
  * bridge_hw_adc_stream_end's restore), where an unbounded spin on a
  * wedged ADC takes the WHOLE LINK down -- the exact failure class the
@@ -198,7 +198,7 @@ void adc_apply_conv_format(uint32_t periph, uint8_t channel)
  * waits in this file; returns false if either phase never completes.
  * NOT static: adc_stream.c's stream_begin and ROVF recovery share it
  * (declared in gd32_common.h) -- every ADCON toggle needs the same
- * bounded recalibration, not just adc_periph_init's boot call. */
+ * bounded recalibration, not just the boot setup. */
 bool adc_calibrate_bounded(uint32_t periph)
 {
 	uint32_t to;
@@ -216,10 +216,12 @@ bool adc_calibrate_bounded(uint32_t periph)
 	return to != 0u;
 }
 
-bool adc_periph_init(uint32_t periph)
+/* Configure one converter after its boot-only reset and shared-clock setup.
+ * The group reset and clock setup intentionally live outside this helper:
+ * ADC0/1/2 share ADC_SYNCCTL, and reprogramming it while a sibling streams
+ * changes that sibling's clock. */
+bool adc_periph_boot_init(uint32_t periph)
 {
-	adc_deinit(periph);
-	adc_clock_config(periph, ADC_CLK_SYNC_HCLK_DIV6);
 	adc_data_alignment_config(periph, ADC_DATAALIGN_RIGHT);
 	adc_channel_length_config(periph, ADC_ROUTINE_CHANNEL, 1u);
 	adc_external_trigger_config(periph, ADC_ROUTINE_CHANNEL, EXTERNAL_TRIGGER_DISABLE);
@@ -237,6 +239,40 @@ bool adc_periph_init(uint32_t periph)
 	for (volatile uint32_t stab = 0u; stab < 4096u; ++stab) {
 	}
 	return adc_calibrate_bounded(periph);
+}
+
+/* One GD32G553 boot sequence: reset every converter before setting either
+ * shared clock domain, then initialise each converter separately.  The SPL
+ * restricts adc_clock_config() to ADC0 (the ADC0/1/2 domain) and ADC3 (its
+ * own domain); ADC1 and ADC2 must never rewrite ADC0's shared SYNCCTL. */
+void adc_periph_boot_reset_all(void)
+{
+	adc_deinit(ADC0);
+	adc_deinit(ADC1);
+	adc_deinit(ADC2);
+	adc_deinit(ADC3);
+}
+
+void adc_shared_clock_init(void)
+{
+	adc_clock_config(ADC0, ADC_CLK_SYNC_HCLK_DIV6);
+	adc_clock_config(ADC3, ADC_CLK_SYNC_HCLK_DIV6);
+}
+
+/* Request-path restore after stream teardown or a single-shot timeout.  It
+ * deliberately resets neither an ADC peripheral nor either shared clock
+ * domain: another converter in ADC0/1/2 may be streaming.  Clearing ADCON
+ * gives the same safe configuration window for alignment, routine length and
+ * trigger selection, and the following bounded calibration replaces the
+ * factor invalidated by that ADCON edge. */
+bool adc_periph_restore(uint32_t periph)
+{
+	adc_disable(periph);
+	adc_dma_request_after_last_disable(periph);
+	adc_dma_mode_disable(periph);
+	adc_flag_clear(periph, ADC_FLAG_EOC);
+	adc_flag_clear(periph, ADC_FLAG_ROVF);
+	return adc_periph_boot_init(periph);
 }
 
 /* ---- per-converter ownership interlock (#133) ------------------------ *
@@ -376,7 +412,7 @@ int bridge_hw_adc_read(uint8_t channel, uint8_t samples, uint16_t *mv)
      * Resolution + oversample (also cached) must be programmed with
      * the converter DISABLED -- DRES/OVSAMPCTL only latch while
      * ADCON==0 -- so bracket the format apply in a disable/enable with
-     * the same tSTAB dwell adc_periph_init uses.  Two bridge channels
+	 * the same tSTAB dwell the boot setup uses.  Two bridge channels
      * share each converter and may hold different formats, so this
      * re-applies every read; the sibling-stream case already returned
      * BUSY above, so no live stream owns the converter here.  The
@@ -404,7 +440,7 @@ int bridge_hw_adc_read(uint8_t channel, uint8_t samples, uint16_t *mv)
      * DISCLOSURE (#34 review): before this PR, adc_calibrate_bounded's
      * worst case -- two phases x 100000 iterations if the RSTCLB/CLB
      * FSM is wedged, ~200000 iterations total -- mattered once, at
-     * boot (adc_periph_init).  It now runs here on every CMD_ADC_READ,
+	 * boot setup.  It now runs here on every CMD_ADC_READ,
      * and identically in bridge_hw_adc_stream_begin and the ROVF
      * recovery path (adc_stream.c), all three inside the priority-1
      * CS-EXTI transport ISR.  A wedged calibration FSM now costs that
@@ -543,7 +579,7 @@ int bridge_hw_adc_read(uint8_t channel, uint8_t samples, uint16_t *mv)
              * reports IO either way.  Release AFTER the re-init so no
              * pre-empting claimant sees a half-reinitialised converter
              * (#133). */
-			(void)adc_periph_init(ch->periph);
+			(void)adc_periph_restore(ch->periph);
 			adc_periph_release(ch->periph);
 			return BRIDGE_HW_ERR_IO;
 		}
