@@ -75,11 +75,11 @@ enum {
  * newest record's slot fails validation, and once that happens the
  * newest metadata names a slot that is not running.
  *
- * The #error below is the point, not a formality: if issue #2's dual-bank
- * boundary fix ever relocates OTA_SLOT_A_BASE/OTA_SLOT_B_BASE without a
- * matching CMakeLists.txt update (or vice versa), the build fails loudly
- * here instead of this guard silently going dead or resolving to the
- * wrong slot. */
+ * The #error below remains defence in depth for non-CMake consumers and
+ * manual overrides.  The production CMake build parses both bases from
+ * ota_layout.h, and app_slot_base.S plus the slot linker's ASSERT separately
+ * prove that this compiled macro equals the image's actual FLASH origin
+ * (#78). */
 #if !defined(BRIDGE_APP_SLOT_BASE)
 #error \
     "BRIDGE_OTA_PARTITIONED requires BRIDGE_APP_SLOT_BASE (see CMakeLists.txt: gd32-bridge-slot-a / gd32-bridge-slot-b)"
