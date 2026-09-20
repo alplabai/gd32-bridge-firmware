@@ -165,6 +165,20 @@ target_compile_options(test_fault_diag PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_fault_diag PRIVATE ztest_shim)
 add_test(NAME fault_diag COMMAND test_fault_diag)
 
+# --- i2c_event_priority: simultaneous I2C0 EV-flag ordering (#136) --------
+#
+# RBNE and ADDSEND clear independently in hardware.  This pure selector pins
+# the required final-byte-before-repeated-start precedence without attempting
+# to host-model the complete vendor I2C register block.
+add_executable(test_i2c_event_priority
+    i2c_event_priority/src/test_i2c_event_priority.c
+    ${FW}/hal/gd32/i2c_event_priority.c
+)
+target_include_directories(test_i2c_event_priority PRIVATE ${FW}/hal/gd32)
+target_compile_options(test_i2c_event_priority PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_i2c_event_priority PRIVATE ztest_shim)
+add_test(NAME i2c_event_priority COMMAND test_i2c_event_priority)
+
 # --- timer_sync_iti: (slave, master) -> SYSCFG ITIx router code (gh#42) ----
 #
 # The lookup table has no vendor-register dependency, so it lives in its own
