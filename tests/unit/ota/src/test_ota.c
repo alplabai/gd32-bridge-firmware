@@ -548,8 +548,8 @@ ZTEST(gd32_bridge_ota, test_meta_record_layout_bytes)
 
 /* The five-step brick sequence from the issue, reproduced end-to-end:
  * BEGIN -> abort mid-erase -> ROLLBACK -> the bootloader's newest-first
- * fallback (#754, modelled by the metadata state ROLLBACK leaves behind,
- * NOT by re-running boot_main.c -- that file is out of scope) -> BEGIN
+ * fallback (#754, modelled here by the metadata state ROLLBACK leaves
+ * behind; tests/unit/boot_decide executes the real boot selection) -> BEGIN
  * again.  Before the fix, the second BEGIN inverted metadata's
  * (divergent) active_slot and armed the erase against TEST_RUNNING_SLOT
  * -- the live image, vector table first. */
@@ -598,8 +598,8 @@ ZTEST(gd32_bridge_ota, test_divergence_second_begin_targets_non_running_slot)
 	 * active_slot = TEST_OTHER_SLOT. */
 	zassert_equal(ota_dispatch(CMD_OTA_ROLLBACK, NULL, 0u, reply, sizeof(reply), &rlen), STATUS_OK);
 
-	/* Step 4: models the bootloader's fallback (boot_main.c:117-124,
-	 * #754) rejecting TEST_OTHER_SLOT's (erased/invalid) image and
+	/* Step 4: models boot_decide_slot()'s fallback (#754) rejecting
+	 * TEST_OTHER_SLOT's (erased/invalid) image and
 	 * booting the older record's slot instead -- i.e. this build,
 	 * TEST_RUNNING_SLOT, keeps running while the newest valid metadata
 	 * (committed in step 3) still names TEST_OTHER_SLOT.  That divergence
@@ -811,9 +811,9 @@ static void drive_to_verified(void)
 
 /* Case 1: divergent, newest on REC0.  REC0 (counter 9) names
  * TEST_OTHER_SLOT; REC1 (counter 8, older) names TEST_RUNNING_SLOT -- the
- * shape the bootloader's newest-first fallback (boot_main.c:117-124,
- * #754) leaves behind when REC0's slot fails validation and it boots
- * REC1's slot instead.  meta_commit must preserve REC1 (it is what is
+ * shape the bootloader's newest-first fallback (boot_decide_slot(),
+ * src/boot/boot_decide.c, #754) leaves behind when REC0's slot fails
+ * validation and it boots REC1's slot instead.  meta_commit must preserve REC1 (it is what is
  * keeping the part alive), not the higher counter.  This FAILS before the
  * #74 fix: the old rule erases the non-newest page (REC1) outright. */
 ZTEST(gd32_bridge_ota, test_meta_commit_preserves_running_slot_record_on_rec0)

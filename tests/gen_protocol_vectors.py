@@ -767,7 +767,8 @@ def build_vectors() -> list[tuple[str, str, str | None]]:
         " (#3), a BUILD property reporting the slot THIS firmware executes"
         " from -- NOT metadata's active_slot field.  The two normally agree,"
         " but diverge across the bootloader's newest-first fallback"
-        " (boot_main.c), where metadata can legitimately name a slot that"
+        " (boot_decide_slot() in src/boot/boot_decide.c), where metadata can"
+        " legitimately name a slot that"
         " is not running; this byte is what lets the host observe that"
         " divergence.  This example value (A) is a slot-A-resident build",
     ))

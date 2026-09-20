@@ -70,8 +70,8 @@ enum {
  * turns "which slot may h_begin erase" into a BUILD invariant instead of
  * a runtime metadata read -- it cannot go stale and needs no flash read
  * or CRC.  That matters because metadata's `active_slot` CAN legitimately
- * diverge from what's executing: the bootloader's newest-first fallback
- * (boot_main.c:117-124, #754, intentional) boots an OLDER record when the
+ * diverge from what's executing: boot_decide_slot()'s newest-first fallback
+ * (src/boot/boot_decide.c, #754, intentional) boots an OLDER record when the
  * newest record's slot fails validation, and once that happens the
  * newest metadata names a slot that is not running.
  *
@@ -221,8 +221,8 @@ static uint8_t meta_page_rank(bool valid, const ota_meta_record_t *r)
  * NOT simply "the other page from the current record" (alternating) --
  * that rule preserves the HIGHEST COUNTER, and the counter is not always
  * what keeps the part alive.  The bootloader boots newest-first with
- * fallback (boot_main.c:117-124, #754): when the newest record's slot
- * fails validation, it boots the OLDER record instead -- so in that
+ * fallback (boot_decide_slot(), src/boot/boot_decide.c, #754): when the
+ * newest record's slot fails validation, it boots the OLDER record instead -- so in that
  * window the older record is the only thing naming a slot the bootloader
  * will actually boot, and the old "erase the non-newest page" rule erased
  * precisely that page.  A power cut inside the erase-then-program window
@@ -239,8 +239,8 @@ static uint8_t meta_page_rank(bool valid, const ota_meta_record_t *r)
  * OTA_RUNNING_SLOT is a build-time fact (see its derivation above), so
  * rank 2 is a cheap NECESSARY condition for "this is the record keeping
  * the part alive" -- it is not a re-validation of the record itself.
- * active_slot_valid() (boot_main.c) validates a record against its OWN
- * slot_valid / img_len[slot] / img_crc32[slot], not slot identity, so two
+ * active_slot_valid() (src/boot/boot_decide.c) validates a record against
+ * its OWN slot_valid / img_len[slot] / img_crc32[slot], not slot identity, so two
  * rank-2 records naming the same slot with different descriptors are not
  * interchangeable; no reachable path constructs that pair today, but rank
  * 2 does not rule it out by itself.  Real re-validation would mean
@@ -380,8 +380,8 @@ h_begin(const uint8_t *req, size_t len, uint8_t *reply, size_t cap, size_t *rlen
 	/* The slot to erase is "the one I am NOT executing from", answered by
      * OTA_RUNNING_SLOT (build-derived, see its definition above) -- NOT by
      * inverting metadata's active_slot (#3).  Metadata can legitimately
-     * name the slot that IS running (the bootloader's newest-first
-     * fallback, boot_main.c:117-124/#754), and inverting a stale answer
+     * name the slot that IS running (boot_decide_slot()'s newest-first
+     * fallback, src/boot/boot_decide.c, #754), and inverting a stale answer
      * used to arm the erase against the live image, vector table first.
      * OTA_RUNNING_SLOT needs no flash read and cannot go stale, so this
      * self-heals the divergence instead of propagating it. */
@@ -678,8 +678,9 @@ static gd32_bridge_status_t h_get_state(uint8_t *reply, size_t cap, size_t *rlen
      *
      * `active` reports OTA_RUNNING_SLOT (build-derived), NOT metadata's
      * active_slot (#3).  The two agree except in the divergent window the
-     * bootloader's newest-first fallback can create (boot_main.c:117-124,
-     * #754): there, metadata's answer is a LIE about what is executing,
+     * bootloader's newest-first fallback can create (boot_decide_slot(),
+     * src/boot/boot_decide.c, #754): there, metadata's answer is a LIE
+     * about what is executing,
      * while OTA_RUNNING_SLOT is a build-time fact.  This is what preserves
      * host observability of the divergence now that h_begin self-heals
      * around it instead of refusing outright -- without this the host

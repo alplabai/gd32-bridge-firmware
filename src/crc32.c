@@ -7,7 +7,7 @@
  * Table-driven (#26 C2, #104): the OTA verify path walks a whole
  * OTA_SLOT_SIZE image (0x0003B000 = 241664 bytes) through this
  * function in one call (src/ota.c's h_verify), and the bootloader does
- * the same over a whole slot on every boot (src/boot/boot_main.c).  The
+ * the same over a whole slot on every boot (src/boot/boot_decide.c).  The
  * previous bit-serial form cost 8 shift-and-branch iterations per byte
  * -- ~1.93M for a full-slot verify.  crc32_table[] below is the
  * standard Sarwate byte-wise table: one lookup replaces those 8

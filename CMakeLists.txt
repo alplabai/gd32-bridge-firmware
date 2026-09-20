@@ -293,6 +293,10 @@ else()
     target_compile_definitions(gd32-bridge-slot-b PRIVATE
         BRIDGE_OTA_PARTITIONED=1 BRIDGE_APP_SLOT_BASE=0x08045000u)
 
-    add_executable(gd32-bootloader src/boot/boot_main.c src/crc32.c hal/gd32_libc_stubs.c)
+    add_executable(gd32-bootloader
+        src/boot/boot_main.c
+        src/boot/boot_decide.c
+        src/crc32.c
+        hal/gd32_libc_stubs.c)
     gd32_firmware_target(gd32-bootloader ${CMAKE_SOURCE_DIR}/toolchain/gd32g553_bootloader.ld)
 endif()
