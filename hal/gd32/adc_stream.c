@@ -17,6 +17,7 @@
 #include "gd32g5x3.h"
 
 #include "adc_dsp_chain.h"
+#include "bridge_critical.h"
 #include "gd32_common.h"
 
 /* Stream slots; layout + sizing doc in gd32_common.h. */
@@ -561,15 +562,84 @@ int bridge_hw_adc_stream_end(uint8_t stream_id)
  * (adc_dsp_chain.c: adc_dsp_filter_stream_busy()).
  * ===================================================================== */
 
-/* stream_id currently loaded into the FAC, or -1 when the FAC is idle. */
-static int8_t adc_dsp_fac_owner = -1;
+/* The FAC/FFT owner byte is shared by the base-level DSP pump and the
+ * ISR-side stream teardown. Negative per-stream values are deliberately
+ * NOT readable owners: they let release revoke a long configuration or FFT
+ * publication while spectrum/data readers treat the block as unavailable
+ * (#184/#185/#187). Transitions to/from an active owner are liveness-checked
+ * in short PRIMASK critical sections; long hardware work stays interruptible. */
+#define ADC_DSP_OWNER_NONE ((int8_t)-1)
+
+static int8_t adc_dsp_owner_transitional(uint8_t stream_id)
+{
+	return (int8_t)(-2 - (int8_t)stream_id);
+}
+
+static bool adc_dsp_owner_live_locked(const volatile int8_t    *owner,
+                                      int8_t                    expected_owner,
+                                      const adc_stream_state_t *stream,
+                                      bool                      fft_terminal)
+{
+	const bool terminal_matches =
+	    fft_terminal ? (stream->dsp_terminal == 3u) : (stream->dsp_terminal != 3u);
+	return *owner == expected_owner && stream->in_use && stream->dsp_bound && terminal_matches;
+}
+
+static bool adc_dsp_owner_claim_config(volatile int8_t          *owner,
+                                       uint8_t                   stream_id,
+                                       const adc_stream_state_t *stream,
+                                       bool                      fft_terminal)
+{
+	const uint32_t irq_state = bridge_irq_lock();
+	bool           claimed   = false;
+	if (*owner == ADC_DSP_OWNER_NONE &&
+	    adc_dsp_owner_live_locked(owner, ADC_DSP_OWNER_NONE, stream, fft_terminal)) {
+		*owner  = adc_dsp_owner_transitional(stream_id);
+		claimed = true;
+	}
+	bridge_irq_unlock(irq_state);
+	return claimed;
+}
+
+static bool adc_dsp_owner_commit_config(volatile int8_t          *owner,
+                                        uint8_t                   stream_id,
+                                        const adc_stream_state_t *stream,
+                                        bool                      fft_terminal)
+{
+	const int8_t   transitional = adc_dsp_owner_transitional(stream_id);
+	const uint32_t irq_state    = bridge_irq_lock();
+	const bool     live = adc_dsp_owner_live_locked(owner, transitional, stream, fft_terminal);
+	if (live) {
+		*owner = (int8_t)stream_id;
+	} else if (*owner == transitional) {
+		/* END may have landed before the configuring claim was visible,
+		 * so release could not clear it. Do not leave a negative claim
+		 * wedged after the post-config liveness check fails. */
+		*owner = ADC_DSP_OWNER_NONE;
+	}
+	bridge_irq_unlock(irq_state);
+	return live;
+}
+
+static bool adc_dsp_owner_release(volatile int8_t *owner, uint8_t stream_id)
+{
+	const int8_t   transitional = adc_dsp_owner_transitional(stream_id);
+	const uint32_t irq_state    = bridge_irq_lock();
+	const bool     released     = *owner == (int8_t)stream_id || *owner == transitional;
+	if (released) *owner = ADC_DSP_OWNER_NONE;
+	bridge_irq_unlock(irq_state);
+	return released;
+}
+
+/* stream_id currently loaded into the FAC, a negative configuring token,
+ * or ADC_DSP_OWNER_NONE while the FAC is idle. */
+static volatile int8_t adc_dsp_fac_owner = ADC_DSP_OWNER_NONE;
 
 /* Release the FAC if this stream owned it (called from stream_end). */
 void adc_dsp_fac_release(uint8_t stream_id)
 {
-	if (adc_dsp_fac_owner == (int8_t)stream_id) {
+	if (adc_dsp_owner_release(&adc_dsp_fac_owner, stream_id)) {
 		fac_stop();
-		adc_dsp_fac_owner = -1;
 	}
 }
 
@@ -742,8 +812,17 @@ static void adc_dsp_pump_stream(uint8_t sid)
 	adc_stream_state_t *s = &adc_streams[sid];
 
 	if (adc_dsp_fac_owner != (int8_t)sid) {
-		if (!adc_dsp_fac_config(s)) return; /* unsupported chain -> stay idle */
-		adc_dsp_fac_owner = (int8_t)sid;
+		if (!adc_dsp_owner_claim_config(&adc_dsp_fac_owner, sid, s, false)) return;
+		if (!adc_dsp_fac_config(s)) {
+			(void)adc_dsp_owner_release(&adc_dsp_fac_owner, sid);
+			return; /* unsupported chain -> stay idle */
+		}
+		if (!adc_dsp_owner_commit_config(&adc_dsp_fac_owner, sid, s, false)) {
+			/* Config may have resumed and called fac_start() after an ISR-side
+			 * release stopped the block. Leave revoked/ended sessions stopped. */
+			fac_stop();
+			return;
+		}
 	}
 
 	const uint32_t laps          = s->lap_count;
@@ -755,11 +834,23 @@ static void adc_dsp_pump_stream(uint8_t sid)
 		/* The pump fell a full ring behind the DMA -- drop the corrupt
 		 * backlog and resync so the next batch is gap-free (the host
 		 * sees this as a proc-ring gap, same as a raw overrun). */
-		s->pump_raw_read = total_written;
+		const uint32_t irq_state = bridge_irq_lock();
+		if (adc_dsp_owner_live_locked(&adc_dsp_fac_owner, (int8_t)sid, s, false)) {
+			s->pump_raw_read = total_written;
+		}
+		bridge_irq_unlock(irq_state);
 		return;
 	}
 
 	while (avail-- > 0) {
+		/* END may pre-empt base level between any two samples. Keep one
+		 * FAC input/output transaction and its software cursors atomic with
+		 * respect to teardown; the section is only a handful of MMIOs. */
+		const uint32_t irq_state = bridge_irq_lock();
+		if (!adc_dsp_owner_live_locked(&adc_dsp_fac_owner, (int8_t)sid, s, false)) {
+			bridge_irq_unlock(irq_state);
+			return;
+		}
 		const uint16_t ridx = (uint16_t)(s->pump_raw_read % BRIDGE_ADC_STREAM_RING_SAMPLES);
 		const uint16_t code = (uint16_t)(s->ring[ridx] & 0x0FFFu); /* 12-bit */
 		s->pump_raw_read++;
@@ -768,7 +859,10 @@ static void adc_dsp_pump_stream(uint8_t sid)
 		 * A unity-DC-gain filter (sum(taps) ~ 1.0) preserves the offset;
 		 * the reverse (>>3) returns a code the existing mv math scales. */
 		const int16_t x = (int16_t)(code << 3);
-		if (fac_flag_get(FAC_FLAG_X0BFF) == SET) break; /* FAC input saturated */
+		if (fac_flag_get(FAC_FLAG_X0BFF) == SET) {
+			bridge_irq_unlock(irq_state);
+			break; /* FAC input saturated */
+		}
 		fac_fixed_data_write(x);
 
 		if (fac_flag_get(FAC_FLAG_YBEF) == RESET) {
@@ -778,6 +872,7 @@ static void adc_dsp_pump_stream(uint8_t sid)
 			s->proc_ring[s->proc_write % BRIDGE_ADC_STREAM_RING_SAMPLES] = (uint16_t)c;
 			s->proc_write++;
 		}
+		bridge_irq_unlock(irq_state);
 	}
 }
 
@@ -820,7 +915,9 @@ void bridge_hw_dsp_pump(void)
  * buffers automatically. */
 #define ADC_DSP_FFT_MAX_POINTS BRIDGE_DSP_MAX_FFT_POINTS
 
-static int8_t            adc_dsp_fft_owner = -1;
+/* Active stream ID, negative configuration/publication token, or
+ * idle. */
+static volatile int8_t   adc_dsp_fft_owner = ADC_DSP_OWNER_NONE;
 static uint16_t          adc_dsp_fft_points;
 static uint8_t           adc_dsp_fft_outfmt; /* 0 complex / 1 mag / 2 mag-onesided */
 static uint16_t          adc_dsp_fft_fill;
@@ -830,6 +927,18 @@ static float             adc_dsp_fft_real[ADC_DSP_FFT_MAX_POINTS];
 static float             adc_dsp_fft_out[ADC_DSP_FFT_MAX_POINTS * 2u]; /* re,im */
 static float             adc_dsp_fft_wcoef[ADC_DSP_FFT_MAX_POINTS];
 static float             adc_dsp_fft_bins[ADC_DSP_FFT_MAX_POINTS * 2u]; /* published */
+
+/* Start a new FFT publication session. The bins may keep their old bytes,
+ * but seq == 0 gates every read until the new session publishes a complete
+ * frame; keeping these three fields together prevents a lifecycle path from
+ * reporting an old sequence as a readable (but empty) new-session frame
+ * (#140). */
+static void adc_dsp_fft_session_reset(void)
+{
+	adc_dsp_fft_fill  = 0u;
+	adc_dsp_fft_seq   = 0u;
+	adc_dsp_fft_nbins = 0u;
+}
 
 static uint8_t adc_dsp_fft_point_enum(uint16_t n)
 {
@@ -909,8 +1018,7 @@ static bool adc_dsp_fft_config(const adc_stream_state_t *s)
 
 	adc_dsp_fft_points = n;
 	adc_dsp_fft_outfmt = ofm;
-	adc_dsp_fft_fill   = 0u;
-	adc_dsp_fft_nbins  = 0u;
+	adc_dsp_fft_session_reset();
 
 	const uint8_t shape = (win_st != 0) ? win_st->data[0] : 0u;
 
@@ -937,15 +1045,15 @@ static bool adc_dsp_fft_config(const adc_stream_state_t *s)
 	return true;
 }
 
-/* Reduce the FFT block's complex output to the published bins, per the
- * chain's output format, and bump the frame seq. */
-static void adc_dsp_fft_publish(void)
+/* Reduce the FFT block's complex output into the pending bin buffer. The
+ * caller publishes nbins + sequence only after revalidating the owner lease. */
+static uint16_t adc_dsp_fft_prepare_bins(void)
 {
 	const uint16_t n = adc_dsp_fft_points;
 	if (adc_dsp_fft_outfmt == 0u) { /* COMPLEX: re,im interleaved, 2N */
 		for (uint16_t i = 0u; i < n * 2u; ++i)
 			adc_dsp_fft_bins[i] = adc_dsp_fft_out[i];
-		adc_dsp_fft_nbins = (uint16_t)(n * 2u);
+		return (uint16_t)(n * 2u);
 	} else { /* MAGNITUDE (N) or MAGNITUDE_ONESIDED (N/2+1) */
 		const uint16_t nb = (adc_dsp_fft_outfmt == 2u) ? (uint16_t)(n / 2u + 1u) : n;
 		for (uint16_t i = 0u; i < nb; ++i) {
@@ -953,9 +1061,8 @@ static void adc_dsp_fft_publish(void)
 			const float im      = adc_dsp_fft_out[i * 2u + 1u];
 			adc_dsp_fft_bins[i] = __builtin_sqrtf(re * re + im * im);
 		}
-		adc_dsp_fft_nbins = nb;
+		return nb;
 	}
-	adc_dsp_fft_seq++;
 }
 
 /* Pump the FFT path for stream sid: accumulate new raw samples into the
@@ -965,8 +1072,15 @@ static void adc_dsp_pump_fft(uint8_t sid)
 	adc_stream_state_t *s = &adc_streams[sid];
 
 	if (adc_dsp_fft_owner != (int8_t)sid) {
-		if (!adc_dsp_fft_config(s)) return;
-		adc_dsp_fft_owner = (int8_t)sid;
+		/* A negative configuring token is visible to release but never to
+		 * spectrum_read, so no stale sequence becomes readable before the
+		 * config path resets this session (#140/#184). */
+		if (!adc_dsp_owner_claim_config(&adc_dsp_fft_owner, sid, s, true)) return;
+		if (!adc_dsp_fft_config(s)) {
+			(void)adc_dsp_owner_release(&adc_dsp_fft_owner, sid);
+			return;
+		}
+		if (!adc_dsp_owner_commit_config(&adc_dsp_fft_owner, sid, s, true)) return;
 		/* pump_raw_read is deliberately NOT rewound here (#70).
 		 * chain_bind already seeds it (adc_dsp_chain.c: `s->pump_raw_read
 		 * = s->total_read;`) at the moment this stream's chain was
@@ -991,35 +1105,93 @@ static void adc_dsp_pump_fft(uint8_t sid)
 	int32_t        avail         = (int32_t)(total_written - s->pump_raw_read);
 	if (avail <= 0) return;
 	if ((uint32_t)avail >= BRIDGE_ADC_STREAM_RING_SAMPLES) {
-		s->pump_raw_read = total_written; /* fell behind -> resync, drop partial window */
-		adc_dsp_fft_fill = 0u;
+		const uint32_t irq_state = bridge_irq_lock();
+		if (adc_dsp_owner_live_locked(&adc_dsp_fft_owner, (int8_t)sid, s, true)) {
+			s->pump_raw_read = total_written; /* fell behind -> resync, drop partial window */
+			adc_dsp_fft_fill = 0u;
+		}
+		bridge_irq_unlock(irq_state);
 		return;
 	}
 
 	while (avail-- > 0) {
+		/* Capture the raw code under the session lease, then perform the
+		 * soft-float conversion with interrupts enabled. The production
+		 * build lowers it to __aeabi_ui2f/__aeabi_fdiv calls, which are far
+		 * too long for the bridge's short PRIMASK sections. */
+		uint32_t irq_state = bridge_irq_lock();
+		if (!adc_dsp_owner_live_locked(&adc_dsp_fft_owner, (int8_t)sid, s, true)) {
+			bridge_irq_unlock(irq_state);
+			return;
+		}
 		const uint16_t ridx = (uint16_t)(s->pump_raw_read % BRIDGE_ADC_STREAM_RING_SAMPLES);
 		const uint16_t code = (uint16_t)(s->ring[ridx] & 0x0FFFu);
-		s->pump_raw_read++;
-		/* code (0..4095) -> float 0..~1.0 */
-		adc_dsp_fft_real[adc_dsp_fft_fill++] = (float)code / 4096.0f;
-		if (adc_dsp_fft_fill >= adc_dsp_fft_points) {
-			fft_calculation_start();
-			uint32_t g = 0u;
-			while (fft_flag_get(FFT_FLAG_CCF) == RESET && ++g < 1000000u) {
-			}
-			if (fft_flag_get(FFT_FLAG_CCF) != RESET) adc_dsp_fft_publish();
-			adc_dsp_fft_fill = 0u;
+		bridge_irq_unlock(irq_state);
+		const float sample = (float)code / 4096.0f;
+
+		irq_state = bridge_irq_lock();
+		if (!adc_dsp_owner_live_locked(&adc_dsp_fft_owner, (int8_t)sid, s, true)) {
+			bridge_irq_unlock(irq_state);
+			return;
 		}
+		s->pump_raw_read++;
+		adc_dsp_fft_real[adc_dsp_fft_fill++] = sample;
+		const bool frame_ready               = adc_dsp_fft_fill >= adc_dsp_fft_points;
+		if (frame_ready) fft_calculation_start();
+		bridge_irq_unlock(irq_state);
+		if (!frame_ready) continue;
+
+		/* The completion wait and bin reduction are intentionally
+		 * interruptible. END revokes the owner first; the two lease checks
+		 * below then prevent this suspended pump from publishing into a
+		 * replacement session that reuses the same stream ID. */
+		uint32_t g = 0u;
+		while (fft_flag_get(FFT_FLAG_CCF) == RESET && ++g < 1000000u) {
+		}
+		const bool complete = fft_flag_get(FFT_FLAG_CCF) != RESET;
+
+		uint32_t publish_irq_state = bridge_irq_lock();
+		if (!complete) {
+			const bool still_live =
+			    adc_dsp_owner_live_locked(&adc_dsp_fft_owner, (int8_t)sid, s, true);
+			if (still_live) adc_dsp_fft_fill = 0u;
+			bridge_irq_unlock(publish_irq_state);
+			if (!still_live) return;
+			continue;
+		}
+
+		/* Make the single bin buffer unreadable before reducing into it.
+		 * END can revoke this transitional token while the long copy/sqrt
+		 * work remains interruptible; spectrum_read reports BUSY instead of
+		 * returning old/new bins under one old sequence (#18/#187). */
+		const int8_t publishing = adc_dsp_owner_transitional(sid);
+		const bool   publishing_claimed =
+		    adc_dsp_owner_live_locked(&adc_dsp_fft_owner, (int8_t)sid, s, true);
+		if (publishing_claimed) adc_dsp_fft_owner = publishing;
+		bridge_irq_unlock(publish_irq_state);
+		if (!publishing_claimed) return;
+
+		const uint16_t nbins  = adc_dsp_fft_prepare_bins();
+		publish_irq_state     = bridge_irq_lock();
+		const bool still_live = adc_dsp_owner_live_locked(&adc_dsp_fft_owner, publishing, s, true);
+		if (still_live) {
+			adc_dsp_fft_nbins = nbins;
+			adc_dsp_fft_seq++;
+			adc_dsp_fft_fill  = 0u;
+			adc_dsp_fft_owner = (int8_t)sid;
+		} else if (adc_dsp_fft_owner == publishing) {
+			adc_dsp_fft_owner = ADC_DSP_OWNER_NONE;
+		}
+		bridge_irq_unlock(publish_irq_state);
+		if (!still_live) return;
 	}
 }
 
 /* Release the FFT block if this stream owned it (stream_end). */
 void adc_dsp_fft_release(uint8_t stream_id)
 {
-	if (adc_dsp_fft_owner == (int8_t)stream_id) {
-		adc_dsp_fft_owner = -1;
-		adc_dsp_fft_fill  = 0u;
-		adc_dsp_fft_nbins = 0u;
+	if (adc_dsp_owner_release(&adc_dsp_fft_owner, stream_id)) {
+		adc_dsp_fft_session_reset();
 	}
 }
 
