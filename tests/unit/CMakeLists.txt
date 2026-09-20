@@ -232,6 +232,20 @@ target_compile_options(test_tmu_q31_scale PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_tmu_q31_scale PRIVATE ztest_shim)
 add_test(NAME tmu_q31_scale COMMAND test_tmu_q31_scale)
 
+# --- pwm_gd32: real PWM validation + register-apply seam (#168) -----------
+add_executable(test_pwm_gd32
+    pwm_gd32/src/test_pwm_gd32.c
+    ztest_shim.c
+    ${FW}/hal/gd32/pwm_set.c
+)
+target_include_directories(test_pwm_gd32 PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${FW}/hal
+    ${FW}/hal/gd32
+)
+target_compile_options(test_pwm_gd32 PRIVATE ${TEST_FLAGS})
+add_test(NAME pwm_gd32 COMMAND test_pwm_gd32)
+
 # --- adc_seq: GD32 ADC register-sequence gate -------------------------------
 #
 # #77 means no CI job compiles hal/gd32/*.c -- the stub build above links

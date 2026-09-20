@@ -104,11 +104,11 @@ typedef enum {
      * inputs).  On V2N every E1M PWM channel rides one of the GD32's
      * 16-bit advanced timers (PWM0..3 -> TIMER0 channels MCH0..MCH3,
      * PWM4..7 -> TIMER7 channels MCH0..MCH3 per
-     * alp-sdk `metadata/e1m_modules/v2n/gd32-io-mcu-map.tsv`).  The 16-bit
-     * counter at the GD32's 216 MHz core clock gives ~4.63 ns LSB
-     * resolution + 303 us maximum period; CMD_PWM_GET reports the
-     * actual programmed value so callers can see what rounding the
-     * firmware applied. */
+     * alp-sdk `metadata/e1m_modules/v2n/gd32-io-mcu-map.tsv`).  The firmware
+     * prescales the 216 MHz timer clock to a 1 us tick: the 16-bit limit is
+     * 65.536 ms edge-aligned or 131.070 ms center-aligned, and longer
+     * periods return STATUS_OUT_OF_RANGE.  CMD_PWM_GET reports the actual
+     * programmed value so callers can see the round-down to whole ticks. */
 	CMD_PWM_CONFIGURE = 0x22,
 	CMD_ADC_READ      = 0x30,
 	/* v0.3: sticky per-channel ADC tuning -- oversampling ratio,
