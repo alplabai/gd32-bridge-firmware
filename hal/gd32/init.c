@@ -153,6 +153,7 @@
  * used by the real backend.  The vendor wrapper compiles its driver archive
  * independently; libopt controls declarations, not which driver units link. */
 #include "gd32g5x3.h"
+#include "gd32g5x3_dbg.h"
 #include "gd32_common.h"
 
 /* ----------------------------------------------------------------- */
@@ -192,6 +193,18 @@ void bridge_hw_init(void)
      * boot PRIMASK is already clear and this is a no-op. */
 	__enable_irq();
 #endif
+
+	/* A breakpoint must preserve the state it is inspecting.  Hold the
+	 * timer counters this backend owns (PWM 0/7, quadrature 1..4 and ADC
+	 * pacing 5/6), both watchdog counters and I2C0's SMBus timeout while
+	 * the CM33 is halted (#55).  These bits affect only debug halt, not
+	 * normal execution.  Do not enable DBG_CTL0 low-power holds here: the
+	 * manual changes their clock source/standby behaviour, so that remains
+	 * an explicit SWD bench choice rather than shipped firmware policy. */
+	DBG_CTL1 |= DBG_CTL1_TIMER1_HOLD | DBG_CTL1_TIMER2_HOLD | DBG_CTL1_TIMER3_HOLD |
+	            DBG_CTL1_TIMER4_HOLD | DBG_CTL1_TIMER5_HOLD | DBG_CTL1_TIMER6_HOLD |
+	            DBG_CTL1_WWDGT_HOLD | DBG_CTL1_FWDGT_HOLD | DBG_CTL1_I2C0_HOLD;
+	DBG_CTL2 |= DBG_CTL2_TIMER0_HOLD | DBG_CTL2_TIMER7_HOLD;
 
 	/* ORDERING (merge of #61's se_reset_init and #127's clock sample):
      * se_reset_init() goes FIRST and that is load-bearing -- see its
