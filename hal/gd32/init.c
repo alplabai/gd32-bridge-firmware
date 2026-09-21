@@ -161,10 +161,11 @@
 
 /* Called once on entry to main() before the transport ISRs come online.
  * This brings up the backend's boot-global clocks, pads and peripheral
- * state; request-time operations live in the per-peripheral TUs.  There is
- * no SysTick handler -- base-level housekeeping runs after each main-loop
- * wake.  No DA9292 wiring exists on this SoM rev; see
- * bridge_hw_da9292_status_cached(). */
+ * state; request-time operations live in the per-peripheral TUs.  Since
+ * gh#54 a 50 ms SysTick retires the main loop's __WFI() on a fixed
+ * cadence, so base-level housekeeping (bridge_hw_tick) advances whether
+ * or not a transport interrupt arrives.  No DA9292 wiring exists on this
+ * SoM rev; see bridge_hw_da9292_status_cached(). */
 /* Sampled at the head of bridge_hw_init (#127); see gd32_common.h for
  * what reads them and why nothing acts on a mismatch yet.  Initialised to
  * the value the constants ASSUME so a debugger attaching before
@@ -361,9 +362,10 @@ void bridge_hw_init(void)
      * independent of the exact railed reference value; the absolute mV
      * scale (ADC_VREF_MV / DAC_VREF_MV) tracks the railed VDDA.
      *
-     * VREFRDY wait is BOUNDED (boot-time, no SysTick yet): a spin
-     * cap, not an unbounded poll -- a never-ready buffer must not hang
-     * the bridge before the transports come online. */
+	 * VREFRDY wait is BOUNDED (boot-time; the gh#54 SysTick is armed
+	 * only at the END of bridge_hw_init, after this block): a spin
+	 * cap, not an unbounded poll -- a never-ready buffer must not hang
+	 * the bridge before the transports come online. */
 	rcu_periph_clock_enable(RCU_VREF);
 	vref_voltage_select(VREF_VOLTAGE_SEL_2_048V); /* lowest target = closest under VDDA */
 	/* CLEAR HIPM first.  VREF_CS resets to 0x02 (HIPM high-impedance),
@@ -426,6 +428,107 @@ void bridge_hw_init(void)
 	for (size_t i = 0; i < QENC_CHANNEL_COUNT; ++i) {
 		qenc_channel_init(&qenc_map[i]);
 	}
+
+	/* --- Periodic tick (gh#54) ----------------------------------------
+	 *
+	 * The main loop is `for (;;) { __WFI(); bridge_hw_tick(); }` and
+	 * used to have NO periodic wake source at all: nothing between
+	 * transport interrupts ever retired the wfi, so an armed OTA slot
+	 * erase stalled mid-slot the moment the host stopped polling, and
+	 * a bound DSP pump stopped producing.  Arm SysTick so the tick
+	 * advances on a 50 ms cadence regardless of host traffic.
+	 *
+	 * 216 MHz / 20 Hz = 10 800 000 -> reload 10 799 999, inside the
+	 * 24-bit 0x00FFFFFF limit (max period 77.6 ms at 216 MHz).  The
+	 * reload is derived from the LIVE SystemCoreClock sampled above
+	 * (#127), not a hardcoded 216 MHz literal -- on a broken clock
+	 * tree the tick is still 50 ms of real time, just fewer counts.
+	 * Reload is clamped to the 24-bit field so a bogusly huge
+	 * SystemCoreClock cannot push LOAD out of range.
+	 *
+	 * NVIC priority 15 (lowest, __NVIC_PRIO_BITS = 4 on this part):
+	 * the handler body is empty -- waking __WFI() is its entire job
+	 * -- and it must never delay BRIDGE_CS_IRQ_PRIO 1 or
+	 * BRIDGE_I2C_IRQ_PRIO 2. */
+	{
+		uint32_t reload = (SystemCoreClock / 20u) - 1u; /* 50 ms */
+		if (reload > SysTick_LOAD_RELOAD_Msk) reload = SysTick_LOAD_RELOAD_Msk;
+		(void)SysTick_Config(reload + 1u);
+		NVIC_SetPriority(SysTick_IRQn, (1u << __NVIC_PRIO_BITS) - 1u); /* 15 = lowest */
+	}
+
+	/* --- Free watchdog (FWDGT, gh#54) ---------------------------------
+	 *
+	 * No watchdog existed anywhere in the tree (the only FWDGT trace
+	 * was the after-the-fact RCU_RSTSCK decode in
+	 * bridge_hw_reset_reason), so every permanent wedge -- the
+	 * vendor Default_Handler infinite loop, a stalled pump, a hung
+	 * flash wait -- stayed wedged until someone power-cycled the SoM.
+	 *
+	 * IRC32K first (defensive, from the vendor FWDGT example rather
+	 * than the UM: Rev1.2 chapter 21 never says writing 0xCCCC
+	 * auto-enables IRC32K, but the SPL touches no RCU register while
+	 * the vendor's own FWDGT_key example brings the oscillator up
+	 * first -- do not present this as a manual requirement).
+	 *
+	 * fwdgt_config() is preferred over an open-coded 0xCCCC sequence
+	 * because it bounds its own PSC/RLD register-update waits
+	 * (FWDGT_PSC_TIMEOUT / FWDGT_RLD_TIMEOUT) -- an open-coded version
+	 * that writes 0xCCCC before spinning on FWDGT_STAT is spinning
+	 * with the watchdog already live on its 1/4-prescaler / 0x0FFF
+	 * reset defaults (512 ms) and an unbounded spin resets the part
+	 * instead of reporting a fault.
+	 *
+	 * Window: (RLD+1) ticks at IRC32K/32 = 501 ms nominal
+	 * (UM Rev1.2 p.525 Table 21-1 row 1/32), and 445 ms to 573 ms
+	 * across the 28-36 kHz grade-7 IRC32K spread (Datasheet Rev2.0
+	 * p.125 Table 4-23).  Sized against the longest per-tick blocking
+	 * step: ota_erase_tick()'s up-to-40 ms dual-bank page-pair erase
+	 * (Datasheet p.126 tERASE max 20 ms/page) -- an order of margin,
+	 * and only the individual STEP must fit, because the feed below
+	 * runs at the end of every bridge_hw_tick() and a pump that stops
+	 * making progress stops feeding.  A full-slot walk is many such
+	 * steps, each well inside the window.
+	 *
+	 * nFWDG_HW must stay 1 (software free watchdog, FMC_OBCTL bit 16)
+	 * so the FWDGT does NOT start at power-on before firmware runs:
+	 * the bootloader's no-valid-image park (src/boot/boot_main.c) is
+	 * a deliberate, diagnosable stop, and a hardware-started watchdog
+	 * turns it into a reset loop a bench probe has to race.  Whether
+	 * a software-started FWDGT survives its own system reset is NOT
+	 * documented (FWDGT_CTL's reset value has no reset-domain
+	 * qualifier, UM p.526) -- that, and the FWDGSPD_DPSLP/STDBY
+	 * option bits (FMC_OBCTL bits 17/18) that decide whether an armed
+	 * FWDGT keeps counting through deep-sleep/standby, are bring-up
+	 * gates on gh#54: read them per unit before shipping.
+	 *
+	 * DBG_CTL1_FWDGT_HOLD so a halted core under SWD does not reset
+	 * itself out of the debugger (UM Rev1.2 p.419, DBG_CTL1 bit 12);
+	 * overlaps the same-bit change in PR #211 (debug holds) -- keep
+	 * both in sync, the OR is idempotent. */
+	rcu_osci_on(RCU_IRC32K);
+	/* Bounded stabilisation spin, same shape as
+	 * rtc_wakeup_init_once() in hal/gd32/power.c -- the vendor's
+	 * rcu_osci_stab_wait() is an unbounded poll, and an unbounded
+	 * poll at boot is exactly the hang the FWDGT exists to prevent
+	 * (and cannot, being not yet armed).  Typical < 50 us. */
+	{
+		uint32_t to = 200000u;
+		while (--to && RESET == rcu_flag_get(RCU_FLAG_IRC32KSTB)) {
+			/* spin */
+		}
+	}
+	(void)fwdgt_config(500u, FWDGT_PSC_DIV32);
+	fwdgt_enable();
+	dbg_periph_enable(DBG_FWDGT_HOLD);
+}
+
+/* Periodic tick handler (gh#54): empty by design.  Its entire job is
+ * to retire the main loop's __WFI() so bridge_hw_tick() runs -- the
+ * tick itself must stay out of interrupt context.  Strong definition
+ * overrides the weak Default_Handler alias in the vendor startup. */
+void SysTick_Handler(void)
+{
 }
 
 /* Called at base level after every main-loop wake.  This backend uses the
@@ -446,6 +549,14 @@ void bridge_hw_tick(void)
 {
 	bridge_hw_dsp_pump();
 	ota_erase_tick();
+	/* Feed the free watchdog LAST (gh#54): a pump above that wedges
+	 * in an unbounded loop never reaches this line, which is the
+	 * entire recovery property -- the part resets ~500 ms later and
+	 * the host sees the bridge reboot instead of a silent wedge.
+	 * Each individual step above is bounded well inside the window
+	 * (the binding one is ota_erase_tick's up-to-40 ms dual-bank
+	 * erase pair), so a normally-progressing tick always feeds. */
+	fwdgt_counter_reload();
 }
 
 /* ----------------------------------------------------------------- */

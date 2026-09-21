@@ -28,6 +28,8 @@
 #include "gd32g5x3_rcu.h"
 #include "gd32g5x3_misc.h"
 #include "gd32g5x3_pmu.h"
+#include "gd32g5x3_fwdgt.h"
+#include "gd32g5x3_dbg.h"
 
 /* GPIO + EXTI for the bridge's IO surface. */
 #include "gd32g5x3_gpio.h"
