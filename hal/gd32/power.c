@@ -138,21 +138,68 @@ static void power_wake_pins_enable(uint32_t wake_bitmap)
 	pmu_wakeup_pin_enable(PMU_WAKEUP_PIN4);
 }
 
+/* Deferred low-power request latched by bridge_hw_power_mode_set() in
+ * a transport ISR and consumed by bridge_power_tick() at base level
+ * (gh#63).  Non-zero `s_lp_pending_mode` means an accepted request is
+ * waiting for a quiet-link window; wake sources were already armed at
+ * latch time (register writes, ISR-safe). */
+static volatile uint8_t s_lp_pending_mode;
+
+/* Watchdog-aware low-power entry gate: feed the FWDGT and honour UM
+ * Rev1.2 p.525's spacing rule ("more than 3 IRC32K clock intervals
+ * must be inserted in the middle of reload and deepsleep/standby mode
+ * commands") before the entry wfi.  3 IRC32K intervals at the 28 kHz
+ * minimum (Datasheet Rev2.0 p.125) is 107 us; the spin below is
+ * ~150-250 us at 216 MHz.  Mirrors the same-named helper on the gh#54
+ * branch (codex/periodic-tick-and-fwdgt) -- identical by design, take
+ * either copy when the two branches merge. */
+static void power_fwdgt_settle_before_lp_entry(void)
+{
+	fwdgt_counter_reload();
+	while (0u != (FWDGT_STAT & (FWDGT_STAT_PUD | FWDGT_STAT_RUD | FWDGT_STAT_WUD))) {
+		/* bounded by construction: the only pending writes are
+		 * bridge_hw_init()'s long-completed fwdgt_config() */
+	}
+	for (volatile uint32_t gap = 0u; gap < 8000u; ++gap) {
+		/* >= 3 IRC32K intervals at 28 kHz min = 107 us; ~5 cycles
+		 * per iteration at 216 MHz -> ~185 us */
+	}
+}
+
 int bridge_hw_power_mode_set(uint8_t mode, uint32_t wake_bitmap, uint32_t wake_after_ms)
 {
 	/* Mode 0 (run) + mode 1 (sleep) are accepted no-ops -- main()'s
-     * `for (;;) { __WFI(); bridge_hw_tick(); }` already runs the CPU
-     * in WFI between transport interrupts, which IS "sleep" on the
-     * GD32G5.  Mode 2 (deep-sleep) + mode 3 (standby) call into the
-     * vendor's PMU helpers below.
-     *
-     * Wake-source semantics: `wake_bitmap` enumerates the explicit
-     * sources the host wants armed; `wake_after_ms` is a timed
-     * fallback that arms the RTC wakeup timer regardless of the
-     * bitmap (per the <alp/power.h> contract: the timer is implicit
-     * when wake_after_ms > 0).  Unsupported bits (UART_RX / USB /
-     * ETH_LINK on the GD32G5 baseline) reject so the host knows the
-     * request was not honoured. */
+	 * `for (;;) { __WFI(); bridge_hw_tick(); }` already runs the CPU
+	 * in WFI between transport interrupts, which IS "sleep" on the
+	 * GD32G5.  Mode 2 (deep-sleep) + mode 3 (standby) are LATCHED
+	 * here and executed from bridge_power_tick() at base level (gh#63)
+	 * -- never entered from this call, because this call runs INSIDE a
+	 * transport ISR (CS-EXTI prio 1 / I2C-EV prio 2) and:
+	 *
+	 *   - an ARMv8-M WFI only ends on an exception that can preempt
+	 *     the current execution priority, so a deep-sleep entered
+	 *     from the CS handler can never be ended by the CS line --
+	 *     the wake source that is supposed to end it;
+	 *   - UM Rev1.2 p.143: with any EXTI_PD bit set, "the program
+	 *     will skip the entry process of Deep-sleep mode to continue
+	 *     execute the following procedure" -- and EXTI_PD0/1 have
+	 *     UNDEFINED reset values (UM p.216/p.219), so the skip was
+	 *     the COMMON case, returning STATUS_OK for a sleep that
+	 *     never happened;
+	 *   - entering Standby from interrupt context leaves the calling
+	 *     transport's state machine mid-transaction with no way to
+	 *     unwind it if the entry aborts.
+	 *
+	 * The reply is staged and drained normally; the actual entry
+	 * happens on the next bridge_power_tick(), on a quiet link.
+	 *
+	 * Wake-source semantics: `wake_bitmap` enumerates the explicit
+	 * sources the host wants armed; `wake_after_ms` is a timed
+	 * fallback that arms the RTC wakeup timer regardless of the
+	 * bitmap (per the <alp/power.h> contract: the timer is implicit
+	 * when wake_after_ms > 0).  Unsupported bits (UART_RX / USB /
+	 * ETH_LINK on the GD32G5 baseline) reject so the host knows the
+	 * request was not honoured. */
 	if ((wake_bitmap & POWER_WAKE_MASK_HW_GATED) != 0u) return BRIDGE_HW_ERR_NOTIMPL;
 
 	switch (mode) {
@@ -160,73 +207,138 @@ int bridge_hw_power_mode_set(uint8_t mode, uint32_t wake_bitmap, uint32_t wake_a
 	case 1u: /* sleep -- already in WFI between transport ISRs */
 		return BRIDGE_HW_OK;
 	case 2u: /* deep-sleep */
-		rcu_periph_clock_enable(RCU_PMU);
-		power_wake_pins_enable(wake_bitmap);
-		if (wake_after_ms != 0u || (wake_bitmap & (POWER_WAKE_RTC | POWER_WAKE_TIMER)) != 0u) {
-			const uint32_t ms = (wake_after_ms != 0u) ? wake_after_ms : POWER_WAKE_TIMER_MAX_MS;
-			int            rc = rtc_wakeup_arm_ms(ms);
-			if (rc != BRIDGE_HW_OK) return rc;
-		}
-		/* I2C0 is one of the modules the PMU keeps powered across
-         * Deep-sleep (UM Rev1.2 p.132, Fig 3-2: "Deep-sleep power on
-         * modules: ... I2C0 ..."), so I2CEN stays live across this
-         * mode unless software disables it first.  UM Rev1.2 SS28.3.11
-         * (p.1279): "Before entering power saving mode (I2CEN = 0), the
-         * I2C peripheral must be disabled if wakeup from power saving
-         * mode is disabled (WUEN = 0)."  This firmware never sets WUEN
-         * (bridge_transport_i2c_hw_init() does not touch it), so every
-         * prior Deep-sleep entry ran I2C0 outside its documented
-         * operating procedure.  Disable it here and bring it fully back
-         * up on the way out. */
-		i2c_disable(BRIDGE_I2C_PERIPH);
-		/* PMU_LDO_LOWPOWER drops the core LDO into its low-power
-         * regulation point during deepsleep (saves a few hundred
-         * uA at the cost of a slightly slower wakeup); WFI_CMD
-         * issues the actual `wfi` instruction that suspends the
-         * core.  Returns here once a wakeup source fires. */
-		pmu_to_deepsleepmode(PMU_LDO_LOWPOWER, WFI_CMD);
-		/* Wake path.  UM Rev1.2 p.142 "Deep-sleep mode": "all of IRC8M,
-         * HXTAL and PLL are disabled ... When exiting the Deep-sleep
-         * mode, the IRC8M is selected as the system clock" -- and this
-         * firmware has no PLL-relock step anywhere (gh#12, tracked
-         * separately), so CK_APB1 can still be running on ~8 MHz IRC8M
-         * rather than the normal 216 MHz PLL when this line executes.
-         * bridge_transport_i2c_hw_init() redoes the GPIO/timing/address/
-         * IRQ setup and re-runs i2c_enable(), so the peripheral comes
-         * back up in a known state and a half-finished transaction from
-         * before sleep cannot resume against it -- that part is correct
-         * regardless of clock.  Its I2C_TIMING fields are now derived
-         * from the LIVE CK_APB1 on every call (not a 216-MHz-only
-         * constant), so this call is correctly timed at whatever clock
-         * CK_APB1 is actually running on here -- including 8 MHz IRC8M,
-         * with no PLL relock required for I2C0 specifically.  If the
-         * derivation still refuses (BRIDGE_HW_ERR_RANGE: the live
-         * apb1_hz is below the Fast-mode floor or produced fields that
-         * don't fit their 4-bit registers), I2C0 is left disabled by
-         * that function rather than brought up mistimed -- surface that
-         * to the caller instead of claiming BRIDGE_HW_OK for a deep-sleep
-         * transition that left the I2C bridge transport down. */
-		return bridge_transport_i2c_hw_init();
+		/* Deep-sleep can only be left through an EXTI line (UM
+		 * Rev1.2 p.142), and this bridge's I2C slave has NO wake
+		 * path: WUEN is never set, the I2C kernel clock is APB1
+		 * not IRC8M (p.1279: without IRC8M, "IRC8M will not [be]
+		 * switched on after receiving start signal"), and EXTI
+		 * line 31 (I2C0 wakeup, p.213 Table 5-3) is never enabled.
+		 * Disabling I2C0 across the entry (gh#41's UM p.1279
+		 * requirement) therefore means a sleeping bridge can never
+		 * be woken over BRD_I2C -- so while that link is up, mode 2
+		 * is refused outright: the honest option gh#63 names.
+		 * "While the link is up" is unconditionally true on this
+		 * bridge today (bridge_transport_i2c_hw_init() runs at
+		 * boot unconditionally), so mode 2 answers NOSUPPORT
+		 * until the I2C-wake branch lands (BRIDGE_I2C_CK_SRC ->
+		 * IRC8M + WUEN re-arm per entry + EXTI line 31 -- a
+		 * bench-validated change of its own, NOT this PR).
+		 * STATUS_NOSUPPORT (0x06) is the wire answer the host
+		 * already handles for other unsupported wake sources. */
+		return BRIDGE_HW_ERR_NOTIMPL;
 	case 3u: /* standby */
 		rcu_periph_clock_enable(RCU_PMU);
+		/* Gate the entry: Standby's wake set is exactly five
+		 * sources (UM Rev1.2 p.142 Table 3-1: "1. NRST pin 2. WKUP
+		 * pins 3. FWDGT reset 4. RTC 5. LCKMD").  A request that
+		 * arms neither a WKUP pin nor the RTC wakeup timer enters
+		 * a mode only NRST can leave -- refuse before anything is
+		 * latched (gh#40 fix 1). */
+		{
+			const bool wake_pins_armed = (wake_bitmap & POWER_WAKE_GPIO) != 0u;
+			const bool rtc_armed =
+			    wake_after_ms != 0u || (wake_bitmap & (POWER_WAKE_RTC | POWER_WAKE_TIMER)) != 0u;
+			if (!wake_pins_armed && !rtc_armed) return BRIDGE_HW_ERR_INVAL;
+		}
 		power_wake_pins_enable(wake_bitmap);
 		if (wake_after_ms != 0u || (wake_bitmap & (POWER_WAKE_RTC | POWER_WAKE_TIMER)) != 0u) {
 			const uint32_t ms = (wake_after_ms != 0u) ? wake_after_ms : POWER_WAKE_TIMER_MAX_MS;
 			int            rc = rtc_wakeup_arm_ms(ms);
 			if (rc != BRIDGE_HW_OK) return rc;
 		}
-		/* Standby powers down the core + SRAM (except backup) and
-         * wakes via reset -- pmu_to_standbymode() never returns;
-         * the SoC re-runs Reset_Handler when a wakeup source fires.
-         * The caller's host link will see the bridge re-issue its
-         * handshake on the next transport packet, which is the
-         * documented contract. */
-		pmu_to_standbymode();
-		/* Unreachable in normal operation; keep the return so the
-         * compiler doesn't warn about a missing terminator. */
+		/* Latch the request: the STATUS_OK reply drains normally,
+		 * and bridge_power_tick() below performs the entry on a
+		 * quiet link.  Wake sources were armed above (pure register
+		 * writes, ISR-safe); the bitmap itself needs no deferral
+		 * because nothing at tick time re-reads it.  Standby exits
+		 * through a power-on reset, so the host's "rebooting, then
+		 * re-init and probe" contract applies unchanged. */
+		s_lp_pending_mode = 3u;
 		return BRIDGE_HW_OK;
 	default:
 		return BRIDGE_HW_ERR_INVAL;
 	}
 	(void)POWER_WAKE_MASK_SUPPORTED;
+}
+
+/* Base-level low-power entry (gh#63): the deferred half of
+ * bridge_hw_power_mode_set().  Runs from bridge_hw_tick() -- base level,
+ * AFTER the accepted request's reply has drained onto the wire, with
+ * no transport state machine mid-transaction.
+ *
+ * Steps 1-4 below NARROW the entry race but cannot close it -- a CS
+ * falling edge landing between the gate and the wfi still defeats the
+ * entry -- which is why every gate failure below re-latches the request
+ * and retries on the NEXT tick rather than reporting a success that
+ * did not happen or silently dropping the request. */
+void bridge_power_tick(void)
+{
+	if (s_lp_pending_mode == 0u) return;
+
+	/* 1. Only sleep on a quiet link: CS de-asserted (PA8 high).  An
+	 *    asserted CS means a transaction is in flight (or about to
+	 *    be) -- retry later. */
+	if (SET != gpio_input_bit_get(BRIDGE_SPI_NSS_PORT, BRIDGE_SPI_NSS_PIN)) return;
+
+	/* 2. Clear every EXTI pending bit (UM Rev1.2 p.143: "In order to
+	 *    enter Deep-sleep mode smoothly, all EXTI line pending status
+	 *    (in the EXTI_PD register) and related peripheral flags must
+	 *    be reset. If not, the program will skip the entry process").
+	 *    EXTI_PD0 at offset 0x14, bits 31:0 rc_w1; EXTI_PD1 at offset
+	 *    0x2C, bits 6:0 rc_w1, bits 31:7 reserved (UM p.216-217,
+	 *    p.219).  Today only line 8 is enabled so the collateral is
+	 *    nil, but any future EXTI consumer (RTC wakeup line 19,
+	 *    I2C0 line 31, LPTIMER line 35) must be re-examined against
+	 *    this clear. */
+	EXTI_PD0 = 0xFFFFFFFFu;
+	EXTI_PD1 = 0x0000007Fu;
+	__DSB();
+
+	/* 3. Re-read and abort the attempt rather than reporting a sleep
+	 *    that did not happen: a re-pended bit means an edge arrived
+	 *    during the clear -- a transaction is starting. */
+	if ((EXTI_PD0 != 0u) || ((EXTI_PD1 & 0x0000007Fu) != 0u)) return;
+
+	/* 4. A WFI with an enabled interrupt already pending in the NVIC
+	 *    is architecturally a no-op, so the pending set must be clear
+	 *    too (gh#63 step 4). */
+	if (NVIC_GetPendingIRQ(BRIDGE_SPI_CS_EXTI_IRQN) != 0u) return;
+	if (NVIC_GetPendingIRQ(BRIDGE_I2C_EV_IRQN) != 0u) return;
+
+	/* 5. Only now enter. */
+	const uint8_t mode = s_lp_pending_mode;
+
+	if (mode == 3u) {
+		/* Watchdog-aware entry (gh#54): feed + >= 3 IRC32K
+		 * intervals of gap before the wfi (UM p.525). */
+		power_fwdgt_settle_before_lp_entry();
+		pmu_to_standbymode();
+
+		/* Reaching this line means the standby entry ABORTED: the
+		 * part did not power down.  The vendor helper has already
+		 * masked the NVIC down to IRQ 3 and IRQ 41 (ICER0 =
+		 * 0xFFFFFFF7 / ICER1 = 0xFFFFFDFF / ICER2 = 0xFFFFFFFF),
+		 * which disables all three transport vectors, and left
+		 * SLEEPDEEP set in SCB->SCR.  Undo the damage so the
+		 * bridge keeps serving its host instead of going
+		 * permanently deaf with a deep-sleeping main loop; the
+		 * failed request is dropped (the reply already said OK,
+		 * but standby's exit is a reset in the intended case, so
+		 * the host's re-init probe is the recovery either way).
+		 * Priorities come from the same bridge_board_config.h
+		 * macros the arming sites use, so the pair cannot drift
+		 * (gh#40 fix 2). */
+		nvic_irq_enable(BRIDGE_SPI_CS_EXTI_IRQN, BRIDGE_CS_IRQ_PRIO, BRIDGE_CS_IRQ_SUBPRIO);
+		nvic_irq_enable(BRIDGE_I2C_EV_IRQN, BRIDGE_I2C_IRQ_PRIO, BRIDGE_I2C_IRQ_SUBPRIO);
+		nvic_irq_enable(BRIDGE_I2C_ER_IRQN, BRIDGE_I2C_IRQ_PRIO, BRIDGE_I2C_IRQ_SUBPRIO);
+		SCB->SCR &= ~SCB_SCR_SLEEPDEEP_Msk;
+		s_lp_pending_mode = 0u; /* drop the failed request */
+	}
+	/* NOTE (future I2C-wake branch): the mode-2 entry lives here --
+	 * quiet-link gate + EXTI_PD clear above, then i2c_disable(),
+	 * pmu_to_deepsleepmode(PMU_LDO_LOWPOWER, WFI_CMD), and
+	 * bridge_transport_i2c_hw_init() on the wake path (its live-clock
+	 * timing derivation handles the post-wake IRC8M, gh#41).  It is
+	 * not reachable until bridge_hw_power_mode_set() stops rejecting
+	 * mode 2 -- see the mode-2 comment there. */
 }

@@ -441,11 +441,16 @@ extern void bridge_hw_dsp_pump(void);
  * page-region per tick so BEGIN never blocks the SPI reply inline.  No-op
  * in the OTA-inert build. */
 extern void ota_erase_tick(void);
+/* Deferred low-power entry (gh#63): executes a mode 2/3 request latched
+ * by bridge_hw_power_mode_set() on a quiet link, at base level -- never
+ * from a transport ISR.  Strong impl in hal/gd32/power.c. */
+extern void bridge_power_tick(void);
 
 void bridge_hw_tick(void)
 {
 	bridge_hw_dsp_pump();
 	ota_erase_tick();
+	bridge_power_tick();
 }
 
 /* ----------------------------------------------------------------- */
