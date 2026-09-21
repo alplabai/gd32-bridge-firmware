@@ -263,8 +263,34 @@ void bridge_transport_spi_hw_init(void)
  * -- the host driver's reply re-read / retry recovers it. */
 void BRIDGE_SPI_CS_EXTI_HANDLER(void)
 {
-	if (RESET != exti_interrupt_flag_get(BRIDGE_SPI_CS_EXTI_LINE)) {
-		exti_interrupt_flag_clear(BRIDGE_SPI_CS_EXTI_LINE);
+	/* Own the WHOLE group this vector serves (gh#66): EXTI5_9_IRQn is
+	 * ONE vector for lines 5..9 (UM Rev1.2 p.209), and the old
+	 * single-line test + clear left lines 5/6/7/9 pending forever if
+	 * any of them ever got enabled -- unbounded re-entry of this
+	 * handler.  Today spi_cs_exti_init() touches only EXTI_8 and the
+	 * vendor exti_init() is a per-bit RMW, so lines 5..7 and 9 keep
+	 * their reset INTEN0/RTEN0/FTEN0 = 0 and cannot assert; this
+	 * clear is what keeps that "latent" instead of "live" the moment
+	 * any other line in the group is enabled.
+	 *
+	 * The specific hazard this must never paper over: line 9's default
+	 * GPIO source in this design is PA9 = SPI1_SCK
+	 * (hal/bridge_board_config.h:58-59).  An enabled EXTI line 9 at
+	 * the 25 MHz link rate would assert on every SCK edge into this
+	 * vector at BRIDGE_CS_IRQ_PRIO 1 -- not unbounded re-entry, a hard
+	 * LIVELOCK that takes the bridge off the bus.  PA9 must never be
+	 * given an EXTI line in any configuration that ships.  (If the
+	 * CRC-and-dispatch work is ever deferred out of this ISR, use
+	 * PendSV or NVIC_SetPendingIRQ on an unused vector -- never
+	 * EXTI_SWIEV0/1, which burns a pin's line number and this same
+	 * shared IRQ 23 vector.)
+	 *
+	 * EXTI_PD0 at offset 0x14 is write-1-to-clear (UM Rev1.2 p.217);
+	 * 0x000003E0 = lines 5..9.  Clear exactly what was pending AT
+	 * ENTRY: an edge arriving between the read and the clear must keep
+	 * its pending bit and re-enter the handler, never be swallowed. */
+	const uint32_t group_pd = EXTI_PD0 & 0x000003E0u;
+	if ((group_pd & (1u << 8)) != 0u) {
 		if (RESET == gpio_input_bit_get(BRIDGE_SPI_NSS_PORT, BRIDGE_SPI_NSS_PIN)) {
 			/* CS asserted (active-low): reset the portable RX staging and
              * make sure RX capture is armed for THIS transaction even if
@@ -323,11 +349,41 @@ void BRIDGE_SPI_CS_EXTI_HANDLER(void)
 			spi_dma_arm_tx(reply_len);
 		}
 	}
+
+	/* Group clear LAST, with the entry snapshot (gh#66): every line
+	 * this vector owns that was pending at entry is cleared here.
+	 * rc_w1 pending bits have no read/clear race protection: an edge
+	 * landing mid-handler re-sets a bit this write then clears, so a
+	 * swallowed edge can cost the dispatch that edge -- for line 8
+	 * that is exactly the swallowed-edge case the idempotent re-arm
+	 * above already tolerates (see the handler header, point 2), and
+	 * the host driver's reply re-read / retry recovers the
+	 * transaction.  Writing 0 to a rc_w1 pending bit is a no-op, so
+	 * the untouched lines' zeros cost nothing. */
+	EXTI_PD0 = group_pd;
 }
 
 /* =================================================================== */
 /* I2C slave bring-up                                                   */
 /* =================================================================== */
+
+/* Apply the GPIOx_LOCK key sequence for the given LKy mask (gh#66):
+ * "Write 1 -> Write 0 -> Write 1 -> Read 0 -> Read 1", LKK at bit 16,
+ * LKy held constant across the whole sequence (UM Rev1.2 p.284
+ * §7.4.8).  After the final read the port's configuration registers
+ * (CTL/OMODE/OSPD/PUD/AFSEL) are frozen for the masked pins until the
+ * next MCU reset; OCTL/BOP/BC/TG stay writable.  The dummy reads are
+ * required steps of the documented sequence -- volatile-free hardware
+ * register reads cannot be elided by the compiler anyway, but the
+ * (void) casts state the intent. */
+static void gpio_lock_port(uint32_t gpiox, uint16_t lky_mask)
+{
+	GPIO_LOCK(gpiox) = 0x00010000u | (uint32_t)lky_mask; /* LKK = 1 */
+	GPIO_LOCK(gpiox) = (uint32_t)lky_mask;               /* LKK = 0 */
+	GPIO_LOCK(gpiox) = 0x00010000u | (uint32_t)lky_mask; /* LKK = 1 */
+	(void)GPIO_LOCK(gpiox);                              /* reads 0 */
+	(void)GPIO_LOCK(gpiox);                              /* reads 1 */
+}
 
 static void i2c_gpio_init(void)
 {
@@ -336,10 +392,21 @@ static void i2c_gpio_init(void)
 	/* Open-drain; rely on the BRD_I2C bus pull-ups. */
 	gpio_mode_set(BRIDGE_I2C_SCL_PORT, GPIO_MODE_AF, GPIO_PUPD_NONE, BRIDGE_I2C_SCL_PIN);
 	gpio_mode_set(BRIDGE_I2C_SDA_PORT, GPIO_MODE_AF, GPIO_PUPD_NONE, BRIDGE_I2C_SDA_PIN);
+	/* Slowest drive class, deliberately (gh#66): OSPD = 0b00 gives
+	 * tR/tF <= 14.1 ns at 2.5-3.6 V / <= 21.7 ns at 1.71-2.5 V into
+	 * 30 pF (Datasheet Rev2.0 p.130 Table 4-30, speed 00) -- still
+	 * 5x+ inside the 300 ns Fast-mode fall-time budget (p.141
+	 * Table 4-48) -- while cutting the di/dt the 60 MHz class (9.1 ns)
+	 * drives into the shared multi-drop BRD_I2C bus carrying the
+	 * OPTIGA Trust M and the 5L35023B.  Marginal ringing on SCL/SDA
+	 * is exactly what produces the SE clock-stretch wedge CMD_SE_RESET
+	 * exists to recover from.  If the bus is ever pushed to Fast-mode
+	 * plus at 1 MHz on a heavily loaded backplane, re-measure tf
+	 * before assuming this class still clears 120 ns. */
 	gpio_output_options_set(
-	    BRIDGE_I2C_SCL_PORT, GPIO_OTYPE_OD, GPIO_OSPEED_60MHZ, BRIDGE_I2C_SCL_PIN);
+	    BRIDGE_I2C_SCL_PORT, GPIO_OTYPE_OD, GPIO_OSPEED_12MHZ, BRIDGE_I2C_SCL_PIN);
 	gpio_output_options_set(
-	    BRIDGE_I2C_SDA_PORT, GPIO_OTYPE_OD, GPIO_OSPEED_60MHZ, BRIDGE_I2C_SDA_PIN);
+	    BRIDGE_I2C_SDA_PORT, GPIO_OTYPE_OD, GPIO_OSPEED_12MHZ, BRIDGE_I2C_SDA_PIN);
 	gpio_af_set(BRIDGE_I2C_SCL_PORT, af, BRIDGE_I2C_SCL_PIN);
 	gpio_af_set(BRIDGE_I2C_SDA_PORT, af, BRIDGE_I2C_SDA_PIN);
 }
@@ -506,6 +573,39 @@ int bridge_transport_i2c_hw_init(void)
 	nvic_irq_enable(BRIDGE_I2C_ER_IRQN, BRIDGE_I2C_IRQ_PRIO, BRIDGE_I2C_IRQ_SUBPRIO);
 
 	i2c_enable(BRIDGE_I2C_PERIPH);
+
+	/* GPIOx_LOCK on the transport pads + SE_RST (gh#66).  main() runs
+	 * transport_i2c_init() LAST of the two transports, and
+	 * se_reset_init() ran first inside bridge_hw_init(), so this is
+	 * the single point where PA8/PA9/PA10/PB15 (SPI), PA15/PB9
+	 * (I2C0) and PC13 (SE_RST) are all configured.  The lock
+	 * protects GPIOx_CTL/OMODE/OSPD/PUD/AFSEL (UM Rev1.2 p.271
+	 * §7.3.9) against any wild write that would retarget a
+	 * transport pad out of alternate function -- defence in depth,
+	 * not a closed hole: a wedged supervisor with locked pads is
+	 * still wedged (the issue's own framing).  OCTL/BOP/BC/TG are
+	 * NOT in the protected set, so CMD_SE_RESET can still pulse PC13
+	 * and the transports keep driving data.
+	 *
+	 * Sequence per UM p.284: Write 1 -> Write 0 -> Write 1 -> Read 0
+	 * -> Read 1, LKy held constant.  GPIOA 0x8700 = PA15/PA10/PA9/
+	 * PA8; GPIOB 0x8200 = PB15/PB9; GPIOC 0x2000 = PC13.
+	 *
+	 * Audited reconfigure paths (the issue demands this before
+	 * enabling): the per-transaction SPI flush above resets SPI1
+	 * only (RCU_SPI1RST) and never touches GPIO config; the
+	 * Deep-sleep wake path (power.c) calls THIS function again, whose
+	 * gpio_mode_set/gpio_af_set on PA15/PB9 become harmless no-ops
+	 * under the lock -- GPIO config survives Deep-sleep (GPIO is in
+	 * the Deep-sleep power-on module set, UM p.132 Fig 3-2), so the
+	 * skipped rewrite loses nothing; i2c_timing_config and the
+	 * address/enable writes touch I2C registers, not GPIO.  Nothing
+	 * else in the tree reconfigures a locked pad.  The lock is
+	 * irreversible until the next MCU reset -- that is the point. */
+	gpio_lock_port(GPIOA, 0x8700u);
+	gpio_lock_port(GPIOB, 0x8200u);
+	gpio_lock_port(GPIOC, 0x2000u);
+
 	return BRIDGE_HW_OK;
 }
 

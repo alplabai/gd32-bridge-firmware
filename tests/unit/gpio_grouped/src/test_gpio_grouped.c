@@ -65,6 +65,8 @@ static void mock_reset(void)
 	memset(mock_events, 0, sizeof mock_events);
 	mock_event_count = 0u;
 	memset(gpio_is_output, 0, sizeof(bool) * GPIO_PAD_MAP_COUNT);
+	/* gh#66 lazy INPUT promotion state is production state too. */
+	memset(gpio_input_promoted, 0, sizeof(bool) * GPIO_PAD_MAP_COUNT);
 }
 
 uint32_t *mock_gpio_bop_lvalue(uint32_t gpio_periph)
@@ -93,8 +95,17 @@ void gpio_output_options_set(uint32_t gpio_periph, uint32_t otype, uint32_t spee
 
 void gpio_mode_set(uint32_t gpio_periph, uint32_t mode, uint32_t pull_up_down, uint32_t pin)
 {
-	zassert_equal(mode, GPIO_MODE_OUTPUT);
-	zassert_equal(pull_up_down, GPIO_PUPD_NONE);
+	/* gh#66 added the read path's lazy INPUT promotion, so this mock
+	 * sees both (OUTPUT, PUPD_NONE) from the write path and (INPUT,
+	 * PULLUP) from the read path. */
+	zassert_true(mode == GPIO_MODE_OUTPUT || mode == GPIO_MODE_INPUT,
+	             "unexpected GPIO mode %u",
+	             (unsigned)mode);
+	if (mode == GPIO_MODE_OUTPUT) {
+		zassert_equal(pull_up_down, GPIO_PUPD_NONE);
+	} else {
+		zassert_equal(pull_up_down, GPIO_PUPD_PULLUP);
+	}
 	mock_log(MOCK_EVENT_MODE, gpio_periph, pin);
 }
 
@@ -191,6 +202,38 @@ ZTEST(gpio_grouped, test_null_read_output_is_rejected_without_access)
 	mock_reset();
 	zassert_equal(bridge_hw_gpio_read(1u, NULL), BRIDGE_HW_ERR_INVAL);
 	zassert_equal(mock_event_count, 0u);
+}
+
+/* gh#66: pads are parked at their analog reset state at boot; the FIRST
+ * read that names a pad promotes it to INPUT + PULLUP (lazily), and
+ * exactly once -- a second read must not re-promote. */
+ZTEST(gpio_grouped, test_first_read_promotes_input_once)
+{
+	mock_reset();
+	mock_inputs[mock_port_index(GPIOB)] = GPIO_PIN_10;
+
+	uint32_t levels = 0u;
+	zassert_equal(bridge_hw_gpio_read(1u << 0, &levels), BRIDGE_HW_OK);
+	zassert_equal(levels, 1u << 0);
+	/* MODE (promotion) logged before the port INPUT_READ. */
+	zassert_equal(mock_event_count, 2u);
+	zassert_equal(mock_events[0].kind, MOCK_EVENT_MODE);
+	zassert_equal(mock_events[0].port, GPIOB);
+	zassert_equal(mock_events[0].pins, GPIO_PIN_10);
+	zassert_equal(mock_events[1].kind, MOCK_EVENT_INPUT_READ);
+	zassert_true(gpio_input_promoted[0]);
+
+	/* Second read of the same pad: promotion is sticky, so only the
+	 * port INPUT_READ happens.  Clear ONLY the event log here -- the
+	 * promotion state must persist across reads (it is production
+	 * state, and mock_reset would wipe it). */
+	memset(mock_events, 0, sizeof mock_events);
+	mock_event_count = 0u;
+	memset(mock_read_count, 0, sizeof mock_read_count);
+	levels = 0u;
+	zassert_equal(bridge_hw_gpio_read(1u << 0, &levels), BRIDGE_HW_OK);
+	zassert_equal(mock_event_count, 1u);
+	zassert_equal(mock_events[0].kind, MOCK_EVENT_INPUT_READ);
 }
 
 ZTEST_SUITE(gpio_grouped, NULL, NULL, NULL, NULL, NULL);

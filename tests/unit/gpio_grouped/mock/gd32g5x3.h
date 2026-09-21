@@ -26,8 +26,10 @@
 
 #define GPIO_OTYPE_PP     ((uint32_t)0u)
 #define GPIO_OSPEED_12MHZ ((uint32_t)0u)
+#define GPIO_MODE_INPUT   ((uint32_t)0u)
 #define GPIO_MODE_OUTPUT  ((uint32_t)1u)
 #define GPIO_PUPD_NONE    ((uint32_t)0u)
+#define GPIO_PUPD_PULLUP  ((uint32_t)1u)
 
 uint32_t *mock_gpio_bop_lvalue(uint32_t gpio_periph);
 #define GPIO_BOP(gpio_periph) (*mock_gpio_bop_lvalue(gpio_periph))

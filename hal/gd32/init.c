@@ -173,6 +173,12 @@
 uint32_t bridge_core_clock_hz      = PWM_TIMER_CLK_HZ;
 bool     bridge_core_clock_matches = true;
 
+/* I/O compensation cell verdict (gh#66): true after bridge_hw_init()
+ * iff SYSCFG_CPSCTL.CPS_RDY confirmed the cell ready within its
+ * bounded spin.  Volatile so a bench probe can read it after boot;
+ * no functional consumer today -- the cell is enable-and-forget. */
+volatile bool gpio_compensation_ready;
+
 void bridge_hw_init(void)
 {
 #if defined(BRIDGE_OTA_PARTITIONED) && defined(BRIDGE_APP_SLOT_BASE)
@@ -247,6 +253,41 @@ void bridge_hw_init(void)
 	bridge_core_clock_hz      = SystemCoreClock;
 	bridge_core_clock_matches = (SystemCoreClock == PWM_TIMER_CLK_HZ);
 
+	/* I/O compensation cell (gh#66): set SYSCFG_CPSCTL.CPS_EN (bit 0,
+	 * UM Rev1.2 p.68-69 §1.7.15, offset 0x3C) and wait for CPS_RDY
+	 * (bit 8, read-only) with a BOUNDED spin in the same shape as the
+	 * VREFRDY wait below -- recording the verdict, never hanging.
+	 * The cell controls output commutation slew (tfall/trise) across
+	 * the whole I/O ring: the SPI pads' speed-10 class spans tR/tF
+	 * 4.0-6.6 ns across supply alone (Datasheet Rev2.0 p.130 Table
+	 * 4-30) -- 65% spread before process and temperature -- and a
+	 * marginal unit at a corner has less edge margin against the
+	 * master's CS-to-first-SCK window than a bench unit shows.
+	 * RCU_SYSCFG is NOT re-enabled here; transport_hw_gd32.c already
+	 * enabled it.  The compensation-code programming path UM p.271
+	 * describes is deliberately not attempted: Rev1.2 defines no
+	 * register for it and CPSCTL has no code field -- only the
+	 * enable-and-let-hardware-compensate mode is reachable.
+	 * Sequencing per gh#66: this is a PVT-robustness measure on
+	 * links that already work, so it lands in the same change as the
+	 * I2C drive-class drop, and BOTH need the bench re-validation
+	 * the issue names (SPI setup window, PWM edges, I2C falls)
+	 * before the verdict counts as settled. */
+	{
+		bool     comp_ready = false;
+		uint32_t spins      = 0u;
+		SYSCFG_CPSCTL |= SYSCFG_CPSCTL_CPS_EN;
+		while (spins++ < 200000u) {
+			if (0u != (SYSCFG_CPSCTL & SYSCFG_CPSCTL_CPS_RDY)) {
+				comp_ready = true;
+				break;
+			}
+		}
+		/* Verdict recorded for a bench read (volatile: no other
+		 * reader today; a never-ready cell must not hang boot). */
+		gpio_compensation_ready = comp_ready;
+	}
+
 	/* Enable AHB2 clocks for every GPIO port the pad map references.
      * The chip's RCU keeps unused GPIO ports clock-gated to save
      * power; we enable A..F unconditionally because the E1M IO map
@@ -258,14 +299,24 @@ void bridge_hw_init(void)
 	rcu_periph_clock_enable(RCU_GPIOE);
 	rcu_periph_clock_enable(RCU_GPIOF);
 
-	/* Configure every entry in `gpio_pad_map` as INPUT + PULL_UP.
-     * Safe default per the GPIO direction policy: no driven
-     * contention with whatever the board might pull / drive on
-     * those pads.  bridge_hw_gpio_write() promotes individual
-     * pads to OUTPUT on demand. */
+	/* Pad map parking (gh#66): leave every entry in `gpio_pad_map`
+	 * at its CTLy = 0b11 ANALOG reset state -- input buffer and both
+	 * pull resistors disabled (UM Rev1.2 p.270 §7.3.7), which is what
+	 * all eighteen pads already reset to (p.275).  The old INPUT +
+	 * PULL_UP park sank 1.8 V / 40 kΩ = 45 µA per pad continuously
+	 * from boot into every pad a carrier holds LOW (Datasheet
+	 * Rev2.0 p.128 Table 4-28: RPU = 40 kΩ, "value guaranteed by
+	 * design") -- on a part whose whole point in modes 2/3 is low
+	 * standing current.  bridge_hw_gpio_read() now promotes a pad to
+	 * INPUT + PULLUP lazily on the first CMD_GPIO_READ that names
+	 * it (with a settling allowance for the pull-up charging the pad
+	 * capacitance), mirroring the existing lazy OUTPUT promotion in
+	 * bridge_hw_gpio_write(); gpio_is_output[] stays the write-side
+	 * truth.  Tradeoff made deliberately per gh#66: an unconnected
+	 * E1M IO reads 0 only while its pad is parked analog (ISTAT
+	 * reads 0 in analog mode, UM p.270) -- the first READ names it,
+	 * promotes it, and every later read is the pulled-up level. */
 	for (size_t i = 0; i < GPIO_PAD_MAP_COUNT; ++i) {
-		gpio_mode_set(
-		    gpio_pad_map[i].periph, GPIO_MODE_INPUT, GPIO_PUPD_PULLUP, gpio_pad_map[i].pin);
 		gpio_is_output[i] = false;
 	}
 
