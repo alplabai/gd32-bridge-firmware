@@ -284,6 +284,8 @@ int bridge_hw_adc_stream_begin(uint8_t stream_id, uint8_t channel, uint32_t samp
 	s->total_read   = 0u; /* lap_count zeroed above, pre-arm */
 	s->dsp_chain_id = 0u;
 	s->dsp_bound    = false;
+	s->dsp_cfg_bad  = false; /* gh#35 sticky flags: clean slate per session */
+	s->dsp_sat      = false;
 	/* Reconfigure done and in_use published: hand the converter's
      * short-term claim back (#133).  From here the in_use scan in
      * bridge_hw_adc_read is what keeps single-shot reads off this
@@ -392,6 +394,15 @@ int bridge_hw_adc_stream_read(uint8_t   stream_id,
 	 * same exact-difference backlog accounting as the raw path. */
 	if (s->dsp_bound) {
 		if (s->dsp_terminal == 3u) return BRIDGE_HW_ERR_NOTIMPL; /* FFT */
+
+		/* gh#35 sticky fault surfacing: a config refusal (coefficients
+		 * out of the FAC's realisable range) answers RANGE; a
+		 * saturated FAC (STEF/GSTEF, see the pump) answers IO.  In
+		 * both cases the stream is never again reported as
+		 * STATUS_OK-serving-clean-data until stream_end resets the
+		 * flags. */
+		if (s->dsp_cfg_bad) return BRIDGE_HW_ERR_RANGE;
+		if (s->dsp_sat) return BRIDGE_HW_ERR_IO;
 
 		const uint32_t pw       = s->proc_write;
 		const int32_t  pbacklog = (int32_t)(pw - s->proc_read);
@@ -531,8 +542,10 @@ int bridge_hw_adc_stream_end(uint8_t stream_id)
 		adc_dsp_chain_release(s->dsp_chain_id);
 	}
 
-	s->in_use    = false;
-	s->dsp_bound = false;
+	s->in_use      = false;
+	s->dsp_bound   = false;
+	s->dsp_cfg_bad = false; /* gh#35: sticky flags live exactly one session */
+	s->dsp_sat     = false;
 	return restored ? BRIDGE_HW_OK : BRIDGE_HW_ERR_IO;
 }
 
@@ -575,20 +588,71 @@ void adc_dsp_fac_release(uint8_t stream_id)
 
 /* Decode one wire coefficient (4 bytes little-endian, Q31 or F32) into
  * the FAC's Q15 fixed-point.  Q31 -> arithmetic >>16; F32 -> clamp to
- * [-1, +1) and scale by 2^15. */
-static int16_t adc_dsp_coeff_q15(uint8_t fmt, const uint8_t *p)
+ * [-1, +1) and scale by 2^15.
+ *
+ * gh#35 fix 2: `g` is the section's headroom exponent -- the FAC's
+ * accumulator gain IPR multiplies the accumulator output by 2^IPR
+ * (UM Rev1.2 p.1505 s35.3.6: "The parameter IPR is the gain, applied
+ * to the accumulator output by multiplied 2IPR, where IPR is in the
+ * range [0:7]"), so coefficients delivered to local memory are scaled
+ * DOWN by 2^g and the gain buys the factor back.  This is exactly the
+ * mechanism AN208 p.13 prescribes ("To make full use of these data,
+ * the above parameters are scaled up by 16384") and the vendor
+ * Iir_dma example uses with iir_gain = 1.  Without it, any |coeff| >=
+ * 1.0 -- routine for a lightly damped biquad, whose a1 routinely sits
+ * between -1 and -2 -- was silently clamped onto the q1.15 rail,
+ * changing the filter's cutoff and Q with no error anywhere on the
+ * wire.  g == 0 keeps this identical to the pre-gh#35 decode. */
+static int16_t adc_dsp_f32_to_q15(float f, uint8_t g)
 {
-	uint32_t w =
-	    (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-	if (fmt == 1u) { /* Q31 */
-		return (int16_t)((int32_t)w >> 16);
-	}
-	/* F32 */
-	float f;
-	__builtin_memcpy(&f, &w, sizeof(f));
-	if (f >= 0.999969f) f = 0.999969f;
+	f = f / (float)(1u << g);
+	if (f >= 1.0f) f = 0.999969f;
 	if (f <= -1.0f) f = -1.0f;
 	return (int16_t)(f * 32768.0f);
+}
+
+/* Negate a q1.15 feedback coefficient.  gh#35 fix 1: the wire contract
+ * (<alp/dsp.h>) is y[n] = b*x - a*y, but the FAC ADDS the feedback
+ * term (UM Rev1.2 p.1505 eq.(35-2): "yn = 2IPR (sum(xn-k x bk) +
+ * sum(yn-k x ak))"), so a1/a2 must be sign-reversed at decode or every
+ * biquad's poles come out mirrored -- a filter designed stable can be
+ * realised unstable.  Both the negation and the halving are confirmed
+ * by the vendor Iir_dma example (main.c:58-60 + ipr=1 at :205).  The
+ * INT16_MIN case clamps to INT16_MAX because -(-32768) is not
+ * representable in int16_t.  Do NOT "fix" the sign back. */
+static int16_t adc_dsp_neg_q15(int16_t v)
+{
+	return (v == INT16_MIN) ? INT16_MAX : (int16_t)(-v);
+}
+
+/* Largest |coefficient| across a section's F32 values, for the
+ * headroom exponent.  Returns a negative value (-1.0f) to signal
+ * "out of FAC range": max|coeff| >= 128 needs g = 7 and still does
+ * not fit, which is where gh#35 draws the line -- refuse the chain
+ * (sticky, surfaced through stream_read as RANGE) instead of silently
+ * clamping onto the rail. */
+#define ADC_DSP_FAC_COEFF_MAX 128.0f
+
+static float adc_dsp_f32_max_abs(const float *v, uint8_t n)
+{
+	float max = 0.0f;
+	for (uint8_t k = 0u; k < n; ++k) {
+		const float a = (v[k] < 0.0f) ? -v[k] : v[k];
+		if (a > max) max = a;
+	}
+	return (max >= ADC_DSP_FAC_COEFF_MAX) ? -1.0f : max;
+}
+
+/* Smallest g in [0,7] with max/2^g <= 1, so no coefficient lands on
+ * the q1.15 rail (caller has already rejected max >= 128, so g = 7
+ * always suffices; the max == 2^g edge clamps to 0.999969, a 3e-5
+ * gain error that is the plane's own resolution). */
+static uint8_t adc_dsp_headroom_exp(float max_abs)
+{
+	uint8_t g = 0u;
+	while (g < 7u && max_abs > (float)(1u << g))
+		++g;
+	return g;
 }
 
 /* Configure the FAC for stream s's bound chain (single FIR or single-
@@ -648,10 +712,35 @@ static bool adc_dsp_fac_config(const adc_stream_state_t *s)
 		if (nt == 0u || nt > BRIDGE_DSP_MAX_FIR_TAPS) return false;
 		if (st->total_size != (uint16_t)(BRIDGE_DSP_STAGE_HDR_BYTES + (uint16_t)nt * 4u))
 			return false;
+		/* gh#35 fix 2: decode every tap, derive the section's headroom
+		 * exponent from the largest magnitude, scale, and set IPR to
+		 * buy the factor back.  Q31 values are inside [-1, 1) by
+		 * construction so g collapses to 0 and the >>16 decode is
+		 * exact; only F32 taps can exceed the q1.15 range.  A max >=
+		 * 128 cannot be scaled into range even at g = 7 -- refuse
+		 * (sticky, surfaced via stream_read as RANGE) rather than
+		 * clamping onto the rail and serving a different filter with
+		 * STATUS_OK. */
 		int16_t taps[BRIDGE_DSP_MAX_FIR_TAPS];
+		uint8_t g = 0u;
+		float   fv[BRIDGE_DSP_MAX_FIR_TAPS];
 		for (uint8_t k = 0u; k < nt; ++k) {
-			taps[k] =
-			    adc_dsp_coeff_q15(fmt, &st->data[BRIDGE_DSP_STAGE_HDR_BYTES + (uint16_t)k * 4u]);
+			const uint16_t off = (uint16_t)(BRIDGE_DSP_STAGE_HDR_BYTES + (uint16_t)k * 4u);
+			const uint32_t w   = (uint32_t)st->data[off] | ((uint32_t)st->data[off + 1u] << 8) |
+			                     ((uint32_t)st->data[off + 2u] << 16) |
+			                     ((uint32_t)st->data[off + 3u] << 24);
+			if (fmt == 1u) { /* Q31 */
+				taps[k] = (int16_t)((int32_t)w >> 16);
+			} else { /* F32 */
+				__builtin_memcpy(&fv[k], &w, sizeof(fv[k]));
+			}
+		}
+		if (fmt != 1u) {
+			const float max = adc_dsp_f32_max_abs(fv, nt);
+			if (max < 0.0f) return false; /* >= 128: out of FAC range */
+			g = adc_dsp_headroom_exp(max);
+			for (uint8_t k = 0u; k < nt; ++k)
+				taps[k] = adc_dsp_f32_to_q15(fv[k], g);
 		}
 		p.coeff_addr       = 0u;
 		p.coeff_size       = nt;
@@ -679,7 +768,7 @@ static bool adc_dsp_fac_config(const adc_stream_state_t *s)
 		p.func = FUNC_CONVO_FIR;
 		p.ipp  = nt;
 		p.ipq  = 0u;
-		p.ipr  = 0u;
+		p.ipr  = g; /* accumulator gain 2^g buys the decode's scaling back */
 		fac_function_config(&p);
 		fac_start();
 		return true;
@@ -690,13 +779,44 @@ static bool adc_dsp_fac_config(const adc_stream_state_t *s)
 	                       * adc_dsp_chain_p1_capable() above, not here. */
 		const uint8_t fmt = st->data[0];
 		/* section = b0,b1,b2,a1,a2 (5 coeffs).  FAC coeffb = feed-
-		 * forward B (b0,b1,b2), coeffa = feedback A (a1,a2). */
+		 * forward B (b0,b1,b2), coeffa = feedback A (a1,a2).
+		 *
+		 * gh#35 fixes 1 + 2 (they must land together -- both change
+		 * the words written into FAC local memory): the feedback pair
+		 * is NEGATED at decode (the FAC adds the feedback term, UM
+		 * p.1505 eq.(35-2); the wire contract subtracts it), and all
+		 * five coefficients are scaled down by the section's headroom
+		 * exponent g with p.ipr = g buying the factor back.  Q31 is
+		 * inside [-1, 1) by construction so g = 0.  max|coeff| >= 128
+		 * refuses the whole config (sticky, surfaced via stream_read
+		 * as RANGE). */
 		int16_t        b[3], a[2];
+		uint8_t        g = 0u;
+		float          fv[5];
 		const uint8_t *c = &st->data[BRIDGE_DSP_STAGE_HDR_BYTES];
-		for (uint8_t k = 0u; k < 3u; ++k)
-			b[k] = adc_dsp_coeff_q15(fmt, &c[k * 4u]);
-		for (uint8_t k = 0u; k < 2u; ++k)
-			a[k] = adc_dsp_coeff_q15(fmt, &c[(3u + k) * 4u]);
+		for (uint8_t k = 0u; k < 5u; ++k) {
+			const uint32_t w = (uint32_t)c[k * 4u] | ((uint32_t)c[k * 4u + 1u] << 8) |
+			                   ((uint32_t)c[k * 4u + 2u] << 16) | ((uint32_t)c[k * 4u + 3u] << 24);
+			if (fmt == 1u) { /* Q31 */
+				const int16_t v = (int16_t)((int32_t)w >> 16);
+				if (k < 3u) {
+					b[k] = v;
+				} else {
+					a[k - 3u] = adc_dsp_neg_q15(v);
+				}
+			} else { /* F32 */
+				__builtin_memcpy(&fv[k], &w, sizeof(fv[k]));
+			}
+		}
+		if (fmt != 1u) {
+			const float max = adc_dsp_f32_max_abs(fv, 5u);
+			if (max < 0.0f) return false; /* >= 128: out of FAC range */
+			g = adc_dsp_headroom_exp(max);
+			for (uint8_t k = 0u; k < 3u; ++k)
+				b[k] = adc_dsp_f32_to_q15(fv[k], g);
+			for (uint8_t k = 0u; k < 2u; ++k)
+				a[k] = adc_dsp_neg_q15(adc_dsp_f32_to_q15(fv[3u + k], g));
+		}
 		p.coeff_addr       = 0u;
 		p.coeff_size       = 5u; /* b0..b2,a1,a2 */
 		p.input_addr       = 5u;
@@ -720,11 +840,13 @@ static bool adc_dsp_fac_config(const adc_stream_state_t *s)
 		pl.output_size = 0u;
 		fac_fixed_buffer_preload(&pl);
 
-		/* IPP = feed-forward count (3), IPQ = feedback count (2). */
+		/* IPP = feed-forward count (3), IPQ = feedback count (2).
+		 * IPR = g: the accumulator gain 2^g buys the decode scaling
+		 * back (UM p.1505; vendor Iir_dma main.c:205 iir_gain = 1). */
 		p.func = FUNC_IIR_DIRECT_FORM_1;
 		p.ipp  = 3u;
 		p.ipq  = 2u;
-		p.ipr  = 0u;
+		p.ipr  = g;
 		fac_function_config(&p);
 		fac_start();
 		return true;
@@ -742,7 +864,19 @@ static void adc_dsp_pump_stream(uint8_t sid)
 	adc_stream_state_t *s = &adc_streams[sid];
 
 	if (adc_dsp_fac_owner != (int8_t)sid) {
-		if (!adc_dsp_fac_config(s)) return; /* unsupported chain -> stay idle */
+		if (!adc_dsp_fac_config(s)) {
+			/* gh#35: a config refusal is no longer silent.  The
+			 * chain passed bind's shape checks but its
+			 * coefficients are out of the FAC's realisable range
+			 * (max|coeff| >= 128).  Mark the stream so
+			 * stream_read answers RANGE instead of letting the
+			 * pump idle forever on a bound chain that will never
+			 * produce -- the #69 silent-starvation shape.  Sticky
+			 * until stream_end: no auto-retry, the coefficients
+			 * cannot change without a new chain_open. */
+			s->dsp_cfg_bad = true;
+			return;
+		}
 		adc_dsp_fac_owner = (int8_t)sid;
 	}
 
@@ -764,17 +898,45 @@ static void adc_dsp_pump_stream(uint8_t sid)
 		const uint16_t code = (uint16_t)(s->ring[ridx] & 0x0FFFu); /* 12-bit */
 		s->pump_raw_read++;
 
-		/* Unipolar ADC code (0..4095) -> Q15 positive (0..~1.0): <<3.
-		 * A unity-DC-gain filter (sum(taps) ~ 1.0) preserves the offset;
-		 * the reverse (>>3) returns a code the existing mv math scales. */
-		const int16_t x = (int16_t)(code << 3);
+		/* gh#35 fix 3: bias the input around mid-scale BEFORE the <<3.
+		 * The old non-negative mapping (code << 3) was reasoned only
+		 * about a unity-DC-gain low-pass; for any high-pass, band-
+		 * pass or DC-blocking biquad the output is legitimately
+		 * negative for about half the samples, and the old output
+		 * clamp (c < 0 -> 0) half-wave-rectified the served stream --
+		 * a large spurious DC term and harmonics the signal never
+		 * contained, delivered with STATUS_OK.  With the bias, x is a
+		 * signed q1.15 in [-1, 0.9995) centred on 0, the FAC output
+		 * is signed symmetric, and the +2048 re-bias below maps a
+		 * mid-scale-centred swing back onto the unipolar code plane
+		 * WITHOUT discarding the negative half. */
+		const int16_t x = (int16_t)(((int32_t)code - 2048) * 8);
 		if (fac_flag_get(FAC_FLAG_X0BFF) == SET) break; /* FAC input saturated */
 		fac_fixed_data_write(x);
 
 		if (fac_flag_get(FAC_FLAG_YBEF) == RESET) {
-			int32_t c = (int32_t)fac_fixed_data_read() >> 3;
+			/* Re-bias the signed q1.15 output back onto the unipolar
+			 * code plane (>>3 undoes the <<3 scale, +2048 undoes the
+			 * mid-scale subtraction above).  Swings beyond one code
+			 * half-range clip here -- the 12-bit processed plane's
+			 * own headroom; genuine FAC saturation is flagged via
+			 * dsp_sat below, so a clipped or railed series is never
+			 * reported as STATUS_OK. */
+			int32_t c = (((int32_t)fac_fixed_data_read()) >> 3) + 2048;
 			if (c < 0) c = 0;
 			if (c > 4095) c = 4095;
+			/* gh#35: saturation visibility.  Poll the FAC's sticky
+			 * error flags (UM p.1515 FAC_STAT STEF bit 10 = output
+			 * saturation, GSTEF bit 11 = gain saturation) rather
+			 * than arming their interrupt enables (STEIE/GSTEIE,
+			 * p.1514) -- the pump runs at base level, no vector is
+			 * needed, and polling cannot preempt the transports.
+			 * Either flag means the served stream contains railed
+			 * values: mark the stream sticky so stream_read stops
+			 * answering STATUS_OK for it. */
+			if (SET == fac_flag_get(FAC_FLAG_STEF) || SET == fac_flag_get(FAC_FLAG_GSTEF)) {
+				s->dsp_sat = true;
+			}
 			s->proc_ring[s->proc_write % BRIDGE_ADC_STREAM_RING_SAMPLES] = (uint16_t)c;
 			s->proc_write++;
 		}

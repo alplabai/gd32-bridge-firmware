@@ -14,7 +14,29 @@ void mock_seq_reset(void)
 {
 	mock_seq_n = 0;
 	memset(mock_seq, 0, sizeof mock_seq);
+	/* gh#35 FAC captures reset with the rest of the mock. */
+	memset(mock_fac_coeffb, 0, sizeof mock_fac_coeffb);
+	memset(mock_fac_coeffa, 0, sizeof mock_fac_coeffa);
+	mock_fac_coeffb_size = 0u;
+	mock_fac_coeffa_size = 0u;
+	mock_fac_func        = 0u;
+	mock_fac_ipr         = 0u;
+	mock_fac_last_write  = 0;
+	mock_fac_read_value  = 0;
+	mock_fac_flags       = 0u;
 }
+
+/* --- gh#35 FAC capture surface ------------------------------------ */
+
+int16_t  mock_fac_coeffb[MOCK_FAC_MAX_COEFFS];
+uint8_t  mock_fac_coeffb_size;
+int16_t  mock_fac_coeffa[MOCK_FAC_MAX_COEFFS];
+uint8_t  mock_fac_coeffa_size;
+uint32_t mock_fac_func;
+uint8_t  mock_fac_ipr;
+int16_t  mock_fac_last_write;
+int16_t  mock_fac_read_value;
+uint32_t mock_fac_flags;
 
 void mock_seq_log(const char *name, uint32_t periph, uint32_t arg)
 {
@@ -325,11 +347,25 @@ void fac_fixed_data_preload_init(fac_fixed_data_preload_struct *p)
 }
 void fac_fixed_buffer_preload(fac_fixed_data_preload_struct *p)
 {
-	(void)p;
+	/* gh#35: capture the decoded coefficient vectors the production
+	 * decode hands to the FAC, so the AN208 / Iir_dma numbers can be
+	 * asserted directly. */
+	if (p->coeffb_size > MOCK_FAC_MAX_COEFFS || p->coeffa_size > MOCK_FAC_MAX_COEFFS) return;
+	memset(mock_fac_coeffb, 0, sizeof mock_fac_coeffb);
+	memset(mock_fac_coeffa, 0, sizeof mock_fac_coeffa);
+	for (uint8_t k = 0u; k < p->coeffb_size; ++k)
+		mock_fac_coeffb[k] = p->coeffb_ctx[k];
+	for (uint8_t k = 0u; k < p->coeffa_size; ++k)
+		mock_fac_coeffa[k] = p->coeffa_ctx[k];
+	mock_fac_coeffb_size = p->coeffb_size;
+	mock_fac_coeffa_size = p->coeffa_size;
+	mock_seq_log("fac_fixed_buffer_preload", 0u, 0u);
 }
 void fac_function_config(fac_parameter_struct *p)
 {
-	(void)p;
+	mock_fac_func = p->func;
+	mock_fac_ipr  = p->ipr; /* gh#35: the headroom exponent must land here */
+	mock_seq_log("fac_function_config", p->func, p->ipr);
 }
 void fac_start(void)
 {
@@ -339,16 +375,17 @@ void fac_stop(void)
 }
 void fac_fixed_data_write(int16_t data)
 {
-	(void)data;
+	mock_fac_last_write = data; /* gh#35 bias test */
 }
 int16_t fac_fixed_data_read(void)
 {
-	return 0;
+	return mock_fac_read_value;
 }
 FlagStatus fac_flag_get(uint32_t flag)
 {
-	(void)flag;
-	return RESET;
+	/* YBEF must read RESET for the pump's output path to run; the
+	 * saturation flags are settable per test (gh#35). */
+	return (mock_fac_flags & flag) ? SET : RESET;
 }
 
 void fft_deinit(void)
