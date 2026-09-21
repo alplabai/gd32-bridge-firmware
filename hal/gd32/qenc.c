@@ -68,6 +68,37 @@ void qenc_channel_init(const gd32_qenc_t *e)
 	                                     TIMER_QUAD_DECODER_MODE2,
 	                                     TIMER_IC_POLARITY_RISING,
 	                                     TIMER_IC_POLARITY_RISING);
+
+	/* Input-capture filter, sized for quadrature at X4 (gh#66):
+	 * MODE2 counts both edges of both inputs, so a dirty channel --
+	 * long cable, worn optical disc, EMI from an adjacent motor --
+	 * turns every glitch into counts with no error to report, and
+	 * the count only ever looks plausible.  timer_quadrature_decoder_
+	 * mode_config() leaves CH0CAPFLT/CH1CAPFLT at their 0000 reset
+	 * value (filter disabled, fSAMP = fDTS, N = 1), so program them
+	 * HERE: 0011 = fSAMP = fCK_TIMER, N = 8 (UM Rev1.2 p.650,
+	 * TIMERx_CHCTL0 CH0CAPFLT bits 7:4 / CH1CAPFLT bits 15:12; "an
+	 * event counter is used ... a transition on the output occurs
+	 * after N input events").  With CK_TIMER at the full 216 MHz
+	 * (TIMER1..TIMER4 tick at core clock, see init.c's APB1 notes)
+	 * and prescaler 0, N=8 rejects pulses under ~37 ns -- far below
+	 * any legitimate encoder edge at the E1M's fastest expected line
+	 * rate -- while bounce of a mechanical origin switch or a noisy
+	 * stub is filtered before the counter sees it.  Lengthen
+	 * (1111 = fDTS/32, N=8) only if bench injection still shows
+	 * glitches.  The timer's own filter is preferred over the
+	 * GPIOx_IFTP/IFL path: per-channel, no GPIO register, and no
+	 * FLPRD grouping across the eight encoder pads (all in pins
+	 * 0..7, all three ports share FLPRD0).  Do NOT extend this to a
+	 * GPIO input filter on PA8/CS -- the CS-to-first-SCK budget is
+	 * the transport's tightest timing. */
+	{
+		const uint32_t chctl0 = TIMER_CHCTL0(e->timer_periph);
+		TIMER_CHCTL0(e->timer_periph) =
+		    (chctl0 & ~(TIMER_CHCTL0_CH0CAPFLT | TIMER_CHCTL0_CH1CAPFLT)) | (0x3u << 4) |
+		    (0x3u << 12); /* CH0CAPFLT = CH1CAPFLT = 0011 */
+	}
+
 	timer_enable(e->timer_periph);
 }
 

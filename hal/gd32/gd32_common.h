@@ -307,10 +307,14 @@ extern bool     bridge_core_clock_matches; /* init.c */
 /* Shared tables (defined in the TU named per line).                  */
 /* ----------------------------------------------------------------- */
 
-extern const gd32_gpio_pad_t gpio_pad_map[GPIO_PAD_MAP_COUNT];        /* gpio.c */
-extern bool                  gpio_is_output[GPIO_PAD_MAP_COUNT];      /* gpio.c */
-extern const gd32_adc_ch_t   adc_channels_map[ADC_CHANNEL_MAP_COUNT]; /* adc.c */
-extern uint16_t              adc_sample_cycles_cache[8];              /* adc.c */
+extern const gd32_gpio_pad_t gpio_pad_map[GPIO_PAD_MAP_COUNT];   /* gpio.c */
+extern bool                  gpio_is_output[GPIO_PAD_MAP_COUNT]; /* gpio.c */
+/* gh#66 lazy INPUT promotion state (read side; gpio.c).  Non-static so
+ * the gpio_grouped host suite can reset it between cases, same pattern
+ * as gpio_is_output. */
+extern bool                gpio_input_promoted[GPIO_PAD_MAP_COUNT];
+extern const gd32_adc_ch_t adc_channels_map[ADC_CHANNEL_MAP_COUNT]; /* adc.c */
+extern uint16_t            adc_sample_cycles_cache[8];              /* adc.c */
 
 /* Per-converter ownership interlock (#133) -- adc.c owns the flags; the
  * streaming path in adc_stream.c claims the same converter around its own
