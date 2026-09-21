@@ -160,6 +160,11 @@ SECTIONS
         PROVIDE ( _heap_end = . );
         . = . + __stack_size;
         PROVIDE ( _sp       = . );
+        /* gh#146: the stack region's LOWER bound, programmed into
+         * MSPLIM by bridge_hw_init().  Without this symbol the limit
+         * was recomputable only from _sp - __stack_size, which no
+         * source ever did. */
+        PROVIDE ( _stack_limit = _sp - __stack_size );
         . = ALIGN(8);
     } > RAM
 

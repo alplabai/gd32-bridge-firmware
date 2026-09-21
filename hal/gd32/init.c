@@ -173,8 +173,48 @@
 uint32_t bridge_core_clock_hz      = PWM_TIMER_CLK_HZ;
 bool     bridge_core_clock_matches = true;
 
+/* gh#146: the stack region's lower bound, provided by both linker
+ * scripts (toolchain/gd32g553_flash.ld, gd32g553_app_slot.ld.in --
+ * _stack_limit = _sp - __stack_size).  Programmed into MSPLIM at the
+ * head of bridge_hw_init(). */
+extern uint32_t _stack_limit[];
+
 void bridge_hw_init(void)
 {
+	/* --- Stack costing + MSPLIM limit (gh#146) -----------------------
+	 *
+	 * THE COSTING (measured, not asserted): a full -Os build of the
+	 * gd32 backend with -fstack-usage (real vendor tree,
+	 * BRIDGE_OTA_PARTITIONED on) reports the worst single frame in the
+	 * firmware's own TUs at 248 bytes (adc_stream.c's FAC decode: the
+	 * int16 taps[BRIDGE_DSP_MAX_FIR_TAPS] + float fv[] pair, #132's
+	 * bounded stack), then 120 (transport_i2c), then a band of 88-104
+	 * (protocol dispatch frames, adc_stream, tmu, gpio).  The deepest
+	 * executable chains:
+	 *
+	 *   CS-EXTI (prio 1) -> protocol_dispatch -> worst opcode handler
+	 *     -> adc_stream path .......... <= ~248 + 104 + 88 + frame ~700
+	 *   + nested I2C-EV (prio 2) -> protocol_dispatch -> handler ~300
+	 *   + 2 exception frames (no FPU context: 32 B each) ........ ~64
+	 *   ---------------------------------------------------- approx 1.1 K
+	 *
+	 * against __stack_size = 2K: roughly 55% of the region on the
+	 * worst legal nesting, which is margin, not slack -- the ring of
+	 * #36's NMI_Handler on top costs another frame, and #132's taps[]
+	 * bound is what keeps the 248 from doubling.  Remeasure after any
+	 * change to adc_stream.c's decode (see the -fstack-usage recipe in
+	 * the commit message: cmake with -DCMAKE_C_FLAGS="-fstack-usage
+	 * -Os", then read the .su files; the bootloader image is measured
+	 * the same way against the SAME 2K).
+	 *
+	 * The limit is enforced, not just measured: MSPLIM (ARMv8-M,
+	 * ARMv8-M ARM B3.1) turns any excursion below _stack_limit into a
+	 * UseFault that lands in fault_handlers.c's recorder-and-reset
+	 * instead of a silent overflow into .heap / .bss.  Set first thing
+	 * so everything but the vendor startup's own frames (which are
+	 * shallow, register-only) is guarded; __set_MSPLIM() needs no
+	 * special care beyond this running once before any nesting. */
+	__set_MSPLIM((uint32_t)_stack_limit);
 #if defined(BRIDGE_OTA_PARTITIONED) && defined(BRIDGE_APP_SLOT_BASE)
 	/* OTA Path-A: the app runs from a flash slot, not 0x08000000, so move
      * the vector table off the vendor SystemInit default before any NVIC
