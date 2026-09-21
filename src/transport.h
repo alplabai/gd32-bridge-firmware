@@ -42,6 +42,15 @@ void bridge_transport_spi_hw_init(void);
  * I2C0 was left disabled rather than brought up mistimed. */
 int bridge_transport_i2c_hw_init(void);
 
+/* Periodic BRD_I2C stuck-SDA detector (gh#39, "Device limitations of
+ * GD32G5x3 Rev1.0" erratum 2.3.1): called from the gd32 backend's
+ * bridge_hw_tick().  The strong impl polls the SDA pad (valid in AF
+ * mode, UM Rev1.2 p.270) and, on two consecutive low readings, runs
+ * the documented I2C software reset (UM p.1262 s28.3.5) to release the
+ * line -- the erratum's prescribed workaround.  Weak no-op default in
+ * transport_i2c.c for the stub backend. */
+void bridge_transport_i2c_stuck_poll(void);
+
 /* ---- SPI slave seams (defined in transport_spi.c) -------------- */
 void    spi_slave_cs_low(void);       /* CS falling edge: reset RX staging   */
 void    spi_slave_rx_byte(uint8_t b); /* one received request byte            */
