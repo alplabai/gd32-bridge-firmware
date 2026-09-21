@@ -270,12 +270,25 @@ static uint8_t meta_page_rank(bool valid, const ota_meta_record_t *r)
  * the new active slot's entry is rewritten (and only when `update_entry`
  * -- a ROLLBACK flips `active_slot` without touching the descriptors, so
  * the rolled-to slot keeps the len/CRC recorded when it was last
- * written). */
+ * written).
+ *
+ * `clear_slot` (gh#36, 0xFF = none): a slot whose validity bit is
+ * CLEARED here and whose img_len/img_crc32 are zeroed.  h_begin uses
+ * this to demote the erase target before the erase is armed, so a
+ * power-cut mid-erase/program leaves metadata that already says the
+ * slot is invalid and the bootloader's CRC walk (boot_main.c) never
+ * touches a half-programmed doubleword -- the exact reachable
+ * flash-ECC NMI scenario gh#36 opened with.  slot_valid is therefore
+ * NOT monotonic any more; clearing at BEGIN is safe because the only
+ * readers of a slot's valid bit are the bootloader (validates len +
+ * CRC before walking), h_rollback (refuses an invalid fallback), and
+ * h_commit (re-ORs the bit only after a fully verified image). */
 static bool meta_commit(uint8_t  active_slot,
                         bool     update_entry,
                         uint32_t fw_ver,
                         uint32_t img_len,
-                        uint32_t img_crc)
+                        uint32_t img_crc,
+                        uint8_t  clear_slot)
 {
 	ota_meta_record_t a, b;
 	const bool        va = meta_read(OTA_META_REC0, &a);
@@ -317,6 +330,16 @@ static bool meta_commit(uint8_t  active_slot,
 	rec.counter += 1u;
 	rec.active_slot = active_slot;
 	rec.slot_valid |= (uint8_t)(1u << active_slot);
+	if (clear_slot <= OTA_SLOT_B) {
+		/* AFTER the OR above, so a clear of the active slot's own bit
+		 * wins (gh#36's h_begin case: metadata may legitimately name
+		 * the BEGIN target as active -- the bootloader's newest-first
+		 * fallback -- and the demotion must still land; boot then
+		 * falls to the older record's slot). */
+		rec.slot_valid &= (uint8_t)~(uint8_t)(1u << clear_slot);
+		rec.img_len[clear_slot]   = 0u;
+		rec.img_crc32[clear_slot] = 0u;
+	}
 	if (update_entry) {
 		rec.fw_version[active_slot] = fw_ver;
 		rec.img_len[active_slot]    = img_len;
@@ -434,6 +457,35 @@ h_begin(const uint8_t *req, size_t len, uint8_t *reply, size_t cap, size_t *rlen
 	s_img_len      = img_len;
 	s_expected_crc = expected_crc;
 	s_fw_version   = fw_version;
+
+	/* gh#36, fix item 2: demote the erase target in metadata BEFORE the
+	 * erase is armed.  Until now slot_valid was only ever OR'd in
+	 * (meta_commit), so a BEGIN whose erase or program run was cut by
+	 * power loss left metadata still describing the target slot as
+	 * valid with its OLD img_len/img_crc32 -- and the bootloader's
+	 * CRC walk (boot_main.c) then read half-programmed 72-bit flash
+	 * doublewords, the one concretely reachable flash-ECC NMI in this
+	 * design.  Commit a metadata generation now that clears the
+	 * target's valid bit and zeroes its len/CRC, so the bootloader
+	 * never walks the damaged slot regardless of where the cut
+	 * lands.  Skipped entirely when no valid metadata exists
+	 * (factory): there is nothing to demote, and writing a synthetic
+	 * record here would invent an active-slot entry with no len/CRC.
+	 * This adds one 1 KB page erase + 44 B program (~21 ms, tERASE
+	 * p.126) to BEGIN's dispatch -- same class of cost as one
+	 * ota_erase_tick() step, and COMMIT/ROLLBACK already pay it
+	 * inline. */
+	{
+		ota_meta_record_t cur;
+		uint32_t          which = 0u;
+		if (meta_current(&cur, &which)) {
+			if (!meta_commit(cur.active_slot, false, 0u, 0u, 0u, s_inactive)) {
+				s_state = OTA_ST_ERROR;
+				s_err   = 7u;
+				return STATUS_IO;
+			}
+		}
+	}
 
 	/* Arm the background erase and ack NOW -- do NOT erase inline (#770).
      * ota_erase_tick() walks the slot a page-region per main-loop tick;
@@ -591,8 +643,12 @@ static gd32_bridge_status_t h_commit(void)
 		s_err   = 6u;
 		return STATUS_INVAL;
 	}
-	if (!meta_commit(
-	        s_inactive, true, s_fw_version /* 0 = legacy BEGIN, unknown */, s_img_len, s_img_crc)) {
+	if (!meta_commit(s_inactive,
+	                 true,
+	                 s_fw_version /* 0 = legacy BEGIN, unknown */,
+	                 s_img_len,
+	                 s_img_crc,
+	                 0xFFu)) {
 		s_state = OTA_ST_ERROR;
 		s_err   = 6u;
 		return STATUS_IO;
@@ -661,7 +717,7 @@ static gd32_bridge_status_t h_rollback(void)
 	/* Flip active to `other` WITHOUT touching the per-slot descriptors
      * (update_entry=false): the bootloader validates the rolled-to slot
      * against the len/CRC recorded when that slot was last committed. */
-	if (!meta_commit(other, false, 0u, 0u, 0u)) {
+	if (!meta_commit(other, false, 0u, 0u, 0u, 0xFFu)) {
 		return STATUS_IO;
 	}
 	/* Same reset-before-reply contract as h_commit(): STATUS_OK is not
