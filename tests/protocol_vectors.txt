@@ -151,29 +151,31 @@ spi_ota_commit_request         = A5F3F820
 spi_ota_rollback_request       = A5F41F50
 # SOF | CMD=0xF5 | (no payload) | CRC
 spi_ota_get_state_request      = A5F53E40
-# SOF | STATUS=0x00 | state=READY(1) | active=A(0) | pending=B(1) | boot_count=1 (LE, metadata generation) | CRC -- pending=0xFF when no session is open. active is ota.c's compile-time OTA_RUNNING_SLOT (#3), a BUILD property reporting the slot THIS firmware executes from -- NOT metadata's active_slot field.  The two normally agree, but diverge across the bootloader's newest-first fallback (boot_main.c), where metadata can legitimately name a slot that is not running; this byte is what lets the host observe that divergence.  This example value (A) is a slot-A-resident build
-spi_ota_get_state_reply_ready  = A500010001010036E3
+# SOF | STATUS=0x00 | state=READY(1) | active=A(0) | pending=B(1) | boot_count=1 (LE, metadata generation) | err=NONE(0) (gh#101) | CRC -- pending=0xFF when no session is open. active is ota.c's compile-time OTA_RUNNING_SLOT (#3), a BUILD property reporting the slot THIS firmware executes from -- NOT metadata's active_slot field.  The two normally agree, but diverge across the bootloader's newest-first fallback (boot_main.c), where metadata can legitimately name a slot that is not running; this byte is what lets the host observe that divergence.  This example value (A) is a slot-A-resident build
+spi_ota_get_state_reply_ready  = A5000100010100004DFB
+# SOF | STATUS=0x00 | state=ERROR(4) | active=A(0) | pending=none(0xFF) | boot_count=1 | err=VERIFY_CRC(0x05) (gh#101: the failure cause that used to be written in nine places and read in none) | CRC.  The err byte is BRIDGE_OTA_ERR_* in protocol.h; cleared by OTA_ABORT.
+spi_ota_get_state_reply_error_verify_crc = A5000400FF010005FED5
 # SOF | CMD=0xF6 | (no payload) | CRC
 spi_ota_abort_request          = A5F65D70
-# SOF | STATUS=0x02 (NOT_READY) | CRC -- WRITE_CHUNK / VERIFY without a BEGIN-opened session, or COMMIT before VERIFY
-spi_ota_reply_not_ready        = A502C6DF
 
 # ---------------------------------------------------------------------
 # §12. v0.7 additions -- link-feature negotiation (CMD_LINK_FEATURES)
 #       + the STATUS_SEQ stamped-reply framing (SPI only)
 # ---------------------------------------------------------------------
+# SOF | STATUS=0x02 (NOT_READY) | CRC -- WRITE_CHUNK / VERIFY without a BEGIN-opened session, or COMMIT before VERIFY
+spi_ota_reply_not_ready        = A502C6DF
 # SOF | CMD=0x81 (LINK_FEATURES) | features=0x01 (STATUS_SEQ wanted) | CRC -- pre-v0.7 firmware answers STATUS_NOSUPPORT
 spi_link_features_request      = A5810178A2
 # SOF | STATUS=0x10 (code OK, stamp=1 -- the firmware arms the feature BEFORE staging, so the negotiation reply itself is stamped and the host baselines from it) | granted=0x01 | CRC
 spi_link_features_reply_granted_seq1 = A51001A289
-# SOF | STATUS=0x50 (code OK, stamp=5) | CRC -- example stamped reply: code = STATUS & 0x0F, stamp = STATUS >> 4; a reply whose stamp equals the previously accepted one is a STALE re-serve
-spi_ping_reply_ok_seq5         = A55071A5
 
 # ---------------------------------------------------------------------
 # §13. Day-one opcode coverage (#31 E4) -- GET_BUILD_ID, RESET_REASON,
 #       GPIO_READ/WRITE, legacy PWM_SET/GET, ADC_READ,
 #       DA9292_STATUS_FORWARD
 # ---------------------------------------------------------------------
+# SOF | STATUS=0x50 (code OK, stamp=5) | CRC -- example stamped reply: code = STATUS & 0x0F, stamp = STATUS >> 4; a reply whose stamp equals the previously accepted one is a STALE re-serve
+spi_ping_reply_ok_seq5         = A55071A5
 # SOF | CMD=0x02 (GET_BUILD_ID) | CRC -- empty payload.  The success reply is GD32_BRIDGE_BUILD_ID_LEN=20 ASCII bytes "<fw-version>+<git-sha-prefix>", baked at CMake build time by cmake/gen_build_id.cmake into a generated header (protocol.c) -- not a fixed wire constant, so no reply vector is given
 spi_get_build_id_request       = A502C6DF
 # SOF | CMD=0x03 (RESET_REASON) | CRC -- empty payload
@@ -194,24 +196,22 @@ spi_adc_read_ch0_4samples_request = A5300004D257
 spi_da9292_status_forward_request = A54040B7
 # SOF | STATUS=0x00 | status=0xFF ("no sample available") | CRC -- bridge_hw_da9292_status_cached() returns this sentinel on both the stub HAL and this SoM revision's real hardware (no DA9292 net reaches the GD32 on this SoM rev; see hal/bridge_hw_stub.c)
 spi_da9292_status_forward_reply_no_sample = A500FF0084
-# SOF | STATUS=0x05 (IO) | empty payload | CRC -- the reply handle_gpio_read/write (protocol.c) give on the STUB HAL backend for any BRIDGE_HW_ERR (they don't special-case BRIDGE_HW_ERR_NOTIMPL the way the status_from_hw()-routed handlers do -- see spi_reply_nosupport for that family's stub reply instead).  handle_pwm_set/get and handle_adc_read used to share this reply too until #23 routed them through status_from_hw(); GPIO_READ/WRITE are out of scope for #23 and still land here
-spi_reply_io                   = A50521AF
 
 # ---------------------------------------------------------------------
 # §14. v0.5 additions (§2B.2), continued (#31 E4) -- PWM_CAPTURE_READ/
 #       END, TIMER_SYNC
 # ---------------------------------------------------------------------
+# SOF | STATUS=0x05 (IO) | empty payload | CRC -- the reply handle_gpio_read/write (protocol.c) give on the STUB HAL backend for any BRIDGE_HW_ERR (they don't special-case BRIDGE_HW_ERR_NOTIMPL the way the status_from_hw()-routed handlers do -- see spi_reply_nosupport for that family's stub reply instead).  handle_pwm_set/get and handle_adc_read used to share this reply too until #23 routed them through status_from_hw(); GPIO_READ/WRITE are out of scope for #23 and still land here
+spi_reply_io                   = A50521AF
 # SOF | CMD=0x24 | channel=0 | CRC -- dispatched to handle_pwm_capture_read() (protocol.c); reply on the gd32 backend is period_ns:u32(LE) pulse_width_ns:u32(LE).  The stub HAL backend answers STATUS_NOSUPPORT (BRIDGE_HW_ERR_NOTIMPL via status_from_hw); see spi_reply_nosupport
 spi_pwm_capture_read_ch0_request = A52400D250
 # SOF | CMD=0x25 | channel=0 | CRC -- dispatched to handle_pwm_capture_end() (protocol.c); empty-payload reply on success.  The stub HAL backend answers STATUS_NOSUPPORT; see spi_reply_nosupport
 spi_pwm_capture_end_ch0_request = A52500E363
-# SOF | CMD=0x27 | master=0(TIMER0) | slave=1(TIMER7) | mode=0 | CRC -- dispatched to handle_timer_sync() (protocol.c); the mode encoding beyond master/slave linkage is HAL-internal and undocumented at the wire layer, so this pins only the 3-byte request framing.  The stub HAL backend answers STATUS_NOSUPPORT; see spi_reply_nosupport
-spi_timer_sync_t0_master_t7_slave_request = A5270001006D4D
 
 # ---------------------------------------------------------------------
 # §15. CMD_ADC_SPECTRUM_READ (#496, #31 E2) -- FFT-chain bin readback
 # ---------------------------------------------------------------------
+# SOF | CMD=0x27 | master=0(TIMER0) | slave=1(TIMER7) | mode=0 | CRC -- dispatched to handle_timer_sync() (protocol.c); the mode encoding beyond master/slave linkage is HAL-internal and undocumented at the wire layer, so this pins only the 3-byte request framing.  The stub HAL backend answers STATUS_NOSUPPORT; see spi_reply_nosupport
+spi_timer_sync_t0_master_t7_slave_request = A5270001006D4D
 # SOF | CMD=0x3A | stream_id=0 | bin_offset=0 | max_bins=4 | CRC
 spi_adc_spectrum_read_stream0_request = A53A00000004FDA6
-# SOF | STATUS=0x00 | seq=1 (LE) | total_bins=10 (LE) | got=2 | bins[0]=4.0f | bins[1]=8.0f | bins[2..3]=0 (zero-padded, i >= got) | CRC -- REPRESENTATIVE of the wired gd32 HAL body, not the stub backend's STATUS_NOSUPPORT reply
-spi_adc_spectrum_read_reply_example = A500010000000A00020000804000000041000000000000000096ED

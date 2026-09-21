@@ -26,6 +26,7 @@
 #include "crc32.h"
 #include "fmc_ota.h"
 #include "bootloader/bootloader.h" /* CMD_OTA_* */
+#include "protocol.h"              /* gd32_bridge_ota_err_t (gh#101) */
 
 /* ---- Weak flash seam (overridden by hal/fmc_ota.c on the gd32 backend) - */
 __attribute__((weak)) bool ota_fmc_supported(void)
@@ -374,7 +375,7 @@ h_begin(const uint8_t *req, size_t len, uint8_t *reply, size_t cap, size_t *rlen
 	                 : 0u;
 	if (img_len == 0u || img_len > OTA_SLOT_SIZE) {
 		s_state = OTA_ST_ERROR;
-		s_err   = 1u;
+		s_err   = BRIDGE_OTA_ERR_SESSION_RANGE;
 		return STATUS_OUT_OF_RANGE;
 	}
 	/* The slot to erase is "the one I am NOT executing from", answered by
@@ -407,14 +408,13 @@ h_begin(const uint8_t *req, size_t len, uint8_t *reply, size_t cap, size_t *rlen
      * situation; a bank-overlap guard belongs to #2's (and #37's) fix,
      * not this one.  If this ever trips, refuse: the erase has not been
      * armed yet at this point, so refusing here costs nothing new.  Note
-     * s_err=7u on trip is currently UNREADABLE by the host: s_err is
-     * written at several sites in this file but read nowhere in this
-     * repo, so a tripped guard looks on the wire like any other
-     * OTA_ST_ERROR; surfacing s_err is a protocol change, tracked
-     * separately. */
+     * s_err on trip is BRIDGE_OTA_ERR_ERASE_TARGET -- readable on the
+     * wire as OTA_GET_STATE's err byte since gh#101 (that protocol
+     * change is how a tripped guard stops looking like any other
+     * OTA_ST_ERROR). */
 	if (erase_at < OTA_RUNNING_SLOT_END && OTA_RUNNING_SLOT_BASE < erase_end) {
 		s_state = OTA_ST_ERROR;
-		s_err   = 7u;
+		s_err   = BRIDGE_OTA_ERR_ERASE_TARGET;
 		return STATUS_INVAL;
 	}
 	/* Every check has passed: NOW commit the wire fields to the session
@@ -488,7 +488,7 @@ h_write(const uint8_t *req, size_t len, uint8_t *reply, size_t cap, size_t *rlen
 	}
 	if (off > OTA_SLOT_SIZE || dlen > OTA_SLOT_SIZE - off) {
 		s_state = OTA_ST_ERROR;
-		s_err   = 3u;
+		s_err   = BRIDGE_OTA_ERR_CHUNK_RANGE;
 		return STATUS_OUT_OF_RANGE;
 	}
 	/* The transport is AT-LEAST-ONCE: the slave can decode a request
@@ -510,13 +510,13 @@ h_write(const uint8_t *req, size_t len, uint8_t *reply, size_t cap, size_t *rlen
 			return STATUS_OK;
 		}
 		s_state = OTA_ST_ERROR;
-		s_err   = 4u;
+		s_err   = BRIDGE_OTA_ERR_PROGRAM_FAILED;
 		return STATUS_IO;
 	}
 	s_state = OTA_ST_BUSY;
 	if (!ota_fmc_program(ota_inactive_base() + off, &req[5], dlen)) {
 		s_state = OTA_ST_ERROR;
-		s_err   = 4u;
+		s_err   = BRIDGE_OTA_ERR_PROGRAM_FAILED;
 		return STATUS_IO;
 	}
 	if (off + (uint32_t)dlen > s_last_off) {
@@ -551,14 +551,14 @@ static gd32_bridge_status_t h_verify(uint8_t *reply, size_t cap, size_t *rlen)
      * writeback already has (#9). */
 	if (s_img_len == 0u || s_img_len > OTA_SLOT_SIZE) {
 		s_state = OTA_ST_ERROR;
-		s_err   = 1u;
+		s_err   = BRIDGE_OTA_ERR_SESSION_RANGE;
 		return STATUS_INVAL;
 	}
 	s_img_crc = ota_crc32(0u, (const uint8_t *)ota_fmc_flash_ptr(ota_inactive_base()), s_img_len);
 	const bool ok = (s_img_crc == s_expected_crc);
 	s_state       = ok ? OTA_ST_VERIFIED : OTA_ST_ERROR;
 	if (!ok) {
-		s_err = 5u;
+		s_err = BRIDGE_OTA_ERR_VERIFY_CRC;
 	}
 	if (cap >= 5u) {
 		wr_u32(&reply[0], s_img_crc);
@@ -578,7 +578,7 @@ static gd32_bridge_status_t h_commit(void)
      * bound is re-checked here rather than inherited from a state enum. */
 	if (s_img_len == 0u || s_img_len > OTA_SLOT_SIZE) {
 		s_state = OTA_ST_ERROR;
-		s_err   = 1u;
+		s_err   = BRIDGE_OTA_ERR_SESSION_RANGE;
 		return STATUS_INVAL;
 	}
 	/* A verified (CRC-matching) image can still be unbootable -- a
@@ -588,13 +588,13 @@ static gd32_bridge_status_t h_commit(void)
 	                        (const uint8_t *)ota_fmc_flash_ptr(ota_inactive_base()),
 	                        s_img_len)) {
 		s_state = OTA_ST_ERROR;
-		s_err   = 6u;
+		s_err   = BRIDGE_OTA_ERR_COMMIT_FAILED;
 		return STATUS_INVAL;
 	}
 	if (!meta_commit(
 	        s_inactive, true, s_fw_version /* 0 = legacy BEGIN, unknown */, s_img_len, s_img_crc)) {
 		s_state = OTA_ST_ERROR;
-		s_err   = 6u;
+		s_err   = BRIDGE_OTA_ERR_COMMIT_FAILED;
 		return STATUS_IO;
 	}
 	/* On silicon the reset happens before protocol_dispatch() returns to
@@ -673,18 +673,33 @@ static gd32_bridge_status_t h_rollback(void)
 
 static gd32_bridge_status_t h_get_state(uint8_t *reply, size_t cap, size_t *rlen)
 {
-	/* Host OTA_GET_STATE reply: state:u8, active:u8, pending:u8, boot_count:u16 (LE).
-     * `boot_count` is mapped to the metadata update counter (generation).
-     *
-     * `active` reports OTA_RUNNING_SLOT (build-derived), NOT metadata's
-     * active_slot (#3).  The two agree except in the divergent window the
-     * bootloader's newest-first fallback can create (boot_main.c:117-124,
-     * #754): there, metadata's answer is a LIE about what is executing,
-     * while OTA_RUNNING_SLOT is a build-time fact.  This is what preserves
-     * host observability of the divergence now that h_begin self-heals
-     * around it instead of refusing outright -- without this the host
-     * would see a comforting but false `active`, same wire byte, same
-     * format, only the source changes. */
+	/* Host OTA_GET_STATE reply: state:u8, active:u8, pending:u8,
+	 * boot_count:u16 (LE), err:u8 (gh#101 -- the err byte is ADDITIVE:
+	 * length is opcode-derived on this wire (docs/gd32-bridge-protocol.md
+	 * §4, "Length is not carried on the wire"), so a host that knows the
+	 * 6-byte form reads it and a pre-gh#101 host sees one trailing byte
+	 * more than it decodes -- tolerable ONLY paired with the alp-sdk
+	 * driver update that lands with this; unpaired deployments must not
+	 * ship this form).  `boot_count` is mapped to the metadata update
+	 * counter (generation).
+	 *
+	 * `active` reports OTA_RUNNING_SLOT (build-derived), NOT metadata's
+	 * active_slot (#3).  The two agree except in the divergent window the
+	 * bootloader's newest-first fallback can create (boot_main.c:117-124,
+	 * #754): there, metadata's answer is a LIE about what is executing,
+	 * while OTA_RUNNING_SLOT is a build-time fact.  This is what preserves
+	 * host observability of the divergence now that h_begin self-heals
+	 * around it instead of refusing outright -- without this the host
+	 * would see a comforting but false `active`, same wire byte, same
+	 * format, only the source changes.
+	 *
+	 * `err` is s_err, the failure cause that used to be written in nine
+	 * places and read in none (gh#101): seven distinct non-zero causes
+	 * all collapsed into state = ERROR with nothing else on the wire.
+	 * The values are pinned as gd32_bridge_ota_err_t in protocol.h and
+	 * by the canonical vectors in tests/gen_protocol_vectors.py.  s_err
+	 * is cleared by OTA_ABORT, so the byte is 0 for any state other
+	 * than a recorded failure. */
 	ota_meta_record_t cur;
 	uint32_t          which;
 	uint16_t          gen = 0u;
@@ -693,13 +708,14 @@ static gd32_bridge_status_t h_get_state(uint8_t *reply, size_t cap, size_t *rlen
 	}
 	const bool in_progress =
 	    (s_state == OTA_ST_READY || s_state == OTA_ST_BUSY || s_state == OTA_ST_VERIFIED);
-	if (cap >= 5u) {
+	if (cap >= 6u) {
 		reply[0] = s_state;
 		reply[1] = OTA_RUNNING_SLOT;
 		reply[2] = in_progress ? s_inactive : 0xFFu; /* 0xFF = none pending */
 		reply[3] = (uint8_t)(gen & 0xFFu);
 		reply[4] = (uint8_t)(gen >> 8);
-		*rlen    = 5u;
+		reply[5] = s_err;
+		*rlen    = 6u;
 	}
 	return STATUS_OK;
 }
@@ -720,7 +736,7 @@ void ota_erase_tick(void)
 	if (!ota_fmc_erase_range(s_erase_at, OTA_PAGE_SIZE)) {
 		s_erasing = false;
 		s_state   = OTA_ST_ERROR;
-		s_err     = 2u;
+		s_err     = BRIDGE_OTA_ERR_ERASE_FAILED;
 		return;
 	}
 	s_erase_at += OTA_PAGE_SIZE;
@@ -759,7 +775,7 @@ gd32_bridge_status_t ota_dispatch(uint8_t        cmd,
 	case CMD_OTA_ABORT:
 		s_erasing = false; /* cancel any in-flight background erase (#770) */
 		s_state   = OTA_ST_IDLE;
-		s_err     = 0u;
+		s_err     = BRIDGE_OTA_ERR_NONE;
 		return STATUS_OK;
 	default:
 		return STATUS_NOSUPPORT;

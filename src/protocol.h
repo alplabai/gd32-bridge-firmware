@@ -301,6 +301,32 @@ typedef enum {
 } gd32_bridge_link_t;
 
 /*
+ * OTA failure causes (gh#101) -- the `err` byte of CMD_OTA_GET_STATE's
+ * reply.  Seven distinct non-zero causes used to collapse into
+ * `state = ERROR` with nothing else on the wire, so a failed session
+ * was unattributable for the host and indistinguishable on the bench
+ * (the 2026-06-04 campaign's seven silicon bugs all presented the
+ * same).  The values are the same bare integers ota.c always assigned
+ * (s_err was written in nine places and read in none); they are now a
+ * documented enum so the next write site cannot collide by accident.
+ * Do NOT renumber: the wire pins them, and the host driver decodes
+ * them by value.  0 = no error recorded (idle / clean session).
+ */
+typedef enum {
+	BRIDGE_OTA_ERR_NONE           = 0x00,
+	BRIDGE_OTA_ERR_SESSION_RANGE  = 0x01, /* BEGIN/VERIFY/COMMIT image size
+	                                     * out of range */
+	BRIDGE_OTA_ERR_ERASE_FAILED   = 0x02, /* background page erase failed */
+	BRIDGE_OTA_ERR_CHUNK_RANGE    = 0x03, /* chunk offset / length rejected */
+	BRIDGE_OTA_ERR_PROGRAM_FAILED = 0x04, /* flash program failed (PGERR/PGSERR) */
+	BRIDGE_OTA_ERR_VERIFY_CRC     = 0x05, /* VERIFY's CRC comparison failed */
+	BRIDGE_OTA_ERR_COMMIT_FAILED  = 0x06, /* COMMIT: bootability check or
+	                                     * metadata commit failed */
+	BRIDGE_OTA_ERR_ERASE_TARGET   = 0x07, /* erase target would intersect
+	                                     * the running slot (#3 guard) */
+} gd32_bridge_ota_err_t;
+
+/*
  * protocol_dispatch -- called by either transport when a complete
  * request envelope has been validated (CRC OK, framing OK).
  *

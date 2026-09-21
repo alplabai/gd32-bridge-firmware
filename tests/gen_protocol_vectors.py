@@ -760,9 +760,11 @@ def build_vectors() -> list[tuple[str, str, str | None]]:
                                                            # slot, see below)
                          0x01,                            # pending_slot = B
                          0x01, 0x00,                      # boot_count = 1 (LE)
+                         0x00,                            # err = NONE (gh#101)
                   ])).hex().upper(),
         "SOF | STATUS=0x00 | state=READY(1) | active=A(0) | pending=B(1) |"
-        " boot_count=1 (LE, metadata generation) | CRC -- pending=0xFF when"
+        " boot_count=1 (LE, metadata generation) | err=NONE(0) (gh#101) | CRC"
+        " -- pending=0xFF when"
         " no session is open. active is ota.c's compile-time OTA_RUNNING_SLOT"
         " (#3), a BUILD property reporting the slot THIS firmware executes"
         " from -- NOT metadata's active_slot field.  The two normally agree,"
@@ -770,6 +772,20 @@ def build_vectors() -> list[tuple[str, str, str | None]]:
         " (boot_main.c), where metadata can legitimately name a slot that"
         " is not running; this byte is what lets the host observe that"
         " divergence.  This example value (A) is a slot-A-resident build",
+    ))
+    out.append((
+        "spi_ota_get_state_reply_error_verify_crc",
+        spi_frame(SOF, STATUS_OK,
+                  bytes([0x04,          # state = ERROR
+                         0x00,          # active = A
+                         0xFF,          # pending = none
+                         0x01, 0x00,    # boot_count = 1
+                         0x05,          # err = VERIFY_CRC (gh#101)
+                  ])).hex().upper(),
+        "SOF | STATUS=0x00 | state=ERROR(4) | active=A(0) | pending=none(0xFF) |"
+        " boot_count=1 | err=VERIFY_CRC(0x05) (gh#101: the failure cause that"
+        " used to be written in nine places and read in none) | CRC.  The err"
+        " byte is BRIDGE_OTA_ERR_* in protocol.h; cleared by OTA_ABORT.",
     ))
     out.append((
         "spi_ota_abort_request",

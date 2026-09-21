@@ -503,6 +503,40 @@ ZTEST(gd32_bridge_ota, test_begin_arms_background_erase)
 	    write_chunk(0u, data, sizeof(data), wr, &wrl), STATUS_OK, "chunk after READY must program");
 }
 
+/* ---- gh#101: GET_STATE surfaces the failure cause ----------------------
+ *
+ * s_err used to be written in nine places and read in none: seven
+ * distinct causes all collapsed into state = ERROR with nothing else
+ * on the wire.  The reply's 6th byte now carries it. */
+ZTEST(gd32_bridge_ota, test_get_state_surfaces_err_cause)
+{
+	reset_model();
+
+	/* A BEGIN with an out-of-range image length records the
+	 * SESSION_RANGE cause. */
+	uint8_t req[8];
+	wr_u32(&req[0], OTA_SLOT_SIZE + 1u); /* img_len -- out of range */
+	wr_u32(&req[4], 0u);
+	uint8_t reply[8] = { 0 };
+	size_t  rlen     = 0u;
+	zassert_equal(ota_dispatch(CMD_OTA_BEGIN, req, sizeof(req), reply, sizeof(reply), &rlen),
+	              STATUS_OUT_OF_RANGE);
+
+	zassert_equal(ota_dispatch(CMD_OTA_GET_STATE, NULL, 0u, reply, sizeof(reply), &rlen),
+	              STATUS_OK);
+	zassert_equal(rlen, 6u, "the GET_STATE reply is 6 bytes since gh#101");
+	zassert_equal(reply[0], 4u /* OTA_ST_ERROR */);
+	zassert_equal(reply[5],
+	              BRIDGE_OTA_ERR_SESSION_RANGE,
+	              "the err byte must attribute the ERROR to its cause (gh#101)");
+
+	/* ABORT clears the cause and returns the state machine to idle. */
+	zassert_equal(ota_dispatch(CMD_OTA_ABORT, NULL, 0u, reply, sizeof(reply), &rlen), STATUS_OK);
+	zassert_equal(ota_dispatch(CMD_OTA_GET_STATE, NULL, 0u, reply, sizeof(reply), &rlen),
+	              STATUS_OK);
+	zassert_equal(reply[5], BRIDGE_OTA_ERR_NONE, "ABORT clears the recorded cause");
+}
+
 /* ---- #733: on-flash layout / byte-representation guard --------------- */
 
 /* The bootloader byte-copies a flash record and CRCs the raw bytes, so
