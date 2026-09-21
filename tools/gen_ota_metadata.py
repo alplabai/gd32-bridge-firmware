@@ -16,12 +16,60 @@ the slot-A application image (0x0800A000):
         --out ota-meta-rec0.bin
     # J-Link: erase 0x08008000 0x0800A000
     # J-Link: loadbin ota-meta-rec0.bin,0x08008000
+    # J-Link: option-byte provisioning per FMC OPTION-BYTE PROVISIONING
+    #         below (gh#48) -- WP over the bootloader + BOOTLK; SPC low
+    #         only if SWD readout must be blocked.  NOT provisioned until
+    #         this has run.
 
 The erase MUST cover both OTA_META_REC0 (0x08008000) and OTA_META_REC1
 (0x08008800): both the bootloader and the application pick the record
 with the highest `counter`, so a stale REC1 left over from a returned
 board silently keeps the old slot active even after REC0 is rewritten
 (#25 B13).
+
+FMC OPTION-BYTE PROVISIONING (gh#48) -- a board is NOT provisioned
+until this step has run beside the loadbin above.  It is a factory /
+bring-up step performed over SWD, NEVER from field firmware (firmware
+that could rewrite its own protection bytes would make them
+decoration).  Nothing in the firmware tree writes any option byte, so
+out of reset every part ships with: SPC at no protection (all main
+flash readable over SWD), no write-protection area over the 32 KB
+bootloader, BOOTLK unset (a stray BOOT0 state can drop the part into
+the system bootloader), and DBGEN still enabled.
+
+Sequenced per GD32G553 UM Rev1.2 p.106-107 (option-byte modify:
+unlock FMC -> OBEKEY 0x5AA5 / OBKEY 0x5698 sequence -> write the
+option bytes -> OBSTART in FMC_CTL -> power-on reset or OBRLD):
+
+  1. Write-protection area over the bootloader bank segment
+     (FMC_WPACT/segment registers, p.112): the safety interlock that
+     stops a bad firmware erase address from reaching the boot path.
+     WP alone is NOT a defence against a hostile writer -- p.109: "If
+     the security protection (SPC) level is set to high, the WP area
+     cannot be modified, else WP area can be modified without any
+     restrictions."
+  2. BOOTLK (p.111): lock boot to 0x08000000 so a stray BOOT0 state
+     cannot drop the part into the system bootloader.  Note p.111:
+     BOOTLK clears only at SPC no protection, or from SPC low while
+     requesting no protection WITH a full mass erase.
+  3. SPC low level protection (p.110: any SPC byte value except 0xAA
+     or 0xCC), PAIRED with DCRP_EREN as p.110 requires when low level
+     protection is configured with no DCRP area defined -- only if
+     flash readout over SWD must be blocked.  After an SPC change
+     made with the debug module still attached, p.110 requires a
+     POWER reset (not a system reset); a WP-only provisioning step
+     does not need that power cycle.
+  4. DBGEN (FMC_WS, p.111) -- decide once, per product line.
+
+NEVER set SPC high level protection (0xCC33) on any module that must
+stay bench-recoverable: p.110 makes it irreversible, and SWD is the
+only reflash path this hardware revision has (src/ota_layout.h:26).
+
+Documented costs the bench procedure must absorb in lockstep with the
+change: with any WP area set, mass erase is refused (p.109), so bench
+recovery becomes clear-WP-then-mass-erase; demoting SPC low to no
+protection mass-erases main flash and, if TCMSRAM pages are protected,
+the whole TCMSRAM (p.110).
 
 Layout mirrors ota_meta_record_t (src/ota_layout.h, struct v2 with
 PER-SLOT image descriptors) and the CRC-32 mirrors src/crc32.c
