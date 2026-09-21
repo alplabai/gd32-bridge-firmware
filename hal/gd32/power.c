@@ -209,6 +209,18 @@ int bridge_hw_power_mode_set(uint8_t mode, uint32_t wake_bitmap, uint32_t wake_a
 		return bridge_transport_i2c_hw_init();
 	case 3u: /* standby */
 		rcu_periph_clock_enable(RCU_PMU);
+		/* Gate the entry: Standby's wake set is exactly five sources
+		 * (UM Rev1.2 p.142 Table 3-1: "1. NRST pin 2. WKUP pins
+		 * 3. FWDGT reset 4. RTC 5. LCKMD").  A request that arms
+		 * neither a WKUP pin nor the RTC wakeup timer enters a
+		 * mode only NRST can leave -- refuse it before
+		 * pmu_to_standbymode() is ever reached (gh#40 fix 1). */
+		{
+			const bool wake_pins_armed = (wake_bitmap & POWER_WAKE_GPIO) != 0u;
+			const bool rtc_armed =
+			    wake_after_ms != 0u || (wake_bitmap & (POWER_WAKE_RTC | POWER_WAKE_TIMER)) != 0u;
+			if (!wake_pins_armed && !rtc_armed) return BRIDGE_HW_ERR_INVAL;
+		}
 		power_wake_pins_enable(wake_bitmap);
 		if (wake_after_ms != 0u || (wake_bitmap & (POWER_WAKE_RTC | POWER_WAKE_TIMER)) != 0u) {
 			const uint32_t ms = (wake_after_ms != 0u) ? wake_after_ms : POWER_WAKE_TIMER_MAX_MS;
@@ -216,15 +228,41 @@ int bridge_hw_power_mode_set(uint8_t mode, uint32_t wake_bitmap, uint32_t wake_a
 			if (rc != BRIDGE_HW_OK) return rc;
 		}
 		/* Standby powers down the core + SRAM (except backup) and
-         * wakes via reset -- pmu_to_standbymode() never returns;
-         * the SoC re-runs Reset_Handler when a wakeup source fires.
-         * The caller's host link will see the bridge re-issue its
-         * handshake on the next transport packet, which is the
-         * documented contract. */
+		 * wakes via reset: on the intended path pmu_to_standbymode()
+		 * never returns and the SoC re-runs Reset_Handler when a
+		 * wakeup source fires.  The caller's host link will see the
+		 * bridge re-issue its handshake on the next transport packet,
+		 * which is the documented contract.
+		 *
+		 * The unintended path -- a __WFI() that retires WITHOUT the
+		 * part entering Standby (the manual documents exactly that
+		 * skip for Deep-sleep, p.143, and is silent for Standby, so
+		 * it cannot be ruled out) -- used to fall through to
+		 * `return BRIDGE_HW_OK`, which masked the real damage the
+		 * vendor helper does on the way in: it writes NVIC ICER0 =
+		 * 0xFFFFFFF7 / ICER1 = 0xFFFFFDFF / ICER2 = 0xFFFFFFFF,
+		 * disabling every interrupt except IRQ 3 and IRQ 41 -- which
+		 * includes all three transport vectors (IRQ 23 SPI CS EXTI,
+		 * IRQ 31 I2C0-EV, IRQ 32 I2C0-ER, UM p.209 Table 5-2) --
+		 * and leaves SLEEPDEEP set in SCB->SCR so the main loop's
+		 * next __WFI() is a deep-sleep from a configuration almost
+		 * nothing can wake.  With the old code the host read
+		 * STATUS_OK off a bridge that had just gone permanently
+		 * deaf on both links, with no watchdog to recover it.
+		 *
+		 * Treat survival as the hard failure it is: restore the
+		 * interrupt configuration the helper destroyed, drop
+		 * SLEEPDEEP, and report BRIDGE_HW_ERR_IO (STATUS_IO on the
+		 * wire).  The priorities must match the arming sites in
+		 * hal/transport_hw_gd32.c exactly -- they come from the same
+		 * bridge_board_config.h macros, so the pair cannot drift. */
 		pmu_to_standbymode();
-		/* Unreachable in normal operation; keep the return so the
-         * compiler doesn't warn about a missing terminator. */
-		return BRIDGE_HW_OK;
+
+		nvic_irq_enable(BRIDGE_SPI_CS_EXTI_IRQN, BRIDGE_CS_IRQ_PRIO, BRIDGE_CS_IRQ_SUBPRIO);
+		nvic_irq_enable(BRIDGE_I2C_EV_IRQN, BRIDGE_I2C_IRQ_PRIO, BRIDGE_I2C_IRQ_SUBPRIO);
+		nvic_irq_enable(BRIDGE_I2C_ER_IRQN, BRIDGE_I2C_IRQ_PRIO, BRIDGE_I2C_IRQ_SUBPRIO);
+		SCB->SCR &= ~SCB_SCR_SLEEPDEEP_Msk;
+		return BRIDGE_HW_ERR_IO;
 	default:
 		return BRIDGE_HW_ERR_INVAL;
 	}
