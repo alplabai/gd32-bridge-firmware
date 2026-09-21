@@ -75,6 +75,53 @@ static uint16_t adc_stream_write_index(const adc_stream_state_t *s)
 	return (uint16_t)(BRIDGE_ADC_STREAM_RING_SAMPLES - remaining);
 }
 
+/* Total samples the DMA has ever deposited, with gh#149's coalescing
+ * recovery folded in.
+ *
+ * The raw arithmetic -- lap_count * RING_SAMPLES + write index -- is
+ * exact ONLY while the lap ISR counts every FTF.  It can undercount:
+ * the DMA's FTF latches once per circular reload, so a reload that
+ * lands while its predecessor's FTF is still pending (or before the
+ * pended prio-3 lap ISR gets to run) is counted at most once -- and
+ * from THIS side of the NVIC there is no distinguishing "ISR pended,
+ * will count" from "two reloads, one count".  The observable symptom
+ * is a write index that REGRESSED (the counter reloaded top-down)
+ * while lap_count stood still: that is one full ring the raw formula
+ * silently drops, permanently skewing this consumer's backlog math so
+ * the next "fresh" samples are one ring stale -- data corruption with
+ * no error code, the failure mode gh#149 opened with.
+ *
+ * Recovery: each consumer tracks its own last-observed (laps, w) and
+ * adds RING_SAMPLES to the total when it sees a regression with
+ * lap_count unchanged.  The correction is per-sample (not persisted
+ * into lap_count), so the lap ISR counting that same reload a moment
+ * later cannot double-credit: the next sample sees lap_count moved
+ * and needs no correction.  Two wraps between two samples of the
+ * same consumer cannot be counted this way -- but that consumer is
+ * then a full ring behind and the existing >= RING_SAMPLES overrun
+ * resync governs; for the correction to miss, the prio-3 lap vector
+ * must be starved for a whole ring period (>= ~10 ms at the 100 kHz
+ * cap), which no bounded prio-1/2 work in this tree approaches (the
+ * longest is the ROVF recovery's ~2 ms bounded recalibration spin).
+ *
+ * trk is the caller's own tracker (s->rd_pos for the prio-1 read
+ * path, s->pump_pos for the base-level pump) -- never lap_count.  The
+ * tracker type lives in gd32_common.h (adc_dma_pos_t). */
+
+static uint32_t adc_stream_total_written(adc_stream_state_t *s, adc_dma_pos_t *trk)
+{
+	const uint32_t laps  = s->lap_count;
+	const uint16_t w     = adc_stream_write_index(s);
+	uint32_t       total = laps * BRIDGE_ADC_STREAM_RING_SAMPLES + (uint32_t)w;
+	if (trk->valid && laps == trk->laps && w < trk->w) {
+		total += BRIDGE_ADC_STREAM_RING_SAMPLES; /* one uncounted reload */
+	}
+	trk->laps  = laps;
+	trk->w     = w;
+	trk->valid = true;
+	return total;
+}
+
 int bridge_hw_adc_stream_begin(uint8_t stream_id, uint8_t channel, uint32_t sample_rate_hz)
 {
 	if (stream_id >= BRIDGE_ADC_STREAM_COUNT) return BRIDGE_HW_ERR_RANGE;
@@ -237,6 +284,12 @@ int bridge_hw_adc_stream_begin(uint8_t stream_id, uint8_t channel, uint32_t samp
 	 * counted -- the overrun detection in stream_read is exact
 	 * total-written-vs-read accounting, not a heuristic. */
 	s->lap_count = 0u;
+	/* gh#149: reset both consumers' position trackers so a new session
+	 * starts from a clean baseline -- a stale tracker from a prior
+	 * session would compare against a garbage (laps, w) and could add a
+	 * phantom lap on the first read. */
+	s->rd_pos.valid   = false;
+	s->pump_pos.valid = false;
 	dma_flag_clear(s->dma_periph, (dma_channel_enum)s->dma_channel, DMA_FLAG_FTF);
 	dma_interrupt_enable(s->dma_periph, (dma_channel_enum)s->dma_channel, DMA_INT_FTF);
 	nvic_irq_enable((s->dma_periph == DMA0) ? DMA0_Channel0_IRQn : DMA1_Channel0_IRQn,
@@ -372,9 +425,16 @@ int bridge_hw_adc_stream_read(uint8_t   stream_id,
 	if (SET == adc_flag_get(ch->periph, ADC_FLAG_ROVF)) {
 		const bool     recal_ok = adc_stream_recover_rovf(s, ch);
 		const uint16_t w        = adc_stream_write_index(s);
-		s->read_idx             = w;
-		s->total_read           = s->lap_count * BRIDGE_ADC_STREAM_RING_SAMPLES + (uint32_t)w;
-		s->pump_raw_read        = s->total_read;
+		/* Re-anchor through the SAME corrected total the read path
+		 * uses (gh#149): the recovery 9-step can step the DMA, so
+		 * both position trackers are re-based against the raw
+		 * post-recovery position -- valid=false makes the next
+		 * sample a clean baseline rather than a regression. */
+		s->rd_pos.valid   = false;
+		s->pump_pos.valid = false;
+		s->read_idx       = w;
+		s->total_read     = s->lap_count * BRIDGE_ADC_STREAM_RING_SAMPLES + (uint32_t)w;
+		s->pump_raw_read  = s->total_read;
 		/* Same wire contract as the ring-overrun branch below
 		 * (alp-sdk docs/gd32-bridge-protocol.md §3.10): STATUS_BUSY, "poll
 		 * faster".  A failed recalibration is the harder failure --
@@ -413,26 +473,29 @@ int bridge_hw_adc_stream_read(uint8_t   stream_id,
 	}
 
 	/* Drain as many fresh samples as the host asked for, capped by
-     * what the DMA has actually deposited since the last read.
-     * Overrun accounting is EXACT total-written-vs-read: the writer's
-     * lifetime deposit count is lap_count full rings (the FTF lap ISR
-     * above) plus the live write index; the reader's is total_read.
-     * A backlog beyond one ring means the writer lapped the reader
-     * and overwrote samples the host never saw -- mixed-lap data that
-     * must not be delivered as a contiguous stream.
-     *
-     * Snapshot lap_count BEFORE the write index: this read runs in
-     * the CS-EXTI handler (prio 1), which outprioritises the lap ISR
-     * (prio 3), so a reload landing mid-read leaves lap_count
-     * momentarily one short while w has already wrapped small.  That
-     * ordering only ever UNDERcounts the backlog (a transient
-     * empty-looking poll that self-corrects once the pended lap ISR
-     * runs) -- never a false overrun.  Unsigned uint32 wrap of the
-     * lifetime totals is harmless: the difference below stays small
-     * and modular arithmetic keeps it exact. */
-	const uint32_t laps          = s->lap_count;
+	 * what the DMA has actually deposited since the last read.
+	 * Overrun accounting is EXACT total-written-vs-read: the writer's
+	 * lifetime deposit count is lap_count full rings (the FTF lap ISR
+	 * above) plus the live write index, with gh#149's coalescing
+	 * recovery folded in by adc_stream_total_written(); the reader's
+	 * is total_read.  A backlog beyond one ring means the writer
+	 * lapped the reader and overwrote samples the host never saw --
+	 * mixed-lap data that must not be delivered as a contiguous
+	 * stream.
+	 *
+	 * Snapshot lap_count BEFORE the write index: this read runs in
+	 * the CS-EXTI handler (prio 1), which outprioritises the lap ISR
+	 * (prio 3), so a reload landing mid-read leaves lap_count
+	 * momentarily one short while w has already wrapped small.  The
+	 * regression correction in adc_stream_total_written() absorbs
+	 * exactly that snapshot (and the genuinely coalesced lap the ISR
+	 * will never count), so the combined path can only ever
+	 * UNDERcount by a lap it has already corrected once -- never a
+	 * false overrun.  Unsigned uint32 wrap of the lifetime totals is
+	 * harmless: the difference below stays small and modular
+	 * arithmetic keeps it exact. */
+	const uint32_t total_written = adc_stream_total_written(s, &s->rd_pos);
 	const uint16_t w             = adc_stream_write_index(s);
-	const uint32_t total_written = laps * BRIDGE_ADC_STREAM_RING_SAMPLES + (uint32_t)w;
 	const int32_t  backlog       = (int32_t)(total_written - s->total_read);
 	if (backlog <= 0) return BRIDGE_HW_OK; /* empty ring (or transient undercount) */
 
@@ -746,9 +809,15 @@ static void adc_dsp_pump_stream(uint8_t sid)
 		adc_dsp_fac_owner = (int8_t)sid;
 	}
 
-	const uint32_t laps          = s->lap_count;
-	const uint16_t w             = adc_stream_write_index(s);
-	const uint32_t total_written = laps * BRIDGE_ADC_STREAM_RING_SAMPLES + (uint32_t)w;
+	/* Same corrected total the read path uses (gh#149): the pump is
+	 * the raw ring's other consumer and owns its own position tracker
+	 * (s->pump_pos), so a coalesced lap the prio-3 ISR never counted
+	 * cannot silently stale the pump's backlog either.  The pump runs
+	 * at base level and can be preempted by the lap ISR mid-call; the
+	 * tracker update inside adc_stream_total_written() is safe under
+	 * that preemption because lap_count is the only shared field read
+	 * (volatile) and the tracker itself is pump-private. */
+	const uint32_t total_written = adc_stream_total_written(s, &s->pump_pos);
 	int32_t        avail         = (int32_t)(total_written - s->pump_raw_read);
 	if (avail <= 0) return;
 	if ((uint32_t)avail >= BRIDGE_ADC_STREAM_RING_SAMPLES) {
@@ -985,9 +1054,10 @@ static void adc_dsp_pump_fft(uint8_t sid)
 		 * bench before relying on this. */
 	}
 
-	const uint32_t laps          = s->lap_count;
-	const uint16_t w             = adc_stream_write_index(s);
-	const uint32_t total_written = laps * BRIDGE_ADC_STREAM_RING_SAMPLES + (uint32_t)w;
+	/* Same corrected total as the FIR/IIR pump (gh#149, see the
+	 * comment there): the FFT pump is the raw ring's consumer for an
+	 * FFT-bound stream and shares the pump-side position tracker. */
+	const uint32_t total_written = adc_stream_total_written(s, &s->pump_pos);
 	int32_t        avail         = (int32_t)(total_written - s->pump_raw_read);
 	if (avail <= 0) return;
 	if ((uint32_t)avail >= BRIDGE_ADC_STREAM_RING_SAMPLES) {

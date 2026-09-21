@@ -210,4 +210,58 @@ ZTEST(gd32_adc_seq, test_rovf_recovery_clears_dma_ftf)
 	             "returns and corrupts the freshly-resynced lap_count");
 }
 
+/* ---------------------------------------------------------------------
+ * #149 -- a coalesced DMA lap (write index regressed while lap_count
+ * stood still) must not permanently skew the read path's backlog
+ * accounting.  Two properties pinned:
+ *   1. the read still serves fresh samples (pre-fix it saw
+ *      total_written go BACKWARDS and answered OK with zero samples
+ *      forever after);
+ *   2. when the pended lap ISR finally counts that same reload, the
+ *      correction is not repeated -- the backlog must stay under one
+ *      ring (rc == OK), not resync as a phantom overrun (BUSY).
+ * --------------------------------------------------------------------- */
+
+ZTEST(gd32_adc_seq, test_read_recovers_coalesced_lap)
+{
+	adc_seq_reset();
+
+	int rc = bridge_hw_adc_stream_begin(0u, BRIDGE_ADC_CH0, 1000u);
+	zassert_equal(rc, BRIDGE_HW_OK, "stream_begin succeeds against the mock");
+
+	/* Reader drains up to position 100 with lap_count == 0. */
+	mock_dma_set_remaining(DMA0, DMA_CH0, BRIDGE_ADC_STREAM_RING_SAMPLES - 100u);
+	uint8_t  got = 0u;
+	uint16_t mv[128];
+	rc = bridge_hw_adc_stream_read(0u, 128u, &got, mv);
+	zassert_equal(rc, BRIDGE_HW_OK, "first read OK");
+	zassert_equal(got, 100u, "first read drains to position 100");
+
+	/* The coalesced lap: the DMA reloaded (w regressed to 8) but the
+	 * FTF the lap ISR would count has not run -- lap_count still 0.
+	 * Pre-fix, total_written = 0*RS + 8 < total_read = 100: the read
+	 * answered OK with ZERO samples and never recovered. */
+	mock_dma_set_remaining(DMA0, DMA_CH0, BRIDGE_ADC_STREAM_RING_SAMPLES - 8u);
+	got = 0u;
+	rc  = bridge_hw_adc_stream_read(0u, 16u, &got, mv);
+	zassert_equal(rc, BRIDGE_HW_OK, "read after a coalesced lap stays OK");
+	zassert_equal(got,
+	              16u,
+	              "the regressed write index must be credited one ring (#149): "
+	              "backlog = (RS+8) - 100, serves max_samples fresh samples");
+
+	/* The pended lap ISR now counts the SAME reload (lap_count 0 -> 1).
+	 * The per-sample correction must not be repeated: total = 1*RS + 8,
+	 * total_read = 116, backlog = RS - 108 < RS -> rc must stay OK.  A
+	 * double-counted correction would push the backlog over one ring
+	 * and answer BUSY with a resync -- the phantom overrun this
+	 * second assertion pins out. */
+	adc_streams[0].lap_count = 1u;
+	mock_dma_set_remaining(DMA0, DMA_CH0, BRIDGE_ADC_STREAM_RING_SAMPLES - 8u);
+	got = 0u;
+	rc  = bridge_hw_adc_stream_read(0u, 128u, &got, mv);
+	zassert_equal(rc, BRIDGE_HW_OK, "the ISR counting the corrected lap must not double-credit it");
+	zassert_equal(got, 128u, "backlog stays under one ring: RS-108 samples remain");
+}
+
 ZTEST_SUITE(gd32_adc_seq, NULL, NULL, NULL, NULL, NULL);
