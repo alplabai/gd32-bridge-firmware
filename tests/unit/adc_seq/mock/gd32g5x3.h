@@ -274,7 +274,9 @@ void nvic_irq_disable(IRQn_Type nvic_irq);
 
 /* ------------------------------------------------------------------ */
 /* FAC -- the DSP filter block.  adc_stream.c's #496 pump code must    */
-/* link; none of the tests below exercise it, so every hook is inert.  */
+/* link; the gh#35 decode tests capture the words the production code  */
+/* hands to fac_fixed_buffer_preload() / fac_function_config(), so the */
+/* mock records them instead of discarding them.                       */
 /* ------------------------------------------------------------------ */
 
 #define FAC_THRESHOLD_1        0u
@@ -283,6 +285,8 @@ void nvic_irq_disable(IRQn_Type nvic_irq);
 #define FUNC_IIR_DIRECT_FORM_1 1u
 #define FAC_FLAG_X0BFF         ((uint32_t)(1u << 0))
 #define FAC_FLAG_YBEF          ((uint32_t)(1u << 1))
+#define FAC_FLAG_STEF          ((uint32_t)(1u << 2))
+#define FAC_FLAG_GSTEF         ((uint32_t)(1u << 3))
 
 typedef struct {
 	uint8_t  coeff_addr;
@@ -310,6 +314,18 @@ typedef struct {
 	const int16_t *output_ctx;
 	uint8_t        output_size;
 } fac_fixed_data_preload_struct;
+
+/* ---- gh#35 capture surface (reset by mock_seq_reset) ----------------- */
+#define MOCK_FAC_MAX_COEFFS 64
+extern int16_t  mock_fac_coeffb[MOCK_FAC_MAX_COEFFS]; /* last preload B vector */
+extern uint8_t  mock_fac_coeffb_size;
+extern int16_t  mock_fac_coeffa[MOCK_FAC_MAX_COEFFS]; /* last preload A vector */
+extern uint8_t  mock_fac_coeffa_size;
+extern uint32_t mock_fac_func;       /* last fac_function_config() func */
+extern uint8_t  mock_fac_ipr;        /* last fac_function_config() ipr */
+extern int16_t  mock_fac_last_write; /* last fac_fixed_data_write() operand */
+extern int16_t  mock_fac_read_value; /* what fac_fixed_data_read() returns */
+extern uint32_t mock_fac_flags;      /* settable; bits are FAC_FLAG_* */
 
 void       fac_deinit(void);
 void       fac_struct_para_init(fac_parameter_struct *fac_parameter);

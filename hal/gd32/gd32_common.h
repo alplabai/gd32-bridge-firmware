@@ -131,6 +131,13 @@ typedef struct {
 	uint32_t          proc_read;     /* stream_read-consumed count      */
 	uint32_t          pump_raw_read; /* pump's raw-ring consumer count  */
 	uint8_t           dsp_terminal;  /* terminal stage kind (0 FIR/1 IIR/3 FFT) */
+	/* gh#35 sticky per-stream fault flags, set by the base-level pump,
+	 * surfaced (and never cleared short of stream_end) by the DSP
+	 * branch of bridge_hw_adc_stream_read: */
+	bool dsp_cfg_bad; /* FAC config refused the bound chain (coeff out of
+	                   * range) -> reads answer RANGE */
+	bool dsp_sat;     /* FAC output/gain saturation observed -> reads
+	                   * answer IO, never STATUS_OK on railed data */
 } adc_stream_state_t;
 
 /* ----------------------------------------------------------------- */
