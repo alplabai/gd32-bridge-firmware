@@ -503,6 +503,49 @@ ZTEST(gd32_bridge_ota, test_begin_arms_background_erase)
 	    write_chunk(0u, data, sizeof(data), wr, &wrl), STATUS_OK, "chunk after READY must program");
 }
 
+/* ---- gh#36: BEGIN demotes the erase target in metadata -----------------
+ *
+ * A power cut mid-erase/program used to leave metadata still describing
+ * the target slot as a valid image with its OLD len/CRC -- and the
+ * bootloader's CRC walk (boot_main.c) then read half-programmed 72-bit
+ * doublewords, the one concretely reachable flash-ECC NMI in this
+ * design.  BEGIN must commit a generation that clears the target's
+ * slot_valid bit and zeroes its len/CRC BEFORE arming the erase. */
+ZTEST(gd32_bridge_ota, test_begin_demotes_target_in_metadata)
+{
+	reset_model();
+
+	const uint32_t len[2] = { 4096u, 4096u };
+	write_meta_record(OTA_META_REC0, 5u, TEST_RUNNING_SLOT, 0x03u, len);
+
+	uint8_t req[8];
+	wr_u32(&req[0], 64u); /* img_len */
+	wr_u32(&req[4], 0u);  /* crc */
+	uint8_t reply[8];
+	size_t  rlen = 0u;
+	zassert_equal(ota_dispatch(CMD_OTA_BEGIN, req, sizeof(req), reply, sizeof(reply), &rlen),
+	              STATUS_OK);
+	zassert_equal(reply[2], TEST_OTHER_SLOT, "BEGIN targets the non-running slot");
+
+	/* The demotion committed a NEW highest-counter record: the highest
+	 * of the two pages is the demoted generation (counter 6); the
+	 * original survives on the other page. */
+	ota_meta_record_t rec;
+	zassert_true(read_meta_at(OTA_META_REC1, &rec),
+	             "the demotion record must be committed (REC0 is rank-2, so REC1 is the erase "
+	             "target)");
+	zassert_equal(rec.counter, 6u, "counter = old max (5) + 1");
+	zassert_equal(rec.active_slot, TEST_RUNNING_SLOT, "BEGIN never flips active_slot");
+	zassert_equal(rec.slot_valid,
+	              (uint8_t)(1u << TEST_RUNNING_SLOT),
+	              "the target's valid bit must be CLEARED (gh#36)");
+	zassert_equal(rec.img_len[TEST_OTHER_SLOT], 0u, "the target's img_len must be zeroed");
+	zassert_equal(rec.img_crc32[TEST_OTHER_SLOT], 0u, "the target's img_crc32 must be zeroed");
+	zassert_equal(rec.img_len[TEST_RUNNING_SLOT],
+	              4096u,
+	              "the running slot's descriptors must carry through untouched");
+}
+
 /* ---- #733: on-flash layout / byte-representation guard --------------- */
 
 /* The bootloader byte-copies a flash record and CRCs the raw bytes, so
@@ -575,11 +618,12 @@ ZTEST(gd32_bridge_ota, test_divergence_second_begin_targets_non_running_slot)
 
 	/* Step 2: BEGIN (correctly targets the non-running slot -- sanity
 	 * check on the harness, no divergence yet), then abandoned mid-erase
-	 * (power loss / host abort).  slot_valid is left set: the erase-time
-	 * clearing path is a separate, deferred slice (see the task notes;
-	 * it would add a bank0 write per BEGIN and #37's read-while-write
-	 * hazard is unmitigated), so this precondition is exactly what a
-	 * real aborted BEGIN leaves behind today. */
+	 * (power loss / host abort).  Since gh#36's fix, BEGIN commits a
+	 * metadata generation that DEMOTES the target slot (clears its
+	 * slot_valid bit + zeroes its len/CRC) before arming the erase, so
+	 * the metadata no longer describes a slot that is being destroyed
+	 * as a valid image -- the bootloader's CRC walk can never reach a
+	 * half-programmed doubleword. */
 	uint8_t req[8];
 	uint8_t reply[8];
 	size_t  rlen = 0u;
@@ -593,17 +637,25 @@ ZTEST(gd32_bridge_ota, test_divergence_second_begin_targets_non_running_slot)
 	ota_erase_tick(); /* mid-erase, not drained to completion */
 	zassert_equal(ota_dispatch(CMD_OTA_ABORT, NULL, 0u, reply, sizeof(reply), &rlen), STATUS_OK);
 
-	/* Step 3: ROLLBACK succeeds (slot_valid/img_len for the other slot
-	 * still assert valid) and commits a NEW highest-counter record with
-	 * active_slot = TEST_OTHER_SLOT. */
-	zassert_equal(ota_dispatch(CMD_OTA_ROLLBACK, NULL, 0u, reply, sizeof(reply), &rlen), STATUS_OK);
+	/* Step 3: ROLLBACK is now REFUSED (gh#36): the target slot was
+	 * demoted at BEGIN, and rolling back to a slot whose image is
+	 * being overwritten would hand the bootloader a half-erased image
+	 * under a valid bit.  STATUS_INVAL is the new, correct answer --
+	 * pin it, because the pre-#36 behaviour answered STATUS_OK here. */
+	zassert_equal(ota_dispatch(CMD_OTA_ROLLBACK, NULL, 0u, reply, sizeof(reply), &rlen),
+	              STATUS_INVAL,
+	              "ROLLBACK to a slot demoted by BEGIN must be refused (gh#36)");
 
-	/* Step 4: models the bootloader's fallback (boot_main.c:117-124,
-	 * #754) rejecting TEST_OTHER_SLOT's (erased/invalid) image and
-	 * booting the older record's slot instead -- i.e. this build,
-	 * TEST_RUNNING_SLOT, keeps running while the newest valid metadata
-	 * (committed in step 3) still names TEST_OTHER_SLOT.  That divergence
-	 * is already in place; no further setup is needed. */
+	/* Step 4: model the bootloader's fallback divergence directly
+	 * (boot_main.c:117-124, #754): the newest record names
+	 * TEST_OTHER_SLOT active while this build keeps running
+	 * TEST_RUNNING_SLOT.  The demoted, half-erased slot is NOT valid,
+	 * so the record's valid bit covers only the running slot. */
+	{
+		const uint32_t len1[2] = { 4096u, 4096u };
+		write_meta_record(
+		    OTA_META_REC0, 20u, TEST_OTHER_SLOT, (uint8_t)(1u << TEST_RUNNING_SLOT), len1);
+	}
 
 	/* Step 5: the assertion that matters.  Pre-fix, this inverted
 	 * metadata's active_slot (TEST_OTHER_SLOT) to get TEST_RUNNING_SLOT
@@ -851,7 +903,10 @@ ZTEST(gd32_bridge_ota, test_meta_commit_preserves_running_slot_record_on_rec0)
 
 	ota_meta_record_t rec0;
 	zassert_true(read_meta_at(OTA_META_REC0, &rec0), "REC0 must hold the freshly committed record");
-	zassert_equal(rec0.counter, 10u, "REC0's new record must carry counter = old max (9) + 1");
+	zassert_equal(
+	    rec0.counter,
+	    11u,
+	    "REC0's new record carries max(9) + 1 per commit: BEGIN's gh#36 demotion + COMMIT");
 	/* The descriptor table must carry forward from REC0 (the NEWEST
 	 * record), not from REC1 (the erase survivor) -- a mutant that reads
 	 * img_len[]/slot_valid off the survivor page instead of the newest
@@ -893,7 +948,10 @@ ZTEST(gd32_bridge_ota, test_meta_commit_preserves_running_slot_record_on_rec1)
 
 	ota_meta_record_t rec1;
 	zassert_true(read_meta_at(OTA_META_REC1, &rec1), "REC1 must hold the freshly committed record");
-	zassert_equal(rec1.counter, 10u, "REC1's new record must carry counter = old max (9) + 1");
+	zassert_equal(
+	    rec1.counter,
+	    11u,
+	    "REC1's new record carries max(9) + 1 per commit: BEGIN's gh#36 demotion + COMMIT");
 }
 
 /* Case 3: the actual brick #74 is about.  Same divergent state as case 1,
@@ -954,12 +1012,13 @@ ZTEST(gd32_bridge_ota, test_meta_commit_tie_break_preserves_newest_both_running)
 
 	ota_meta_record_t rec0;
 	zassert_true(read_meta_at(OTA_META_REC0, &rec0),
-	             "REC0 (higher counter) must survive untouched");
-	zassert_equal(rec0.counter, 5u, "REC0's counter must be untouched");
+	             "REC0 must hold the freshly COMMITTED record (gh#36: BEGIN rewrote REC1 "
+	             "first, so the tie-break now picks REC0 as the lower-counter page)");
+	zassert_equal(rec0.counter, 7u, "REC0 carries BEGIN's demotion counter (6) + 1 at COMMIT");
 
 	ota_meta_record_t rec1;
-	zassert_true(read_meta_at(OTA_META_REC1, &rec1), "REC1 must hold the freshly committed record");
-	zassert_equal(rec1.counter, 6u, "REC1 (lower counter) must be the one rewritten");
+	zassert_true(read_meta_at(OTA_META_REC1, &rec1), "REC1 must hold BEGIN's demotion record");
+	zassert_equal(rec1.counter, 6u, "REC1 (lower counter) was rewritten by BEGIN's gh#36 commit");
 }
 
 /* Case 5: neither record names the running slot (both name
@@ -983,12 +1042,13 @@ ZTEST(gd32_bridge_ota, test_meta_commit_tie_break_preserves_newest_neither_runni
 
 	ota_meta_record_t rec0;
 	zassert_true(read_meta_at(OTA_META_REC0, &rec0),
-	             "REC0 (higher counter) must survive untouched");
-	zassert_equal(rec0.counter, 5u, "REC0's counter must be untouched");
+	             "REC0 must hold the freshly COMMITTED record (gh#36: BEGIN rewrote REC1 "
+	             "first, so the equal-counter tie now picks REC0 as the erase target)");
+	zassert_equal(rec0.counter, 7u, "REC0 carries BEGIN's demotion counter (6) + 1 at COMMIT");
 
 	ota_meta_record_t rec1;
-	zassert_true(read_meta_at(OTA_META_REC1, &rec1), "REC1 must hold the freshly committed record");
-	zassert_equal(rec1.counter, 6u, "REC1 (lower counter) must be the one rewritten");
+	zassert_true(read_meta_at(OTA_META_REC1, &rec1), "REC1 must hold BEGIN's demotion record");
+	zassert_equal(rec1.counter, 6u, "REC1 was rewritten by BEGIN's gh#36 commit");
 }
 
 /* Case 5b: EQUAL counters on both pages, same rank.  meta_commit can
@@ -1026,16 +1086,20 @@ ZTEST(gd32_bridge_ota, test_meta_commit_equal_counters_preserve_rec0)
 	              "COMMIT must succeed");
 
 	ota_meta_record_t rec0;
-	zassert_true(read_meta_at(OTA_META_REC0, &rec0), "REC0 must survive an equal-counter tie");
-	zassert_equal(rec0.counter, 7u, "REC0's counter must be untouched -- REC0 wins the tie");
+	zassert_true(read_meta_at(OTA_META_REC0, &rec0),
+	             "REC0 must hold the freshly COMMITTED record (gh#36: BEGIN rewrote REC1 "
+	             "first, flipping which page the equal-counter tie now erases)");
+	zassert_equal(rec0.counter, 9u, "REC0 carries BEGIN's demotion counter (8) + 1 at COMMIT");
+	zassert_equal(rec0.img_len[TEST_RUNNING_SLOT],
+	              0x1000u,
+	              "the committed record must still carry REC0's original descriptors -- REC0 "
+	              "won the meta_pick_newest() tie in BOTH commits, so the chain never "
+	              "touched len1");
 
 	ota_meta_record_t rec1;
-	zassert_true(read_meta_at(OTA_META_REC1, &rec1), "REC1 must hold the freshly committed record");
-	zassert_equal(rec1.counter, 8u, "REC1 must be the erase target on an equal-counter tie");
-	zassert_equal(rec1.img_len[TEST_RUNNING_SLOT],
-	              0x1000u,
-	              "the committed record must carry REC0's descriptors -- REC0 wins the tie in "
-	              "meta_pick_newest() too, not just in the erase-target choice");
+	zassert_true(read_meta_at(OTA_META_REC1, &rec1),
+	             "REC1 must hold BEGIN's gh#36 demotion record");
+	zassert_equal(rec1.counter, 8u, "REC1 was rewritten by BEGIN's gh#36 commit");
 }
 
 /* Case 6: exactly one valid record (REC0 planted, REC1 left as
@@ -1059,13 +1123,14 @@ ZTEST(gd32_bridge_ota, test_meta_commit_targets_the_only_invalid_page)
 
 	ota_meta_record_t rec0;
 	zassert_true(read_meta_at(OTA_META_REC0, &rec0),
-	             "REC0 (the only valid page) must survive untouched");
-	zassert_equal(rec0.counter, 1u, "REC0's counter must be untouched");
+	             "REC0 must hold the freshly COMMITTED record (gh#36: BEGIN rewrote REC1 "
+	             "first, so COMMIT now flips to the only-valid-page's ERASE target REC0)");
+	zassert_equal(rec0.counter, 3u, "REC0 carries BEGIN's demotion counter (2) + 1 at COMMIT");
 
 	ota_meta_record_t rec1;
 	zassert_true(read_meta_at(OTA_META_REC1, &rec1),
-	             "REC1 (the invalid page) must hold the freshly committed record");
-	zassert_equal(rec1.counter, 2u, "REC1's new record must carry counter = old max (1) + 1");
+	             "REC1 must hold BEGIN's gh#36 demotion record");
+	zassert_equal(rec1.counter, 2u, "REC1 was rewritten by BEGIN's gh#36 commit");
 }
 
 /* Case 7: neither record is valid (factory-fresh / fully-erased flash).
@@ -1123,7 +1188,10 @@ ZTEST(gd32_bridge_ota, test_meta_commit_rollback_preserves_running_slot_record)
 
 	ota_meta_record_t rec0;
 	zassert_true(read_meta_at(OTA_META_REC0, &rec0), "REC0 must hold the freshly committed record");
-	zassert_equal(rec0.counter, 10u, "REC0's new record must carry counter = old max (9) + 1");
+	zassert_equal(rec0.counter,
+	              10u,
+	              "ROLLBACK's record must carry counter = old max (9) + 1 (no BEGIN ran in "
+	              "this case, so there is no gh#36 demotion commit to count)");
 	/* ROLLBACK leaves the descriptor table untouched (update_entry=false),
 	 * so it must carry forward from REC0 (the NEWEST record) exactly as
 	 * COMMIT's carry-forward does above -- same mutant, same kill
@@ -1168,7 +1236,10 @@ ZTEST(gd32_bridge_ota, test_meta_commit_erase_fail_preserves_both_records)
 
 	ota_meta_record_t rec1;
 	zassert_true(read_meta_at(OTA_META_REC1, &rec1), "REC1 must remain CRC-valid, untouched");
-	zassert_equal(rec1.counter, 3u, "REC1's counter must be untouched by a failed erase");
+	zassert_equal(rec1.counter,
+	              6u,
+	              "REC1 holds BEGIN's gh#36 demotion record -- the failed COMMIT erase must "
+	              "not touch it either");
 	zassert_equal(rec1.active_slot, TEST_RUNNING_SLOT, "REC1's active_slot must be untouched");
 
 	g_erase_fail = false; /* hygiene: no before-hook clears this (#6) */

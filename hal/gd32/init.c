@@ -247,6 +247,39 @@ void bridge_hw_init(void)
 	bridge_core_clock_hz      = SystemCoreClock;
 	bridge_core_clock_matches = (SystemCoreClock == PWM_TIMER_CLK_HZ);
 
+	/* --- Explicit NMI-source arming (gh#36) ---------------------------
+	 *
+	 * Five NMI sources come up ARMED by the reset values of
+	 * SYSCFG_CFG3 (0xXXXX X00F), CFG4 (0xXXX0 XX03) and CFG5
+	 * (0xXXXX XX03) (UM Rev1.2 p.64-67): CKNMIIE (HXTAL clock
+	 * failure), FLASHECCIE (flash double-bit ECC -- unconditional,
+	 * UM p.93 "When two errors are detected, the ECCDET0 bit ... is
+	 * set and a NMI is generated"), and the SRAM0/SRAM1/TCMSRAM
+	 * multi-bit + single-bit ECC enables.  Until gh#36's handler
+	 * work (hal/gd32/fault_handlers.c) every one of them vectored
+	 * into the vendor Default_Handler's infinite loop with no
+	 * watchdog armed -- a permanent, undiagnosable wedge.
+	 *
+	 * The handlers exist now, so the armed set is KEPT -- but written
+	 * explicitly, read-modify-write on exactly the enable bits, so
+	 * the set of live NMI sources is a decision recorded in this
+	 * source rather than an accident of a reset value the manual
+	 * prints with X digits.  The three single-bit-correction enables
+	 * stay armed but inert: they route to the SYSCFG NVIC line,
+	 * which this firmware never enables.  The SRAM multi-bit paths
+	 * are option-byte dependent (FMC_OBCTL bit 24 SRAM_ECCEN, p.121
+	 * -- unread on a bench part, see gh#36's verification list); the
+	 * flash path needs no such confirmation and is live on every
+	 * part.
+	 *
+	 * The BOOTLOADER runs on the same reset defaults; its matching
+	 * writes + handler set are owned by open PR #182 and must land
+	 * with the same values -- both images must agree. */
+	SYSCFG_CFG3 |= (SYSCFG_CFG3_CKMNMIIE | SYSCFG_CFG3_FLASHECCIE | SYSCFG_CFG3_SRAM0ECCSEIE |
+	                SYSCFG_CFG3_SRAM0ECCMEIE);
+	SYSCFG_CFG4 |= (SYSCFG_CFG4_SRAM1ECCSEIE | SYSCFG_CFG4_SRAM1ECCMEIE);
+	SYSCFG_CFG5 |= (SYSCFG_CFG5_TCMSRAMECCSEIE | SYSCFG_CFG5_TCMSRAMECCMEIE);
+
 	/* Enable AHB2 clocks for every GPIO port the pad map references.
      * The chip's RCU keeps unused GPIO ports clock-gated to save
      * power; we enable A..F unconditionally because the E1M IO map
