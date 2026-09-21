@@ -138,6 +138,40 @@ static void power_wake_pins_enable(uint32_t wake_bitmap)
 	pmu_wakeup_pin_enable(PMU_WAKEUP_PIN4);
 }
 
+/* Watchdog-aware low-power entry gate (gh#54 + gh#54's reading of UM
+ * Rev1.2 p.525).  The FWDGT armed in bridge_hw_init() is fed at the end
+ * of every bridge_hw_tick(); a low-power entry is the one place the
+ * tick stops running, so the entry must (a) feed the dog one last time
+ * -- maximising the window the sleep starts from -- and (b) honour the
+ * manual's spacing rule: "When after the execution of watchdog reload
+ * operation, if the MCU needs enter the deepsleep/standby mode
+ * immediately, more than 3 IRC32K clock intervals must be inserted in
+ * the middle of reload and deepsleep/standby mode commands by software
+ * setting."  3 IRC32K intervals at the 28 kHz minimum (Datasheet
+ * Rev2.0 p.125) is 107 us; the spin below is ~150-250 us at 216 MHz,
+ * carrying margin across the characterised spread.  Also drain the
+ * PSC/RLD/WND update-busy bits first (FWDGT_STAT PUD/RUD/WUD, UM
+ * p.528) so the reload is not racing a pending register write.
+ *
+ * Whether the armed FWDGT keeps COUNTING through Deep-sleep/Standby is
+ * decided by the FWDGSPD_DPSLP/FWDGSPD_STDBY option bytes (FMC_OBCTL
+ * bits 17/18), which Rev1.2 prints no factory value for -- a bring-up
+ * gate on gh#54, read them per unit.  If a bit reads 1, a sleep longer
+ * than the ~501 ms window ends in a watchdog reset out of the mode;
+ * that is a bench item to settle, not something this code can decide. */
+static void power_fwdgt_settle_before_lp_entry(void)
+{
+	fwdgt_counter_reload();
+	while (0u != (FWDGT_STAT & (FWDGT_STAT_PUD | FWDGT_STAT_RUD | FWDGT_STAT_WUD))) {
+		/* bounded by construction: the only pending writes are
+		 * bridge_hw_init()'s long-completed fwdgt_config() */
+	}
+	for (volatile uint32_t gap = 0u; gap < 8000u; ++gap) {
+		/* >= 3 IRC32K intervals at 28 kHz min = 107 us; ~5 cycles
+		 * per iteration at 216 MHz -> ~185 us */
+	}
+}
+
 int bridge_hw_power_mode_set(uint8_t mode, uint32_t wake_bitmap, uint32_t wake_after_ms)
 {
 	/* Mode 0 (run) + mode 1 (sleep) are accepted no-ops -- main()'s
@@ -179,6 +213,9 @@ int bridge_hw_power_mode_set(uint8_t mode, uint32_t wake_bitmap, uint32_t wake_a
          * operating procedure.  Disable it here and bring it fully back
          * up on the way out. */
 		i2c_disable(BRIDGE_I2C_PERIPH);
+		/* Watchdog-aware entry (see power_fwdgt_settle_before_lp_entry):
+		 * feed + >= 3 IRC32K intervals of gap before the wfi (gh#54). */
+		power_fwdgt_settle_before_lp_entry();
 		/* PMU_LDO_LOWPOWER drops the core LDO into its low-power
          * regulation point during deepsleep (saves a few hundred
          * uA at the cost of a slightly slower wakeup); WFI_CMD
@@ -221,6 +258,9 @@ int bridge_hw_power_mode_set(uint8_t mode, uint32_t wake_bitmap, uint32_t wake_a
          * The caller's host link will see the bridge re-issue its
          * handshake on the next transport packet, which is the
          * documented contract. */
+		/* Watchdog-aware entry (see power_fwdgt_settle_before_lp_entry):
+		 * feed + >= 3 IRC32K intervals of gap before the wfi (gh#54). */
+		power_fwdgt_settle_before_lp_entry();
 		pmu_to_standbymode();
 		/* Unreachable in normal operation; keep the return so the
          * compiler doesn't warn about a missing terminator. */

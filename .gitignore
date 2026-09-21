@@ -12,3 +12,4 @@ build*/
 # `python3 -m compileall -q tests tools` both create these under tests/ and
 # tools/.
 __pycache__/
+.kilo/

@@ -106,9 +106,12 @@
 
 /* NVIC priorities (preemption, sub).  CS EXTI framing at
  * BRIDGE_CS_IRQ_PRIO, I2C EV/ER at BRIDGE_I2C_IRQ_PRIO, ADC-stream DMA
- * lap FTF at prio 3 (hal/gd32/adc_stream.c:27-28).  Periodic
- * housekeeping runs at base level from the main WFI loop, not SysTick
- * -- there is no SysTick handler in this firmware. */
+ * lap FTF at prio 3 (hal/gd32/adc_stream.c:27-28).  The periodic
+ * SysTick (gh#54) runs at the LOWEST NVIC priority 15: its whole job
+ * is to retire the main loop's __WFI() on a 50 ms cadence so
+ * bridge_hw_tick() advances even when the host goes quiet -- it must
+ * never delay a transport ISR.  Base-level housekeeping still runs
+ * from the main WFI loop; the tick handler body itself is empty. */
 #define BRIDGE_CS_IRQ_PRIO     1u
 #define BRIDGE_CS_IRQ_SUBPRIO  1u
 #define BRIDGE_I2C_IRQ_PRIO    2u
