@@ -94,6 +94,15 @@ typedef struct {
  * got-count mismatch over a timed dwell. */
 #define BRIDGE_ADC_PACE_CLK_HZ 216000000u
 
+/* gh#149 per-consumer DMA position tracker (see adc_stream_state_t's
+ * rd_pos/pump_pos fields and adc_stream_total_written() in
+ * adc_stream.c). */
+typedef struct {
+	uint32_t laps;
+	uint16_t w;
+	bool     valid;
+} adc_dma_pos_t;
+
 typedef struct {
 	bool     in_use;
 	uint8_t  channel;     /* ADC channel index this stream watches */
@@ -113,8 +122,21 @@ typedef struct {
 	 * stream_read path. */
 	volatile uint32_t lap_count;
 	uint32_t          total_read;
-	uint8_t           dsp_chain_id;
-	bool              dsp_bound;
+	/* gh#149 DMA-lap coalescing recovery: per-consumer last-observed
+	 * DMA position (raw lap_count + write index), used by
+	 * adc_stream_total_written() to detect a ring reload whose FTF
+	 * the lap ISR had not counted yet at sample time (write index
+	 * regressed while lap_count stood still) and add the missed lap
+	 * to that consumer's total.  Two consumers, two trackers, no
+	 * shared mutation: the read path (stream_read, CS-EXTI prio 1)
+	 * owns rd_pos; the base-level pump owns pump_pos.  Either may
+	 * observe the same missed lap and correct its OWN total; neither
+	 * writes lap_count, so the count the ISR eventually makes can
+	 * never double-credit. */
+	adc_dma_pos_t rd_pos;
+	adc_dma_pos_t pump_pos;
+	uint8_t       dsp_chain_id;
+	bool          dsp_bound;
 
 	/* --- #496 DSP runtime dispatch: filtered data plane --- */
 	/* When a FIR/IIR chain is bound, the base-level pump
