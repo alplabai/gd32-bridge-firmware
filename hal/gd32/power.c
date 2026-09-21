@@ -119,13 +119,84 @@ static int rtc_wakeup_arm_ms(uint32_t wake_after_ms)
 	if (ticks > 65535u) ticks = 65535u;
 
 	/* The vendor sequence: disable the wakeup timer, switch its
-     * clock source, set the counter, re-enable.  rtc_wakeup_disable
-     * may return ERROR if the WTWF flag never sets; treat as IO. */
+	 * clock source, set the counter, re-enable.  rtc_wakeup_disable
+	 * may return ERROR if the WTWF flag never sets; treat as IO.
+	 *
+	 * UM Rev1.2 p.548 s22.3.18 prescribes THREE steps to make an RTC
+	 * wakeup event reach the core -- "1. Configure and enable the
+	 * corresponding interrupt line ... of EXTI and set the rising edge
+	 * for triggering. 2. Configure and enable the RTC ... auto wakeup
+	 * interrupt. 3. Configure and enable the RTC ... auto wakeup
+	 * function."  rtc_wakeup_enable() below is step 3 ONLY; before
+	 * gh#53 neither step 1 (EXTI line 19: "RTC wakeup timer", UM
+	 * p.213 Table 5-3) nor step 2 (RTC_CTL.WTIE, bit 14, UM p.551)
+	 * existed anywhere in the tree, so the timer counted down, set
+	 * RTC_STAT.WTF ... and nothing reached the NVIC: a mode-2 entry
+	 * armed with wake_after_ms never came back and both transport
+	 * links died with it (no watchdog either, gh#54).
+	 *
+	 * Clear WTF BEFORE the timer is enabled: it is set by hardware
+	 * on expiry and cleared only by software writing 0 (UM p.554
+	 * s22.4.4 bit 10), RTC_STAT is NOT reset by a system reset
+	 * ("Only INITM, INITF and RSYNF bits are set to 0. Others are
+	 * not affected", UM p.553), so a WTF left by one firmware run
+	 * survives every NRST into the next -- arming without clearing
+	 * is not idempotent across resets.  The clear must also precede
+	 * rtc_wakeup_enable() by at least 1.5 RTC clock periods (~47 us
+	 * at 32 kHz, UM p.554) relative to the NEXT WTF set; the timer
+	 * counts a whole wake_after_ms before that, so ordering here is
+	 * free. */
 	if (SUCCESS != rtc_wakeup_disable()) return BRIDGE_HW_ERR_IO;
 	if (SUCCESS != rtc_wakeup_clock_set(WAKEUP_RTCCK_DIV16)) return BRIDGE_HW_ERR_IO;
 	if (SUCCESS != rtc_wakeup_timer_set((uint16_t)(ticks - 1u))) return BRIDGE_HW_ERR_IO;
+
+	/* Step 2: RTC_CTL.WTIE (UM p.551, bit 14; the vendor unlock/lock
+	 * around the write is inside rtc_interrupt_enable()).  Table 22-3
+	 * (UM p.548) carries the footnote "Only active when RTC clock
+	 * source is LXTAL or IRC32K" -- satisfied by the
+	 * rcu_rtc_clock_config(RCU_RTCSRC_IRC32K) above. */
+	rtc_flag_clear(RTC_FLAG_WT);          /* p.554: WTF cleared by software */
+	rtc_interrupt_enable(RTC_INT_WAKEUP); /* RTC_CTL.WTIE <- 1 */
+
+	/* Step 1: EXTI line 19 = RTC wakeup timer (UM p.213 Table 5-3),
+	 * rising edge (UM p.548 s22.3.18 step 1), IRQ 3 (UM p.208
+	 * Table 5-2).  exti_init() is a per-bit RMW of INTEN0/RTEN0/FTEN0,
+	 * so this cannot disturb the CS line 8 configuration owned by
+	 * hal/transport_hw_gd32.c. */
+	exti_flag_clear(EXTI_19);
+	exti_init(EXTI_19, EXTI_INTERRUPT, EXTI_TRIG_RISING);
+
+	/* Priority 0 is mandatory, not cosmetic (gh#53): until gh#63 moves
+	 * the deep-sleep entry out of the CS-EXTI handler, the entry WFI
+	 * runs at preempt priority 1 (BRIDGE_CS_IRQ_PRIO) and can only be
+	 * ended by an interrupt that outranks the active one.  Priority 0
+	 * is also exactly the line the vendor pmu_to_standbymode() leaves
+	 * unmasked (its ICER0 write preserves bit 3), so the same NVIC
+	 * enable serves mode 3's RTC exit. */
+	nvic_irq_enable(RTC_WKUP_IRQn, 0U, 0U);
+
 	rtc_wakeup_enable();
 	return BRIDGE_HW_OK;
+}
+
+/* RTC wakeup-timer ISR (IRQ 3).  A strong definition overrides the
+ * weak Default_Handler alias in the vendor startup
+ * (startup_gd32g5x3.S:302-303) -- without THIS handler, enabling
+ * WTIE + EXTI 19 would convert a non-waking bridge into a hard-hung
+ * one, because the vector resolves to Default_Handler's
+ * `b Infinite_Loop` at priority 0 (gh#53's own warning: land the
+ * handler in the same change, not a follow-up).
+ *
+ * Ordering: clear the EXTI pending bit FIRST, then the RTC flag.
+ * WTF must be cleared before the timer's next expiry and is safe to
+ * touch here -- the 1.5-RTC-clock spacing rule (UM p.554) is about
+ * the gap between the clear and the NEXT WTF set, which is a whole
+ * wake_after_ms away.  Do NOT also clear WTF from base level in the
+ * same window; rtc_wakeup_arm_ms() clears it once, at arm time. */
+void RTC_WKUP_IRQHandler(void)
+{
+	exti_interrupt_flag_clear(EXTI_19);
+	rtc_flag_clear(RTC_FLAG_WT);
 }
 
 static void power_wake_pins_enable(uint32_t wake_bitmap)
@@ -161,7 +232,21 @@ int bridge_hw_power_mode_set(uint8_t mode, uint32_t wake_bitmap, uint32_t wake_a
 		return BRIDGE_HW_OK;
 	case 2u: /* deep-sleep */
 		rcu_periph_clock_enable(RCU_PMU);
-		power_wake_pins_enable(wake_bitmap);
+		/* WKUP pins are a STANDBY-only wake mechanism (UM Rev1.2
+		 * p.142 Table 3-1: Deep-sleep wake = "Any interrupt from
+		 * EXTI lines for WFI"; Standby wake = "NRST pin / WKUP
+		 * pins / FWDGT reset / RTC / LCKMD").  Arming PMU_CS.WUPENx
+		 * for mode 2 (the pre-gh#53 behaviour) does nothing -- and
+		 * worse, the SPI CS edge CANNOT wake this entry even though
+		 * EXTI line 8 exists, because the entry WFI executes from
+		 * inside the CS-EXTI handler at preempt priority 1 (until
+		 * gh#63 moves it to base level) and a same-or-lower-priority
+		 * interrupt cannot end it.  Reject the bit honestly until
+		 * the opcode carries a pad selector: STATUS_NOSUPPORT tells
+		 * the host its request was not honoured (gh#53 fix item 3).
+		 * Mode 3 keeps power_wake_pins_enable() below -- WKUP pins
+		 * are its documented wake set. */
+		if ((wake_bitmap & POWER_WAKE_GPIO) != 0u) return BRIDGE_HW_ERR_NOTIMPL;
 		if (wake_after_ms != 0u || (wake_bitmap & (POWER_WAKE_RTC | POWER_WAKE_TIMER)) != 0u) {
 			const uint32_t ms = (wake_after_ms != 0u) ? wake_after_ms : POWER_WAKE_TIMER_MAX_MS;
 			int            rc = rtc_wakeup_arm_ms(ms);
