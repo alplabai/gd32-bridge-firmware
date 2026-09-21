@@ -135,6 +135,9 @@ SECTIONS
         PROVIDE ( _heap_end = . );
         . = . + __stack_size;
         PROVIDE ( _sp       = . );
+        /* gh#146: the stack region's LOWER bound, programmed into
+         * MSPLIM by bridge_hw_init(). */
+        PROVIDE ( _stack_limit = _sp - __stack_size );
         . = ALIGN(8);
     } > RAM
 
