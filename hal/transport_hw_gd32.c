@@ -658,3 +658,87 @@ void BRIDGE_I2C_ER_HANDLER(void)
 		i2c_slave_tx_abort();
 	}
 }
+
+/* =====================================================================
+ * BRD_I2C stuck-SDA detector (gh#39) -- erratum 2.3.1 workaround.
+ *
+ * "Device limitations of GD32G5x3 Rev1.0" s2.3.1: a 7-bit-address I2C
+ * slave "will enter an error state, causing it to malfunction and the
+ * SDA line to remain low" when a master that simulates I2C via IO
+ * (an i2c-gpio adapter, a bench probe, an `i2cdetect -a` sweep of the
+ * reserved head addresses) sends "Start + 10-bit Match Head Address +
+ * Start + 7-bit Address Read + Wait ACK + Start".  This bridge runs
+ * I2C0 exactly in that configuration (I2C_ADDFORMAT_7BITS).  The SDA
+ * pad held low means no master on the shared multi-drop BRD_I2C bus
+ * (OPTIGA Trust M, 5L35023B) can issue a START -- a bus-wide outage,
+ * while the SPI link keeps answering, which is the least diagnosable
+ * form this fault can take.
+ *
+ * Vendor workaround, verbatim: "Software periodically checks the status
+ * of the SDA line. If SDA is detected to be stuck low, reinitialize
+ * the I2C module."  Called from bridge_hw_tick() at base level (the
+ * gh#54 SysTick gives it a 50 ms cadence independent of host traffic).
+ *
+ * Detector design: a single instantaneous pad read is ambiguous -- a
+ * legitimate in-flight byte holds SDA low ~half the bit times, so two
+ * bare tick samples could both land on data bits and tear down a
+ * healthy transfer (continuous back-to-back I2C traffic, e.g. an OTA
+ * streamed over this bus, would eventually hit that pair by chance).
+ * Instead each tick takes a BURST of samples ~1 ms apart: at 400 kHz a
+ * single SDA-low-while-not-addressed period lasts at most one bit
+ * (2.5 us) or a clock-stretch (which holds SCL low, not SDA), so
+ * BRIDGE_I2C_STUCK_SAMPLES consecutive low readings spanning ~3 ms is
+ * ~1200 bit times -- unreachable in correct traffic.  Only then does
+ * the tick count as a "low candidate", and only TWO consecutive
+ * candidate ticks act (the issue's confirmation rule).
+ *
+ * AF-mode pads still report the live line state (UM Rev1.2 p.270
+ * s7.3.8: "A read access to the port input status register gets the
+ * I/O state"), so gpio_input_bit_get() on PB9 is a valid detector.
+ *
+ * Recovery is the documented I2C software reset (UM Rev1.2 p.1262
+ * s28.3.5): "Write I2CEN = 0 / Check I2CEN = 0 / Write I2CEN = 1",
+ * I2CEN held low >= 3 APB clock cycles, which "releases SCL and SDA"
+ * and leaves I2C_TIMING / I2C_SADDR0 / configuration bits intact --
+ * safe to run from a tick, and preferable to re-running
+ * bridge_transport_i2c_hw_init().  The portable staging is resynced
+ * with i2c_slave_tx_abort() so a half-consumed reply from before the
+ * wedge is dropped rather than resumed against a fresh peripheral. */
+#define BRIDGE_I2C_STUCK_SAMPLES 4u
+
+static uint8_t i2c_sda_low_ticks;
+
+void bridge_transport_i2c_stuck_poll(void)
+{
+	/* Burst sample: SDA low across the whole burst is the candidate. */
+	bool all_low = true;
+	for (uint32_t k = 0u; k < BRIDGE_I2C_STUCK_SAMPLES; ++k) {
+		if (RESET != gpio_input_bit_get(BRIDGE_I2C_SDA_PORT, BRIDGE_I2C_SDA_PIN)) {
+			all_low = false;
+			break;
+		}
+		if (k + 1u < BRIDGE_I2C_STUCK_SAMPLES) {
+			/* ~1 ms gap: 216000 cycles at 216 MHz, ~5 cycles per
+			 * volatile iteration -> 43200 iterations.  Only paid
+			 * on the stuck path; a healthy line exits at the first
+			 * sample. */
+			for (volatile uint32_t gap = 0u; gap < 43200u; ++gap) {
+				/* spread samples ~1 ms apart */
+			}
+		}
+	}
+	if (!all_low) {
+		i2c_sda_low_ticks = 0u;
+		return;
+	}
+	if (++i2c_sda_low_ticks < 2u) return; /* confirm across two ticks */
+	i2c_sda_low_ticks = 0u;
+
+	/* Documented software reset (UM Rev1.2 p.1262 s28.3.5). */
+	I2C_CTL0(BRIDGE_I2C_PERIPH) &= ~I2C_CTL0_I2CEN; /* Write I2CEN = 0 */
+	while (0u != (I2C_CTL0(BRIDGE_I2C_PERIPH) & I2C_CTL0_I2CEN)) {
+		/* Check I2CEN = 0 -- the read-back IS the >= 3 APB cycle hold */
+	}
+	I2C_CTL0(BRIDGE_I2C_PERIPH) |= I2C_CTL0_I2CEN; /* Write I2CEN = 1 */
+	i2c_slave_tx_abort();                          /* drop a half-consumed staged reply */
+}
