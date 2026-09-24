@@ -186,6 +186,27 @@ ZTEST(gpio_grouped, test_ignored_high_bits_touch_nothing)
 	zassert_equal(mock_event_count, 0u);
 }
 
+ZTEST(gpio_grouped, test_reg_on_bits_route_to_gpioe_14_15)
+{
+	/* Bits 18/19 (BT_REG_ON/WL_REG_ON) are sideband, not E1M pads, but
+	 * they still route through the same generic mask path -- prove
+	 * they land on GPIOE PIN_14/PIN_15 and nowhere else. */
+	mock_reset();
+	mock_inputs[mock_port_index(GPIOE)] = GPIO_PIN_14 | GPIO_PIN_15;
+
+	uint32_t       levels = 0u;
+	const uint32_t mask   = (1u << 18) | (1u << 19);
+	zassert_equal(bridge_hw_gpio_read(mask, &levels), BRIDGE_HW_OK);
+	zassert_equal(levels, mask);
+	zassert_equal(mock_read_count[mock_port_index(GPIOE)], 1u);
+
+	mock_reset();
+	for (size_t i = 0; i < GPIO_PAD_MAP_COUNT; ++i)
+		gpio_is_output[i] = true; /* boot already promoted both, per init.c */
+	zassert_equal(bridge_hw_gpio_write(mask, (1u << 18)), BRIDGE_HW_OK);
+	zassert_equal(mock_bop[mock_port_index(GPIOE)], GPIO_PIN_14 | (GPIO_PIN_15 << 16));
+}
+
 ZTEST(gpio_grouped, test_null_read_output_is_rejected_without_access)
 {
 	mock_reset();

@@ -153,6 +153,18 @@ ADC and encoder maps in `hal/gd32/adc.c` (`adc_channels_map[]`) and
 Host code reaches a channel by its logical id; the firmware
 translates internally.
 
+`gpio_pad_map[]` is 20 entries: 18 E1M IO pads (bits 0-17) plus two
+sideband bits (18, 19) that are not E1M pads at all -- `BT_REG_ON`
+(GD32 `PE14`) and `WL_REG_ON` (GD32 `PE15`), the Murata
+LBEE5HY2FY-922 Wi-Fi/BT module's power enables. Unlike the E1M pads,
+which boot INPUT+PULL_UP, these two boot **OUTPUT driven LOW**
+(module off); the module has internal 50 k pull-downs on both, so an
+input pad would leave the module's power state indeterminate. Module
+power is host policy, not a firmware default: a host powers the
+module by writing bits 18/19 high via `CMD_GPIO_WRITE`. Full wire
+detail (bit table, CRC vectors) is in `docs/gd32-bridge-protocol.md`
+(alp-sdk).
+
 ## Cross-link
 
 * Protocol wire spec: [`docs/gd32-bridge-protocol.md` (alp-sdk)](https://github.com/alplabai/alp-sdk/blob/main/docs/gd32-bridge-protocol.md).
