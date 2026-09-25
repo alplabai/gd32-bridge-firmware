@@ -138,11 +138,26 @@ typedef struct {
 /* _Static_assert that the sizeof-derived size matches these).        */
 /* ----------------------------------------------------------------- */
 
-#define GPIO_PAD_MAP_COUNT    18u /* _Static_assert against sizeof in gpio.c       */
+#define GPIO_PAD_MAP_COUNT    20u /* _Static_assert against sizeof in gpio.c       */
 #define ADC_CHANNEL_MAP_COUNT 8u  /* _Static_assert against sizeof in adc.c        */
 #define QENC_CHANNEL_COUNT    4u  /* _Static_assert against sizeof in qenc.c       */
 #define PWM_CHANNEL_COUNT     8u  /* _Static_assert against sizeof in pwm.c        */
 #define DAC_CHANNEL_COUNT     2u  /* _Static_assert against sizeof in dac.c        */
+
+/* Bits 18/19 of the GPIO mask are sideband, not E1M pads: the Murata
+ * LBEE5HY2FY-922 Wi-Fi/BT module's power enables (module has internal
+ * 50 k pull-downs on both).  Named here, not just indexed, because
+ * hal/gd32/init.c drives them differently from the rest of
+ * `gpio_pad_map` (OUTPUT LOW at boot, not INPUT+PULL_UP -- see the
+ * boot loop in init.c and the pad-map comment in gpio.c).  REG_ON
+ * power policy is the HOST's, not this firmware's: the GD32 only
+ * proxies the line; it never drives it high on its own. */
+#define GPIO_PAD_BT_REG_ON 18u
+#define GPIO_PAD_WL_REG_ON 19u
+_Static_assert(GPIO_PAD_WL_REG_ON == GPIO_PAD_BT_REG_ON + 1 &&
+                   GPIO_PAD_WL_REG_ON < GPIO_PAD_MAP_COUNT,
+               "GPIO_PAD_BT_REG_ON/GPIO_PAD_WL_REG_ON must stay adjacent and in-range -- "
+               "init.c's boot loop walks BT_REG_ON..WL_REG_ON inclusive");
 
 /* ----------------------------------------------------------------- */
 /* Shared analog + timer constants.                                   */
