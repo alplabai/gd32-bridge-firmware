@@ -108,10 +108,12 @@ _Static_assert(sizeof(gpio_pad_map) / sizeof(gpio_pad_map[0]) == GPIO_PAD_MAP_CO
                "gpio_pad_map size must match GPIO_PAD_MAP_COUNT");
 
 /* Per-pad direction tracking.  Boot configures every pad as INPUT +
- * PULL_UP; bridge_hw_gpio_write() flips an entry to OUTPUT push-pull
- * on first call (sticky until the next chip reset).  Avoids the
- * need for a separate `CMD_GPIO_CONFIGURE` opcode.  Used ONLY by
- * bridge_hw_gpio_write() to decide whether a pad still needs
+ * PULL_UP -- except GPIO_PAD_BT_REG_ON / GPIO_PAD_WL_REG_ON (bits
+ * 18/19), which boot OUTPUT driven LOW instead (see init.c and the
+ * pad-map comment above); bridge_hw_gpio_write() flips an entry to
+ * OUTPUT push-pull on first call (sticky until the next chip reset).
+ * Avoids the need for a separate `CMD_GPIO_CONFIGURE` opcode.  Used
+ * ONLY by bridge_hw_gpio_write() to decide whether a pad still needs
  * promoting -- bridge_hw_gpio_read() below always reads the measured
  * pad level regardless of this flag (gh#62). */
 bool gpio_is_output[GPIO_PAD_MAP_COUNT];

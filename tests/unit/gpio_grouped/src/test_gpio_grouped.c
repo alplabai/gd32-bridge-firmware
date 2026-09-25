@@ -201,8 +201,10 @@ ZTEST(gpio_grouped, test_reg_on_bits_route_to_gpioe_14_15)
 	zassert_equal(mock_read_count[mock_port_index(GPIOE)], 1u);
 
 	mock_reset();
+	/* Simulate post-promotion state directly -- this test does not exercise
+	 * init.c's boot loop. */
 	for (size_t i = 0; i < GPIO_PAD_MAP_COUNT; ++i)
-		gpio_is_output[i] = true; /* boot already promoted both, per init.c */
+		gpio_is_output[i] = true;
 	zassert_equal(bridge_hw_gpio_write(mask, (1u << 18)), BRIDGE_HW_OK);
 	zassert_equal(mock_bop[mock_port_index(GPIOE)], GPIO_PIN_14 | (GPIO_PIN_15 << 16));
 }

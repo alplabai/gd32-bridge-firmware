@@ -154,6 +154,10 @@ typedef struct {
  * proxies the line; it never drives it high on its own. */
 #define GPIO_PAD_BT_REG_ON 18u
 #define GPIO_PAD_WL_REG_ON 19u
+_Static_assert(GPIO_PAD_WL_REG_ON == GPIO_PAD_BT_REG_ON + 1 &&
+                   GPIO_PAD_WL_REG_ON < GPIO_PAD_MAP_COUNT,
+               "GPIO_PAD_BT_REG_ON/GPIO_PAD_WL_REG_ON must stay adjacent and in-range -- "
+               "init.c's boot loop walks BT_REG_ON..WL_REG_ON inclusive");
 
 /* ----------------------------------------------------------------- */
 /* Shared analog + timer constants.                                   */
