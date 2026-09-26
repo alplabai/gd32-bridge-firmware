@@ -33,9 +33,13 @@
  * (src/trial_marker.c). This replaced an earlier cut that trusted the
  * fw_version the host declared in OTA_BEGIN -- the 2026-09-26 incident
  * was the host declaring the bad image's TRUE, pre-fix version, which
- * that guard would have believed. Policy: a markerless image commits
- * CONFIRMED (no watchdog protection, needs SWD recovery if bad) -- see
- * ota_image_trial_capable()'s own comment (src/ota_layout.h) for why.
+ * that guard would have believed. Policy: a markerless image has no
+ * confirm path, so CMD_OTA_COMMIT now REFUSES it outright (STATUS_INVAL,
+ * a dedicated s_err code, the active slot untouched -- see h_commit)
+ * instead of committing it CONFIRMED and unprotected; such an image
+ * remains installable only via SWD/factory programming.
+ * h_rollback is unchanged -- see its own comment for why a markerless
+ * ROLLBACK target still commits CONFIRMED.
  */
 
 #include <stddef.h>
@@ -806,37 +810,49 @@ static gd32_bridge_status_t h_commit(void)
 		s_err   = 6u;
 		return STATUS_INVAL;
 	}
-	/* Downgrade guard (bench fact 2026-09-26 follow-up): TRIAL iff the
-	 * IMAGE ITSELF (the bytes just staged in the inactive slot, NOT the
-	 * fw_version the host declared at OTA_BEGIN) carries the
-	 * confirm-capable trial marker -- see ota_image_trial_capable()
-	 * (src/ota_layout.h) for why the declared version can no longer be
-	 * trusted for this decision: the 2026-09-26 incident was the host
-	 * declaring the bad image's TRUE, pre-fix version, which the old
-	 * declared-version guard would have believed. s_fw_version is still
-	 * recorded into the metadata record below (informational only; no
-	 * longer decides trial eligibility).
+	/* Downgrade guard (bench fact 2026-09-26 follow-up), POLICY CLOSED on
+	 * PR #246 -- a markerless image is REFUSED here, not committed: TRIAL
+	 * eligibility comes from the IMAGE ITSELF (the bytes just staged in
+	 * the inactive slot, NOT the fw_version the host declared at
+	 * OTA_BEGIN) -- see ota_image_trial_capable() (src/ota_layout.h) for
+	 * why the declared version can no longer be trusted for this
+	 * decision: the 2026-09-26 incident was the host declaring the bad
+	 * image's TRUE, pre-fix version, which the old declared-version guard
+	 * would have believed. s_fw_version is still recorded into the
+	 * metadata record below (informational only; never decides trial
+	 * eligibility or commit-ability).
 	 *
 	 * Policy, stated plainly (see ota_image_trial_capable()'s own comment
 	 * for the full rationale, do not soften this on a future edit): a
-	 * markerless image -- ANY build older than this change, including
-	 * the 2026-09-26 incident image itself -- commits CONFIRMED here and
-	 * is NOT protected by the FWDGT; a bad markerless image still needs a
-	 * bench SWD recovery, exactly as before this fix existed. That is
-	 * deliberate: forcing TRIAL onto a markerless image would instead
-	 * make the FWDGT revert (or, with no older CONFIRMED fallback,
-	 * reset-loop every ~32.8 s) even a perfectly healthy old image,
-	 * because an old app has no confirm path at all. */
-	const uint8_t commit_flags =
-	    ota_image_trial_capable((const uint8_t *)ota_fmc_flash_ptr(ota_inactive_base()), s_img_len)
-	        ? OTA_META_FLAG_TRIAL
-	        : 0u;
+	 * markerless image -- no marker at all, or a marker whose
+	 * confirm-capability bit is clear -- has NO CONFIRM PATH. Forcing
+	 * TRIAL onto it would revert even a perfectly healthy image after the
+	 * ~32.8 s FWDGT window (it never calls ota_note_frame()), or
+	 * reset-loop it with no older CONFIRMED fallback to revert to; and
+	 * committing it CONFIRMED, unprotected, is exactly the 2026-09-26
+	 * incident shape again. So this build refuses the COMMIT outright --
+	 * a valid, well-formed request that policy declines -- rather than
+	 * silently choosing between those two bad outcomes: the host gets an
+	 * explicit STATUS_INVAL with zero downtime, the active slot is left
+	 * completely untouched, and the very next OTA_BEGIN starts a fresh
+	 * session normally (h_begin has no state precondition). A pre-marker
+	 * image stays installable only via SWD/factory programming.
+	 * h_rollback (~905-925 below) is unchanged: rolling back to a
+	 * markerless slot that already ran still commits CONFIRMED, because
+	 * that image has booted successfully on this unit before -- it is not
+	 * a fresh, unproven image for the FWDGT to guard. */
+	if (!ota_image_trial_capable((const uint8_t *)ota_fmc_flash_ptr(ota_inactive_base()),
+	                              s_img_len)) {
+		s_state = OTA_ST_ERROR;
+		s_err   = 8u; /* markerless/non-confirm-capable image: COMMIT refused */
+		return STATUS_INVAL;
+	}
 	if (!meta_commit(s_inactive,
 	                 true,
 	                 s_fw_version /* 0 = legacy BEGIN, unknown */,
 	                 s_img_len,
 	                 s_img_crc,
-	                 commit_flags,
+	                 OTA_META_FLAG_TRIAL,
 	                 0u,
 	                 0xFFu)) {
 		s_state = OTA_ST_ERROR;
@@ -912,8 +928,12 @@ static gd32_bridge_status_t h_rollback(void)
      * marker -- same ota_image_trial_capable() COMMIT uses, read from
      * `other`'s own base rather than the declared cur.fw_version[other]
      * (see h_commit's comment for why the declared version is no longer
-     * trusted for this decision, and for the same "markerless commits
-     * CONFIRMED, not TRIAL-forever" policy this rollback path shares). */
+     * trusted for this decision). Unlike COMMIT, which now REFUSES a
+     * markerless image outright (policy closed on PR #246, see h_commit
+     * above), ROLLBACK still commits a markerless target CONFIRMED: that
+     * slot's metadata record already proves it booted successfully on
+     * this unit before, so it is not a fresh, unproven image the FWDGT
+     * needs to guard here. */
 	uint32_t other_base = 0u;
 	if (!ota_slot_base_checked(other, &other_base)) {
 		return STATUS_INVAL; /* unreachable: `other` is always A/B */

@@ -270,26 +270,25 @@ static inline bool ota_image_bootable(uint32_t base, const uint8_t *img, uint32_
  * scan against the built .bin as a build-time gate: a slot image
  * produced without a findable marker fails the build.
  *
- * Policy, stated plainly (do not soften this on a future edit): ONLY an
- * image that carries this marker (with the confirm-capability bit set)
- * ever gets the FWDGT safety net. A markerless image -- any build older
- * than this change, INCLUDING the 2026-09-26 incident image itself
- * (built from a pre-marker tree) -- commits/rolls back CONFIRMED and is
- * NOT protected: a bad markerless image still needs a bench SWD
- * recovery, exactly as before this fix existed. That is a deliberate
- * trade-off, not an oversight: forcing TRIAL onto a markerless image
- * instead would make the FWDGT revert it (or, with no older CONFIRMED
- * record to fall back to, reset-loop it every ~32.8 s) even when that
- * image is perfectly healthy, because an old app has no confirm path at
- * all -- it never calls ota_note_frame()/ota_confirm_tick(), so nothing
- * would ever clear a TRIAL flag forced onto it. The previous cut's
- * "unknown fw_version defaults to TRIAL" policy is deliberately NOT
- * carried forward as "no marker defaults to TRIAL": that default was a
- * judgement call under a weaker signal (a declared version the host
- * could get wrong, as 2026-09-26 proved) and does not automatically
- * transfer to a signal read from the image's own bytes -- whether some
- * other opt-in default belongs here is a maintainer decision left open
- * on PR #246. */
+ * Policy, stated plainly (do not soften this on a future edit; CLOSED on
+ * PR #246): ONLY an image that carries this marker (with the
+ * confirm-capability bit set) ever gets the FWDGT safety net. A
+ * markerless image -- no marker at all, or a marker whose
+ * confirm-capability bit is clear -- has no confirm path at all: it
+ * never calls ota_note_frame()/ota_confirm_tick(), so nothing would ever
+ * clear a TRIAL flag forced onto it. Forcing TRIAL onto it would instead
+ * make the FWDGT revert it (or, with no older CONFIRMED record to fall
+ * back to, reset-loop it every ~32.8 s) even when the image is perfectly
+ * healthy; committing it CONFIRMED and unprotected is exactly the
+ * 2026-09-26 incident shape again. `h_commit()` (src/ota.c) therefore
+ * REFUSES the OTA_COMMIT outright for such an image -- STATUS_INVAL, a
+ * dedicated s_err code, the active slot left untouched, the next
+ * OTA_BEGIN unaffected -- rather than choosing between those two bad
+ * outcomes. A pre-marker image stays installable only via SWD/factory
+ * programming. `h_rollback()` (src/ota.c) is unchanged by this: rolling
+ * back to a markerless slot that already ran on this unit still commits
+ * CONFIRMED, because that image has booted here before and is not the
+ * fresh, unproven case this guard exists for. */
 #define OTA_TRIAL_MARKER_MAGIC_BYTES \
 	{ 'G', 'D', '3', '2', 'B', 'R', 'I', 'D', 'G', 'E', '-', 'T', 'R', 'I', 'A', 'L' }
 #define OTA_TRIAL_MARKER_STRUCT_VER 1u

@@ -878,7 +878,14 @@ ZTEST(gd32_bridge_ota, test_rollback_still_uses_metadata_active_slot)
  * parallel harness.  BEGIN/WRITE/VERIFY never touch the metadata pages
  * (only the image slot), so a case may plant arbitrary metadata via
  * write_meta_record() BEFORE calling this and have it survive intact up
- * to the COMMIT dispatch the case makes afterwards. */
+ * to the COMMIT dispatch the case makes afterwards.
+ *
+ * The staged image carries a confirm-capable trial marker (policy closed
+ * on PR #246, src/ota.c's h_commit(): a markerless image is now REFUSED
+ * at COMMIT, not committed CONFIRMED) -- the #74 page-selection cases
+ * this feeds are about meta_commit()'s rank rule, independent of the
+ * trial-marker downgrade guard, so they need COMMIT to actually reach
+ * meta_commit() rather than being refused before it. */
 static void drive_to_verified(void)
 {
 	uint32_t other_base = 0u;
@@ -889,9 +896,17 @@ static void drive_to_verified(void)
 	 * -- satisfies ota_image_bootable() (#755) so COMMIT's bootability
 	 * guard doesn't itself reject the session before reaching
 	 * meta_commit. */
-	uint8_t img[8];
+	uint8_t img[TEST_IMG_LEN] = { 0 };
 	put32(&img[0], 0x20010000u);
 	put32(&img[4], other_base | 1u);
+	const uint8_t  magic[16] = OTA_TRIAL_MARKER_MAGIC_BYTES;
+	const uint16_t sv        = OTA_TRIAL_MARKER_STRUCT_VER;
+	const uint16_t cap       = OTA_TRIAL_CAP_CONFIRM;
+	memcpy(&img[TEST_MARKER_OFFSET], magic, sizeof magic);
+	img[TEST_MARKER_OFFSET + 16u] = (uint8_t)(sv & 0xFFu);
+	img[TEST_MARKER_OFFSET + 17u] = (uint8_t)(sv >> 8);
+	img[TEST_MARKER_OFFSET + 18u] = (uint8_t)(cap & 0xFFu);
+	img[TEST_MARKER_OFFSET + 19u] = (uint8_t)(cap >> 8);
 	const uint32_t img_len = (uint32_t)sizeof(img);
 	const uint32_t crc     = ota_crc32(0u, img, img_len);
 
@@ -1910,19 +1925,41 @@ static gd32_bridge_status_t commit_cycle_marker(bool with_marker, bool cap_bit)
 	return ota_dispatch(CMD_OTA_COMMIT, NULL, 0u, reply, sizeof reply, &rlen);
 }
 
-ZTEST(gd32_bridge_ota, test_commit_no_marker_confirms_no_trial)
+ZTEST(gd32_bridge_ota, test_commit_no_marker_refused)
 {
-	/* A pre-marker (or otherwise markerless) image cannot generate the
-	 * confirm handshake, so committing it TRIAL would gate the wire
-	 * BUSY with nothing to ever clear it -- must commit CONFIRMED. */
+	/* Policy (closed on PR #246): a pre-marker (or otherwise markerless)
+	 * image cannot generate the confirm handshake, so it is REFUSED at
+	 * COMMIT -- STATUS_INVAL, metadata and active slot untouched, no
+	 * reset -- rather than committed CONFIRMED and unprotected. See
+	 * h_commit()'s comment (src/ota.c). */
 	reset_model();
-	zassert_equal(commit_cycle_marker(false, false), STATUS_OK);
+	uint32_t len[2];
+	len[TEST_RUNNING_SLOT] = TEST_IMG_LEN;
+	len[TEST_OTHER_SLOT]   = 0u;
+	write_meta_record_flags(OTA_META_REC0, 5u, TEST_RUNNING_SLOT, 0x01u, len, 0u /* CONFIRMED */);
 
-	ota_meta_record_t newest;
+	zassert_equal(commit_cycle_marker(false, false), STATUS_INVAL);
+
+	ota_meta_record_t after;
 	uint32_t          which;
-	zassert_true(meta_current_for_test(&newest, &which));
-	zassert_equal(newest.flags, 0u, "an image with no trial marker must commit CONFIRMED");
-	zassert_equal(g_reset_calls, 1u, "a successful COMMIT still resets on real silicon");
+	zassert_true(meta_current_for_test(&after, &which));
+	zassert_equal(which, OTA_META_REC0, "a refused COMMIT must not touch either metadata page");
+	zassert_equal(after.counter, 5u, "a refused COMMIT must leave the metadata record untouched");
+	zassert_equal(
+	    after.active_slot, TEST_RUNNING_SLOT, "a refused COMMIT must not flip the active slot");
+	zassert_equal(after.flags, 0u, "a refused COMMIT must not touch flags");
+	zassert_equal(g_reset_calls, 0u, "a refused COMMIT must not reset -- no reboot on refusal");
+
+	/* The very next OTA_BEGIN must still work: h_begin has no
+	 * precondition on the OTA_ST_ERROR the refusal above left behind. */
+	uint8_t  reply[8];
+	size_t   rlen = 0u;
+	uint8_t  req[8];
+	wr_u32(&req[0], TEST_IMG_LEN);
+	wr_u32(&req[4], 0u);
+	zassert_equal(ota_dispatch(CMD_OTA_BEGIN, req, sizeof req, reply, sizeof reply, &rlen),
+	              STATUS_OK,
+	              "a fresh OTA_BEGIN after a refused COMMIT must still succeed");
 }
 
 ZTEST(gd32_bridge_ota, test_commit_marker_confirm_capable_sets_trial)
@@ -1938,20 +1975,20 @@ ZTEST(gd32_bridge_ota, test_commit_marker_confirm_capable_sets_trial)
 	              "a confirm-capable marker must get TRIAL protection");
 }
 
-ZTEST(gd32_bridge_ota, test_commit_marker_no_confirm_bit_confirms_no_trial)
+ZTEST(gd32_bridge_ota, test_commit_marker_no_confirm_bit_refused)
 {
 	/* Marker present (so a future image COULD advertise other
 	 * capabilities) but the confirm-capability bit is clear: this image
-	 * still cannot generate the confirm handshake, so it must not be
-	 * trusted with TRIAL either. */
+	 * still cannot generate the confirm handshake, so ota_image_trial_capable()
+	 * reads it exactly like a markerless image and COMMIT refuses it too
+	 * (policy closed on PR #246, see h_commit()'s comment, src/ota.c). */
 	reset_model();
-	zassert_equal(commit_cycle_marker(true, false), STATUS_OK);
+	zassert_equal(commit_cycle_marker(true, false), STATUS_INVAL);
 
 	ota_meta_record_t newest;
 	uint32_t          which;
-	zassert_true(meta_current_for_test(&newest, &which));
-	zassert_equal(
-	    newest.flags, 0u, "a marker without the confirm-capability bit must not arm TRIAL");
+	zassert_false(meta_current_for_test(&newest, &which),
+	              "a refused COMMIT must leave metadata untouched (still no valid record)");
 }
 
 ZTEST(gd32_bridge_ota, test_rollback_target_no_marker_confirms_no_trial)
