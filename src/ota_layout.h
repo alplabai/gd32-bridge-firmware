@@ -179,9 +179,11 @@ static inline bool ota_boot_candidate_ok(const ota_meta_record_t *r, bool wdt_fi
  * Returns the winning index into `cands`/`valid` (0..n-1), or -1 if
  * NOTHING is even valid -- the genuine "nothing to boot" case the
  * recovery WFI loop exists for. */
-static inline int
-ota_boot_select(const ota_meta_record_t **cands, const bool *valid, int n, bool wdt_fired,
-               bool *last_resort_out)
+static inline int ota_boot_select(const ota_meta_record_t **cands,
+                                  const bool               *valid,
+                                  int                       n,
+                                  bool                      wdt_fired,
+                                  bool                     *last_resort_out)
 {
 	*last_resort_out = false;
 	for (int i = 0; i < n; ++i) {

@@ -506,7 +506,7 @@ uint8_t bridge_hw_reset_reason(void)
      * RCU_RSTSCK read instead, same priority order, and clear RSTFC here
      * (this function becomes the sole owner of that clear on this path,
      * same as it always was before the bootloader-stash rework existed). */
-	uint32_t   rstsck    = RTC_BKP8;
+	uint32_t   rstsck     = RTC_BKP8;
 	const bool from_stash = (rstsck != 0u);
 	if (!from_stash) {
 		rstsck = RCU_RSTSCK;

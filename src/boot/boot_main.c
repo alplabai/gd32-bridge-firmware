@@ -207,7 +207,7 @@ int main(void)
 
 	ota_meta_record_t        a, b;
 	const ota_meta_record_t *cands[2];
-	const int                n = meta_candidates(&a, &b, cands);
+	const int                n        = meta_candidates(&a, &b, cands);
 	bool                     valid[2] = { false, false };
 	for (int i = 0; i < n; ++i) {
 		valid[i] = active_slot_valid(cands[i]);

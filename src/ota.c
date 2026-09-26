@@ -461,9 +461,9 @@ static volatile bool s_frame_seen; /* a wire frame arrived since boot (the confi
  * the erase target there would erase the WRONG record). */
 static bool find_running_slot_record(ota_meta_record_t *out, uint32_t *which_addr)
 {
-	ota_meta_record_t a, b;
-	const bool        va   = meta_read(OTA_META_REC0, &a);
-	const bool        vb   = meta_read(OTA_META_REC1, &b);
+	ota_meta_record_t        a, b;
+	const bool               va        = meta_read(OTA_META_REC0, &a);
+	const bool               vb        = meta_read(OTA_META_REC1, &b);
 	const ota_meta_record_t *best      = NULL;
 	uint32_t                 best_addr = 0u;
 	if (va && a.active_slot == OTA_RUNNING_SLOT) {
@@ -495,9 +495,8 @@ void ota_boot_init(void)
 
 	ota_meta_record_t run_rec;
 	uint32_t          run_rec_which; /* unused here; ota_confirm_tick() needs it */
-	const bool        have_run_rec = find_running_slot_record(&run_rec, &run_rec_which);
-	const bool        run_rec_trial =
-	    have_run_rec && (run_rec.flags & OTA_META_FLAG_TRIAL) != 0u;
+	const bool        have_run_rec  = find_running_slot_record(&run_rec, &run_rec_which);
+	const bool        run_rec_trial = have_run_rec && (run_rec.flags & OTA_META_FLAG_TRIAL) != 0u;
 	if (run_rec_trial) {
 		s_trial = true; /* fresh (or re-armed last-resort) trial boot */
 	}
@@ -526,8 +525,7 @@ void ota_boot_init(void)
 		ota_meta_record_t newest;
 		uint32_t          which;
 		if (meta_pick_newest(&a, va, &b, vb, &newest, &which) &&
-		    newest.active_slot != OTA_RUNNING_SLOT &&
-		    (newest.flags & OTA_META_FLAG_TRIAL) != 0u) {
+		    newest.active_slot != OTA_RUNNING_SLOT && (newest.flags & OTA_META_FLAG_TRIAL) != 0u) {
 			ota_fault_loop_clear();
 			(void)meta_commit(OTA_RUNNING_SLOT, false, 0u, 0u, 0u, 0u, 0u, newest.active_slot);
 		}
