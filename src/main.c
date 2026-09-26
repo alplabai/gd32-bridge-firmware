@@ -31,6 +31,7 @@
 
 #include <stdint.h>
 
+#include "ota.h"
 #include "protocol.h"
 #include "transport.h"
 
@@ -56,6 +57,10 @@ __attribute__((weak)) void __WFI(void)
 int main(void)
 {
 	bridge_hw_init();
+	/* Reconcile OTA trial/confirm state (bench fact 2026-09-26) BEFORE
+	 * the transports come up: a trial-gated boot must answer BUSY to
+	 * the very first frame either transport decodes. */
+	ota_boot_init();
 	transport_spi_init();
 	transport_i2c_init();
 

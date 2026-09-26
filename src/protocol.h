@@ -36,7 +36,18 @@
  * firmware-version.txt, surfaced via GET_BUILD_ID ("<ver>+<sha>").  The
  * two axes move independently. */
 #define PROTOCOL_VERSION_MAJOR 0u
-#define PROTOCOL_VERSION_MINOR 10u
+/* v0.12 (bench fact 2026-09-26): the trial/confirm watchdog fallback makes
+ * protocol_dispatch() answer STATUS_BUSY for EVERY opcode -- not just the
+ * handful that already documented a BUSY case -- for the whole window
+ * between a TRIAL boot and its confirm.  That is new, wire-observable
+ * behaviour a host must be ready for, so this is a MINOR bump per
+ * extending-the-gd32-bridge-protocol's own rule ("adding an opcode = MINOR
+ * bump"): no opcode/payload actually changed, but a host built against an
+ * OLDER MINOR has no reason to expect BUSY from e.g. CMD_PING, so it is
+ * exactly the same "older hosts don't need it, newer ones should know"
+ * shape that rule exists for.  0.11 is already taken by the REG_ON PR off
+ * dev; this uses 0.12 to avoid a collision. */
+#define PROTOCOL_VERSION_MINOR 12u
 #define PROTOCOL_VERSION_PATCH 0u
 
 /* v0.7: opt-in link features negotiated via CMD_LINK_FEATURES.

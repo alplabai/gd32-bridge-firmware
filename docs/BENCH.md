@@ -432,6 +432,122 @@ regression — nothing regressed, because nothing ran there before.
 SWD probe, and be ready to reflash both slots plus the metadata records if
 the erase corrupts the running image mid-cycle.
 
+### 2.5 — trial/confirm + watchdog fallback (bench fact 2026-09-26, E1M-V2M103)
+
+**Proves:** a TRIAL image that hangs before `main()` (the exact incident
+this fix responds to: a slot-B image passed VERIFY/COMMIT then hung in
+stock `SystemInit` spinning on `HXTALSTB`) reverts via the armed FWDGT
+(`src/boot/boot_main.c`, `OTA_TRIAL_FWDGT_RELOAD` ≈ 32.8 s nominal at
+IRC32K/256 -- nominal, not an asserted tolerance, see DESIGN.md) instead of
+bricking the bridge on both transports; that a healthy TRIAL image confirms
+itself (`ota_confirm_tick()`, `src/ota.c`) on the first wire frame after
+boot, rather than staying gated forever; and that a failed/interrupted
+confirm degrades to the OLDER, already-confirmed record surviving, not to
+"only the TRIAL record is left".
+
+**Marker precondition (bench fact 2026-09-26 follow-up):** TRIAL is now
+decided from a marker baked into the image (`ota_image_trial_capable()`,
+`src/ota_layout.h`; `tools/check_trial_marker.py` fails the build if it is
+missing), not from the fw_version the host declares in `OTA_BEGIN`. Both
+the KNOWN-GOOD image in step 1 and the KNOWN-BAD image in step 2 must be
+built from this tree (any `gd32-bridge-slot-a`/`-b` build carries the
+marker automatically) so this runbook actually exercises the TRIAL path --
+an image built without the marker (a pre-fix binary, or one hand-assembled
+without going through this repo's build) commits/rolls back straight to
+CONFIRMED and none of steps 1-6 below observe TRIAL/watchdog behaviour at
+all.
+
+**Brick-risk precondition -- read before running step 2:** this step's
+bad-image case is the one place in this runbook that DELIBERATELY commits
+an image known not to come up. That is only safe with the NEW bootloader
+(this fix) already flashed AND read back over SWD to confirm the binary in
+flash is the one just built -- on an OLD (pre-fix) bootloader, the exact
+same bad image bricks the part with no watchdog to revert it, recoverable
+only via a bench SWD probe. Do not run step 2 against a part whose
+bootloader has not been freshly, verifiably reflashed.
+
+**Procedure:**
+1. Commit a KNOWN-GOOD image (one that reaches `main()` and services the
+   wire normally) via the usual OTA cycle. Immediately after the reset,
+   issue `CMD_PING` repeatedly and confirm the reply is `STATUS_BUSY` with
+   an empty payload until the confirm tick's own reset lands, then `STATUS_OK`
+   on the reboot that follows.  Measure the total window: it should be one
+   reboot, not the ~32.8 s watchdog window (a confirmed image should never
+   need the watchdog).
+2. Commit a KNOWN-BAD image built to hang before `main()` (e.g. an infinite
+   loop before the reset handler reaches `main`, or a genuine repro of the
+   `HXTALSTB` spin if the clock config under test can reproduce it safely).
+   Time from the self-reset to the fallback boot's console/link becoming
+   responsive again; confirm it lands close to the ~32.8 s nominal reload
+   and that the bridge is servicing PING again on the *previous* (pre-OTA)
+   image, not the hung one.
+3. Confirm `CMD_RESET_REASON` on the fallback boot reports **WDT** (decoded
+   from the bootloader's `RTC_BKP8` stash, not a live `RCU_RSTSCK` read --
+   see DESIGN.md's "reset-cause ownership"; this is the FWDGTRSTF-priority
+   reorder ahead of EPRSTF, so confirm the fallback specifically reports WDT
+   and not NRST_PIN even if the part's own reset tree happens to latch both)
+   and confirm a SECOND OTA attempt onto the same (now doubly-rejected) slot
+   is not itself blocked by a stale TRIAL flag from the first attempt
+   (`ota_boot_init()`'s self-heal path, which also clears that slot's
+   `slot_valid` bit -- confirm a ROLLBACK attempt targeting the
+   just-rejected slot is refused, not merely a fresh BEGIN).
+4. With a debugger attached and a breakpoint set inside the TRIAL image
+   before `ota_confirm_tick()` would fire, confirm the core halt does NOT
+   let the FWDGT reset it out from under the debug session (`DBG_FWDGT_HOLD`
+   -- the counter FREEZES while halted, it does not keep running).
+5. **Forced confirm-commit failure:** with a way to force
+   `ota_fmc_program()`/`ota_fmc_erase_range()` to fail during the confirm
+   commit specifically (a debug hook, or a deliberately corrupted/locked
+   metadata page if the bench setup allows inducing one safely), commit a
+   KNOWN-GOOD TRIAL image, let it boot, send a frame, and force the confirm
+   commit to fail. Confirm: no reset happens (the image keeps running,
+   still gated `STATUS_BUSY`); the watchdog is still armed and, left alone,
+   eventually reverts to the previous confirmed image at the nominal
+   window; and post-revert, the OLDER confirmed metadata record is intact
+   (read it back) -- this is the `target_override` fix (`meta_commit()`,
+   `src/ota.c`): the confirm's erase target is the TRIAL record's OWN page,
+   never the other page holding the fallback.
+6. **Watch 60 s after a successful confirm reboot** (comfortably past the
+   ~32.8 s nominal window) to prove `NVIC_SystemReset()` actually stops the
+   FWDGT: the confirmed (non-TRIAL) image never arms a watchdog of its own,
+   so if the part is still alive and un-reset 60 s later, the confirm
+   reboot genuinely cleared the prior arming rather than leaving a stale
+   countdown running across the reboot.
+
+**PASS:** the good-image case confirms in one reboot with no ~32.8 s stall;
+the bad-image case recovers automatically within roughly the nominal FWDGT
+window and lands back on a serviceable link; `CMD_RESET_REASON` reports WDT
+correctly after the fallback; a second OTA/ROLLBACK attempt is not wedged by
+or able to re-select the first attempt's rejected slot; a halted debug
+session survives past the nominal timeout without a spurious reset; a
+forced confirm-commit failure leaves the older confirmed record intact and
+still eventually reverts, un-reset by the failed commit itself; the part
+survives 60 s post-confirm-reboot with no further reset.
+
+**FAIL:** the good image never confirms (stays gated on `STATUS_BUSY`
+forever); the bad image's hang is NOT reverted (bridge stays dead — the
+original 2026-09-26 incident, unfixed); `CMD_RESET_REASON` reports the wrong
+cause after the fallback; a second OTA/ROLLBACK attempt is refused because
+of stale TRIAL state OR is able to re-select the rejected slot; a debugger
+halt trips a spurious watchdog reset; a forced confirm-commit failure
+destroys the older confirmed record (leaving ONLY the TRIAL record); or a
+watchdog reset recurs more than ~32.8 s after a successful confirm reboot.
+
+**Falsifies:** the whole premise of this fix -- that arming a device-side
+watchdog around an unconfirmed OTA image, gated by a host-driven confirm
+signal, converts a boot-time hang into an automatic, bounded-time recovery
+instead of a bricked link needing a bench SWD probe, AND that an
+interrupted confirm degrades gracefully to "reverted" instead of "the only
+record left is the one that was never confirmed."
+
+**Brick risk:** step 2 is real brick risk on anything but a freshly
+verified NEW bootloader (see the precondition above) -- recovery is a bench
+SWD probe. The rest of this step (1, 3, 4, 5, 6) carries no risk beyond
+what Phase 2's other steps already carry: this is explicitly the safety net
+for boot hangs a prior OTA attempt could introduce, so a bad result in
+those sub-steps means "no worse than before this fix landed," not a new
+brick class.
+
 ---
 
 ## Phase 3 — I2C transport (#83)

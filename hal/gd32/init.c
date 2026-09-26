@@ -441,11 +441,17 @@ extern void bridge_hw_dsp_pump(void);
  * page-region per tick so BEGIN never blocks the SPI reply inline.  No-op
  * in the OTA-inert build. */
 extern void ota_erase_tick(void);
+/* OTA trial/confirm pump (bench fact 2026-09-26, E1M-V2M103): once the
+ * wire has noted a frame during an unconfirmed trial, commits the slot
+ * permanent and reboots.  No-op in the OTA-inert build, and a no-op on
+ * every tick outside an active trial. */
+extern void ota_confirm_tick(void);
 
 void bridge_hw_tick(void)
 {
 	bridge_hw_dsp_pump();
 	ota_erase_tick();
+	ota_confirm_tick();
 }
 
 /* ----------------------------------------------------------------- */
@@ -455,45 +461,78 @@ void bridge_hw_tick(void)
 
 uint8_t bridge_hw_reset_reason(void)
 {
-	/* Read RCU_RSTSCK (reset/clock control status register, GD32G5xx
-     * Reference Manual §6.6.13) and decode the sticky reset-cause
-     * flags in the high byte: PORRSTF (bit 27), BORRSTF (25),
-     * EPRSTF (26, NRST pin), SWRSTF (28), FWDGTRSTF (29),
-     * WWDGTRSTF (30), LPRSTF (31).
+	/* Decoded from the BOOTLOADER's stash (RTC_BKP8, backup-domain,
+     * survives NVIC_SystemReset -- reset-cause ownership rework, bench
+     * fact 2026-09-26), NOT a live RCU_RSTSCK read: src/boot/boot_main.c
+     * reads RCU_RSTSCK (reset/clock control status register, GD32G5xx
+     * Reference Manual §6.6.13) exactly ONCE per boot, stashes the raw
+     * value here, then clears RSTFC before jumping -- so by the time this
+     * application code runs, RCU_RSTSCK has already been reset to a clean
+     * slate for whatever NEXT reset follows.  A live read here would see
+     * only causes from AFTER the bootloader ran (normally none), not what
+     * actually preceded this boot.  See src/boot/boot_main.c's file
+     * header for the full rationale.
      *
-     * The hardware can latch multiple flags across nested resets, so
-     * we decode in coldest-first priority order: a power-on event
-     * dominates a brownout, which dominates an external-pin reset,
-     * which dominates a watchdog or software trigger.  Encoded byte
-     * matches the host's `gd32g553_reset_cause_t` in
-     * <alp/chips/gd32g553.h>:
+     * Sticky bits in the high byte: PORRSTF (bit 27), BORRSTF (25),
+     * EPRSTF (26, NRST pin), SWRSTF (28), FWDGTRSTF (29), WWDGTRSTF (30),
+     * LPRSTF (31) -- decoded in coldest-first priority order, WITH ONE
+     * DELIBERATE EXCEPTION: FWDGTRSTF/WWDGTRSTF is checked BEFORE EPRSTF.
+     * The GD32G5x3 can latch EPRSTF alongside an internally-generated
+     * watchdog reset (check the datasheet's reset-tree section for the
+     * exact condition on this part); if a caller wants the DOMINANT
+     * cause, a real watchdog event must win over a coincidentally-latched
+     * EPRSTF bit, not the other way around.  Power-on and brownout still
+     * take priority over everything -- those really are "colder" than a
+     * watchdog.  Encoded byte matches the host's `gd32g553_reset_cause_t`
+     * in <alp/chips/gd32g553.h>:
      *
      *   0 = UNKNOWN, 1 = POWER_ON, 2 = NRST_PIN, 3 = SOFT,
      *   4 = WDT, 5 = BROWNOUT, 6 = LOWPOWER.
      *
-     * RSTFC (bit 24) clears every cause flag in one write; the vendor
-     * helper `rcu_all_reset_flag_clear()` is functionally identical
-     * but we keep the access inline to avoid pulling rcu.c stages we
-     * don't otherwise need.  After the write the next reader sees
-     * UNKNOWN unless something resets the chip again. */
-	const uint32_t rstsck = RCU_RSTSCK;
-	uint8_t        cause  = 0u; /* UNKNOWN */
+     * Clear-on-read: the stash is zeroed after decoding (needs the same
+     * backup-domain write-unlock the bootloader uses), so the next reader
+     * sees UNKNOWN unless the bootloader stashes a fresh cause on a later
+     * boot.
+     *
+     * Fallback (C1, adversarial-verify finding): the stash is only ever
+     * written by THIS fix's bootloader.  A RTC_BKP8 == 0 read here means
+     * one of two things this function cannot tell apart -- and does not
+     * need to: (a) the full-flash, non-partitioned image (no bootloader
+     * runs at all, see CMakeLists.txt's BRIDGE_OTA_PARTITIONED option), or
+     * (b) an OLD (pre-this-fix) bootloader paired with this new app, which
+     * never stashed anything.  Reading RTC_BKP8 == 0 unconditionally as
+     * UNKNOWN would silently regress CMD_RESET_REASON to "always UNKNOWN"
+     * on both of those real configurations.  Fall back to a LIVE
+     * RCU_RSTSCK read instead, same priority order, and clear RSTFC here
+     * (this function becomes the sole owner of that clear on this path,
+     * same as it always was before the bootloader-stash rework existed). */
+	uint32_t   rstsck     = RTC_BKP8;
+	const bool from_stash = (rstsck != 0u);
+	if (!from_stash) {
+		rstsck = RCU_RSTSCK;
+	}
+	uint8_t cause = 0u; /* UNKNOWN */
 
 	if (rstsck & RCU_RSTSCK_PORRSTF) {
 		cause = 1u; /* POWER_ON */
 	} else if (rstsck & RCU_RSTSCK_BORRSTF) {
 		cause = 5u; /* BROWNOUT */
+	} else if (rstsck & (RCU_RSTSCK_FWDGTRSTF | RCU_RSTSCK_WWDGTRSTF)) {
+		cause = 4u; /* WDT */
 	} else if (rstsck & RCU_RSTSCK_EPRSTF) {
 		cause = 2u; /* NRST_PIN */
 	} else if (rstsck & RCU_RSTSCK_LPRSTF) {
 		cause = 6u; /* LOWPOWER */
-	} else if (rstsck & (RCU_RSTSCK_FWDGTRSTF | RCU_RSTSCK_WWDGTRSTF)) {
-		cause = 4u; /* WDT */
 	} else if (rstsck & RCU_RSTSCK_SWRSTF) {
 		cause = 3u; /* SOFT */
 	}
 
-	RCU_RSTSCK |= RCU_RSTSCK_RSTFC;
+	RCU_APB1EN |= RCU_APB1EN_PMUEN;
+	PMU_CTL0 |= PMU_CTL0_BKPWEN;
+	RTC_BKP8 = 0u; /* clear-on-read, whichever source answered */
+	if (!from_stash) {
+		RCU_RSTSCK |= RCU_RSTSCK_RSTFC;
+	}
 	return cause;
 }
 
