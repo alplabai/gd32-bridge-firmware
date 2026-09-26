@@ -157,11 +157,13 @@ translates internally.
 sideband bits (18, 19) that are not E1M pads at all -- `BT_REG_ON`
 (GD32 `PE14`) and `WL_REG_ON` (GD32 `PE15`), the Murata
 LBEE5HY2FY-922 Wi-Fi/BT module's power enables. Unlike the E1M pads,
-which boot INPUT+PULL_UP, these two boot **OUTPUT driven LOW**
-(module off); the module has internal 50 k pull-downs on both, so an
-input pad would leave the module's power state indeterminate. Module
-power is host policy, not a firmware default: a host powers the
-module by writing bits 18/19 high via `CMD_GPIO_WRITE`. This table
+which boot INPUT, high-Z (no internal pull -- the carrier's own
+pulls define the default; see the boot-loop comment in
+[`hal/gd32/init.c`](hal/gd32/init.c)), these two boot **OUTPUT driven
+LOW** (module off); the module has internal 50 k pull-downs on both,
+so an input pad would leave the module's power state indeterminate.
+Module power is host policy, not a firmware default: a host powers
+the module by writing bits 18/19 high via `CMD_GPIO_WRITE`. This table
 (source of truth: `gpio_pad_map[]` in
 [`hal/gd32/gpio.c`](hal/gd32/gpio.c)) is the owner of the bit layout --
 `docs/gd32-bridge-protocol.md` (alp-sdk) links back here instead of

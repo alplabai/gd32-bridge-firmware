@@ -519,7 +519,8 @@ already the slowest class the part offers).
    reads 1 before `GPIOC_CTL` field `CTL13[1:0]` reads `01`.
 2. **E1M IO pads.** Scope one E1M IO pad (e.g. IO8) across the host's
    first `CMD_GPIO_WRITE` commanding it HIGH; confirm the pad rises
-   monotonically from the pull-up level with no LOW dip.
+   monotonically from its boot level (high-Z, no internal pull -- see
+   `hal/gd32/init.c`) with no LOW dip.
 3. **GPIO read reports the pad, not the write.** Command an E1M IO pad
    HIGH via `CMD_GPIO_WRITE`, then pull it toward ground through a
    resistor sized to cross the input threshold against the push-pull
