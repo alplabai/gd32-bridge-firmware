@@ -148,7 +148,7 @@ typedef struct {
  * LBEE5HY2FY-922 Wi-Fi/BT module's power enables (module has internal
  * 50 k pull-downs on both).  Named here, not just indexed, because
  * hal/gd32/init.c drives them differently from the rest of
- * `gpio_pad_map` (OUTPUT LOW at boot, not INPUT+PULL_UP -- see the
+ * `gpio_pad_map` (OUTPUT LOW at boot, not INPUT high-Z -- see the
  * boot loop in init.c and the pad-map comment in gpio.c).  REG_ON
  * power policy is the HOST's, not this firmware's: the GD32 only
  * proxies the line; it never drives it high on its own. */
