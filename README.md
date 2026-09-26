@@ -153,19 +153,23 @@ ADC and encoder maps in `hal/gd32/adc.c` (`adc_channels_map[]`) and
 Host code reaches a channel by its logical id; the firmware
 translates internally.
 
-`gpio_pad_map[]` is 20 entries: 18 E1M IO pads (bits 0-17) plus two
-sideband bits (18, 19) that are not E1M pads at all -- `BT_REG_ON`
+`gpio_pad_map[]` is 21 entries: 18 E1M IO pads (bits 0-17) plus three
+sideband bits (18, 19, 20) that are not E1M pads at all -- `BT_REG_ON`
 (GD32 `PE14`) and `WL_REG_ON` (GD32 `PE15`), the Murata
-LBEE5HY2FY-922 Wi-Fi/BT module's power enables. Unlike the E1M pads,
-which boot INPUT+PULL_UP, these two boot **OUTPUT driven LOW**
-(module off); the module has internal 50 k pull-downs on both, so an
-input pad would leave the module's power state indeterminate. Module
-power is host policy, not a firmware default: a host powers the
-module by writing bits 18/19 high via `CMD_GPIO_WRITE`. This table
-(source of truth: `gpio_pad_map[]` in
-[`hal/gd32/gpio.c`](hal/gd32/gpio.c)) is the owner of the bit layout --
-`docs/gd32-bridge-protocol.md` (alp-sdk) links back here instead of
-repeating it:
+LBEE5HY2FY-922 Wi-Fi/BT module's power enables, and `CAN_STBY` (GD32
+`PB13`), the shared standby line for the two on-module TCAN1044
+CAN-FD transceivers (U15/U16). Unlike the E1M pads, which boot
+INPUT+PULL_UP, these three boot **OUTPUT driven to a safe default**:
+REG_ON pads **LOW** (module off; both have internal 50 k pull-downs,
+so an input pad would leave power state indeterminate), CAN_STBY
+**HIGH** (both transceivers held in standby -- STB HIGH = standby,
+STB LOW = normal). Module/bus power-up is host policy, not a
+firmware default: a host powers the Wi-Fi/BT module by writing bits
+18/19 high, and takes the CAN bus live by writing bit 20 low, both
+via `CMD_GPIO_WRITE`. This table (source of truth: `gpio_pad_map[]`
+in [`hal/gd32/gpio.c`](hal/gd32/gpio.c)) is the owner of the bit
+layout -- `docs/gd32-bridge-protocol.md` (alp-sdk) links back here
+instead of repeating it:
 
 | Bit | GD32 pad | Signal      |
 |----:|----------|-------------|
@@ -189,17 +193,38 @@ repeating it:
 |  17 | PD1      | E1M IO35    |
 |  18 | PE14     | BT_REG_ON   |
 |  19 | PE15     | WL_REG_ON   |
+|  20 | PB13     | CAN_STBY    |
 
 Any GD32 reset (WDT, fault, OTA A/B swap, SE reset) drops both REG_ON
-lines low again -- the boot-time OUTPUT LOW default in
-[`hal/gd32/init.c`](hal/gd32/init.c) applies on every reset, not just
-cold power-on, so the Wi-Fi/BT module gets power-cycled along with it.
-The host must re-assert bits 18/19 after any GD32 reset; `CMD_RESET_REASON`
-is how a host detects one happened. Firmware v0.10 and earlier silently
-ignore writes to bits 18/19 and still return `STATUS_OK` -- these bits
-did not exist yet, so a host relying on them must require
-`PROTOCOL_VERSION_MINOR >= 11` (via `GET_VERSION`) before trusting
-that a bit 18/19 write actually powered the module.
+lines low and drives CAN_STBY high again -- the boot-time defaults in
+[`hal/gd32/init.c`](hal/gd32/init.c) apply on every reset, not just
+cold power-on, so the Wi-Fi/BT module gets power-cycled and the CAN
+bus goes back to standby along with it. The host must re-assert bits
+18/19/20 after any GD32 reset; `CMD_RESET_REASON` is how a host
+detects one happened. Firmware v0.10 and earlier silently ignore
+writes to bits 18/19 and still return `STATUS_OK` (bits did not exist
+yet); firmware v0.12 and earlier do the same for bit 20. A host
+relying on bits 18/19 must require `PROTOCOL_VERSION_MINOR >= 11`,
+and on bit 20 must require `PROTOCOL_VERSION_MINOR >= 13` (both via
+`GET_VERSION`), before trusting that the write actually took effect.
+
+**Merge-order note (bridge GPIO / REG_ON / CAN_STBY family):** this
+branch (`feat/can-stby-bridge-gpio`) is stacked on
+[`feat/wifi-bt-reg-on`](https://github.com/alplabai/gd32-bridge-firmware/pull/244)
+(#244), the branch that actually carries the bits 18/19 REG_ON work.
+[`fix/e1m-pads-boot-no-pull`](https://github.com/alplabai/gd32-bridge-firmware/pull/245)
+(#245, fw 0.2.13) is ALSO stacked on #244 but is a sibling of this
+branch, not an ancestor -- merge order for this family is **#244 ->
+{#245, this branch} in either order**, not #244 -> #245 -> this.
+[`feat/ota-trial-confirm-dev`](https://github.com/alplabai/gd32-bridge-firmware/pull/246)
+(#246, fw 0.2.15, protocol MINOR 12) is a SEPARATE branch off `dev`
+directly -- verified via `git merge-base --is-ancestor` and
+`gh pr list`'s `baseRefName` (both say `dev`, and #246 does not
+contain the REG_ON commits) -- it only happens to have claimed
+adjacent firmware/protocol version numbers. This branch's versions
+(firmware 0.2.16, protocol MINOR 13) are chosen to be higher than
+every open claim above so they cannot collide with #246 either,
+without depending on it.
 
 ## Cross-link
 

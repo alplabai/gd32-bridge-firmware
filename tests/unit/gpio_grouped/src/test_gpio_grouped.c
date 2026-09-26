@@ -209,6 +209,29 @@ ZTEST(gpio_grouped, test_reg_on_bits_route_to_gpioe_14_15)
 	zassert_equal(mock_bop[mock_port_index(GPIOE)], GPIO_PIN_14 | (GPIO_PIN_15 << 16));
 }
 
+ZTEST(gpio_grouped, test_can_stby_bit_routes_to_gpiob_13)
+{
+	/* Bit 20 (CAN_STBY) is sideband, not an E1M pad, but it still
+	 * routes through the same generic mask path -- prove it lands on
+	 * GPIOB PIN_13 and nowhere else. */
+	mock_reset();
+	mock_inputs[mock_port_index(GPIOB)] = GPIO_PIN_13;
+
+	uint32_t       levels = 0u;
+	const uint32_t mask   = (1u << 20);
+	zassert_equal(bridge_hw_gpio_read(mask, &levels), BRIDGE_HW_OK);
+	zassert_equal(levels, mask);
+	zassert_equal(mock_read_count[mock_port_index(GPIOB)], 1u);
+
+	mock_reset();
+	/* Simulate post-promotion state directly -- this test does not exercise
+	 * init.c's boot loop. */
+	for (size_t i = 0; i < GPIO_PAD_MAP_COUNT; ++i)
+		gpio_is_output[i] = true;
+	zassert_equal(bridge_hw_gpio_write(mask, 0u), BRIDGE_HW_OK);
+	zassert_equal(mock_bop[mock_port_index(GPIOB)], GPIO_PIN_13 << 16);
+}
+
 ZTEST(gpio_grouped, test_null_read_output_is_rejected_without_access)
 {
 	mock_reset();

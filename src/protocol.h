@@ -36,7 +36,7 @@
  * firmware-version.txt, surfaced via GET_BUILD_ID ("<ver>+<sha>").  The
  * two axes move independently. */
 #define PROTOCOL_VERSION_MAJOR 0u
-#define PROTOCOL_VERSION_MINOR 11u
+#define PROTOCOL_VERSION_MINOR 13u
 #define PROTOCOL_VERSION_PATCH 0u
 
 /* v0.7: opt-in link features negotiated via CMD_LINK_FEATURES.
@@ -103,7 +103,16 @@ typedef enum {
      * LBEE5HY2FY-922 Wi-Fi/BT module's power enables (sideband, not
      * an E1M pad; GPIO_PAD_BT_REG_ON/GPIO_PAD_WL_REG_ON in
      * hal/gd32/gd32_common.h).  Older hosts addressing only bits
-     * 0..17 are unaffected. */
+     * 0..17 are unaffected.
+     * v0.13: grew again, 20 to 21 bits -- bit 20 is CAN_STBY, the
+     * shared standby line for the two on-module TCAN1044 CAN-FD
+     * transceivers (sideband, not an E1M pad; GPIO_PAD_CAN_STBY).
+     * v0.12 is skipped here on purpose: it is reserved by the
+     * independent, not-stacked-on-this-branch feat/ota-trial-confirm-dev
+     * (#246), which bumped MINOR for an unrelated OTA wire change off
+     * dev directly. This branch stacks on feat/wifi-bt-reg-on (#244)
+     * instead (see README's merge-order note) and picks v0.13 so it
+     * cannot collide with #246's v0.12 whichever merges first. */
 	CMD_PWM_SET = 0x20,
 	CMD_PWM_GET = 0x21,
 	/* v0.3: sticky per-channel PWM tuning (align mode, dead time, fault
