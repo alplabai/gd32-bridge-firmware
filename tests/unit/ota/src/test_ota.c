@@ -279,6 +279,36 @@ static void write_meta_record_flags(uint32_t       addr,
 	memcpy(_host_ptr(addr), &rec, sizeof(rec));
 }
 
+/* write_meta_record_flags() plus an explicit per-slot fw_version -- the
+ * downgrade-guard tests below (bench fact 2026-09-26) need a REAL,
+ * intentional fw_version rather than the 0xFF-garbage
+ * write_meta_record_flags() otherwise leaves there (which happens to
+ * decode as a huge, "trial-capable" number and would mask a downgrade-
+ * guard regression by accident). */
+static void write_meta_record_flags_fw(uint32_t       addr,
+                                       uint32_t       counter,
+                                       uint8_t        active_slot,
+                                       uint8_t        slot_valid,
+                                       const uint32_t img_len[2],
+                                       const uint32_t fw_version[2],
+                                       uint8_t        flags)
+{
+	ota_meta_record_t rec;
+	memset(&rec, 0xFF, sizeof(rec));
+	rec.magic          = OTA_META_MAGIC;
+	rec.struct_version = OTA_META_STRUCT_VER;
+	rec.counter        = counter;
+	rec.active_slot    = active_slot;
+	rec.slot_valid     = slot_valid;
+	rec.flags          = flags;
+	rec.fw_version[0]  = fw_version[0];
+	rec.fw_version[1]  = fw_version[1];
+	rec.img_len[0]     = img_len[0];
+	rec.img_len[1]     = img_len[1];
+	rec.rec_crc32 = ota_crc32(0u, (const uint8_t *)&rec, offsetof(ota_meta_record_t, rec_crc32));
+	memcpy(_host_ptr(addr), &rec, sizeof(rec));
+}
+
 /* Read a metadata page directly out of the flash model (#74 tests below):
  * mirrors meta_read()'s own validity check (magic, struct_version, CRC
  * over the record up to rec_crc32) so a test can observe meta_commit's
@@ -1493,6 +1523,54 @@ ZTEST(gd32_bridge_ota, test_boot_init_heals_from_rejected_trial)
 	             "self-heal must repoint active at the running slot");
 	zassert_equal(newest.flags, 0u, "self-heal must clear TRIAL");
 	zassert_equal(newest.counter, 2u, "self-heal commits a new (higher-counter) record");
+	zassert_equal(newest.slot_valid, (uint8_t)(1u << TEST_RUNNING_SLOT),
+	             "self-heal must invalidate the rejected (TEST_OTHER_SLOT) slot so ROLLBACK "
+	             "can never re-select it");
+}
+
+ZTEST(gd32_bridge_ota, test_boot_init_heals_with_both_pages_valid)
+{
+	reset_model();
+	/* Both pages valid this time: REC0 = older CONFIRMED record naming
+	 * TEST_RUNNING_SLOT (rank 2 -- matches the running slot); REC1 =
+	 * newer TRIAL record naming TEST_OTHER_SLOT (rank 1 -- rejected).
+	 * Ranks differ (2 vs 1), so the self-heal commit's rank rule must
+	 * erase the LOWER-ranked page (REC1), preserving REC0 untouched --
+	 * the confirmed record that is actually running. */
+	uint32_t len0[2];
+	len0[TEST_RUNNING_SLOT] = 64u;
+	len0[TEST_OTHER_SLOT]   = 0u;
+	write_meta_record_flags(
+	    OTA_META_REC0, 1u, TEST_RUNNING_SLOT, (uint8_t)(1u << TEST_RUNNING_SLOT), len0, 0u);
+
+	uint32_t len1[2];
+	len1[TEST_RUNNING_SLOT] = 0u;
+	len1[TEST_OTHER_SLOT]   = 64u;
+	write_meta_record_flags(OTA_META_REC1,
+	                       2u,
+	                       TEST_OTHER_SLOT,
+	                       (uint8_t)(1u << TEST_OTHER_SLOT),
+	                       len1,
+	                       OTA_META_FLAG_TRIAL);
+
+	ota_boot_init();
+	zassert_false(ota_trial_unconfirmed(), "the record naming us (REC0) is not TRIAL");
+	zassert_equal(g_reset_calls, 0u, "self-heal must not reset");
+
+	ota_meta_record_t rec0;
+	zassert_true(read_meta_at(OTA_META_REC0, &rec0), "REC0 must survive the self-heal untouched");
+	zassert_equal(rec0.counter, 1u);
+	zassert_equal(rec0.active_slot, TEST_RUNNING_SLOT);
+
+	ota_meta_record_t newest;
+	uint32_t          which;
+	zassert_true(meta_current_for_test(&newest, &which));
+	zassert_equal(which, OTA_META_REC1, "the heal commit must land on REC1 (rank 1), not REC0 (rank 2)");
+	zassert_equal(newest.active_slot, TEST_RUNNING_SLOT);
+	zassert_equal(newest.flags, 0u);
+	zassert_equal(newest.slot_valid, (uint8_t)(1u << TEST_RUNNING_SLOT),
+	             "self-heal must invalidate the rejected TEST_OTHER_SLOT");
+	zassert_equal(newest.counter, 3u, "counter must exceed both prior records");
 }
 
 ZTEST(gd32_bridge_ota, test_confirm_tick_commits_and_reboots)
@@ -1511,7 +1589,15 @@ ZTEST(gd32_bridge_ota, test_confirm_tick_commits_and_reboots)
 
 	ota_note_frame();
 	ota_confirm_tick();
-	zassert_false(ota_trial_unconfirmed(), "a noted frame must let the tick confirm");
+	/* The gate stays CLOSED through the reset itself (item 6, bench fact
+	 * 2026-09-26): s_confirmed is deliberately not set before
+	 * ota_system_reset() -- a real reset never returns, so there is no
+	 * "confirmed but not yet rebooted" state on real silicon.  Proving
+	 * confirmation landed means simulating the NEXT boot: call
+	 * ota_boot_init() again and check that IT reads back the (now
+	 * flags=0) flash record. */
+	zassert_true(ota_trial_unconfirmed(),
+	             "the gate must stay closed through the reset -- s_confirmed is not set here");
 	zassert_equal(g_reset_calls, 1u, "confirm must reboot exactly once");
 
 	ota_meta_record_t newest;
@@ -1520,6 +1606,66 @@ ZTEST(gd32_bridge_ota, test_confirm_tick_commits_and_reboots)
 	zassert_equal(newest.active_slot, TEST_RUNNING_SLOT);
 	zassert_equal(newest.flags, 0u, "confirmed record must clear TRIAL");
 	zassert_equal(newest.counter, 2u, "confirm must bump the counter");
+
+	ota_boot_init(); /* simulates the reboot ota_system_reset() causes */
+	zassert_false(ota_trial_unconfirmed(),
+	             "a fresh boot reading the now-confirmed record must not be gated");
+}
+
+ZTEST(gd32_bridge_ota, test_confirm_tick_failed_commit_preserves_older_confirmed_record)
+{
+	reset_model();
+	/* Older, already-CONFIRMED record on REC0 -- this is what a failed
+	 * or power-cut-interrupted confirm must leave standing (item 1,
+	 * bench fact 2026-09-26: "reverted", not "only TRIAL is left"). */
+	uint32_t len_old[2];
+	len_old[TEST_OTHER_SLOT]   = 64u;
+	len_old[TEST_RUNNING_SLOT] = 0u;
+	write_meta_record_flags(
+	    OTA_META_REC0, 1u, TEST_OTHER_SLOT, (uint8_t)(1u << TEST_OTHER_SLOT), len_old, 0u);
+
+	/* Freshly-committed TRIAL record naming TEST_RUNNING_SLOT on REC1 --
+	 * the page a real COMMIT's #74 rank rule would land it on here
+	 * (REC0 ranks 1: valid, names the non-running slot; REC1 ranks 0:
+	 * empty -- so REC1 is the lower-ranked erase target). */
+	uint32_t len_new[2];
+	len_new[TEST_OTHER_SLOT]   = 64u;
+	len_new[TEST_RUNNING_SLOT] = 64u;
+	write_meta_record_flags(OTA_META_REC1, 2u, TEST_RUNNING_SLOT, 0x03u, len_new, OTA_META_FLAG_TRIAL);
+
+	ota_boot_init();
+	zassert_true(ota_trial_unconfirmed(), "the record naming us (REC1) is TRIAL: fresh trial boot");
+
+	ota_note_frame();
+	g_program_fail = true;
+	ota_confirm_tick();
+	g_program_fail = false;
+
+	zassert_true(ota_trial_unconfirmed(), "a failed confirm commit must leave TRIAL gating the wire");
+	zassert_equal(g_reset_calls, 0u, "must not reset on a failed confirm commit");
+
+	/* meta_commit's target_override forces the confirm onto REC1 (the
+	 * TRIAL record's OWN page) -- so a failed program leaves REC1 erased
+	 * (blank/invalid) but must NEVER have touched REC0. */
+	ota_meta_record_t rec0;
+	zassert_true(read_meta_at(OTA_META_REC0, &rec0),
+	             "the OLDER confirmed record (REC0) must survive a failed confirm untouched");
+	zassert_equal(rec0.active_slot, TEST_OTHER_SLOT);
+	zassert_equal(rec0.flags, 0u);
+	zassert_equal(rec0.counter, 1u);
+
+	ota_meta_record_t rec1;
+	zassert_false(read_meta_at(OTA_META_REC1, &rec1),
+	             "REC1 (the confirm's own erase target) is left erased/invalid by the failed program");
+
+	/* Post-failure, meta_current() -- and so the NEXT real boot -- sees
+	 * only the older confirmed record: "reverted", not "only TRIAL". */
+	ota_meta_record_t newest;
+	uint32_t          which;
+	zassert_true(meta_current_for_test(&newest, &which));
+	zassert_equal(which, OTA_META_REC0);
+	zassert_equal(newest.active_slot, TEST_OTHER_SLOT);
+	zassert_equal(newest.flags, 0u);
 }
 
 ZTEST(gd32_bridge_ota, test_confirm_tick_program_failure_keeps_trial_no_reset)
@@ -1566,12 +1712,17 @@ ZTEST(gd32_bridge_ota, test_busy_gate_blocks_all_opcodes_until_confirmed)
 	zassert_true(ota_trial_unconfirmed(), "merely dispatching frames doesn't confirm by itself");
 
 	/* The gate noted every one of those frames; the confirm tick (as
-	 * bridge_hw_tick would run it) now commits and reboots. */
+	 * bridge_hw_tick would run it) now commits and reboots. The gate
+	 * stays CLOSED through the reset itself (item 6) -- proving
+	 * confirmation landed means simulating the next boot. */
 	ota_confirm_tick();
-	zassert_false(ota_trial_unconfirmed());
+	zassert_true(ota_trial_unconfirmed(), "the gate must stay closed through the reset itself");
 	zassert_equal(g_reset_calls, 1u);
 
-	/* Post-confirm, a normal opcode gets a real reply again. */
+	ota_boot_init(); /* simulates the reboot ota_system_reset() causes */
+	zassert_false(ota_trial_unconfirmed());
+
+	/* Post-(simulated)-reboot, a normal opcode gets a real reply again. */
 	uint8_t reply[8];
 	size_t  rlen = 0u;
 	zassert_equal(
@@ -1640,13 +1791,17 @@ ZTEST(gd32_bridge_ota, test_rollback_sets_trial_flag_exactly)
 {
 	reset_model();
 	/* TEST_RUNNING_SLOT active+confirmed; TEST_OTHER_SLOT has a valid
-	 * descriptor to roll back to.  0xFF garbage planted first, same
-	 * carry-forward proof as the COMMIT case above. */
+	 * descriptor (including a trial-CAPABLE fw_version, explicitly --
+	 * NOT the 0xFF-garbage write_meta_record_flags() would otherwise
+	 * leave, which happens to decode as huge/trial-capable by accident
+	 * and would mask a downgrade-guard regression here) to roll back to. */
 	uint32_t len[2];
 	len[TEST_RUNNING_SLOT] = 64u;
 	len[TEST_OTHER_SLOT]   = 64u;
-	write_meta_record_flags(
-	    OTA_META_REC0, 1u, TEST_RUNNING_SLOT, 0x03u /* both slots valid */, len, 0xFFu);
+	uint32_t fwv[2] = { 0u, 0u };
+	fwv[TEST_OTHER_SLOT] = 0x00020Eu; /* 0.2.14 -- mirrors ota.c's OTA_TRIAL_MIN_FW_VERSION */
+	write_meta_record_flags_fw(
+	    OTA_META_REC0, 1u, TEST_RUNNING_SLOT, 0x03u /* both slots valid */, len, fwv, 0xFFu);
 
 	uint8_t reply[8];
 	size_t  rlen = 0u;
@@ -1661,4 +1816,195 @@ ZTEST(gd32_bridge_ota, test_rollback_sets_trial_flag_exactly)
 	    newest.flags, (uint8_t)OTA_META_FLAG_TRIAL, "rollback marks the rolled-to slot TRIAL");
 	zassert_equal(newest.img_len[TEST_OTHER_SLOT], 64u,
 	             "rollback must not touch the per-slot descriptors");
+}
+
+/* ---- downgrade guard: TRIAL only for a fw_version that can confirm
+ * itself (item 4, bench fact 2026-09-26) -------------------------------
+ * 0.2.14 mirrors ota.c's (file-scope, unexported) OTA_TRIAL_MIN_FW_VERSION. */
+#define TEST_TRIAL_MIN_FW_VERSION 0x00020Eu
+
+/* Runs a full BEGIN->WRITE->VERIFY->COMMIT cycle for a small bootable
+ * image, optionally supplying the v0.7 fw-version triple (11-byte BEGIN)
+ * or the legacy 8-byte form (has_fw_version=false) -- meta_commit() is
+ * static, so the downgrade guard can only be driven through the real wire
+ * path, not by poking it directly. */
+static gd32_bridge_status_t
+commit_cycle(bool has_fw_version, uint8_t major, uint8_t minor, uint8_t patch)
+{
+	uint8_t img[16] = { 0 };
+	put32(&img[0], 0x20010000u); /* MSP into SRAM */
+	uint32_t other_base;
+	zassert_true(ota_slot_base_checked(TEST_OTHER_SLOT, &other_base));
+	put32(&img[4], (other_base + 8u) | 1u); /* reset, Thumb, in-image */
+	const uint32_t expected_crc = ota_crc32(0u, img, sizeof img);
+
+	uint8_t req[11];
+	wr_u32(&req[0], sizeof img);
+	wr_u32(&req[4], expected_crc);
+	size_t req_len = 8u;
+	if (has_fw_version) {
+		req[8]  = major;
+		req[9]  = minor;
+		req[10] = patch;
+		req_len = 11u;
+	}
+	uint8_t reply[8];
+	size_t  rlen = 0u;
+	zassert_equal(ota_dispatch(CMD_OTA_BEGIN, req, req_len, reply, sizeof reply, &rlen), STATUS_OK);
+	for (unsigned i = 0u; i < (OTA_SLOT_SIZE / OTA_PAGE_SIZE) + 4u; ++i) {
+		ota_erase_tick();
+	}
+
+	uint8_t wreply[8];
+	size_t  wrl = 0u;
+	zassert_equal(write_chunk(0u, img, sizeof img, wreply, &wrl), STATUS_OK);
+
+	rlen = 0u;
+	zassert_equal(ota_dispatch(CMD_OTA_VERIFY, NULL, 0u, reply, sizeof reply, &rlen), STATUS_OK);
+	zassert_equal(reply[4], 1u, "verify must succeed (crc matches)");
+
+	rlen = 0u;
+	return ota_dispatch(CMD_OTA_COMMIT, NULL, 0u, reply, sizeof reply, &rlen);
+}
+
+ZTEST(gd32_bridge_ota, test_commit_unknown_fw_version_confirms_no_trial)
+{
+	reset_model();
+	zassert_equal(commit_cycle(false, 0u, 0u, 0u), STATUS_OK); /* legacy 8-byte BEGIN */
+
+	ota_meta_record_t newest;
+	uint32_t          which;
+	zassert_true(meta_current_for_test(&newest, &which));
+	zassert_equal(newest.flags, 0u, "unknown fw_version must commit CONFIRMED, not TRIAL");
+	zassert_equal(g_reset_calls, 1u, "a successful COMMIT still resets on real silicon");
+}
+
+ZTEST(gd32_bridge_ota, test_commit_below_min_fw_version_confirms_no_trial)
+{
+	reset_model();
+	zassert_equal(commit_cycle(true, 0u, 2u, 13u), STATUS_OK); /* 0.2.13 < 0.2.14 */
+
+	ota_meta_record_t newest;
+	uint32_t          which;
+	zassert_true(meta_current_for_test(&newest, &which));
+	zassert_equal(newest.flags, 0u, "a below-threshold fw_version must commit CONFIRMED, not TRIAL");
+}
+
+ZTEST(gd32_bridge_ota, test_commit_at_min_fw_version_sets_trial)
+{
+	reset_model();
+	zassert_equal(commit_cycle(true, 0u, 2u, 14u), STATUS_OK); /* exactly 0.2.14 */
+
+	ota_meta_record_t newest;
+	uint32_t          which;
+	zassert_true(meta_current_for_test(&newest, &which));
+	zassert_equal(newest.flags,
+	             (uint8_t)OTA_META_FLAG_TRIAL,
+	             "fw_version AT the threshold must still get TRIAL protection");
+}
+
+ZTEST(gd32_bridge_ota, test_rollback_old_target_fw_version_confirms_no_trial)
+{
+	reset_model();
+	uint32_t len[2];
+	len[TEST_RUNNING_SLOT] = 64u;
+	len[TEST_OTHER_SLOT]   = 64u;
+	uint32_t fwv[2]        = { 0u, 0u };
+	fwv[TEST_OTHER_SLOT]   = TEST_TRIAL_MIN_FW_VERSION - 1u; /* just below the threshold */
+	write_meta_record_flags_fw(OTA_META_REC0, 1u, TEST_RUNNING_SLOT, 0x03u, len, fwv, 0u);
+
+	uint8_t reply[8];
+	size_t  rlen = 0u;
+	zassert_equal(ota_dispatch(CMD_OTA_ROLLBACK, NULL, 0u, reply, sizeof reply, &rlen), STATUS_OK);
+
+	ota_meta_record_t newest;
+	uint32_t          which;
+	zassert_true(meta_current_for_test(&newest, &which));
+	zassert_equal(newest.active_slot, TEST_OTHER_SLOT);
+	zassert_equal(newest.flags, 0u, "rollback to an old-fw target must not arm TRIAL");
+}
+
+ZTEST(gd32_bridge_ota, test_rollback_new_target_fw_version_sets_trial)
+{
+	reset_model();
+	uint32_t len[2];
+	len[TEST_RUNNING_SLOT] = 64u;
+	len[TEST_OTHER_SLOT]   = 64u;
+	uint32_t fwv[2]        = { 0u, 0u };
+	fwv[TEST_OTHER_SLOT]   = TEST_TRIAL_MIN_FW_VERSION; /* exactly the threshold */
+	write_meta_record_flags_fw(OTA_META_REC0, 1u, TEST_RUNNING_SLOT, 0x03u, len, fwv, 0u);
+
+	uint8_t reply[8];
+	size_t  rlen = 0u;
+	zassert_equal(ota_dispatch(CMD_OTA_ROLLBACK, NULL, 0u, reply, sizeof reply, &rlen), STATUS_OK);
+
+	ota_meta_record_t newest;
+	uint32_t          which;
+	zassert_true(meta_current_for_test(&newest, &which));
+	zassert_equal(newest.active_slot, TEST_OTHER_SLOT);
+	zassert_equal(
+	    newest.flags, (uint8_t)OTA_META_FLAG_TRIAL, "rollback to a trial-capable target must arm TRIAL");
+}
+
+/* ---- composed bootloader selection loop (item 1, bench fact 2026-09-26):
+ * ota_boot_select() (src/ota_layout.h) is pure and flash-free, so these
+ * drive it directly with hand-built records -- no flash model needed. */
+
+ZTEST(gd32_bridge_ota, test_boot_select_strict_pass_picks_newest_when_both_pass)
+{
+	ota_meta_record_t a, b;
+	memset(&a, 0, sizeof a);
+	a.active_slot = TEST_RUNNING_SLOT;
+	a.flags       = 0u;
+	memset(&b, 0, sizeof b);
+	b.active_slot                    = TEST_OTHER_SLOT;
+	b.flags                          = 0u;
+	const ota_meta_record_t *cands[2] = { &a, &b };
+	bool                     valid[2] = { true, true };
+	bool                     last_resort = true; /* poisoned */
+	const int                sel         = ota_boot_select(cands, valid, 2, false, &last_resort);
+	zassert_equal(sel, 0, "newest-first: cands[0] wins when both pass strictly");
+	zassert_false(last_resort);
+}
+
+ZTEST(gd32_bridge_ota, test_boot_select_skips_invalid_and_watchdog_rejected)
+{
+	ota_meta_record_t a, b;
+	memset(&a, 0, sizeof a);
+	a.flags = OTA_META_FLAG_TRIAL; /* newest, TRIAL */
+	memset(&b, 0, sizeof b);
+	b.flags = 0u; /* older, confirmed */
+	const ota_meta_record_t *cands[2] = { &a, &b };
+	bool                     valid[2] = { true, true };
+	bool                     last_resort = false;
+	/* wdt_fired: cands[0] (TRIAL) fails the strict pass; cands[1] wins. */
+	const int sel = ota_boot_select(cands, valid, 2, true, &last_resort);
+	zassert_equal(sel, 1, "the watchdog-rejected TRIAL candidate must not win strictly");
+	zassert_false(last_resort, "a strict-pass winner exists -- last resort must not fire");
+}
+
+ZTEST(gd32_bridge_ota, test_boot_select_last_resort_boots_rejected_trial_when_nothing_else_valid)
+{
+	ota_meta_record_t a;
+	memset(&a, 0, sizeof a);
+	a.flags = OTA_META_FLAG_TRIAL;
+	const ota_meta_record_t *cands[1] = { &a };
+	bool                     valid[1] = { true };
+	bool                     last_resort = false;
+	const int sel = ota_boot_select(cands, valid, 1, true /* wdt_fired */, &last_resort);
+	zassert_equal(sel, 0, "the only valid candidate must still boot, even watchdog-rejected");
+	zassert_true(last_resort, "must report that the last-resort pass fired");
+}
+
+ZTEST(gd32_bridge_ota, test_boot_select_returns_none_when_nothing_valid)
+{
+	ota_meta_record_t a, b;
+	memset(&a, 0, sizeof a);
+	memset(&b, 0, sizeof b);
+	const ota_meta_record_t *cands[2] = { &a, &b };
+	bool                     valid[2] = { false, false };
+	bool                     last_resort = true; /* poisoned */
+	const int sel = ota_boot_select(cands, valid, 2, false, &last_resort);
+	zassert_equal(sel, -1, "no valid candidate at all -- must report nothing bootable");
+	zassert_false(last_resort);
 }

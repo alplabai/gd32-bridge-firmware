@@ -16,11 +16,26 @@
  * on HXTALSTB), and this bootloader had no way to know -- it jumped to the
  * newest valid slot unconditionally, bricking the bridge on both transports
  * until an SWD recovery.  COMMIT/ROLLBACK now mark the freshly-active slot
- * TRIAL; a TRIAL candidate gets the FWDGT armed (~16 s, see
- * OTA_TRIAL_FWDGT_RELOAD below) before the jump, so a hang before the app
- * confirms (src/ota.c ota_confirm_tick()) reverts here to try the previous
- * slot instead.
+ * TRIAL; a TRIAL candidate gets the FWDGT armed (see OTA_TRIAL_FWDGT_RELOAD
+ * below) before the jump, so a hang before the app confirms (src/ota.c
+ * ota_confirm_tick()) reverts here to try the previous slot instead.  A
+ * bootloader must never idle while SOME CRC-valid, vector-valid candidate
+ * exists: ota_boot_select() (src/ota_layout.h) adds a last-resort pass for
+ * exactly that -- see its own comment.
  *
+ * Reset-cause ownership: this bootloader reads RCU_RSTSCK exactly ONCE per
+ * boot, STASHES the raw value in RTC_BKP8 (backup-domain, survives
+ * NVIC_SystemReset -- same rationale as hal/gd32/fault_handlers.c's use of
+ * RTC_BKP0..7 for fault records; RTC_BKP8 is the next free register), then
+ * clears RSTFC before jumping.  The application's bridge_hw_reset_reason()
+ * (hal/gd32/init.c) decodes CMD_RESET_REASON from that stash, not from a
+ * live RCU_RSTSCK read -- by the time the app runs, this bootloader has
+ * already cleared the live register, so reading it directly there would
+ * always see "no cause".  This also means a stale FWDGTRSTF from an
+ * EARLIER, unrelated cycle can never survive past THIS boot to be
+ * misread as a fresh trial's watchdog fallback on some LATER boot.
+ *
+
  * SILICON-VALIDATED 2026-06-04 (bench, protocol v0.6): boot/validate/jump,
  * slot relocation, dual-bank FMC-from-RAM, and the full stream → verify →
  * commit → boot-new-slot → rollback cycle were proven end-to-end over the
@@ -46,12 +61,35 @@
  * E1M-V2M103): a slot-B image passed VERIFY/COMMIT then hung before
  * main() (stock SystemInit spinning on HXTALSTB) with no watchdog to
  * revert it -- the bridge stayed dead on both transports until an SWD
- * recovery.  IRC32K/256 ~= 125 Hz; reload 2000 counts -> ~16 s nominal
- * before a TRIAL candidate that never confirms falls back to the
- * previous slot.  IRC32K's factory trim drifts a few percent across
- * temperature (GD32G5x3 datasheet) -- this is nominal, not exact; retune
- * here if bench soak timing needs a different margin. */
-#define OTA_TRIAL_FWDGT_RELOAD 2000u
+ * recovery.  Maximum reload (0xFFF, 12-bit counter) at the coarsest
+ * prescaler (/256) -- the longest window this peripheral can express --
+ * to give a genuinely slow-starting image (clock recovery, cold-flash
+ * wait states) every chance to reach ota_confirm_tick() before reverting.
+ * IRC32K/256 is NOMINALLY ~125 Hz, so 0xFFF (4095) counts is NOMINALLY
+ * ~32.8 s -- stated as nominal, not exact: this file does not assert an
+ * IRC32K tolerance number of its own.  The GD32G5x3 datasheet's IRC32K
+ * accuracy section is the authority on the real spread and has not been
+ * independently checked against this repo for this fix; treat the ~32.8 s
+ * figure as an order-of-magnitude planning number until that check
+ * happens, and retune the reload here if bench soak timing needs a
+ * different margin (a WARM boot bench soak can also just measure the
+ * ACTUAL fallback latency directly, sidestepping the datasheet number
+ * entirely). */
+#define OTA_TRIAL_FWDGT_RELOAD 0xFFFu
+
+/* Backup-domain write access: RCU_APB1EN_PMUEN clocks the PMU so
+ * PMU_CTL0 is writable at all; PMU_CTL0_BKPWEN then gates writes to the
+ * RTC_BKPx block itself (UM p.145) -- same two-register unlock
+ * hal/gd32/fault_handlers.c's fault_backup_unlock() uses for RTC_BKP0..7;
+ * duplicated here rather than shared because the two are separate
+ * translation units linked into separate images (bootloader vs. app) and
+ * this is two idempotent register writes, not logic worth a shared
+ * header over. */
+static void backup_domain_unlock(void)
+{
+	RCU_APB1EN |= RCU_APB1EN_PMUEN;
+	PMU_CTL0 |= PMU_CTL0_BKPWEN;
+}
 
 static bool meta_read(uint32_t addr, ota_meta_record_t *r)
 {
@@ -133,41 +171,57 @@ static void jump_to_slot(uint32_t slot_base)
 
 int main(void)
 {
+	/* Read the reset cause ONCE, up front, then hand ownership of
+	 * RCU_RSTSCK's cause bits to the stash: after this point they are
+	 * cleared, so nothing later in this boot (or a future one) can
+	 * mistake a stale bit for a fresh event.  See the file header's
+	 * "Reset-cause ownership" section. */
+	const uint32_t rstsck    = RCU_RSTSCK;
+	const bool     wdt_fired = (rstsck & RCU_RSTSCK_FWDGTRSTF) != 0u;
+	backup_domain_unlock();
+	RTC_BKP8 = rstsck;
+	RCU_RSTSCK |= RCU_RSTSCK_RSTFC;
+
 	ota_meta_record_t        a, b;
 	const ota_meta_record_t *cands[2];
 	const int                n = meta_candidates(&a, &b, cands);
-	/* Read the reset cause ONCE, up front (bench fact 2026-09-26,
-	 * E1M-V2M103): this bootloader must NOT clear RCU_RSTSCK -- the
-	 * fallback app's CMD_RESET_REASON still needs to report WDT for a
-	 * real watchdog event (the app clears it lazily, on that read; the
-	 * one deliberate RSTSCK clear point is ota_system_reset(), hit
-	 * only after a trial CONFIRMS). */
-	const bool wdt_fired = (RCU_RSTSCK & RCU_RSTSCK_FWDGTRSTF) != 0u;
-	/* Newest-first with fallback (#754): the first record whose active
-	 * slot passes full semantic + image validation AND the trial/
-	 * watchdog gate (a TRIAL candidate that already burned a watchdog
-	 * reset this power cycle hung before confirming once -- don't
-	 * re-try it) wins. */
+	bool                     valid[2] = { false, false };
 	for (int i = 0; i < n; ++i) {
-		if (!active_slot_valid(cands[i]) || !ota_boot_candidate_ok(cands[i], wdt_fired)) {
-			continue;
-		}
+		valid[i] = active_slot_valid(cands[i]);
+	}
+	bool      last_resort = false;
+	const int sel         = ota_boot_select(cands, valid, n, wdt_fired, &last_resort);
+	if (sel >= 0) {
 		uint32_t base;
-		if (!ota_slot_base_checked(cands[i]->active_slot, &base)) {
-			continue; /* unreachable: active_slot_valid already checked this */
+		if (ota_slot_base_checked(cands[sel]->active_slot, &base)) {
+			if ((cands[sel]->flags & OTA_META_FLAG_TRIAL) != 0u) {
+				/* Freeze the FWDGT counter while a debugger holds the
+				 * core halted (DBG_FWDGT_HOLD) -- without this, a
+				 * breakpointed bench session gets blown away by a
+				 * spurious watchdog reset mid-investigation; the
+				 * counter resumes counting from where it was once
+				 * execution continues, so this does not extend the
+				 * real (running) window. */
+				dbg_periph_enable(DBG_FWDGT_HOLD);
+				if (fwdgt_config(OTA_TRIAL_FWDGT_RELOAD, FWDGT_PSC_DIV256) != SUCCESS) {
+					/* The vendor PSC/RLD writes each poll a
+					 * ready flag under a bounded software
+					 * timeout (gd32g5x3_fwdgt.c); a transient
+					 * contention immediately after boot (LSI/
+					 * IRC32K still settling) can trip that once.
+					 * Retry exactly once -- this is the
+					 * bootloader arming its OWN safety net, so a
+					 * retry LOOP here would defeat the point if
+					 * the watchdog itself is the thing stuck. */
+					(void)fwdgt_config(OTA_TRIAL_FWDGT_RELOAD, FWDGT_PSC_DIV256);
+				}
+				/* last_resort candidates are always TRIAL (see
+				 * ota_boot_select()'s own comment), so arming here
+				 * unconditionally covers that case too -- no
+				 * separate branch needed. */
+			}
+			jump_to_slot(base);
 		}
-		if ((cands[i]->flags & OTA_META_FLAG_TRIAL) != 0u) {
-			/* Arm the watchdog before jumping into an unconfirmed
-			 * image: if it hangs before ota_confirm_tick() ever runs
-			 * (the 2026-09-26 bench incident), FWDGT reverts to the
-			 * previous slot instead of bricking the bridge on both
-			 * transports.  Keep the watchdog running if a debugger
-			 * halts the core, so a breakpointed bench session doesn't
-			 * spuriously reset mid-investigation. */
-			dbg_periph_enable(DBG_FWDGT_HOLD);
-			fwdgt_config(OTA_TRIAL_FWDGT_RELOAD, FWDGT_PSC_DIV256);
-		}
-		jump_to_slot(base);
 	}
 	/* No valid image: recovery. A later build exposes the OTA opcodes here
      * to accept a reflash over the bridge; today, idle so a bench SWD probe

@@ -280,13 +280,40 @@ static uint8_t meta_page_rank(bool valid, const ota_meta_record_t *r)
  * the new active slot's entry is rewritten (and only when `update_entry`
  * -- a ROLLBACK flips `active_slot` without touching the descriptors, so
  * the rolled-to slot keeps the len/CRC recorded when it was last
- * written). */
+ * written).
+ *
+ * `target_override`: 0 uses the rank rule above (the COMMIT/ROLLBACK/
+ * self-heal shape: establish a NEW active slot while preserving whichever
+ * page best protects the part that is actually running).  A nonzero
+ * value (OTA_META_REC0/REC1) instead forces erase+program onto that
+ * EXACT page, bypassing the rank rule entirely -- the one caller that
+ * needs this is ota_confirm_tick() (bench fact 2026-09-26): confirming a
+ * TRIAL record is "flip THIS record's own flags to CONFIRMED", not
+ * "establish a new active slot", so it must overwrite the SAME page the
+ * TRIAL record already occupies (the page meta_current() names via
+ * `which` at the point of confirming).  Using the rank rule there instead
+ * would target the OTHER page -- which, in the exact scenario this fix
+ * exists for, is the OLDER, already-CONFIRMED fallback record -- and a
+ * failed or power-cut-interrupted confirm would then destroy that
+ * fallback, leaving ONLY the (still-TRIAL) record behind instead of
+ * degrading to "reverted" the way an interrupted write should.
+ *
+ * `invalidate_slot`: OTA_SLOT_A or OTA_SLOT_B clears that slot's
+ * slot_valid bit in the written record (in addition to setting
+ * `active_slot`'s bit); 0xFFu means "touch no additional bit".  Used by
+ * ota_boot_init()'s self-heal path (bench fact 2026-09-26) to invalidate
+ * a hung/rejected TRIAL slot so a later ROLLBACK can never re-select it
+ * (h_rollback's own guard already refuses an invalid `other` slot -- this
+ * is what makes that guard fire for a slot the bootloader just steered
+ * away from). */
 static bool meta_commit(uint8_t  active_slot,
                         bool     update_entry,
                         uint32_t fw_ver,
                         uint32_t img_len,
                         uint32_t img_crc,
-                        uint8_t  flags)
+                        uint8_t  flags,
+                        uint32_t target_override,
+                        uint8_t  invalidate_slot)
 {
 	ota_meta_record_t a, b;
 	const bool        va = meta_read(OTA_META_REC0, &a);
@@ -303,21 +330,25 @@ static bool meta_commit(uint8_t  active_slot,
 	 * page is touched, and rec.counter += 1u below keeps the new record
 	 * strictly above whatever page survives the erase. */
 
-	const uint8_t rank_a = meta_page_rank(va, &a);
-	const uint8_t rank_b = meta_page_rank(vb, &b);
-	uint32_t      target;
-	if (rank_a != rank_b) {
-		target = (rank_a < rank_b) ? OTA_META_REC0 : OTA_META_REC1;
-	} else if (rank_a != 0u) {
-		/* Same rank, both valid: tie-break by counter, preserving the
-		 * newest -- reproduces meta_pick_newest()'s own REC0-on-tie
-		 * pick, so this matches meta_commit's pre-#74 selection bit for
-		 * bit whenever the ranks agree. */
-		target = (a.counter >= b.counter) ? OTA_META_REC1 : OTA_META_REC0;
+	uint32_t target;
+	if (target_override != 0u) {
+		target = target_override;
 	} else {
-		/* Neither page holds a CRC-valid record: no counter to compare,
-		 * so target the first page (today's factory-init behaviour). */
-		target = OTA_META_REC0;
+		const uint8_t rank_a = meta_page_rank(va, &a);
+		const uint8_t rank_b = meta_page_rank(vb, &b);
+		if (rank_a != rank_b) {
+			target = (rank_a < rank_b) ? OTA_META_REC0 : OTA_META_REC1;
+		} else if (rank_a != 0u) {
+			/* Same rank, both valid: tie-break by counter, preserving the
+			 * newest -- reproduces meta_pick_newest()'s own REC0-on-tie
+			 * pick, so this matches meta_commit's pre-#74 selection bit for
+			 * bit whenever the ranks agree. */
+			target = (a.counter >= b.counter) ? OTA_META_REC1 : OTA_META_REC0;
+		} else {
+			/* Neither page holds a CRC-valid record: no counter to compare,
+			 * so target the first page (today's factory-init behaviour). */
+			target = OTA_META_REC0;
+		}
 	}
 
 	if (!ota_fmc_erase_range(target, OTA_PAGE_SIZE)) {
@@ -328,6 +359,9 @@ static bool meta_commit(uint8_t  active_slot,
 	rec.counter += 1u;
 	rec.active_slot = active_slot;
 	rec.slot_valid |= (uint8_t)(1u << active_slot);
+	if (invalidate_slot == OTA_SLOT_A || invalidate_slot == OTA_SLOT_B) {
+		rec.slot_valid &= (uint8_t)~(1u << invalidate_slot);
+	}
 	/* ALWAYS set explicitly -- never carry the surviving record's flags
 	 * forward.  It describes a different boot's trial state (and on a
 	 * record last written before this field existed, the old _pad bytes
@@ -357,9 +391,31 @@ static uint32_t ota_inactive_base(void)
 /* ---- trial/confirm + watchdog fallback (bench fact 2026-09-26,
  * E1M-V2M103) -------------------------------------------------------- */
 
-static bool s_trial;      /* this boot is running a not-yet-confirmed TRIAL image */
-static bool s_confirmed;  /* the confirm commit already landed this boot */
-static bool s_frame_seen; /* a wire frame arrived since boot (the confirm signal) */
+/* Minimum firmware version (packed major<<16|minor<<8|patch, matching
+ * OTA_BEGIN's v0.7 wire form) that KNOWS about this trial/confirm dance --
+ * 0.2.14, the firmware-version.txt release this fix first shipped in.  An
+ * image older than that, or one whose version is UNKNOWN (a legacy 8-byte
+ * BEGIN packs 0), never calls ota_boot_init()/ota_confirm_tick(): nothing
+ * in it will ever clear a TRIAL flag, so marking it TRIAL would gate the
+ * wire BUSY forever instead of merely losing the watchdog protection.
+ * Committing/rolling back to such an image CONFIRMED (flags=0) is the
+ * conservative choice -- no different from before this fix, and no
+ * permanent brick either. */
+#define OTA_TRIAL_MIN_FW_VERSION 0x00020Eu /* 0.2.14 */
+
+static bool fw_version_trial_capable(uint32_t packed_fw_version)
+{
+	return packed_fw_version != 0u && packed_fw_version >= OTA_TRIAL_MIN_FW_VERSION;
+}
+
+/* volatile: ota_confirm_tick() runs from the base-level tick and
+ * ota_note_frame()/ota_trial_unconfirmed() run from (or are consulted by)
+ * the transport ISR-driven protocol_dispatch() path -- these three are the
+ * cross-context handshake between them, not just an optimiser hazard on
+ * this single-core, no-RTOS target. */
+static volatile bool s_trial;      /* this boot is running a not-yet-confirmed TRIAL image */
+static volatile bool s_confirmed;  /* the confirm commit already landed this boot */
+static volatile bool s_frame_seen; /* a wire frame arrived since boot (the confirm signal) */
 
 void ota_boot_init(void)
 {
@@ -372,25 +428,46 @@ void ota_boot_init(void)
 	if (!ota_fmc_supported()) {
 		return;
 	}
-	ota_meta_record_t cur;
+	ota_meta_record_t a, b;
+	const bool        va = meta_read(OTA_META_REC0, &a);
+	const bool        vb = meta_read(OTA_META_REC1, &b);
+	if (!va && !vb) {
+		return; /* factory / corrupt: nothing to reconcile */
+	}
+
+	/* The record that actually NAMES the slot we are running -- NOT
+	 * simply meta_current()'s overall-newest pick (#754's fallback, and
+	 * this fix's last-resort pass in ota_boot_select(), can both boot a
+	 * candidate that is NOT the highest-counter record on flash; if an
+	 * even-newer-but-rejected record exists on the other page,
+	 * meta_current() would describe a slot nothing is executing). */
+	const ota_meta_record_t *run_rec = NULL;
+	if (va && a.active_slot == OTA_RUNNING_SLOT) {
+		run_rec = &a;
+	}
+	if (vb && b.active_slot == OTA_RUNNING_SLOT &&
+	    (run_rec == NULL || b.counter > run_rec->counter)) {
+		run_rec = &b;
+	}
+	if (run_rec != NULL && (run_rec->flags & OTA_META_FLAG_TRIAL) != 0u) {
+		s_trial = true; /* fresh (or re-armed last-resort) trial boot */
+	}
+
+	/* Separately: does the OVERALL newest record still name a DIFFERENT
+	 * slot, and is it still marked TRIAL?  That is a lingering divergence
+	 * -- that candidate was rejected (by validity or the watchdog gate)
+	 * in favour of what we are actually running.  Self-heal it so a
+	 * later boot never sees a stale trial pointing at a slot nothing will
+	 * jump to again, AND clear that slot's slot_valid bit so a later
+	 * ROLLBACK can never re-select the exact slot the bootloader just
+	 * steered away from.  We ARE the safe (or last-resort, already-
+	 * gated-by-s_trial-above) fallback already, so no reset. */
+	ota_meta_record_t newest;
 	uint32_t          which;
-	if (!meta_current(&cur, &which)) {
-		return; /* factory / corrupt record: nothing to reconcile */
+	if (meta_pick_newest(&a, va, &b, vb, &newest, &which) &&
+	    newest.active_slot != OTA_RUNNING_SLOT && (newest.flags & OTA_META_FLAG_TRIAL) != 0u) {
+		(void)meta_commit(OTA_RUNNING_SLOT, false, 0u, 0u, 0u, 0u, 0u, newest.active_slot);
 	}
-	if ((cur.flags & OTA_META_FLAG_TRIAL) == 0u) {
-		return; /* already confirmed */
-	}
-	if (cur.active_slot == OTA_RUNNING_SLOT) {
-		s_trial = true; /* fresh trial boot: gate the wire until confirmed */
-		return;
-	}
-	/* Metadata still names the OTHER (rejected-trial) slot active, but
-	 * WE are the image actually executing -- the bootloader's watchdog
-	 * gate (ota_boot_candidate_ok) turned that candidate down and fell
-	 * back here.  Self-heal the record so a later boot never sees a
-	 * stale trial pointing at a slot nothing will jump to again.  We ARE
-	 * the safe fallback already, so no reset. */
-	(void)meta_commit(OTA_RUNNING_SLOT, false, 0u, 0u, 0u, 0u);
 }
 
 bool ota_trial_unconfirmed(void)
@@ -408,10 +485,24 @@ void ota_confirm_tick(void)
 	if (!s_trial || s_confirmed || !s_frame_seen) {
 		return;
 	}
-	if (!meta_commit(OTA_RUNNING_SLOT, false, 0u, 0u, 0u, 0u)) {
+	/* Force the erase target onto the SAME page the current TRIAL record
+	 * occupies (target_override=`which`) -- see meta_commit()'s own
+	 * comment for why the #74 rank rule must NOT choose here. */
+	ota_meta_record_t cur;
+	uint32_t          which;
+	if (!meta_current(&cur, &which)) {
+		return; /* unreachable: ota_boot_init() already required a valid
+		         * TRIAL record naming OTA_RUNNING_SLOT to set s_trial */
+	}
+	if (!meta_commit(OTA_RUNNING_SLOT, false, 0u, 0u, 0u, 0u, which, 0xFFu)) {
 		return; /* leave TRIAL set -- the armed watchdog is the safety net */
 	}
-	s_confirmed = true;
+	/* Do NOT set s_confirmed here: the gate must stay closed for the
+	 * remainder of THIS boot (a real ota_system_reset() never returns; a
+	 * host-test seam that does could otherwise observe a one-instruction
+	 * window where the commit landed but the reset hasn't -- s_confirmed
+	 * only needs to exist for a NEXT boot's ota_boot_init() to read back
+	 * flags=0 from flash, not for this one). */
 	ota_system_reset(); /* reboot into the now-permanent (non-TRIAL) image */
 }
 
@@ -668,12 +759,19 @@ static gd32_bridge_status_t h_commit(void)
 		s_err   = 6u;
 		return STATUS_INVAL;
 	}
+	/* Downgrade guard (bench fact 2026-09-26): only mark TRIAL when the
+	 * committed image itself KNOWS how to confirm -- see
+	 * fw_version_trial_capable()'s own comment.  An unknown/pre-trial
+	 * image commits CONFIRMED instead, same as before this fix. */
+	const uint8_t commit_flags = fw_version_trial_capable(s_fw_version) ? OTA_META_FLAG_TRIAL : 0u;
 	if (!meta_commit(s_inactive,
 	                 true,
 	                 s_fw_version /* 0 = legacy BEGIN, unknown */,
 	                 s_img_len,
 	                 s_img_crc,
-	                 OTA_META_FLAG_TRIAL)) {
+	                 commit_flags,
+	                 0u,
+	                 0xFFu)) {
 		s_state = OTA_ST_ERROR;
 		s_err   = 6u;
 		return STATUS_IO;
@@ -741,8 +839,13 @@ static gd32_bridge_status_t h_rollback(void)
 	}
 	/* Flip active to `other` WITHOUT touching the per-slot descriptors
      * (update_entry=false): the bootloader validates the rolled-to slot
-     * against the len/CRC recorded when that slot was last committed. */
-	if (!meta_commit(other, false, 0u, 0u, 0u, OTA_META_FLAG_TRIAL)) {
+     * against the len/CRC recorded when that slot was last committed.
+     * Downgrade guard (bench fact 2026-09-26): TRIAL only if the target
+     * slot's OWN recorded fw_version knows how to confirm -- see
+     * fw_version_trial_capable(). */
+	const uint8_t rollback_flags =
+	    fw_version_trial_capable(cur.fw_version[other]) ? OTA_META_FLAG_TRIAL : 0u;
+	if (!meta_commit(other, false, 0u, 0u, 0u, rollback_flags, 0u, 0xFFu)) {
 		return STATUS_IO;
 	}
 	/* Same reset-before-reply contract as h_commit(): STATUS_OK is not

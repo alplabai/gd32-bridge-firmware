@@ -407,15 +407,16 @@ bool ota_fmc_program(uint32_t addr, const uint8_t *data, size_t len)
 
 void ota_system_reset(void)
 {
-	/* Clear the sticky RCU_RSTSCK cause flags before resetting (single
-	 * clear point, bench fact 2026-09-26): a stale FWDGTRSTF left over
-	 * from an EARLIER, unrelated cycle must not make the NEXT boot's
-	 * one-shot wdt_fired read (src/boot/boot_main.c) look like a fresh
-	 * watchdog fallback for THIS trial.  The bootloader itself must
-	 * never clear RSTSCK -- it only reads wdt_fired once per boot -- and
-	 * the fallback app's CMD_RESET_REASON still needs to report WDT for
-	 * a real watchdog event (bridge_hw_reset_reason() clears it lazily,
-	 * on that read). */
-	RCU_RSTSCK |= RCU_RSTSCK_RSTFC;
+	/* RCU_RSTSCK.RSTFC is no longer cleared here (bench fact 2026-09-26,
+	 * reset-cause ownership rework): src/boot/boot_main.c now reads
+	 * RCU_RSTSCK exactly ONCE per boot, stashes the raw value in
+	 * RTC_BKP8, and clears RSTFC itself, unconditionally, on EVERY boot
+	 * -- not just the ones this function triggers.  A write here would be
+	 * redundant (the very next boot re-clears it regardless) and would
+	 * also erase the cause bits before the bootloader ever gets to stash
+	 * them, if this function is ever reached on a path that ISN'T
+	 * followed by a reset (it isn't, today, but nothing here should
+	 * depend on that). See src/boot/boot_main.c's file header and
+	 * hal/gd32/init.c's bridge_hw_reset_reason() for the read side. */
 	NVIC_SystemReset();
 }

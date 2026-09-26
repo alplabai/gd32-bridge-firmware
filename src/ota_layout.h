@@ -151,6 +151,53 @@ static inline bool ota_boot_candidate_ok(const ota_meta_record_t *r, bool wdt_fi
 	return !(((r->flags & OTA_META_FLAG_TRIAL) != 0u) && wdt_fired);
 }
 
+/* Composed bootloader candidate-selection loop (#754's newest-first
+ * fallback + the trial/watchdog gate + a last-resort pass) -- pure and
+ * host-testable, so src/boot/boot_main.c and its test suite share the
+ * exact same decision instead of a mirrored copy that can drift.  It does
+ * NOT touch flash: `cands` are records already resident in RAM (read by
+ * meta_read()/meta_candidates() on real hardware, or planted directly by
+ * a test), newest-first; `valid[i]` is the caller's precomputed
+ * active_slot_valid(cands[i]) (that check needs a real image CRC walk
+ * over flash, which is exactly what a host test fakes -- keeping it out
+ * of this function is what makes the function itself flash-free); `n` is
+ * 0..2; `wdt_fired` is the reset cause read once by the caller.
+ *
+ * Pass 1 (strict, ordinary #754 behaviour): the first candidate that is
+ * both valid and passes ota_boot_candidate_ok() wins.
+ *
+ * Pass 2 (last resort): a bootloader must never idle while a CRC-valid,
+ * vector-valid image exists, even if every such candidate happens to be
+ * an unconfirmed TRIAL that already burned a watchdog reset this power
+ * cycle.  If pass 1 finds nothing, boot the newest candidate that is
+ * valid but was rejected ONLY by the trial/watchdog gate -- under a
+ * freshly-armed watchdog (the caller re-arms FWDGT for any TRIAL
+ * candidate regardless of which pass picked it), so a transient failure
+ * gets another confirm/revert cycle instead of a guaranteed brick.
+ * `*last_resort_out` reports whether this pass had to fire.
+ *
+ * Returns the winning index into `cands`/`valid` (0..n-1), or -1 if
+ * NOTHING is even valid -- the genuine "nothing to boot" case the
+ * recovery WFI loop exists for. */
+static inline int
+ota_boot_select(const ota_meta_record_t **cands, const bool *valid, int n, bool wdt_fired,
+               bool *last_resort_out)
+{
+	*last_resort_out = false;
+	for (int i = 0; i < n; ++i) {
+		if (valid[i] && ota_boot_candidate_ok(cands[i], wdt_fired)) {
+			return i;
+		}
+	}
+	for (int i = 0; i < n; ++i) {
+		if (valid[i] && !ota_boot_candidate_ok(cands[i], wdt_fired)) {
+			*last_resort_out = true;
+			return i;
+		}
+	}
+	return -1;
+}
+
 /* Minimum bootable image = at least the initial-MSP + reset-vector
  * words at the slot base (the boot path jumps via those two). */
 #define OTA_IMG_MIN_LEN 8u
