@@ -11,6 +11,16 @@
  * Pairs with src/ota.c (the application-side OTA state machine that writes
  * the inactive slot + commits the metadata).
  *
+ * Trial/confirm + watchdog fallback (bench fact 2026-09-26, E1M-V2M103): a
+ * CRC-valid slot-B image once hung before main() (stock SystemInit spinning
+ * on HXTALSTB), and this bootloader had no way to know -- it jumped to the
+ * newest valid slot unconditionally, bricking the bridge on both transports
+ * until an SWD recovery.  COMMIT/ROLLBACK now mark the freshly-active slot
+ * TRIAL; a TRIAL candidate gets the FWDGT armed (~16 s, see
+ * OTA_TRIAL_FWDGT_RELOAD below) before the jump, so a hang before the app
+ * confirms (src/ota.c ota_confirm_tick()) reverts here to try the previous
+ * slot instead.
+ *
  * SILICON-VALIDATED 2026-06-04 (bench, protocol v0.6): boot/validate/jump,
  * slot relocation, dual-bank FMC-from-RAM, and the full stream → verify →
  * commit → boot-new-slot → rollback cycle were proven end-to-end over the
@@ -31,6 +41,17 @@
 
 #include "ota_layout.h"
 #include "crc32.h"
+
+/* Trial/confirm watchdog calibration knob (bench fact 2026-09-26,
+ * E1M-V2M103): a slot-B image passed VERIFY/COMMIT then hung before
+ * main() (stock SystemInit spinning on HXTALSTB) with no watchdog to
+ * revert it -- the bridge stayed dead on both transports until an SWD
+ * recovery.  IRC32K/256 ~= 125 Hz; reload 2000 counts -> ~16 s nominal
+ * before a TRIAL candidate that never confirms falls back to the
+ * previous slot.  IRC32K's factory trim drifts a few percent across
+ * temperature (GD32G5x3 datasheet) -- this is nominal, not exact; retune
+ * here if bench soak timing needs a different margin. */
+#define OTA_TRIAL_FWDGT_RELOAD 2000u
 
 static bool meta_read(uint32_t addr, ota_meta_record_t *r)
 {
@@ -115,13 +136,38 @@ int main(void)
 	ota_meta_record_t        a, b;
 	const ota_meta_record_t *cands[2];
 	const int                n = meta_candidates(&a, &b, cands);
+	/* Read the reset cause ONCE, up front (bench fact 2026-09-26,
+	 * E1M-V2M103): this bootloader must NOT clear RCU_RSTSCK -- the
+	 * fallback app's CMD_RESET_REASON still needs to report WDT for a
+	 * real watchdog event (the app clears it lazily, on that read; the
+	 * one deliberate RSTSCK clear point is ota_system_reset(), hit
+	 * only after a trial CONFIRMS). */
+	const bool wdt_fired = (RCU_RSTSCK & RCU_RSTSCK_FWDGTRSTF) != 0u;
 	/* Newest-first with fallback (#754): the first record whose active
-	 * slot passes full semantic + image validation wins. */
+	 * slot passes full semantic + image validation AND the trial/
+	 * watchdog gate (a TRIAL candidate that already burned a watchdog
+	 * reset this power cycle hung before confirming once -- don't
+	 * re-try it) wins. */
 	for (int i = 0; i < n; ++i) {
-		uint32_t base;
-		if (active_slot_valid(cands[i]) && ota_slot_base_checked(cands[i]->active_slot, &base)) {
-			jump_to_slot(base);
+		if (!active_slot_valid(cands[i]) || !ota_boot_candidate_ok(cands[i], wdt_fired)) {
+			continue;
 		}
+		uint32_t base;
+		if (!ota_slot_base_checked(cands[i]->active_slot, &base)) {
+			continue; /* unreachable: active_slot_valid already checked this */
+		}
+		if ((cands[i]->flags & OTA_META_FLAG_TRIAL) != 0u) {
+			/* Arm the watchdog before jumping into an unconfirmed
+			 * image: if it hangs before ota_confirm_tick() ever runs
+			 * (the 2026-09-26 bench incident), FWDGT reverts to the
+			 * previous slot instead of bricking the bridge on both
+			 * transports.  Keep the watchdog running if a debugger
+			 * halts the core, so a breakpointed bench session doesn't
+			 * spuriously reset mid-investigation. */
+			dbg_periph_enable(DBG_FWDGT_HOLD);
+			fwdgt_config(OTA_TRIAL_FWDGT_RELOAD, FWDGT_PSC_DIV256);
+		}
+		jump_to_slot(base);
 	}
 	/* No valid image: recovery. A later build exposes the OTA opcodes here
      * to accept a reflash over the bridge; today, idle so a bench SWD probe

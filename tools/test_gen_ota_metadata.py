@@ -94,7 +94,8 @@ class BuildRecordCrc(unittest.TestCase):
         img = _image(GOOD_MSP, GOOD_RESET, pad_to=64)
         rec = gom.build_record(0, 7, img, 0x00010203)
         self.assertEqual(len(rec), 44)
-        magic, ver, counter, active, valid = struct.unpack_from("<III BB", rec, 0)
+        magic, ver, counter, active, valid, flags = struct.unpack_from(
+            "<III BBB", rec, 0)
         fw_ver = struct.unpack_from("<2I", rec, 16)
         img_len = struct.unpack_from("<2I", rec, 24)
         img_crc = struct.unpack_from("<2I", rec, 32)
@@ -111,6 +112,20 @@ class BuildRecordCrc(unittest.TestCase):
         # rec_crc32 covers every byte before it -- this is what
         # active_slot_valid()/meta_read() in the firmware recompute.
         self.assertEqual(rec_crc, zlib.crc32(rec[:40]) & 0xFFFFFFFF)
+
+    def test_factory_record_flags_byte_is_zero(self) -> None:
+        """byte 14 (ota_meta_record_t.flags, src/ota_layout.h) must be 0
+        for a factory record: a freshly-flashed partitioned part boots
+        straight into a CONFIRMED slot, with no trial/watchdog dance on
+        first power-up (see src/bootloader/DESIGN.md, "Trial/confirm +
+        watchdog fallback")."""
+        img = _image(GOOD_MSP, GOOD_RESET, pad_to=64)
+        rec = gom.build_record(0, 1, img, 0)
+        self.assertEqual(
+            rec[14], 0,
+            f"byte 14 (flags) must be 0 for a factory record -- "
+            f"CONFIRMED, no trial/watchdog dance on first boot; "
+            f"got {rec[14]:#x}")
 
 
 class CliExitStatus(unittest.TestCase):

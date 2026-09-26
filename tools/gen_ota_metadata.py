@@ -24,8 +24,15 @@ board silently keeps the old slot active even after REC0 is rewritten
 (#25 B13).
 
 Layout mirrors ota_meta_record_t (src/ota_layout.h, struct v2 with
-PER-SLOT image descriptors) and the CRC-32 mirrors src/crc32.c
-(IEEE 802.3 reflected == zlib.crc32).  Keep all three in lockstep.
+PER-SLOT image descriptors and a trial/confirm `flags` byte) and the
+CRC-32 mirrors src/crc32.c (IEEE 802.3 reflected == zlib.crc32).  Keep
+all three in lockstep.
+
+A factory record always writes `flags = 0` (CONFIRMED, no
+OTA_META_FLAG_TRIAL): the part must boot straight into a stable slot on
+first power-up, with no trial/watchdog dance -- that dance is only for a
+slot an OTA COMMIT/ROLLBACK just switched to (see
+src/bootloader/DESIGN.md, "Trial/confirm + watchdog fallback").
 """
 
 from __future__ import annotations
@@ -112,12 +119,13 @@ def build_record(active_slot: int, counter: int, img: bytes,
     img_crc[active_slot] = zlib.crc32(img) & 0xFFFFFFFF
 
     body = struct.pack(
-        "<III BB 2x 2I 2I 2I",
+        "<III BBB x 2I 2I 2I",
         OTA_META_MAGIC,
         OTA_META_STRUCT_VER,
         counter,
         active_slot,
         1 << active_slot,          # slot_valid bitmask
+        0,                         # flags: 0 = CONFIRMED (factory record)
         *fw_ver,
         *img_len,
         *img_crc,

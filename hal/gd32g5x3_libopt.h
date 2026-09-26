@@ -28,6 +28,7 @@
 #include "gd32g5x3_rcu.h"
 #include "gd32g5x3_misc.h"
 #include "gd32g5x3_pmu.h"
+#include "gd32g5x3_dbg.h"
 
 /* GPIO + EXTI for the bridge's IO surface. */
 #include "gd32g5x3_gpio.h"
@@ -64,5 +65,8 @@
 
 /* RTC wake source. */
 #include "gd32g5x3_rtc.h"
+
+/* Free watchdog: trial/confirm boot fallback (src/boot/boot_main.c). */
+#include "gd32g5x3_fwdgt.h"
 
 #endif /* GD32G5X3_LIBOPT_H */

@@ -73,13 +73,27 @@ enum { OTA_SLOT_A = 0u, OTA_SLOT_B = 1u };
 #define OTA_META_MAGIC      0x4F544D31u /* "OTM1" */
 #define OTA_META_STRUCT_VER 2u
 
+/* Trial/confirm + watchdog fallback (bench fact 2026-09-26, E1M-V2M103):
+ * an OTA'd slot-B image passed VERIFY and COMMIT, then hung before
+ * main() (stock SystemInit spinning on HXTALSTB) -- the bootloader had
+ * no watchdog/confirm and jumped to the newest CRC-valid slot
+ * unconditionally, bricking the bridge on both transports until an SWD
+ * recovery.  `flags` marks a freshly-committed/rolled-back slot TRIAL
+ * until the app notes a live wire frame and confirms it (src/ota.c
+ * ota_boot_init/ota_trial_unconfirmed/ota_note_frame/ota_confirm_tick);
+ * the bootloader (src/boot/boot_main.c) arms the FWDGT before jumping to
+ * a TRIAL candidate so a hang before main() reverts to the previous slot
+ * instead of repeating the bench incident. */
+#define OTA_META_FLAG_TRIAL 0x01u
+
 typedef struct {
 	uint32_t magic;          /* OTA_META_MAGIC */
 	uint32_t struct_version; /* OTA_META_STRUCT_VER */
 	uint32_t counter;        /* monotonic; highest valid record wins */
 	uint8_t  active_slot;    /* OTA_SLOT_A | OTA_SLOT_B */
 	uint8_t  slot_valid;     /* bit0 = slot A valid, bit1 = slot B valid */
-	uint8_t  _pad[2];
+	uint8_t  flags;          /* OTA_META_FLAG_* -- TRIAL until confirmed */
+	uint8_t  _pad1;
 	uint32_t fw_version[2]; /* per-slot firmware semver (A, B); 0 = unknown */
 	uint32_t img_len[2];    /* per-slot image length (A, B) */
 	uint32_t img_crc32[2];  /* per-slot image CRC-32 (A, B) */
@@ -103,6 +117,7 @@ _Static_assert(offsetof(ota_meta_record_t, struct_version) == 4u, "meta.struct_v
 _Static_assert(offsetof(ota_meta_record_t, counter) == 8u, "meta.counter offset");
 _Static_assert(offsetof(ota_meta_record_t, active_slot) == 12u, "meta.active_slot offset");
 _Static_assert(offsetof(ota_meta_record_t, slot_valid) == 13u, "meta.slot_valid offset");
+_Static_assert(offsetof(ota_meta_record_t, flags) == 14u, "meta.flags offset");
 _Static_assert(offsetof(ota_meta_record_t, fw_version) == 16u, "meta.fw_version offset");
 _Static_assert(offsetof(ota_meta_record_t, img_len) == 24u, "meta.img_len offset");
 _Static_assert(offsetof(ota_meta_record_t, img_crc32) == 32u, "meta.img_crc32 offset");
@@ -125,6 +140,15 @@ static inline bool ota_slot_base_checked(uint8_t slot, uint32_t *base_out)
 		return true;
 	}
 	return false;
+}
+
+/* Boot-time trial/confirm gate: a TRIAL candidate that already ran a
+ * watchdog reset on this power cycle must not be re-tried -- it hung
+ * before confirming once and the fallback slot is the safe choice.
+ * A non-TRIAL (confirmed) candidate is never rejected on this basis. */
+static inline bool ota_boot_candidate_ok(const ota_meta_record_t *r, bool wdt_fired)
+{
+	return !(((r->flags & OTA_META_FLAG_TRIAL) != 0u) && wdt_fired);
 }
 
 /* Minimum bootable image = at least the initial-MSP + reset-vector

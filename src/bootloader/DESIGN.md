@@ -45,6 +45,72 @@ image is now active. This was already exercised, unremarked, by the
 Integration detail beyond the public flash-layout and wire contract is tracked
 outside this repo; this file documents the recoverable public bootloader path.
 
+## Trial/confirm + watchdog fallback
+
+**Bench fact (2026-09-26, E1M-V2M103):** an OTA'd slot-B image passed VERIFY
+and COMMIT, then hung *before* `main()` (stock `SystemInit` spinning on
+`HXTALSTB`). This bootloader had no watchdog and no confirm step -- it jumped
+to the newest CRC-valid slot unconditionally, so the bridge was dead on both
+transports (SPI + I2C) until an external SWD recovery.
+
+The fix adds a **TRIAL** flag to the A/B metadata record
+(`ota_meta_record_t.flags`, `OTA_META_FLAG_TRIAL`) and a free watchdog
+(FWDGT) fallback:
+
+1. `CMD_OTA_COMMIT` / `CMD_OTA_ROLLBACK` mark the slot they just made active
+   **TRIAL** (never CONFIRMED) -- `src/ota.c`'s `meta_commit()`.
+2. This bootloader reads `RCU_RSTSCK` **once**, up front, to see whether the
+   *previous* boot ended in a watchdog reset (`FWDGTRSTF`) -- and never
+   clears it (see "reset-cause ownership" below). For each candidate record
+   (newest-first, #754's existing fallback order), `ota_boot_candidate_ok()`
+   (`src/ota_layout.h`) rejects a TRIAL candidate if a watchdog already fired
+   this power cycle -- it hung before confirming once; don't re-try it, fall
+   back to the next candidate (the previous, already-confirmed slot).
+3. Before jumping into a TRIAL candidate, the bootloader arms the FWDGT:
+   IRC32K/256 prescaler, reload 2000 (`OTA_TRIAL_FWDGT_RELOAD` in
+   `src/boot/boot_main.c`) -- **~16 s nominal** (IRC32K's factory trim
+   drifts a few percent across temperature per the GD32G5x3 datasheet; this
+   is a calibration knob, not an exact bound). The debug-hold bit
+   (`DBG_FWDGT_HOLD`) is set first so a breakpointed bench session doesn't
+   spuriously reset mid-investigation.
+4. If the jumped-to image comes up, `main()` calls `ota_boot_init()`
+   (`src/ota.c`) *before* the transports start. It reconciles the metadata
+   against which slot is **actually** executing (`OTA_RUNNING_SLOT`, the
+   same compile-time fact #3's fixes already derive from
+   `BRIDGE_APP_SLOT_BASE`):
+   - Metadata names **us** TRIAL+active: a fresh trial boot.
+     `ota_trial_unconfirmed()` gates the wire -- every opcode
+     `protocol_dispatch()` sees, on either link, answers `STATUS_BUSY` with
+     an empty payload (never `STATUS_OK` from a session that might still
+     revert), and notes that a live frame arrived.
+   - Metadata still names the **other** (rejected) slot TRIAL+active: we are
+     the bootloader's watchdog fallback. Self-heal the record (repoint
+     `active_slot` at us, clear TRIAL) with **no reset** -- we are already
+     the safe slot.
+5. Once a frame has been noted during an unconfirmed trial, the base-level
+   tick (`ota_confirm_tick()`, called next to `ota_erase_tick()` from
+   `bridge_hw_tick()`) commits the slot **CONFIRMED** (`flags = 0`) and
+   reboots. The extra reset is deliberate: on a fresh, non-TRIAL boot this
+   bootloader never arms the FWDGT, so rebooting is the only way to stop the
+   watchdog that's been running since the trial boot. If that commit fails
+   (flash error), the TRIAL flag is left set and **no reset happens** -- the
+   already-armed watchdog is the fallback safety net.
+
+**Reset-cause ownership:** this bootloader only *reads* `RCU_RSTSCK`; it
+never clears it. The one deliberate clear point is `ota_system_reset()`
+(`hal/fmc_ota.c`), which sets `RCU_RSTSCK.RSTFC` immediately before
+`NVIC_SystemReset()` -- so a stale `FWDGTRSTF` left over from an earlier,
+unrelated cycle can't masquerade as *this* trial's watchdog fallback. The
+app's `CMD_RESET_REASON` handler (`hal/gd32/init.c`) still clears the same
+register lazily, on demand, for a real watchdog event a host queries about.
+
+**Cost on fielded units with the OLD (pre-trial) bootloader:** none of this
+protects them -- an old bootloader doesn't know about `flags` or
+`ota_boot_candidate_ok()` and will still jump unconditionally to the newest
+valid slot. Only a bootloader rebuilt with this change gets the watchdog
+fallback. On any bootloader that DOES have it, the visible cost is one extra
+GD32 self-reboot per successful OTA (the confirm step's deliberate reset).
+
 ## OTA opcode contract
 
 | Opcode                | Code |

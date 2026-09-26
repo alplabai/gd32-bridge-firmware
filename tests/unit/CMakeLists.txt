@@ -73,6 +73,13 @@ set(TEST_FLAGS -std=c11 -Wall -Wextra -Werror)
 # an A-resident-only test build would never compile the OTA_SLOT_B_BASE
 # arm of the #elif chain.
 #
+# protocol.c + bootloader.c + bridge_hw_stub.c (bench fact 2026-09-26):
+# the trial/confirm BUSY gate lives in protocol_dispatch(), which this
+# suite's ota_dispatch()-only predecessor never linked -- added so the
+# gate can be driven end to end (ota_boot_init() -> protocol_dispatch()
+# BUSY -> ota_confirm_tick()) against the real dispatcher, for both slot
+# builds.
+#
 # The two bases below are PARSED out of src/ota_layout.h -- the same
 # header ota.c includes -- rather than hand-copied, so this copy cannot
 # drift silently against it.  Two other independent copies of the same
@@ -103,6 +110,9 @@ foreach(_slot A B)
         ota/src/test_ota.c
         ${FW}/src/ota.c
         ${FW}/src/crc32.c
+        ${FW}/src/protocol.c
+        ${FW}/src/bootloader/bootloader.c
+        ${FW}/hal/bridge_hw_stub.c
     )
     target_include_directories(${_tgt} PRIVATE ${FW}/src ${FW}/hal)
     target_compile_definitions(${_tgt} PRIVATE
