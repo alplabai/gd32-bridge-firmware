@@ -320,7 +320,13 @@ static bool read_meta_at(uint32_t addr, ota_meta_record_t *out)
  * image); `cap_bit`=false plants a marker whose capability_flags clears
  * OTA_TRIAL_CAP_CONFIRM (mirrors a future marker version that doesn't
  * implement the confirm handshake). */
-#define TEST_IMG_LEN 32u
+/* Marker offset for every hand-built test image below: the real floor
+ * (OTA_TRIAL_MARKER_MIN_OFFSET, src/ota_layout.h) is what the scan
+ * itself enforces, so tests use exactly that floor rather than the real
+ * device's ~616-byte vector table -- proves the scan's boundary
+ * condition without a needlessly large buffer. */
+#define TEST_MARKER_OFFSET OTA_TRIAL_MARKER_MIN_OFFSET
+#define TEST_IMG_LEN       96u
 static void plant_trial_image(uint32_t base, bool with_marker, bool cap_bit)
 {
 	uint8_t buf[TEST_IMG_LEN] = { 0 };
@@ -328,13 +334,13 @@ static void plant_trial_image(uint32_t base, bool with_marker, bool cap_bit)
 	wr_u32(&buf[4], (base + 8u) | 1u); /* reset, Thumb, in-image */
 	if (with_marker) {
 		const uint8_t magic[16] = OTA_TRIAL_MARKER_MAGIC_BYTES;
-		memcpy(&buf[8], magic, sizeof magic);
-		const uint16_t sv  = OTA_TRIAL_MARKER_STRUCT_VER;
-		const uint16_t cap = cap_bit ? OTA_TRIAL_CAP_CONFIRM : 0u;
-		buf[24]            = (uint8_t)(sv & 0xFFu);
-		buf[25]            = (uint8_t)(sv >> 8);
-		buf[26]            = (uint8_t)(cap & 0xFFu);
-		buf[27]            = (uint8_t)(cap >> 8);
+		memcpy(&buf[TEST_MARKER_OFFSET], magic, sizeof magic);
+		const uint16_t sv             = OTA_TRIAL_MARKER_STRUCT_VER;
+		const uint16_t cap            = cap_bit ? OTA_TRIAL_CAP_CONFIRM : 0u;
+		buf[TEST_MARKER_OFFSET + 16u] = (uint8_t)(sv & 0xFFu);
+		buf[TEST_MARKER_OFFSET + 17u] = (uint8_t)(sv >> 8);
+		buf[TEST_MARKER_OFFSET + 18u] = (uint8_t)(cap & 0xFFu);
+		buf[TEST_MARKER_OFFSET + 19u] = (uint8_t)(cap >> 8);
 	}
 	zassert_true(ota_fmc_program(base, buf, sizeof buf), "plant_trial_image: program failed");
 }
@@ -1773,11 +1779,11 @@ ZTEST(gd32_bridge_ota, test_commit_sets_trial_flag_no_pad_carry)
 		const uint8_t  magic[16] = OTA_TRIAL_MARKER_MAGIC_BYTES;
 		const uint16_t sv        = OTA_TRIAL_MARKER_STRUCT_VER;
 		const uint16_t cap       = OTA_TRIAL_CAP_CONFIRM;
-		memcpy(&img[8], magic, sizeof magic);
-		img[24] = (uint8_t)(sv & 0xFFu);
-		img[25] = (uint8_t)(sv >> 8);
-		img[26] = (uint8_t)(cap & 0xFFu);
-		img[27] = (uint8_t)(cap >> 8);
+		memcpy(&img[TEST_MARKER_OFFSET], magic, sizeof magic);
+		img[TEST_MARKER_OFFSET + 16u] = (uint8_t)(sv & 0xFFu);
+		img[TEST_MARKER_OFFSET + 17u] = (uint8_t)(sv >> 8);
+		img[TEST_MARKER_OFFSET + 18u] = (uint8_t)(cap & 0xFFu);
+		img[TEST_MARKER_OFFSET + 19u] = (uint8_t)(cap >> 8);
 	}
 	const uint32_t expected_crc = ota_crc32(0u, img, sizeof img);
 
@@ -1826,8 +1832,8 @@ ZTEST(gd32_bridge_ota, test_rollback_sets_trial_flag_exactly)
 	 * leave in the metadata record, which is irrelevant here since the
 	 * downgrade guard now reads the image, not the metadata. */
 	uint32_t len[2];
-	len[TEST_RUNNING_SLOT] = 64u;
-	len[TEST_OTHER_SLOT]   = 64u;
+	len[TEST_RUNNING_SLOT] = TEST_IMG_LEN;
+	len[TEST_OTHER_SLOT]   = TEST_IMG_LEN;
 	write_meta_record_flags(
 	    OTA_META_REC0, 1u, TEST_RUNNING_SLOT, 0x03u /* both slots valid */, len, 0xFFu);
 	uint32_t other_base;
@@ -1846,8 +1852,9 @@ ZTEST(gd32_bridge_ota, test_rollback_sets_trial_flag_exactly)
 	    newest.active_slot, TEST_OTHER_SLOT, "rollback must flip active to the other slot");
 	zassert_equal(
 	    newest.flags, (uint8_t)OTA_META_FLAG_TRIAL, "rollback marks the rolled-to slot TRIAL");
-	zassert_equal(
-	    newest.img_len[TEST_OTHER_SLOT], 64u, "rollback must not touch the per-slot descriptors");
+	zassert_equal(newest.img_len[TEST_OTHER_SLOT],
+	              TEST_IMG_LEN,
+	              "rollback must not touch the per-slot descriptors");
 }
 
 /* ---- downgrade guard: TRIAL only for an image that carries a
@@ -1872,11 +1879,11 @@ static gd32_bridge_status_t commit_cycle_marker(bool with_marker, bool cap_bit)
 		const uint8_t  magic[16] = OTA_TRIAL_MARKER_MAGIC_BYTES;
 		const uint16_t sv        = OTA_TRIAL_MARKER_STRUCT_VER;
 		const uint16_t cap       = cap_bit ? OTA_TRIAL_CAP_CONFIRM : 0u;
-		memcpy(&img[8], magic, sizeof magic);
-		img[24] = (uint8_t)(sv & 0xFFu);
-		img[25] = (uint8_t)(sv >> 8);
-		img[26] = (uint8_t)(cap & 0xFFu);
-		img[27] = (uint8_t)(cap >> 8);
+		memcpy(&img[TEST_MARKER_OFFSET], magic, sizeof magic);
+		img[TEST_MARKER_OFFSET + 16u] = (uint8_t)(sv & 0xFFu);
+		img[TEST_MARKER_OFFSET + 17u] = (uint8_t)(sv >> 8);
+		img[TEST_MARKER_OFFSET + 18u] = (uint8_t)(cap & 0xFFu);
+		img[TEST_MARKER_OFFSET + 19u] = (uint8_t)(cap >> 8);
 	}
 	const uint32_t expected_crc = ota_crc32(0u, img, sizeof img);
 
@@ -1998,57 +2005,78 @@ ZTEST(gd32_bridge_ota, test_rollback_target_marker_confirm_capable_sets_trial)
 
 ZTEST(gd32_bridge_ota, test_image_trial_capable_present_and_confirm_capable)
 {
-	uint8_t buf[48] = { 0 };
+	uint8_t buf[TEST_IMG_LEN] = { 0 };
 	{
 		const uint8_t  magic[16] = OTA_TRIAL_MARKER_MAGIC_BYTES;
 		const uint16_t sv        = OTA_TRIAL_MARKER_STRUCT_VER;
 		const uint16_t cap       = OTA_TRIAL_CAP_CONFIRM;
-		memcpy(&buf[8], magic, sizeof magic);
-		buf[24] = (uint8_t)(sv & 0xFFu);
-		buf[25] = (uint8_t)(sv >> 8);
-		buf[26] = (uint8_t)(cap & 0xFFu);
-		buf[27] = (uint8_t)(cap >> 8);
+		memcpy(&buf[TEST_MARKER_OFFSET], magic, sizeof magic);
+		buf[TEST_MARKER_OFFSET + 16u] = (uint8_t)(sv & 0xFFu);
+		buf[TEST_MARKER_OFFSET + 17u] = (uint8_t)(sv >> 8);
+		buf[TEST_MARKER_OFFSET + 18u] = (uint8_t)(cap & 0xFFu);
+		buf[TEST_MARKER_OFFSET + 19u] = (uint8_t)(cap >> 8);
 	}
 	zassert_true(ota_image_trial_capable(buf, sizeof buf));
 }
 
 ZTEST(gd32_bridge_ota, test_image_trial_capable_absent)
 {
-	uint8_t buf[48] = { 0 }; /* no marker anywhere */
+	uint8_t buf[TEST_IMG_LEN] = { 0 }; /* no marker anywhere */
 	zassert_false(ota_image_trial_capable(buf, sizeof buf));
 }
 
 ZTEST(gd32_bridge_ota, test_image_trial_capable_corrupt_magic)
 {
-	uint8_t buf[48] = { 0 };
+	uint8_t buf[TEST_IMG_LEN] = { 0 };
 	{
 		const uint8_t  magic[16] = OTA_TRIAL_MARKER_MAGIC_BYTES;
 		const uint16_t sv        = OTA_TRIAL_MARKER_STRUCT_VER;
 		const uint16_t cap       = OTA_TRIAL_CAP_CONFIRM;
-		memcpy(&buf[8], magic, sizeof magic);
-		buf[8] ^= 0xFFu; /* corrupt exactly one magic byte */
-		buf[24] = (uint8_t)(sv & 0xFFu);
-		buf[25] = (uint8_t)(sv >> 8);
-		buf[26] = (uint8_t)(cap & 0xFFu);
-		buf[27] = (uint8_t)(cap >> 8);
+		memcpy(&buf[TEST_MARKER_OFFSET], magic, sizeof magic);
+		buf[TEST_MARKER_OFFSET] ^= 0xFFu; /* corrupt exactly one magic byte */
+		buf[TEST_MARKER_OFFSET + 16u] = (uint8_t)(sv & 0xFFu);
+		buf[TEST_MARKER_OFFSET + 17u] = (uint8_t)(sv >> 8);
+		buf[TEST_MARKER_OFFSET + 18u] = (uint8_t)(cap & 0xFFu);
+		buf[TEST_MARKER_OFFSET + 19u] = (uint8_t)(cap >> 8);
 	}
 	zassert_false(ota_image_trial_capable(buf, sizeof buf), "a corrupt magic must not match");
 }
 
 ZTEST(gd32_bridge_ota, test_image_trial_capable_unknown_struct_version_rejected)
 {
-	uint8_t buf[48] = { 0 };
+	uint8_t buf[TEST_IMG_LEN] = { 0 };
 	{
 		const uint8_t  magic[16] = OTA_TRIAL_MARKER_MAGIC_BYTES;
 		const uint16_t cap       = OTA_TRIAL_CAP_CONFIRM;
-		memcpy(&buf[8], magic, sizeof magic);
-		buf[24] = 0xFFu; /* struct_version = 0xFFFF, not recognised */
-		buf[25] = 0xFFu;
-		buf[26] = (uint8_t)(cap & 0xFFu);
-		buf[27] = (uint8_t)(cap >> 8);
+		memcpy(&buf[TEST_MARKER_OFFSET], magic, sizeof magic);
+		buf[TEST_MARKER_OFFSET + 16u] = 0xFFu; /* struct_version = 0xFFFF, not recognised */
+		buf[TEST_MARKER_OFFSET + 17u] = 0xFFu;
+		buf[TEST_MARKER_OFFSET + 18u] = (uint8_t)(cap & 0xFFu);
+		buf[TEST_MARKER_OFFSET + 19u] = (uint8_t)(cap >> 8);
 	}
 	zassert_false(ota_image_trial_capable(buf, sizeof buf),
 	              "an unrecognised struct_version must not be trusted");
+}
+
+ZTEST(gd32_bridge_ota, test_image_trial_capable_before_min_offset_not_found)
+{
+	/* A byte-for-byte marker sitting inside the core vector-table region
+	 * (< OTA_TRIAL_MARKER_MIN_OFFSET) must NOT be treated as the real
+	 * one -- it would have to overlap the fixed ARMv8-M core exception
+	 * vectors that precede any device-specific vector. */
+	uint8_t buf[TEST_IMG_LEN] = { 0 };
+	{
+		const uint8_t  magic[16] = OTA_TRIAL_MARKER_MAGIC_BYTES;
+		const uint16_t sv        = OTA_TRIAL_MARKER_STRUCT_VER;
+		const uint16_t cap       = OTA_TRIAL_CAP_CONFIRM;
+		memcpy(&buf[0], magic, sizeof magic);
+		buf[16] = (uint8_t)(sv & 0xFFu);
+		buf[17] = (uint8_t)(sv >> 8);
+		buf[18] = (uint8_t)(cap & 0xFFu);
+		buf[19] = (uint8_t)(cap >> 8);
+	}
+	zassert_false(ota_image_trial_capable(buf, sizeof buf),
+	              "a marker before OTA_TRIAL_MARKER_MIN_OFFSET must not be found");
 }
 
 ZTEST(gd32_bridge_ota, test_image_trial_capable_outside_scan_window_not_found)

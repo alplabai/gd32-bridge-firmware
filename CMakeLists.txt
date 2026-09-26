@@ -298,20 +298,31 @@ else()
 
     # Build-time gate (bench fact 2026-09-26 follow-up): fail the build if
     # the produced slot image does not actually carry a findable,
-    # confirm-capable trial marker -- tools/check_trial_marker.py runs the
-    # identical bounded scan ota_image_trial_capable() (src/ota_layout.h)
-    # does, against the just-built .bin, rather than trusting the linker
-    # script placed it correctly.  Only meaningful once the .bin exists
-    # (gd32 backend; the stub backend has no Reset_Handler to objcopy).
+    # confirm-capable trial marker sitting where the linker script's
+    # `.trial_marker` section actually put it -- tools/check_trial_marker.py
+    # runs the identical bounded scan ota_image_trial_capable()
+    # (src/ota_layout.h) does against the just-built .bin, THEN
+    # cross-checks the found offset against `.trial_marker`'s linked VMA
+    # (read out of the .elf via arm-none-eabi-objdump, --elf/--slot-base
+    # below) rather than trusting either side alone.  Only meaningful once
+    # the .bin/.elf exist (gd32 backend; the stub backend has no
+    # Reset_Handler to objcopy).
     if(BRIDGE_HAL_BACKEND STREQUAL "gd32")
         find_package(Python3 COMPONENTS Interpreter REQUIRED)
-        foreach(_slot_tgt gd32-bridge-slot-a gd32-bridge-slot-b)
-            add_custom_command(TARGET ${_slot_tgt} POST_BUILD
-                COMMAND ${Python3_EXECUTABLE}
-                    ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_trial_marker.py
-                    ${CMAKE_BINARY_DIR}/${_slot_tgt}.bin
-                COMMENT "Checking ${_slot_tgt}.bin for a trial-capability marker")
-        endforeach()
+        add_custom_command(TARGET gd32-bridge-slot-a POST_BUILD
+            COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_trial_marker.py
+                ${CMAKE_BINARY_DIR}/gd32-bridge-slot-a.bin
+                --elf ${CMAKE_BINARY_DIR}/gd32-bridge-slot-a${CMAKE_EXECUTABLE_SUFFIX}
+                --slot-base 0x0800A000
+            COMMENT "Checking gd32-bridge-slot-a.bin for a trial-capability marker")
+        add_custom_command(TARGET gd32-bridge-slot-b POST_BUILD
+            COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_trial_marker.py
+                ${CMAKE_BINARY_DIR}/gd32-bridge-slot-b.bin
+                --elf ${CMAKE_BINARY_DIR}/gd32-bridge-slot-b${CMAKE_EXECUTABLE_SUFFIX}
+                --slot-base 0x08045000
+            COMMENT "Checking gd32-bridge-slot-b.bin for a trial-capability marker")
     endif()
 
     add_executable(gd32-bootloader src/boot/boot_main.c src/crc32.c hal/gd32_libc_stubs.c)

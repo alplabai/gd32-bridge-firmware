@@ -33,7 +33,9 @@
  * (src/trial_marker.c). This replaced an earlier cut that trusted the
  * fw_version the host declared in OTA_BEGIN -- the 2026-09-26 incident
  * was the host declaring the bad image's TRUE, pre-fix version, which
- * that guard would have believed.
+ * that guard would have believed. Policy: a markerless image commits
+ * CONFIRMED (no watchdog protection, needs SWD recovery if bad) -- see
+ * ota_image_trial_capable()'s own comment (src/ota_layout.h) for why.
  */
 
 #include <stddef.h>
@@ -813,7 +815,18 @@ static gd32_bridge_status_t h_commit(void)
 	 * declaring the bad image's TRUE, pre-fix version, which the old
 	 * declared-version guard would have believed. s_fw_version is still
 	 * recorded into the metadata record below (informational only; no
-	 * longer decides trial eligibility). */
+	 * longer decides trial eligibility).
+	 *
+	 * Policy, stated plainly (see ota_image_trial_capable()'s own comment
+	 * for the full rationale, do not soften this on a future edit): a
+	 * markerless image -- ANY build older than this change, including
+	 * the 2026-09-26 incident image itself -- commits CONFIRMED here and
+	 * is NOT protected by the FWDGT; a bad markerless image still needs a
+	 * bench SWD recovery, exactly as before this fix existed. That is
+	 * deliberate: forcing TRIAL onto a markerless image would instead
+	 * make the FWDGT revert (or, with no older CONFIRMED fallback,
+	 * reset-loop every ~32.8 s) even a perfectly healthy old image,
+	 * because an old app has no confirm path at all. */
 	const uint8_t commit_flags =
 	    ota_image_trial_capable((const uint8_t *)ota_fmc_flash_ptr(ota_inactive_base()), s_img_len)
 	        ? OTA_META_FLAG_TRIAL
@@ -899,7 +912,8 @@ static gd32_bridge_status_t h_rollback(void)
      * marker -- same ota_image_trial_capable() COMMIT uses, read from
      * `other`'s own base rather than the declared cur.fw_version[other]
      * (see h_commit's comment for why the declared version is no longer
-     * trusted for this decision). */
+     * trusted for this decision, and for the same "markerless commits
+     * CONFIRMED, not TRIAL-forever" policy this rollback path shares). */
 	uint32_t other_base = 0u;
 	if (!ota_slot_base_checked(other, &other_base)) {
 		return STATUS_INVAL; /* unreachable: `other` is always A/B */

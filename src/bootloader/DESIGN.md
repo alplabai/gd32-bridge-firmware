@@ -75,13 +75,27 @@ The fix adds a **TRIAL** flag to the A/B metadata record
    it. Eligibility has to come from the image itself, not from what the
    host claims about it. `s_fw_version` is still recorded into the
    metadata record (informational only; no longer decides trial
-   eligibility). An image with no marker at all (every pre-marker build)
-   is **not** trial-capable: it cannot generate the confirm handshake
-   (`ota_note_frame()`/`ota_confirm_tick()`), so marking it TRIAL would
-   gate the wire BUSY forever with nothing to ever clear it -- such an
-   image commits/rolls back straight to CONFIRMED instead, keeping the
-   pre-fix (no-watchdog-safety-net) behaviour for images that predate this
-   dance, rather than bricking them behind a gate they can never open.
+   eligibility).
+
+   **Policy, stated plainly: only images that carry the marker get the
+   FWDGT safety net.** A markerless image -- any build older than this
+   change, INCLUDING the 2026-09-26 incident image itself (built from a
+   pre-marker tree) -- commits/rolls back **CONFIRMED, and is NOT
+   protected**: a bad markerless image still needs a bench SWD recovery,
+   exactly as it did before this fix existed. The trade-off is
+   deliberate, not an oversight: forcing TRIAL onto a markerless image
+   instead would make the FWDGT revert it (or, with no older CONFIRMED
+   record to fall back to, reset-loop it every ~32.8 s) even when that
+   image is perfectly healthy, because an old app has no confirm path at
+   all -- it never calls `ota_note_frame()`/`ota_confirm_tick()`, so
+   nothing would ever clear a TRIAL flag forced onto it.
+   The earlier "unknown fw_version defaults to TRIAL" policy (the
+   version-guard cut this one replaces) is deliberately NOT carried
+   forward as "no marker defaults to TRIAL" -- that default was a
+   judgement call under the old, weaker signal (a declared version the
+   host could get wrong, as 2026-09-26 proved) and does not transfer to
+   a signal read from the image's own bytes; whether some other opt-in
+   default belongs here is a maintainer decision left open on PR #246.
    `tools/check_trial_marker.py` is a build-time gate (wired into
    `CMakeLists.txt` for the two OTA-slot targets): it runs the identical
    bounded scan against the just-built `.bin`, so a slot image produced
