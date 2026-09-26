@@ -34,6 +34,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #define OTA_PAGE_SIZE 0x00000800u /* 2 KB single-bank page */
 
@@ -222,6 +223,82 @@ static inline int ota_boot_select(const ota_meta_record_t **cands,
  * @p img is a readable pointer to the image bytes (identical to base on
  * memory-mapped silicon; a HAL-provided pointer under the OTA fake-flash
  * unit tests); @p len is the metadata-recorded, CRC-checked length. */
+/* Trial-capability marker (bench fact 2026-09-26 follow-up): the
+ * downgrade guard that decides whether COMMIT/ROLLBACK marks a slot
+ * OTA_META_FLAG_TRIAL used to trust the fw_version the HOST declared in
+ * OTA_BEGIN (the now-removed OTA_TRIAL_MIN_FW_VERSION/
+ * fw_version_trial_capable() in ota.c) -- but the 2026-09-26 bench
+ * incident this whole trial/confirm dance responds to was the host
+ * declaring the BAD image's TRUE, pre-fix version at OTA_BEGIN, which
+ * that guard would have believed and committed the same image WITHOUT
+ * trial protection. Eligibility must come from the IMAGE ITSELF: every
+ * app image built from this branch onward plants this 20-byte struct
+ * right after its vector table (toolchain/gd32g553_app_slot.ld.in's
+ * `.trial_marker` section, src/trial_marker.c) and
+ * ota_image_trial_capable() below scans a bounded window of the SLOT'S
+ * OWN flash bytes for it at COMMIT/ROLLBACK -- not a numeric offset
+ * shared with the linker script, so a future vector-table size change
+ * (an added IRQ, a different startup file) does not need a matching
+ * constant edited here. tools/check_trial_marker.py runs the identical
+ * scan against the built .bin as a build-time gate: a slot image
+ * produced without a findable marker fails the build instead of
+ * shipping an image that would silently commit CONFIRMED (no safety
+ * net) or, if this policy is ever inverted by mistake, TRIAL forever
+ * with no way to clear the gate. */
+#define OTA_TRIAL_MARKER_MAGIC_BYTES \
+	{ 'G', 'D', '3', '2', 'B', 'R', 'I', 'D', 'G', 'E', '-', 'T', 'R', 'I', 'A', 'L' }
+#define OTA_TRIAL_MARKER_STRUCT_VER 1u
+/* bit0: the image implements the confirm handshake (ota_note_frame() /
+ * ota_confirm_tick()) -- the only capability this marker records today. */
+#define OTA_TRIAL_CAP_CONFIRM 0x0001u
+
+typedef struct {
+	uint8_t  magic[16];
+	uint16_t struct_version;
+	uint16_t capability_flags;
+} ota_trial_marker_t;
+_Static_assert(sizeof(ota_trial_marker_t) == 20u, "ota_trial_marker_t on-flash size drifted");
+
+/* Bounded scan window: comfortably covers the GD32G553 vector table
+ * (154 vectors * 4 B = 616 B, ALIGN(4)) plus the marker this build
+ * places right after it, with slack for a future startup-file change --
+ * generous on purpose so this reader needs no numeric offset kept in
+ * lockstep with the linker script. */
+#define OTA_TRIAL_SCAN_LIMIT 2048u
+
+static inline uint16_t ota_trial_rd_u16(const uint8_t *p)
+{
+	return (uint16_t)((uint32_t)p[0] | ((uint32_t)p[1] << 8));
+}
+
+/* True iff `img` (length `len`, the SLOT'S OWN recorded image length --
+ * never the host-declared OTA_BEGIN version) carries a confirm-capable
+ * trial marker within the bounded scan window.  An image with no marker
+ * at all (every pre-marker build) or a struct_version this reader does
+ * not recognise is NOT trial-capable: it cannot generate the confirm
+ * handshake, so marking it TRIAL would gate the wire BUSY with nothing
+ * to ever clear it. */
+static inline bool ota_image_trial_capable(const uint8_t *img, uint32_t len)
+{
+	if (img == NULL) {
+		return false;
+	}
+	const uint32_t limit = (len < OTA_TRIAL_SCAN_LIMIT) ? len : OTA_TRIAL_SCAN_LIMIT;
+	if (limit < sizeof(ota_trial_marker_t)) {
+		return false;
+	}
+	const uint8_t magic[16] = OTA_TRIAL_MARKER_MAGIC_BYTES;
+	for (uint32_t off = 0u; off + sizeof(ota_trial_marker_t) <= limit; off += 4u) {
+		if (memcmp(&img[off], magic, sizeof magic) == 0) {
+			if (ota_trial_rd_u16(&img[off + 16u]) != OTA_TRIAL_MARKER_STRUCT_VER) {
+				return false; /* unknown layout: don't guess at it */
+			}
+			return (ota_trial_rd_u16(&img[off + 18u]) & OTA_TRIAL_CAP_CONFIRM) != 0u;
+		}
+	}
+	return false;
+}
+
 static inline bool ota_image_bootable(uint32_t base, const uint8_t *img, uint32_t len)
 {
 	if (len < OTA_IMG_MIN_LEN || img == 0) {

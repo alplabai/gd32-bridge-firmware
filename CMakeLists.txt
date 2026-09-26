@@ -283,15 +283,36 @@ else()
     configure_file(${CMAKE_SOURCE_DIR}/toolchain/gd32g553_app_slot.ld.in
                    ${CMAKE_BINARY_DIR}/gd32g553_slot_b.ld @ONLY)
 
-    add_executable(gd32-bridge-slot-a ${GD32_BRIDGE_SOURCES})
+    # src/trial_marker.c: only the two OTA-slot targets ever run as a
+    # trial candidate, so only they carry the marker (see that file's
+    # header comment).
+    add_executable(gd32-bridge-slot-a ${GD32_BRIDGE_SOURCES} src/trial_marker.c)
     gd32_firmware_target(gd32-bridge-slot-a ${CMAKE_BINARY_DIR}/gd32g553_slot_a.ld)
     target_compile_definitions(gd32-bridge-slot-a PRIVATE
         BRIDGE_OTA_PARTITIONED=1 BRIDGE_APP_SLOT_BASE=0x0800A000u)
 
-    add_executable(gd32-bridge-slot-b ${GD32_BRIDGE_SOURCES})
+    add_executable(gd32-bridge-slot-b ${GD32_BRIDGE_SOURCES} src/trial_marker.c)
     gd32_firmware_target(gd32-bridge-slot-b ${CMAKE_BINARY_DIR}/gd32g553_slot_b.ld)
     target_compile_definitions(gd32-bridge-slot-b PRIVATE
         BRIDGE_OTA_PARTITIONED=1 BRIDGE_APP_SLOT_BASE=0x08045000u)
+
+    # Build-time gate (bench fact 2026-09-26 follow-up): fail the build if
+    # the produced slot image does not actually carry a findable,
+    # confirm-capable trial marker -- tools/check_trial_marker.py runs the
+    # identical bounded scan ota_image_trial_capable() (src/ota_layout.h)
+    # does, against the just-built .bin, rather than trusting the linker
+    # script placed it correctly.  Only meaningful once the .bin exists
+    # (gd32 backend; the stub backend has no Reset_Handler to objcopy).
+    if(BRIDGE_HAL_BACKEND STREQUAL "gd32")
+        find_package(Python3 COMPONENTS Interpreter REQUIRED)
+        foreach(_slot_tgt gd32-bridge-slot-a gd32-bridge-slot-b)
+            add_custom_command(TARGET ${_slot_tgt} POST_BUILD
+                COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_trial_marker.py
+                    ${CMAKE_BINARY_DIR}/${_slot_tgt}.bin
+                COMMENT "Checking ${_slot_tgt}.bin for a trial-capability marker")
+        endforeach()
+    endif()
 
     add_executable(gd32-bootloader src/boot/boot_main.c src/crc32.c hal/gd32_libc_stubs.c)
     gd32_firmware_target(gd32-bootloader ${CMAKE_SOURCE_DIR}/toolchain/gd32g553_bootloader.ld)

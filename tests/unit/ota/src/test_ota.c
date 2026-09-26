@@ -290,36 +290,6 @@ static void write_meta_record_flags(uint32_t       addr,
 	memcpy(_host_ptr(addr), &rec, sizeof(rec));
 }
 
-/* write_meta_record_flags() plus an explicit per-slot fw_version -- the
- * downgrade-guard tests below (bench fact 2026-09-26) need a REAL,
- * intentional fw_version rather than the 0xFF-garbage
- * write_meta_record_flags() otherwise leaves there (which happens to
- * decode as a huge, "trial-capable" number and would mask a downgrade-
- * guard regression by accident). */
-static void write_meta_record_flags_fw(uint32_t       addr,
-                                       uint32_t       counter,
-                                       uint8_t        active_slot,
-                                       uint8_t        slot_valid,
-                                       const uint32_t img_len[2],
-                                       const uint32_t fw_version[2],
-                                       uint8_t        flags)
-{
-	ota_meta_record_t rec;
-	memset(&rec, 0xFF, sizeof(rec));
-	rec.magic          = OTA_META_MAGIC;
-	rec.struct_version = OTA_META_STRUCT_VER;
-	rec.counter        = counter;
-	rec.active_slot    = active_slot;
-	rec.slot_valid     = slot_valid;
-	rec.flags          = flags;
-	rec.fw_version[0]  = fw_version[0];
-	rec.fw_version[1]  = fw_version[1];
-	rec.img_len[0]     = img_len[0];
-	rec.img_len[1]     = img_len[1];
-	rec.rec_crc32 = ota_crc32(0u, (const uint8_t *)&rec, offsetof(ota_meta_record_t, rec_crc32));
-	memcpy(_host_ptr(addr), &rec, sizeof(rec));
-}
-
 /* Read a metadata page directly out of the flash model (#74 tests below):
  * mirrors meta_read()'s own validity check (magic, struct_version, CRC
  * over the record up to rec_crc32) so a test can observe meta_commit's
@@ -338,6 +308,35 @@ static bool read_meta_at(uint32_t addr, ota_meta_record_t *out)
 	}
 	*out = rec;
 	return true;
+}
+
+/* Plant a minimal bootable image (ota_image_bootable()'s MSP+reset head)
+ * directly into the flash model at `base`, with or without a trial
+ * marker (bench fact 2026-09-26 follow-up) -- used by the marker-based
+ * downgrade-guard tests below to control what
+ * ota_image_trial_capable() (src/ota_layout.h) finds at COMMIT/ROLLBACK
+ * without going through a full BEGIN/WRITE/VERIFY wire cycle every time.
+ * `with_marker`=false plants no marker at all (mirrors a pre-marker
+ * image); `cap_bit`=false plants a marker whose capability_flags clears
+ * OTA_TRIAL_CAP_CONFIRM (mirrors a future marker version that doesn't
+ * implement the confirm handshake). */
+#define TEST_IMG_LEN 32u
+static void plant_trial_image(uint32_t base, bool with_marker, bool cap_bit)
+{
+	uint8_t buf[TEST_IMG_LEN] = { 0 };
+	wr_u32(&buf[0], 0x20010000u);      /* MSP into SRAM */
+	wr_u32(&buf[4], (base + 8u) | 1u); /* reset, Thumb, in-image */
+	if (with_marker) {
+		const uint8_t magic[16] = OTA_TRIAL_MARKER_MAGIC_BYTES;
+		memcpy(&buf[8], magic, sizeof magic);
+		const uint16_t sv  = OTA_TRIAL_MARKER_STRUCT_VER;
+		const uint16_t cap = cap_bit ? OTA_TRIAL_CAP_CONFIRM : 0u;
+		buf[24]            = (uint8_t)(sv & 0xFFu);
+		buf[25]            = (uint8_t)(sv >> 8);
+		buf[26]            = (uint8_t)(cap & 0xFFu);
+		buf[27]            = (uint8_t)(cap >> 8);
+	}
+	zassert_true(ota_fmc_program(base, buf, sizeof buf), "plant_trial_image: program failed");
 }
 
 /* Mirrors ota.c's meta_current()/meta_pick_newest() (highest-counter valid
@@ -1761,11 +1760,25 @@ ZTEST(gd32_bridge_ota, test_commit_sets_trial_flag_no_pad_carry)
 	write_meta_record_flags(
 	    OTA_META_REC0, 1u, TEST_RUNNING_SLOT, (uint8_t)(1u << TEST_RUNNING_SLOT), len, 0xFFu);
 
-	uint8_t img[16] = { 0 };
+	/* Image carries a confirm-capable trial marker (bench fact 2026-09-26
+	 * follow-up) -- this test's whole point is to prove COMMIT sets
+	 * `flags` explicitly to TRIAL, so it needs an image
+	 * ota_image_trial_capable() actually accepts. */
+	uint8_t img[TEST_IMG_LEN] = { 0 };
 	put32(&img[0], 0x20010000u); /* MSP into SRAM */
 	uint32_t other_base;
 	zassert_true(ota_slot_base_checked(TEST_OTHER_SLOT, &other_base));
 	put32(&img[4], (other_base + 8u) | 1u); /* reset, Thumb, in-image */
+	{
+		const uint8_t  magic[16] = OTA_TRIAL_MARKER_MAGIC_BYTES;
+		const uint16_t sv        = OTA_TRIAL_MARKER_STRUCT_VER;
+		const uint16_t cap       = OTA_TRIAL_CAP_CONFIRM;
+		memcpy(&img[8], magic, sizeof magic);
+		img[24] = (uint8_t)(sv & 0xFFu);
+		img[25] = (uint8_t)(sv >> 8);
+		img[26] = (uint8_t)(cap & 0xFFu);
+		img[27] = (uint8_t)(cap >> 8);
+	}
 	const uint32_t expected_crc = ota_crc32(0u, img, sizeof img);
 
 	uint8_t req[11];
@@ -1807,17 +1820,19 @@ ZTEST(gd32_bridge_ota, test_rollback_sets_trial_flag_exactly)
 {
 	reset_model();
 	/* TEST_RUNNING_SLOT active+confirmed; TEST_OTHER_SLOT has a valid
-	 * descriptor (including a trial-CAPABLE fw_version, explicitly --
+	 * descriptor to roll back to, and its OWN flash bytes carry a
+	 * confirm-capable trial marker (bench fact 2026-09-26 follow-up) --
 	 * NOT the 0xFF-garbage write_meta_record_flags() would otherwise
-	 * leave, which happens to decode as huge/trial-capable by accident
-	 * and would mask a downgrade-guard regression here) to roll back to. */
+	 * leave in the metadata record, which is irrelevant here since the
+	 * downgrade guard now reads the image, not the metadata. */
 	uint32_t len[2];
 	len[TEST_RUNNING_SLOT] = 64u;
 	len[TEST_OTHER_SLOT]   = 64u;
-	uint32_t fwv[2]        = { 0u, 0u };
-	fwv[TEST_OTHER_SLOT]   = 0x00020Eu; /* 0.2.14 -- mirrors ota.c's OTA_TRIAL_MIN_FW_VERSION */
-	write_meta_record_flags_fw(
-	    OTA_META_REC0, 1u, TEST_RUNNING_SLOT, 0x03u /* both slots valid */, len, fwv, 0xFFu);
+	write_meta_record_flags(
+	    OTA_META_REC0, 1u, TEST_RUNNING_SLOT, 0x03u /* both slots valid */, len, 0xFFu);
+	uint32_t other_base;
+	zassert_true(ota_slot_base_checked(TEST_OTHER_SLOT, &other_base));
+	plant_trial_image(other_base, true /* with_marker */, true /* cap_bit */);
 
 	uint8_t reply[8];
 	size_t  rlen = 0u;
@@ -1835,39 +1850,43 @@ ZTEST(gd32_bridge_ota, test_rollback_sets_trial_flag_exactly)
 	    newest.img_len[TEST_OTHER_SLOT], 64u, "rollback must not touch the per-slot descriptors");
 }
 
-/* ---- downgrade guard: TRIAL only for a fw_version that can confirm
- * itself (item 4, bench fact 2026-09-26) -------------------------------
- * 0.2.14 mirrors ota.c's (file-scope, unexported) OTA_TRIAL_MIN_FW_VERSION. */
-#define TEST_TRIAL_MIN_FW_VERSION 0x00020Eu
+/* ---- downgrade guard: TRIAL only for an image that carries a
+ * confirm-capable trial marker (bench fact 2026-09-26 follow-up).
+ * Replaces the old fw_version-threshold guard: eligibility now comes
+ * from the IMAGE ITSELF (ota_image_trial_capable(), src/ota_layout.h),
+ * not the version the host declares in OTA_BEGIN. */
 
 /* Runs a full BEGIN->WRITE->VERIFY->COMMIT cycle for a small bootable
- * image, optionally supplying the v0.7 fw-version triple (11-byte BEGIN)
- * or the legacy 8-byte form (has_fw_version=false) -- meta_commit() is
- * static, so the downgrade guard can only be driven through the real wire
- * path, not by poking it directly. */
-static gd32_bridge_status_t
-commit_cycle(bool has_fw_version, uint8_t major, uint8_t minor, uint8_t patch)
+ * image, with or without a trial marker (and, when present, with its
+ * capability bit set or cleared) -- meta_commit() is static, so the
+ * downgrade guard can only be driven through the real wire path, not by
+ * poking it directly. */
+static gd32_bridge_status_t commit_cycle_marker(bool with_marker, bool cap_bit)
 {
-	uint8_t img[16] = { 0 };
+	uint8_t img[TEST_IMG_LEN] = { 0 };
 	put32(&img[0], 0x20010000u); /* MSP into SRAM */
 	uint32_t other_base;
 	zassert_true(ota_slot_base_checked(TEST_OTHER_SLOT, &other_base));
 	put32(&img[4], (other_base + 8u) | 1u); /* reset, Thumb, in-image */
+	if (with_marker) {
+		const uint8_t  magic[16] = OTA_TRIAL_MARKER_MAGIC_BYTES;
+		const uint16_t sv        = OTA_TRIAL_MARKER_STRUCT_VER;
+		const uint16_t cap       = cap_bit ? OTA_TRIAL_CAP_CONFIRM : 0u;
+		memcpy(&img[8], magic, sizeof magic);
+		img[24] = (uint8_t)(sv & 0xFFu);
+		img[25] = (uint8_t)(sv >> 8);
+		img[26] = (uint8_t)(cap & 0xFFu);
+		img[27] = (uint8_t)(cap >> 8);
+	}
 	const uint32_t expected_crc = ota_crc32(0u, img, sizeof img);
 
-	uint8_t req[11];
+	uint8_t req[8];
 	wr_u32(&req[0], sizeof img);
 	wr_u32(&req[4], expected_crc);
-	size_t req_len = 8u;
-	if (has_fw_version) {
-		req[8]  = major;
-		req[9]  = minor;
-		req[10] = patch;
-		req_len = 11u;
-	}
 	uint8_t reply[8];
 	size_t  rlen = 0u;
-	zassert_equal(ota_dispatch(CMD_OTA_BEGIN, req, req_len, reply, sizeof reply, &rlen), STATUS_OK);
+	zassert_equal(ota_dispatch(CMD_OTA_BEGIN, req, sizeof req, reply, sizeof reply, &rlen),
+	              STATUS_OK);
 	for (unsigned i = 0u; i < (OTA_SLOT_SIZE / OTA_PAGE_SIZE) + 4u; ++i) {
 		ota_erase_tick();
 	}
@@ -1884,60 +1903,60 @@ commit_cycle(bool has_fw_version, uint8_t major, uint8_t minor, uint8_t patch)
 	return ota_dispatch(CMD_OTA_COMMIT, NULL, 0u, reply, sizeof reply, &rlen);
 }
 
-ZTEST(gd32_bridge_ota, test_commit_unknown_fw_version_sets_trial)
+ZTEST(gd32_bridge_ota, test_commit_no_marker_confirms_no_trial)
 {
-	/* C4 (adversarial-verify finding): policy flipped from this fix's
-	 * first cut.  Unknown (a legacy 8-byte BEGIN, packs 0) gets TRIAL,
-	 * not CONFIRMED -- the 2026-09-26 bench incident this whole fix
-	 * responds to WAS a legacy/version-unknown-shaped commit, so treating
-	 * "unknown" as "skip the safety net" would leave that exact incident
-	 * unprotected. */
+	/* A pre-marker (or otherwise markerless) image cannot generate the
+	 * confirm handshake, so committing it TRIAL would gate the wire
+	 * BUSY with nothing to ever clear it -- must commit CONFIRMED. */
 	reset_model();
-	zassert_equal(commit_cycle(false, 0u, 0u, 0u), STATUS_OK); /* legacy 8-byte BEGIN */
+	zassert_equal(commit_cycle_marker(false, false), STATUS_OK);
+
+	ota_meta_record_t newest;
+	uint32_t          which;
+	zassert_true(meta_current_for_test(&newest, &which));
+	zassert_equal(newest.flags, 0u, "an image with no trial marker must commit CONFIRMED");
+	zassert_equal(g_reset_calls, 1u, "a successful COMMIT still resets on real silicon");
+}
+
+ZTEST(gd32_bridge_ota, test_commit_marker_confirm_capable_sets_trial)
+{
+	reset_model();
+	zassert_equal(commit_cycle_marker(true, true), STATUS_OK);
 
 	ota_meta_record_t newest;
 	uint32_t          which;
 	zassert_true(meta_current_for_test(&newest, &which));
 	zassert_equal(newest.flags,
 	              (uint8_t)OTA_META_FLAG_TRIAL,
-	              "unknown fw_version must still get TRIAL protection");
-	zassert_equal(g_reset_calls, 1u, "a successful COMMIT still resets on real silicon");
+	              "a confirm-capable marker must get TRIAL protection");
 }
 
-ZTEST(gd32_bridge_ota, test_commit_below_min_fw_version_confirms_no_trial)
+ZTEST(gd32_bridge_ota, test_commit_marker_no_confirm_bit_confirms_no_trial)
 {
+	/* Marker present (so a future image COULD advertise other
+	 * capabilities) but the confirm-capability bit is clear: this image
+	 * still cannot generate the confirm handshake, so it must not be
+	 * trusted with TRIAL either. */
 	reset_model();
-	zassert_equal(commit_cycle(true, 0u, 2u, 13u), STATUS_OK); /* 0.2.13 < 0.2.14 */
+	zassert_equal(commit_cycle_marker(true, false), STATUS_OK);
 
 	ota_meta_record_t newest;
 	uint32_t          which;
 	zassert_true(meta_current_for_test(&newest, &which));
 	zassert_equal(
-	    newest.flags, 0u, "a below-threshold fw_version must commit CONFIRMED, not TRIAL");
+	    newest.flags, 0u, "a marker without the confirm-capability bit must not arm TRIAL");
 }
 
-ZTEST(gd32_bridge_ota, test_commit_at_min_fw_version_sets_trial)
-{
-	reset_model();
-	zassert_equal(commit_cycle(true, 0u, 2u, 14u), STATUS_OK); /* exactly 0.2.14 */
-
-	ota_meta_record_t newest;
-	uint32_t          which;
-	zassert_true(meta_current_for_test(&newest, &which));
-	zassert_equal(newest.flags,
-	              (uint8_t)OTA_META_FLAG_TRIAL,
-	              "fw_version AT the threshold must still get TRIAL protection");
-}
-
-ZTEST(gd32_bridge_ota, test_rollback_old_target_fw_version_confirms_no_trial)
+ZTEST(gd32_bridge_ota, test_rollback_target_no_marker_confirms_no_trial)
 {
 	reset_model();
 	uint32_t len[2];
-	len[TEST_RUNNING_SLOT] = 64u;
-	len[TEST_OTHER_SLOT]   = 64u;
-	uint32_t fwv[2]        = { 0u, 0u };
-	fwv[TEST_OTHER_SLOT]   = TEST_TRIAL_MIN_FW_VERSION - 1u; /* just below the threshold */
-	write_meta_record_flags_fw(OTA_META_REC0, 1u, TEST_RUNNING_SLOT, 0x03u, len, fwv, 0u);
+	len[TEST_RUNNING_SLOT] = TEST_IMG_LEN;
+	len[TEST_OTHER_SLOT]   = TEST_IMG_LEN;
+	write_meta_record_flags(OTA_META_REC0, 1u, TEST_RUNNING_SLOT, 0x03u, len, 0u);
+	uint32_t other_base;
+	zassert_true(ota_slot_base_checked(TEST_OTHER_SLOT, &other_base));
+	plant_trial_image(other_base, false /* with_marker */, false);
 
 	uint8_t reply[8];
 	size_t  rlen = 0u;
@@ -1947,18 +1966,19 @@ ZTEST(gd32_bridge_ota, test_rollback_old_target_fw_version_confirms_no_trial)
 	uint32_t          which;
 	zassert_true(meta_current_for_test(&newest, &which));
 	zassert_equal(newest.active_slot, TEST_OTHER_SLOT);
-	zassert_equal(newest.flags, 0u, "rollback to an old-fw target must not arm TRIAL");
+	zassert_equal(newest.flags, 0u, "rollback to a markerless target must not arm TRIAL");
 }
 
-ZTEST(gd32_bridge_ota, test_rollback_new_target_fw_version_sets_trial)
+ZTEST(gd32_bridge_ota, test_rollback_target_marker_confirm_capable_sets_trial)
 {
 	reset_model();
 	uint32_t len[2];
-	len[TEST_RUNNING_SLOT] = 64u;
-	len[TEST_OTHER_SLOT]   = 64u;
-	uint32_t fwv[2]        = { 0u, 0u };
-	fwv[TEST_OTHER_SLOT]   = TEST_TRIAL_MIN_FW_VERSION; /* exactly the threshold */
-	write_meta_record_flags_fw(OTA_META_REC0, 1u, TEST_RUNNING_SLOT, 0x03u, len, fwv, 0u);
+	len[TEST_RUNNING_SLOT] = TEST_IMG_LEN;
+	len[TEST_OTHER_SLOT]   = TEST_IMG_LEN;
+	write_meta_record_flags(OTA_META_REC0, 1u, TEST_RUNNING_SLOT, 0x03u, len, 0u);
+	uint32_t other_base;
+	zassert_true(ota_slot_base_checked(TEST_OTHER_SLOT, &other_base));
+	plant_trial_image(other_base, true /* with_marker */, true /* cap_bit */);
 
 	uint8_t reply[8];
 	size_t  rlen = 0u;
@@ -1970,33 +1990,82 @@ ZTEST(gd32_bridge_ota, test_rollback_new_target_fw_version_sets_trial)
 	zassert_equal(newest.active_slot, TEST_OTHER_SLOT);
 	zassert_equal(newest.flags,
 	              (uint8_t)OTA_META_FLAG_TRIAL,
-	              "rollback to a trial-capable target must arm TRIAL");
+	              "rollback to a confirm-capable-marker target must arm TRIAL");
 }
 
-ZTEST(gd32_bridge_ota, test_rollback_unknown_target_fw_version_sets_trial)
+/* ---- ota_image_trial_capable() (src/ota_layout.h) in isolation: pure and
+ * flash-free, so these drive it directly with hand-built byte buffers. */
+
+ZTEST(gd32_bridge_ota, test_image_trial_capable_present_and_confirm_capable)
 {
-	/* C4 (adversarial-verify finding): a factory/pre-version-tracking
-	 * image (fw_version == 0, unknown) is consistent with the commit-side
-	 * policy flip -- unknown defaults to TRIAL protection, not "no
-	 * trial". */
-	reset_model();
-	uint32_t len[2];
-	len[TEST_RUNNING_SLOT] = 64u;
-	len[TEST_OTHER_SLOT]   = 64u;
-	uint32_t fwv[2]        = { 0u, 0u }; /* TEST_OTHER_SLOT explicitly left unknown (0) */
-	write_meta_record_flags_fw(OTA_META_REC0, 1u, TEST_RUNNING_SLOT, 0x03u, len, fwv, 0u);
+	uint8_t buf[48] = { 0 };
+	{
+		const uint8_t  magic[16] = OTA_TRIAL_MARKER_MAGIC_BYTES;
+		const uint16_t sv        = OTA_TRIAL_MARKER_STRUCT_VER;
+		const uint16_t cap       = OTA_TRIAL_CAP_CONFIRM;
+		memcpy(&buf[8], magic, sizeof magic);
+		buf[24] = (uint8_t)(sv & 0xFFu);
+		buf[25] = (uint8_t)(sv >> 8);
+		buf[26] = (uint8_t)(cap & 0xFFu);
+		buf[27] = (uint8_t)(cap >> 8);
+	}
+	zassert_true(ota_image_trial_capable(buf, sizeof buf));
+}
 
-	uint8_t reply[8];
-	size_t  rlen = 0u;
-	zassert_equal(ota_dispatch(CMD_OTA_ROLLBACK, NULL, 0u, reply, sizeof reply, &rlen), STATUS_OK);
+ZTEST(gd32_bridge_ota, test_image_trial_capable_absent)
+{
+	uint8_t buf[48] = { 0 }; /* no marker anywhere */
+	zassert_false(ota_image_trial_capable(buf, sizeof buf));
+}
 
-	ota_meta_record_t newest;
-	uint32_t          which;
-	zassert_true(meta_current_for_test(&newest, &which));
-	zassert_equal(newest.active_slot, TEST_OTHER_SLOT);
-	zassert_equal(newest.flags,
-	              (uint8_t)OTA_META_FLAG_TRIAL,
-	              "rollback to an unknown-fw target must still arm TRIAL");
+ZTEST(gd32_bridge_ota, test_image_trial_capable_corrupt_magic)
+{
+	uint8_t buf[48] = { 0 };
+	{
+		const uint8_t  magic[16] = OTA_TRIAL_MARKER_MAGIC_BYTES;
+		const uint16_t sv        = OTA_TRIAL_MARKER_STRUCT_VER;
+		const uint16_t cap       = OTA_TRIAL_CAP_CONFIRM;
+		memcpy(&buf[8], magic, sizeof magic);
+		buf[8] ^= 0xFFu; /* corrupt exactly one magic byte */
+		buf[24] = (uint8_t)(sv & 0xFFu);
+		buf[25] = (uint8_t)(sv >> 8);
+		buf[26] = (uint8_t)(cap & 0xFFu);
+		buf[27] = (uint8_t)(cap >> 8);
+	}
+	zassert_false(ota_image_trial_capable(buf, sizeof buf), "a corrupt magic must not match");
+}
+
+ZTEST(gd32_bridge_ota, test_image_trial_capable_unknown_struct_version_rejected)
+{
+	uint8_t buf[48] = { 0 };
+	{
+		const uint8_t  magic[16] = OTA_TRIAL_MARKER_MAGIC_BYTES;
+		const uint16_t cap       = OTA_TRIAL_CAP_CONFIRM;
+		memcpy(&buf[8], magic, sizeof magic);
+		buf[24] = 0xFFu; /* struct_version = 0xFFFF, not recognised */
+		buf[25] = 0xFFu;
+		buf[26] = (uint8_t)(cap & 0xFFu);
+		buf[27] = (uint8_t)(cap >> 8);
+	}
+	zassert_false(ota_image_trial_capable(buf, sizeof buf),
+	              "an unrecognised struct_version must not be trusted");
+}
+
+ZTEST(gd32_bridge_ota, test_image_trial_capable_outside_scan_window_not_found)
+{
+	uint8_t buf[OTA_TRIAL_SCAN_LIMIT + 32u];
+	memset(buf, 0, sizeof buf);
+	const uint8_t  magic[16] = OTA_TRIAL_MARKER_MAGIC_BYTES;
+	const uint16_t sv        = OTA_TRIAL_MARKER_STRUCT_VER;
+	const uint16_t cap       = OTA_TRIAL_CAP_CONFIRM;
+	const uint32_t off       = OTA_TRIAL_SCAN_LIMIT; /* past the bounded window */
+	memcpy(&buf[off], magic, sizeof magic);
+	buf[off + 16u] = (uint8_t)(sv & 0xFFu);
+	buf[off + 17u] = (uint8_t)(sv >> 8);
+	buf[off + 18u] = (uint8_t)(cap & 0xFFu);
+	buf[off + 19u] = (uint8_t)(cap >> 8);
+	zassert_false(ota_image_trial_capable(buf, sizeof buf),
+	              "a marker past OTA_TRIAL_SCAN_LIMIT must not be found");
 }
 
 /* ---- composed bootloader selection loop (item 1, bench fact 2026-09-26):

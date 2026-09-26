@@ -445,6 +445,18 @@ boot, rather than staying gated forever; and that a failed/interrupted
 confirm degrades to the OLDER, already-confirmed record surviving, not to
 "only the TRIAL record is left".
 
+**Marker precondition (bench fact 2026-09-26 follow-up):** TRIAL is now
+decided from a marker baked into the image (`ota_image_trial_capable()`,
+`src/ota_layout.h`; `tools/check_trial_marker.py` fails the build if it is
+missing), not from the fw_version the host declares in `OTA_BEGIN`. Both
+the KNOWN-GOOD image in step 1 and the KNOWN-BAD image in step 2 must be
+built from this tree (any `gd32-bridge-slot-a`/`-b` build carries the
+marker automatically) so this runbook actually exercises the TRIAL path --
+an image built without the marker (a pre-fix binary, or one hand-assembled
+without going through this repo's build) commits/rolls back straight to
+CONFIRMED and none of steps 1-6 below observe TRIAL/watchdog behaviour at
+all.
+
 **Brick-risk precondition -- read before running step 2:** this step's
 bad-image case is the one place in this runbook that DELIBERATELY commits
 an image known not to come up. That is only safe with the NEW bootloader

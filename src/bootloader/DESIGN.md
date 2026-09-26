@@ -58,24 +58,34 @@ The fix adds a **TRIAL** flag to the A/B metadata record
 (FWDGT) fallback:
 
 1. `CMD_OTA_COMMIT` / `CMD_OTA_ROLLBACK` mark the slot they just made active
-   **TRIAL**, UNLESS that slot's own recorded firmware version is
-   **explicitly known** (nonzero) AND below the trial-capable threshold,
-   `0.2.14` (`OTA_TRIAL_MIN_FW_VERSION`, `src/ota.c`) -- the release this
-   dance first shipped in. Policy, corrected from this fix's first cut:
-   **unknown defaults to TRIAL, not the reverse.** The 2026-09-26 bench
-   incident this whole fix responds to WAS a legacy/version-unknown-shaped
-   commit; treating "unknown" as "skip the safety net" would leave that
-   exact incident unprotected. An image whose version genuinely predates
-   `ota_boot_init()`/`ota_confirm_tick()` -- and so can never generate the
-   wire traffic that confirms it -- marked TRIAL is **not** "BUSY forever":
-   such an image has no gate at all (it never calls
-   `ota_trial_unconfirmed()`), so it keeps serving the wire completely
-   normally, right up until the FWDGT reverts it at the nominal window
-   (item 3 below) -- **unconditionally, whether or not it was healthy**.
-   Deliberately installing an old image that should *survive* therefore
-   requires the host to supply that image's real, explicit, known-old
-   version in `OTA_BEGIN`; omitting the version (the legacy 8-byte form) is
-   no longer a way to dodge the watchdog.
+   **TRIAL** iff that slot's OWN FLASH BYTES carry a confirm-capable trial
+   marker -- `ota_image_trial_capable()` (`src/ota_layout.h`) scans a
+   bounded window of the target slot's own image for a 20-byte struct
+   (magic + struct version + a capability bitfield, bit0 = implements the
+   confirm handshake) that every app image built from this branch onward
+   plants right after its vector table (`toolchain/gd32g553_app_slot.ld.in`'s
+   `.trial_marker` section, `src/trial_marker.c`).
+   **Bench fact 2026-09-26 follow-up:** this replaced an earlier cut of
+   this guard that trusted the fw_version the HOST declared in
+   `OTA_BEGIN` (`OTA_TRIAL_MIN_FW_VERSION`, now removed). That guard was
+   defeated by the exact incident it existed to protect against: on
+   2026-09-26 the host declared the BAD image's TRUE, pre-fix version at
+   `OTA_BEGIN`, which the declared-version guard believed and would have
+   committed WITHOUT trial protection -- the FWDGT would never have saved
+   it. Eligibility has to come from the image itself, not from what the
+   host claims about it. `s_fw_version` is still recorded into the
+   metadata record (informational only; no longer decides trial
+   eligibility). An image with no marker at all (every pre-marker build)
+   is **not** trial-capable: it cannot generate the confirm handshake
+   (`ota_note_frame()`/`ota_confirm_tick()`), so marking it TRIAL would
+   gate the wire BUSY forever with nothing to ever clear it -- such an
+   image commits/rolls back straight to CONFIRMED instead, keeping the
+   pre-fix (no-watchdog-safety-net) behaviour for images that predate this
+   dance, rather than bricking them behind a gate they can never open.
+   `tools/check_trial_marker.py` is a build-time gate (wired into
+   `CMakeLists.txt` for the two OTA-slot targets): it runs the identical
+   bounded scan against the just-built `.bin`, so a slot image produced
+   without a findable marker fails the build instead of shipping one.
 2. This bootloader reads `RCU_RSTSCK` **once**, up front, to see whether the
    *previous* boot ended in a watchdog reset (`FWDGTRSTF`), stashes the raw
    value, and clears `RSTFC` (see "reset-cause ownership" below). For each
@@ -241,7 +251,7 @@ protects them -- an old bootloader doesn't know about `flags`,
 `ota_boot_candidate_ok()`, the last-resort pass, or the reset-cause stash,
 and will still jump unconditionally to the newest valid slot with no
 watchdog. **An old bootloader paired with a NEW app**: the app still writes
-`OTA_META_FLAG_TRIAL` on commit/rollback (subject to the version gate
+`OTA_META_FLAG_TRIAL` on commit/rollback (subject to the trial-marker guard
 above) and still gates the wire BUSY via `ota_boot_init()` -- but nothing
 ever arms a watchdog to revert a hang, so the trial/confirm dance adds an
 extra reboot with **no actual safety net** if the new image hangs before

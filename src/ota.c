@@ -25,6 +25,15 @@
  * ota_trial_unconfirmed() until the first noted frame lets
  * ota_confirm_tick() (run from the base-level tick) clear the flag and
  * reboot into the now-permanent image.  See src/bootloader/DESIGN.md.
+ *
+ * Trial eligibility is decided from the IMAGE ITSELF (bench fact
+ * 2026-09-26 follow-up): ota_image_trial_capable() (src/ota_layout.h)
+ * scans the target slot's own flash bytes for a marker every app image
+ * built from this branch onward plants right after its vector table
+ * (src/trial_marker.c). This replaced an earlier cut that trusted the
+ * fw_version the host declared in OTA_BEGIN -- the 2026-09-26 incident
+ * was the host declaring the bad image's TRUE, pre-fix version, which
+ * that guard would have believed.
  */
 
 #include <stddef.h>
@@ -405,36 +414,6 @@ static uint32_t ota_inactive_base(void)
 
 /* ---- trial/confirm + watchdog fallback (bench fact 2026-09-26,
  * E1M-V2M103) -------------------------------------------------------- */
-
-/* Minimum EXPLICITLY-KNOWN firmware version (packed major<<16|minor<<8|
- * patch, matching OTA_BEGIN's v0.7 wire form) below which an image is
- * deliberately committed WITHOUT trial protection -- 0.2.14, the
- * firmware-version.txt release this dance first shipped in.
- *
- * Policy (C4, adversarial-verify finding -- corrected from this fix's
- * first cut): UNKNOWN (0, a legacy 8-byte BEGIN) gets TRIAL, not the
- * other way around.  The 2026-09-26 bench incident that motivated this
- * whole fix WAS a legacy/version-unknown-shaped commit; treating
- * "unknown" as "skip the safety net" would leave the exact incident this
- * fix exists for unprotected.  Only an image whose version the host
- * EXPLICITLY reported, and which is a real pre-0.2.14 release, gets the
- * conservative no-trial treatment -- that image genuinely predates
- * ota_confirm_tick()/ota_boot_init() and, marked TRIAL, would never
- * itself generate the wire traffic that confirms it; instead of gating
- * the wire forever, though, the case below shows it is NOT "BUSY
- * forever" -- an old app has no gate at all (it never calls
- * ota_trial_unconfirmed()), so it keeps serving the wire normally right
- * up until the FWDGT reverts it at the nominal window, unconditionally,
- * whether or not it was healthy.  Deliberately installing an old image
- * that should SURVIVE therefore requires the host to supply that image's
- * real, explicit, known-old version in OTA_BEGIN -- an unknown/omitted
- * version is no longer a way to dodge the watchdog. */
-#define OTA_TRIAL_MIN_FW_VERSION 0x00020Eu /* 0.2.14 */
-
-static bool fw_version_trial_capable(uint32_t packed_fw_version)
-{
-	return packed_fw_version == 0u || packed_fw_version >= OTA_TRIAL_MIN_FW_VERSION;
-}
 
 /* volatile: ota_confirm_tick() runs from the base-level tick and
  * ota_note_frame()/ota_trial_unconfirmed() run from (or are consulted by)
@@ -825,11 +804,20 @@ static gd32_bridge_status_t h_commit(void)
 		s_err   = 6u;
 		return STATUS_INVAL;
 	}
-	/* Downgrade guard (bench fact 2026-09-26, corrected per C4): TRIAL
-	 * unless the image's version is EXPLICITLY known and below the
-	 * trial-capable threshold -- see fw_version_trial_capable()'s own
-	 * comment for why unknown defaults to protected, not the reverse. */
-	const uint8_t commit_flags = fw_version_trial_capable(s_fw_version) ? OTA_META_FLAG_TRIAL : 0u;
+	/* Downgrade guard (bench fact 2026-09-26 follow-up): TRIAL iff the
+	 * IMAGE ITSELF (the bytes just staged in the inactive slot, NOT the
+	 * fw_version the host declared at OTA_BEGIN) carries the
+	 * confirm-capable trial marker -- see ota_image_trial_capable()
+	 * (src/ota_layout.h) for why the declared version can no longer be
+	 * trusted for this decision: the 2026-09-26 incident was the host
+	 * declaring the bad image's TRUE, pre-fix version, which the old
+	 * declared-version guard would have believed. s_fw_version is still
+	 * recorded into the metadata record below (informational only; no
+	 * longer decides trial eligibility). */
+	const uint8_t commit_flags =
+	    ota_image_trial_capable((const uint8_t *)ota_fmc_flash_ptr(ota_inactive_base()), s_img_len)
+	        ? OTA_META_FLAG_TRIAL
+	        : 0u;
 	if (!meta_commit(s_inactive,
 	                 true,
 	                 s_fw_version /* 0 = legacy BEGIN, unknown */,
@@ -906,11 +894,20 @@ static gd32_bridge_status_t h_rollback(void)
 	/* Flip active to `other` WITHOUT touching the per-slot descriptors
      * (update_entry=false): the bootloader validates the rolled-to slot
      * against the len/CRC recorded when that slot was last committed.
-     * Downgrade guard (bench fact 2026-09-26, corrected per C4): TRIAL
-     * unless the target slot's OWN recorded fw_version is explicitly
-     * known and below the threshold -- see fw_version_trial_capable(). */
+     * Downgrade guard (bench fact 2026-09-26 follow-up): TRIAL iff the
+     * TARGET slot's OWN flash bytes carry the confirm-capable trial
+     * marker -- same ota_image_trial_capable() COMMIT uses, read from
+     * `other`'s own base rather than the declared cur.fw_version[other]
+     * (see h_commit's comment for why the declared version is no longer
+     * trusted for this decision). */
+	uint32_t other_base = 0u;
+	if (!ota_slot_base_checked(other, &other_base)) {
+		return STATUS_INVAL; /* unreachable: `other` is always A/B */
+	}
 	const uint8_t rollback_flags =
-	    fw_version_trial_capable(cur.fw_version[other]) ? OTA_META_FLAG_TRIAL : 0u;
+	    ota_image_trial_capable((const uint8_t *)ota_fmc_flash_ptr(other_base), cur.img_len[other])
+	        ? OTA_META_FLAG_TRIAL
+	        : 0u;
 	if (!meta_commit(other, false, 0u, 0u, 0u, rollback_flags, 0u, 0xFFu)) {
 		return STATUS_IO;
 	}
