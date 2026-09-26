@@ -492,9 +492,26 @@ uint8_t bridge_hw_reset_reason(void)
      * Clear-on-read: the stash is zeroed after decoding (needs the same
      * backup-domain write-unlock the bootloader uses), so the next reader
      * sees UNKNOWN unless the bootloader stashes a fresh cause on a later
-     * boot. */
-	const uint32_t rstsck = RTC_BKP8;
-	uint8_t        cause  = 0u; /* UNKNOWN */
+     * boot.
+     *
+     * Fallback (C1, adversarial-verify finding): the stash is only ever
+     * written by THIS fix's bootloader.  A RTC_BKP8 == 0 read here means
+     * one of two things this function cannot tell apart -- and does not
+     * need to: (a) the full-flash, non-partitioned image (no bootloader
+     * runs at all, see CMakeLists.txt's BRIDGE_OTA_PARTITIONED option), or
+     * (b) an OLD (pre-this-fix) bootloader paired with this new app, which
+     * never stashed anything.  Reading RTC_BKP8 == 0 unconditionally as
+     * UNKNOWN would silently regress CMD_RESET_REASON to "always UNKNOWN"
+     * on both of those real configurations.  Fall back to a LIVE
+     * RCU_RSTSCK read instead, same priority order, and clear RSTFC here
+     * (this function becomes the sole owner of that clear on this path,
+     * same as it always was before the bootloader-stash rework existed). */
+	uint32_t   rstsck    = RTC_BKP8;
+	const bool from_stash = (rstsck != 0u);
+	if (!from_stash) {
+		rstsck = RCU_RSTSCK;
+	}
+	uint8_t cause = 0u; /* UNKNOWN */
 
 	if (rstsck & RCU_RSTSCK_PORRSTF) {
 		cause = 1u; /* POWER_ON */
@@ -512,7 +529,10 @@ uint8_t bridge_hw_reset_reason(void)
 
 	RCU_APB1EN |= RCU_APB1EN_PMUEN;
 	PMU_CTL0 |= PMU_CTL0_BKPWEN;
-	RTC_BKP8 = 0u;
+	RTC_BKP8 = 0u; /* clear-on-read, whichever source answered */
+	if (!from_stash) {
+		RCU_RSTSCK |= RCU_RSTSCK_RSTFC;
+	}
 	return cause;
 }
 

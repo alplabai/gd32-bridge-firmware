@@ -58,14 +58,24 @@ The fix adds a **TRIAL** flag to the A/B metadata record
 (FWDGT) fallback:
 
 1. `CMD_OTA_COMMIT` / `CMD_OTA_ROLLBACK` mark the slot they just made active
-   **TRIAL**, but only when that slot's own recorded firmware version is
-   **downgrade-safe**: `>= 0.2.14` (`OTA_TRIAL_MIN_FW_VERSION`, `src/ota.c`),
-   the release this dance first shipped in. An older or version-unknown
-   image (a legacy 8-byte `OTA_BEGIN`) has no `ota_boot_init()` /
-   `ota_confirm_tick()` of its own to ever clear the flag, so marking it
-   TRIAL would gate the wire BUSY forever; such an image commits/rolls back
-   **CONFIRMED** (`flags = 0`) instead -- no watchdog protection, same as
-   before this fix, but no permanent brick either.
+   **TRIAL**, UNLESS that slot's own recorded firmware version is
+   **explicitly known** (nonzero) AND below the trial-capable threshold,
+   `0.2.14` (`OTA_TRIAL_MIN_FW_VERSION`, `src/ota.c`) -- the release this
+   dance first shipped in. Policy, corrected from this fix's first cut:
+   **unknown defaults to TRIAL, not the reverse.** The 2026-09-26 bench
+   incident this whole fix responds to WAS a legacy/version-unknown-shaped
+   commit; treating "unknown" as "skip the safety net" would leave that
+   exact incident unprotected. An image whose version genuinely predates
+   `ota_boot_init()`/`ota_confirm_tick()` -- and so can never generate the
+   wire traffic that confirms it -- marked TRIAL is **not** "BUSY forever":
+   such an image has no gate at all (it never calls
+   `ota_trial_unconfirmed()`), so it keeps serving the wire completely
+   normally, right up until the FWDGT reverts it at the nominal window
+   (item 3 below) -- **unconditionally, whether or not it was healthy**.
+   Deliberately installing an old image that should *survive* therefore
+   requires the host to supply that image's real, explicit, known-old
+   version in `OTA_BEGIN`; omitting the version (the legacy 8-byte form) is
+   no longer a way to dodge the watchdog.
 2. This bootloader reads `RCU_RSTSCK` **once**, up front, to see whether the
    *previous* boot ended in a watchdog reset (`FWDGTRSTF`), stashes the raw
    value, and clears `RSTFC` (see "reset-cause ownership" below). For each
@@ -87,11 +97,20 @@ The fix adds a **TRIAL** flag to the A/B metadata record
    this is *nominally* ~32.8 s, stated as an order-of-magnitude planning
    number, not an asserted tolerance: the GD32G5x3 datasheet's IRC32K
    accuracy section is the authority on the real spread and has not been
-   independently re-checked against this repo for this fix. `fwdgt_config()`'s
-   return is checked and retried exactly once on failure (a transient
-   PSC/RLD-write timeout right after boot is the plausible failure mode;
-   see `src/boot/boot_main.c`'s own comment) -- not looped, since this is
-   the bootloader arming its own safety net. The debug-hold bit
+   independently re-checked against this repo for this fix. `fwdgt_clock_ready()`
+   brings up IRC32K (`rcu_osci_on(RCU_IRC32K)` + a bounded stabilisation
+   wait, mirroring `hal/gd32/power.c`'s `rtc_wakeup_init_once()` for the
+   identical oscillator) BEFORE arming (C2, adversarial-verify finding):
+   without it, the very first `fwdgt_config()` call on a cold boot can
+   race the oscillator and time out its PSC/RLD write. `fwdgt_config()`'s
+   return is checked and retried exactly once on failure -- not looped,
+   since this is the bootloader arming its own safety net. **A PSC/RLD
+   timeout is not benign:** `fwdgt_config()` issues `FWDGT_CTL`'s
+   `KEY_ENABLE` write FIRST, unconditionally, so the counter is running
+   and CANNOT be un-armed by any register in this peripheral by the time a
+   PSC/RLD failure is even detected; a timeout leaves the counter running
+   under FWDGT's power-on-reset defaults (`PSC=/4`, `RLD=0xFFF`, roughly
+   0.5 s at nominal IRC32K) instead of the intended ~32.8 s. The debug-hold bit
    (`DBG_FWDGT_HOLD`) is set first: it **freezes** the FWDGT counter while a
    debugger holds the core halted, so a breakpointed bench session isn't
    blown away by a spurious watchdog reset mid-investigation (the counter
@@ -99,14 +118,14 @@ The fix adds a **TRIAL** flag to the A/B metadata record
    real, running window).
 4. If the jumped-to image comes up, `main()` calls `ota_boot_init()`
    (`src/ota.c`) *before* the transports start. It derives trial status from
-   the record that actually **names the slot we are running**
-   (`OTA_RUNNING_SLOT`, the same compile-time fact #3's fixes already
-   derive from `BRIDGE_APP_SLOT_BASE`) -- deliberately NOT simply
-   `meta_current()`'s overall-newest pick, because the last-resort pass
-   above (and #754's ordinary fallback) can both boot a candidate that is
-   *not* the highest-counter record on flash; if an even-newer-but-rejected
-   record sits on the other page, `meta_current()` alone would describe a
-   slot nothing is executing.
+   `find_running_slot_record()` -- the CRC-valid record whose `active_slot`
+   actually **names the slot we are running** (`OTA_RUNNING_SLOT`, the same
+   compile-time fact #3's fixes already derive from `BRIDGE_APP_SLOT_BASE`)
+   -- deliberately NOT simply `meta_current()`'s overall-newest pick,
+   because the last-resort pass above (and #754's ordinary fallback) can
+   both boot a candidate that is *not* the highest-counter record on flash;
+   if an even-newer-but-rejected record sits on the other page,
+   `meta_current()` alone would describe a slot nothing is executing.
    - The record naming us is TRIAL: a fresh (or re-armed last-resort) trial
      boot. `ota_trial_unconfirmed()` gates the wire -- every opcode
      `protocol_dispatch()` sees, on either link, answers `STATUS_BUSY` with
@@ -119,21 +138,47 @@ The fix adds a **TRIAL** flag to the A/B metadata record
      reset** -- we are already the safe (or last-resort) fallback -- and
      also **clear that slot's `slot_valid` bit**, so a later `ROLLBACK` can
      never re-select the exact slot the bootloader just steered away from.
+     **Composition guard:** self-heal is deliberately SKIPPED whenever the
+     record naming us is *itself* still an unconfirmed TRIAL (the
+     composed "last-resort boot of a still-gated image" shape) -- writing
+     `flags = 0` there would prematurely confirm a record
+     `ota_confirm_tick()` has not actually confirmed, bypassing the
+     frame-gated dance entirely. Deferring is safe: `ota_confirm_tick()`
+     (via the same `find_running_slot_record()` lookup) targets and fixes
+     up our own record once a frame arrives, and the other page's stale
+     pointer gets cleaned up by this self-heal on a LATER boot once we are
+     no longer gated.
+   - Both this self-heal path and a successful confirm (item 5) call
+     `ota_fault_loop_clear()`, which zeroes `hal/gd32/fault_handlers.c`'s
+     consecutive-fault counter (`RTC_BKP7`). Without this, a TRIAL image
+     that fault-loops (hits `FAULT_RESET_LOOP_LIMIT` before the FWDGT ever
+     gets a chance to revert it) permanently consumes that counter --
+     `fault_handlers.c`'s own header documents "nothing clears `RTC_BKP7`
+     on a healthy boot" as an accepted, standing limitation -- so the
+     confirmed fallback slot's very first UNRELATED fault would then halt
+     instead of reset. Reaching either call site here IS the "healthy
+     boot" signal that limitation was waiting on.
 5. Once a frame has been noted during an unconfirmed trial, the base-level
    tick (`ota_confirm_tick()`, called next to `ota_erase_tick()` from
    `bridge_hw_tick()`) commits the slot **CONFIRMED** (`flags = 0`) and
-   reboots. This commit forces its erase target onto the **same metadata
-   page the TRIAL record already occupies** (`meta_commit()`'s
-   `target_override` parameter) rather than the usual #74 rank rule: a
-   confirm is "flip this record's own flags", not "establish a new active
-   slot", so it must not touch the *other* page -- which, in the scenario
-   this fix exists for, holds the OLDER, already-CONFIRMED fallback
-   record. A failed or power-cut-interrupted confirm then degrades to
-   "reverted" (the older confirmed record survives, untouched, and the
-   next boot uses it) rather than "only the TRIAL record is left". The
-   extra reset on a successful confirm is deliberate: on a fresh, non-TRIAL
-   boot this bootloader never arms the FWDGT, so rebooting is the only way
-   to stop the watchdog that's been running since the trial boot. The
+   reboots. This commit forces its erase target onto the **page of the
+   record that names `OTA_RUNNING_SLOT` with TRIAL** -- the SAME
+   `find_running_slot_record()` lookup item 4 used, **not**
+   `meta_current()` -- via `meta_commit()`'s `target_override` parameter,
+   rather than the usual #74 rank rule. This distinction matters
+   precisely in the #754-fallback shape: if the OVERALL newest record
+   names a *different*, rejected slot, `meta_current()` would hand
+   confirm the WRONG page to force as its erase target, corrupting the
+   very record confirm is supposed to leave alone. A confirm is "flip
+   THIS record's own flags", not "establish a new active slot", so it
+   must not touch the *other* page -- which, in the scenario this fix
+   exists for, holds the OLDER, already-CONFIRMED fallback record. A
+   failed or power-cut-interrupted confirm then degrades to "reverted"
+   (the older confirmed record survives, untouched, and the next boot
+   uses it) rather than "only the TRIAL record is left". The extra reset
+   on a successful confirm is deliberate: on a fresh, non-TRIAL boot this
+   bootloader never arms the FWDGT, so rebooting is the only way to stop
+   the watchdog that's been running since the trial boot. The
    confirmed-in-RAM flag is deliberately **not** set before this reset (a
    real `ota_system_reset()` never returns; keeping the gate closed through
    it means a host-test seam that DOES return can't observe a
@@ -141,6 +186,14 @@ The fix adds a **TRIAL** flag to the A/B metadata record
    silicon -- a test wanting to prove confirmation landed calls
    `ota_boot_init()` again, simulating the reboot, and checks that FRESH
    read of the now-flags=0 record).
+
+   **A frame-confirmed image can still be reverted.** Noting a frame
+   (`ota_note_frame()`) only starts the confirm commit on the NEXT
+   base-level tick -- it does not stop the FWDGT. If power is lost, or the
+   watchdog itself fires, inside the narrow erase-then-program window the
+   confirm commit runs in, the image reverts exactly as if no frame had
+   ever arrived: a healthy, wire-responsive image is not exempt from this
+   window merely for having proven itself once.
 
 **Reset-cause ownership:** this bootloader reads `RCU_RSTSCK` exactly ONCE
 per boot, **stashes** the raw value in `RTC_BKP8` (an RTC backup-domain
@@ -164,6 +217,24 @@ distinguished from a live one if the app never happened to call
 `CMD_RESET_REASON` at all would carry a stale cause forward indefinitely
 under the old design; the bootloader now owns the read-once/clear-always
 step regardless of what the app does afterward.
+
+**Fallback source, by configuration (C1, adversarial-verify finding):**
+`RTC_BKP8` is written ONLY by THIS fix's bootloader, so
+`bridge_hw_reset_reason()` treats a `RTC_BKP8 == 0` read as "no stash was
+ever written" and falls back to a LIVE `RCU_RSTSCK` read (same priority
+order, clearing `RSTFC` itself on that path) rather than reporting UNKNOWN
+unconditionally:
+
+| Configuration | `CMD_RESET_REASON` source |
+|---|---|
+| New bootloader + new app (the fully-updated pair) | `RTC_BKP8` stash |
+| Full-flash, non-partitioned image (no bootloader runs at all) | live `RCU_RSTSCK` fallback |
+| Old (pre-fix) bootloader + new app | live `RCU_RSTSCK` fallback (the old bootloader never stashed anything) |
+
+The live-read fallback inherits the ORIGINAL single-reader limitation the
+stash exists to remove (this app is the only thing that will ever read or
+clear those bits), but that is strictly better than a permanent UNKNOWN on
+two real, reachable configurations.
 
 **Cost on fielded units with the OLD (pre-fix) bootloader:** none of this
 protects them -- an old bootloader doesn't know about `flags`,
@@ -198,7 +269,13 @@ even though it came up healthy. The host must also treat `STATUS_BUSY`
 returned to ANY opcode in that window as **retryable**, not as an error:
 it means "this session may still revert", and a later retry of the exact
 same frame either succeeds (post-confirm) or fails the same way (still
-gated) -- never a wire fault.
+gated) -- never a wire fault. This retry contract also covers the rarer
+case item 5 states plainly: a frame the host already sent can still be
+reverted by a power loss or watchdog fault landing inside the confirm
+commit's own erase-then-program window, so "I already got a non-BUSY
+reply once" is not itself proof the image survived -- re-probe with
+`OTA_GET_STATE` / `CMD_GET_BUILD_ID` after any suspected reset, the same
+as the missing-reply case above.
 
 ## OTA opcode contract
 

@@ -62,6 +62,21 @@ __attribute__((weak)) const void *ota_fmc_flash_ptr(uint32_t addr)
 {
 	return (const void *)(uintptr_t)addr;
 }
+/* C3 (adversarial-verify finding): clears hal/gd32/fault_handlers.c's
+ * consecutive-fault counter (RTC_BKP7) once a boot reaches a point this
+ * trial/confirm dance considers "healthy enough to trust" -- the
+ * self-heal path (we ARE the confirmed fallback after a watchdog-rejected
+ * trial) and a successful confirm commit.  Without this, a TRIAL image
+ * that fault-loops (hits FAULT_RESET_LOOP_LIMIT before the FWDGT ever
+ * gets a chance to revert it) permanently consumes that counter, since
+ * fault_handlers.c's own header documents "nothing clears RTC_BKP7 on a
+ * healthy boot" as an accepted, standing limitation -- so the confirmed
+ * fallback slot's very first UNRELATED fault would then halt instead of
+ * resetting.  Reaching either call site here is exactly the "healthy
+ * boot" signal that limitation was waiting on. */
+__attribute__((weak)) void ota_fault_loop_clear(void)
+{
+}
 
 #if defined(BRIDGE_OTA_PARTITIONED)
 
@@ -391,31 +406,81 @@ static uint32_t ota_inactive_base(void)
 /* ---- trial/confirm + watchdog fallback (bench fact 2026-09-26,
  * E1M-V2M103) -------------------------------------------------------- */
 
-/* Minimum firmware version (packed major<<16|minor<<8|patch, matching
- * OTA_BEGIN's v0.7 wire form) that KNOWS about this trial/confirm dance --
- * 0.2.14, the firmware-version.txt release this fix first shipped in.  An
- * image older than that, or one whose version is UNKNOWN (a legacy 8-byte
- * BEGIN packs 0), never calls ota_boot_init()/ota_confirm_tick(): nothing
- * in it will ever clear a TRIAL flag, so marking it TRIAL would gate the
- * wire BUSY forever instead of merely losing the watchdog protection.
- * Committing/rolling back to such an image CONFIRMED (flags=0) is the
- * conservative choice -- no different from before this fix, and no
- * permanent brick either. */
+/* Minimum EXPLICITLY-KNOWN firmware version (packed major<<16|minor<<8|
+ * patch, matching OTA_BEGIN's v0.7 wire form) below which an image is
+ * deliberately committed WITHOUT trial protection -- 0.2.14, the
+ * firmware-version.txt release this dance first shipped in.
+ *
+ * Policy (C4, adversarial-verify finding -- corrected from this fix's
+ * first cut): UNKNOWN (0, a legacy 8-byte BEGIN) gets TRIAL, not the
+ * other way around.  The 2026-09-26 bench incident that motivated this
+ * whole fix WAS a legacy/version-unknown-shaped commit; treating
+ * "unknown" as "skip the safety net" would leave the exact incident this
+ * fix exists for unprotected.  Only an image whose version the host
+ * EXPLICITLY reported, and which is a real pre-0.2.14 release, gets the
+ * conservative no-trial treatment -- that image genuinely predates
+ * ota_confirm_tick()/ota_boot_init() and, marked TRIAL, would never
+ * itself generate the wire traffic that confirms it; instead of gating
+ * the wire forever, though, the case below shows it is NOT "BUSY
+ * forever" -- an old app has no gate at all (it never calls
+ * ota_trial_unconfirmed()), so it keeps serving the wire normally right
+ * up until the FWDGT reverts it at the nominal window, unconditionally,
+ * whether or not it was healthy.  Deliberately installing an old image
+ * that should SURVIVE therefore requires the host to supply that image's
+ * real, explicit, known-old version in OTA_BEGIN -- an unknown/omitted
+ * version is no longer a way to dodge the watchdog. */
 #define OTA_TRIAL_MIN_FW_VERSION 0x00020Eu /* 0.2.14 */
 
 static bool fw_version_trial_capable(uint32_t packed_fw_version)
 {
-	return packed_fw_version != 0u && packed_fw_version >= OTA_TRIAL_MIN_FW_VERSION;
+	return packed_fw_version == 0u || packed_fw_version >= OTA_TRIAL_MIN_FW_VERSION;
 }
 
 /* volatile: ota_confirm_tick() runs from the base-level tick and
  * ota_note_frame()/ota_trial_unconfirmed() run from (or are consulted by)
- * the transport ISR-driven protocol_dispatch() path -- these three are the
+ * the transport ISR-driven protocol_dispatch() path -- these two are the
  * cross-context handshake between them, not just an optimiser hazard on
  * this single-core, no-RTOS target. */
 static volatile bool s_trial;      /* this boot is running a not-yet-confirmed TRIAL image */
-static volatile bool s_confirmed;  /* the confirm commit already landed this boot */
 static volatile bool s_frame_seen; /* a wire frame arrived since boot (the confirm signal) */
+
+/* Find the CRC-valid metadata record (of the at-most-two pages) whose
+ * `active_slot` names OTA_RUNNING_SLOT -- the slot the bootloader
+ * ACTUALLY booted, per #754's fallback (and this fix's last-resort pass,
+ * ota_boot_select()), which is not always meta_current()'s overall-newest
+ * pick: the newest record on flash can legitimately name a DIFFERENT
+ * slot that was rejected (by validity or the watchdog gate) in favour of
+ * this one.  On the (today unreachable) case where both pages somehow
+ * name the running slot, the higher counter wins, matching
+ * meta_pick_newest()'s own tie rule.
+ *
+ * Shared by ota_boot_init() (decides s_trial from it) and
+ * ota_confirm_tick() (C7, adversarial-verify finding: confirm MUST target
+ * THIS record's own page, not meta_current()'s -- in the #754-fallback
+ * shape above, meta_current() names the wrong, rejected page and forcing
+ * the erase target there would erase the WRONG record). */
+static bool find_running_slot_record(ota_meta_record_t *out, uint32_t *which_addr)
+{
+	ota_meta_record_t a, b;
+	const bool        va   = meta_read(OTA_META_REC0, &a);
+	const bool        vb   = meta_read(OTA_META_REC1, &b);
+	const ota_meta_record_t *best      = NULL;
+	uint32_t                 best_addr = 0u;
+	if (va && a.active_slot == OTA_RUNNING_SLOT) {
+		best      = &a;
+		best_addr = OTA_META_REC0;
+	}
+	if (vb && b.active_slot == OTA_RUNNING_SLOT && (best == NULL || b.counter > best->counter)) {
+		best      = &b;
+		best_addr = OTA_META_REC1;
+	}
+	if (best == NULL) {
+		return false;
+	}
+	*out        = *best;
+	*which_addr = best_addr;
+	return true;
+}
 
 void ota_boot_init(void)
 {
@@ -423,56 +488,55 @@ void ota_boot_init(void)
 	 * explicitly too so host-side test re-entry into the same process
 	 * behaves identically to a fresh boot. */
 	s_trial      = false;
-	s_confirmed  = false;
 	s_frame_seen = false;
 	if (!ota_fmc_supported()) {
 		return;
 	}
-	ota_meta_record_t a, b;
-	const bool        va = meta_read(OTA_META_REC0, &a);
-	const bool        vb = meta_read(OTA_META_REC1, &b);
-	if (!va && !vb) {
-		return; /* factory / corrupt: nothing to reconcile */
-	}
 
-	/* The record that actually NAMES the slot we are running -- NOT
-	 * simply meta_current()'s overall-newest pick (#754's fallback, and
-	 * this fix's last-resort pass in ota_boot_select(), can both boot a
-	 * candidate that is NOT the highest-counter record on flash; if an
-	 * even-newer-but-rejected record exists on the other page,
-	 * meta_current() would describe a slot nothing is executing). */
-	const ota_meta_record_t *run_rec = NULL;
-	if (va && a.active_slot == OTA_RUNNING_SLOT) {
-		run_rec = &a;
-	}
-	if (vb && b.active_slot == OTA_RUNNING_SLOT &&
-	    (run_rec == NULL || b.counter > run_rec->counter)) {
-		run_rec = &b;
-	}
-	if (run_rec != NULL && (run_rec->flags & OTA_META_FLAG_TRIAL) != 0u) {
+	ota_meta_record_t run_rec;
+	uint32_t          run_rec_which; /* unused here; ota_confirm_tick() needs it */
+	const bool        have_run_rec = find_running_slot_record(&run_rec, &run_rec_which);
+	const bool        run_rec_trial =
+	    have_run_rec && (run_rec.flags & OTA_META_FLAG_TRIAL) != 0u;
+	if (run_rec_trial) {
 		s_trial = true; /* fresh (or re-armed last-resort) trial boot */
 	}
 
-	/* Separately: does the OVERALL newest record still name a DIFFERENT
-	 * slot, and is it still marked TRIAL?  That is a lingering divergence
-	 * -- that candidate was rejected (by validity or the watchdog gate)
-	 * in favour of what we are actually running.  Self-heal it so a
-	 * later boot never sees a stale trial pointing at a slot nothing will
-	 * jump to again, AND clear that slot's slot_valid bit so a later
-	 * ROLLBACK can never re-select the exact slot the bootloader just
-	 * steered away from.  We ARE the safe (or last-resort, already-
-	 * gated-by-s_trial-above) fallback already, so no reset. */
-	ota_meta_record_t newest;
-	uint32_t          which;
-	if (meta_pick_newest(&a, va, &b, vb, &newest, &which) &&
-	    newest.active_slot != OTA_RUNNING_SLOT && (newest.flags & OTA_META_FLAG_TRIAL) != 0u) {
-		(void)meta_commit(OTA_RUNNING_SLOT, false, 0u, 0u, 0u, 0u, 0u, newest.active_slot);
+	/* Self-heal: does the OVERALL newest record still name a DIFFERENT
+	 * slot, and is it still marked TRIAL?  That candidate was rejected
+	 * (by validity or the watchdog gate) in favour of what we are
+	 * actually running.  Repoint `active_slot` at us and clear the
+	 * rejected slot's `slot_valid` bit so a later ROLLBACK can never
+	 * re-select the exact slot the bootloader just steered away from.
+	 *
+	 * Deliberately skipped while run_rec_trial is true: if OUR OWN record
+	 * is still an unconfirmed TRIAL (the last-resort-boot composition --
+	 * we are ourselves the fallback AND still gated), self-healing here
+	 * would prematurely stamp flags=0 on a record ota_confirm_tick() has
+	 * not actually confirmed yet, bypassing the frame-gated confirm dance
+	 * entirely.  Deferring is safe: ota_confirm_tick() (via
+	 * find_running_slot_record(), the SAME lookup) will target and fix up
+	 * our own record once a frame actually arrives, and any leftover
+	 * stale pointer on the other page gets cleaned up by THIS self-heal
+	 * on a later boot once we are no longer gated. */
+	if (!run_rec_trial) {
+		ota_meta_record_t a, b;
+		const bool        va = meta_read(OTA_META_REC0, &a);
+		const bool        vb = meta_read(OTA_META_REC1, &b);
+		ota_meta_record_t newest;
+		uint32_t          which;
+		if (meta_pick_newest(&a, va, &b, vb, &newest, &which) &&
+		    newest.active_slot != OTA_RUNNING_SLOT &&
+		    (newest.flags & OTA_META_FLAG_TRIAL) != 0u) {
+			ota_fault_loop_clear();
+			(void)meta_commit(OTA_RUNNING_SLOT, false, 0u, 0u, 0u, 0u, 0u, newest.active_slot);
+		}
 	}
 }
 
 bool ota_trial_unconfirmed(void)
 {
-	return s_trial && !s_confirmed;
+	return s_trial;
 }
 
 void ota_note_frame(void)
@@ -482,27 +546,31 @@ void ota_note_frame(void)
 
 void ota_confirm_tick(void)
 {
-	if (!s_trial || s_confirmed || !s_frame_seen) {
+	if (!s_trial || !s_frame_seen) {
 		return;
 	}
-	/* Force the erase target onto the SAME page the current TRIAL record
-	 * occupies (target_override=`which`) -- see meta_commit()'s own
-	 * comment for why the #74 rank rule must NOT choose here. */
-	ota_meta_record_t cur;
+	/* Force the erase target onto the SAME page the record naming
+	 * OTA_RUNNING_SLOT already occupies -- find_running_slot_record(),
+	 * NOT meta_current() (C7: meta_current() names the wrong page in the
+	 * #754-fallback shape).  See meta_commit()'s own comment for why the
+	 * #74 rank rule must not choose here either. */
+	ota_meta_record_t run_rec;
 	uint32_t          which;
-	if (!meta_current(&cur, &which)) {
-		return; /* unreachable: ota_boot_init() already required a valid
-		         * TRIAL record naming OTA_RUNNING_SLOT to set s_trial */
+	if (!find_running_slot_record(&run_rec, &which)) {
+		return; /* unreachable: ota_boot_init() already required this to
+		         * exist, TRIAL, to set s_trial */
 	}
 	if (!meta_commit(OTA_RUNNING_SLOT, false, 0u, 0u, 0u, 0u, which, 0xFFu)) {
 		return; /* leave TRIAL set -- the armed watchdog is the safety net */
 	}
-	/* Do NOT set s_confirmed here: the gate must stay closed for the
-	 * remainder of THIS boot (a real ota_system_reset() never returns; a
-	 * host-test seam that does could otherwise observe a one-instruction
-	 * window where the commit landed but the reset hasn't -- s_confirmed
-	 * only needs to exist for a NEXT boot's ota_boot_init() to read back
-	 * flags=0 from flash, not for this one). */
+	ota_fault_loop_clear();
+	/* No RAM "confirmed" flag is set here: the gate must stay closed for
+	 * the remainder of THIS boot (a real ota_system_reset() never
+	 * returns; a host-test seam that does could otherwise observe a
+	 * one-instruction window where the commit landed but the reset
+	 * hasn't).  Proving confirmation landed means reading back the flash
+	 * record post-reset (a real next boot's ota_boot_init(), or a test
+	 * simulating one). */
 	ota_system_reset(); /* reboot into the now-permanent (non-TRIAL) image */
 }
 
@@ -759,10 +827,10 @@ static gd32_bridge_status_t h_commit(void)
 		s_err   = 6u;
 		return STATUS_INVAL;
 	}
-	/* Downgrade guard (bench fact 2026-09-26): only mark TRIAL when the
-	 * committed image itself KNOWS how to confirm -- see
-	 * fw_version_trial_capable()'s own comment.  An unknown/pre-trial
-	 * image commits CONFIRMED instead, same as before this fix. */
+	/* Downgrade guard (bench fact 2026-09-26, corrected per C4): TRIAL
+	 * unless the image's version is EXPLICITLY known and below the
+	 * trial-capable threshold -- see fw_version_trial_capable()'s own
+	 * comment for why unknown defaults to protected, not the reverse. */
 	const uint8_t commit_flags = fw_version_trial_capable(s_fw_version) ? OTA_META_FLAG_TRIAL : 0u;
 	if (!meta_commit(s_inactive,
 	                 true,
@@ -840,9 +908,9 @@ static gd32_bridge_status_t h_rollback(void)
 	/* Flip active to `other` WITHOUT touching the per-slot descriptors
      * (update_entry=false): the bootloader validates the rolled-to slot
      * against the len/CRC recorded when that slot was last committed.
-     * Downgrade guard (bench fact 2026-09-26): TRIAL only if the target
-     * slot's OWN recorded fw_version knows how to confirm -- see
-     * fw_version_trial_capable(). */
+     * Downgrade guard (bench fact 2026-09-26, corrected per C4): TRIAL
+     * unless the target slot's OWN recorded fw_version is explicitly
+     * known and below the threshold -- see fw_version_trial_capable(). */
 	const uint8_t rollback_flags =
 	    fw_version_trial_capable(cur.fw_version[other]) ? OTA_META_FLAG_TRIAL : 0u;
 	if (!meta_commit(other, false, 0u, 0u, 0u, rollback_flags, 0u, 0xFFu)) {

@@ -35,7 +35,6 @@
  * EARLIER, unrelated cycle can never survive past THIS boot to be
  * misread as a fresh trial's watchdog fallback on some LATER boot.
  *
-
  * SILICON-VALIDATED 2026-06-04 (bench, protocol v0.6): boot/validate/jump,
  * slot relocation, dual-bank FMC-from-RAM, and the full stream → verify →
  * commit → boot-new-slot → rollback cycle were proven end-to-end over the
@@ -89,6 +88,30 @@ static void backup_domain_unlock(void)
 {
 	RCU_APB1EN |= RCU_APB1EN_PMUEN;
 	PMU_CTL0 |= PMU_CTL0_BKPWEN;
+}
+
+/* Bring up IRC32K -- the FWDGT's fixed clock source -- BEFORE arming the
+ * watchdog (C2, adversarial-verify finding).  Without this, the very
+ * first fwdgt_config() call on a cold boot can race the oscillator:
+ * gd32g5x3_fwdgt.c's PSC/RLD writes each poll a ready flag (PUD/RUD) that
+ * only advances on IRC32K edges, so a PSC/RLD write issued before IRC32K
+ * has even started can legitimately time out -- and unlike a graceful
+ * "retry later," fwdgt_config() writes FWDGT_CTL's KEY_ENABLE FIRST,
+ * unconditionally, starting the counter immediately and IRREVOCABLY (no
+ * register disarms a running FWDGT); see the call site below for what a
+ * PSC/RLD timeout leaves armed in that case.  Same bring-up
+ * hal/gd32/power.c's rtc_wakeup_init_once() uses for the identical
+ * oscillator; returns false (best-effort) if IRC32K never stabilises, in
+ * which case fwdgt_config() below still runs and its own bounded
+ * software timeout is the final word regardless. */
+static bool fwdgt_clock_ready(void)
+{
+	rcu_osci_on(RCU_IRC32K);
+	uint32_t to = 200000u;
+	while (--to && RESET == rcu_flag_get(RCU_FLAG_IRC32KSTB)) {
+		/* spin */
+	}
+	return to != 0u;
 }
 
 static bool meta_read(uint32_t addr, ota_meta_record_t *r)
@@ -203,16 +226,32 @@ int main(void)
 				 * execution continues, so this does not extend the
 				 * real (running) window. */
 				dbg_periph_enable(DBG_FWDGT_HOLD);
+				(void)fwdgt_clock_ready(); /* best-effort; see its own comment */
 				if (fwdgt_config(OTA_TRIAL_FWDGT_RELOAD, FWDGT_PSC_DIV256) != SUCCESS) {
-					/* The vendor PSC/RLD writes each poll a
-					 * ready flag under a bounded software
-					 * timeout (gd32g5x3_fwdgt.c); a transient
-					 * contention immediately after boot (LSI/
-					 * IRC32K still settling) can trip that once.
-					 * Retry exactly once -- this is the
-					 * bootloader arming its OWN safety net, so a
-					 * retry LOOP here would defeat the point if
-					 * the watchdog itself is the thing stuck. */
+					/* CORRECTED (C2): fwdgt_config() already
+					 * issued FWDGT_CTL's KEY_ENABLE write before
+					 * this PSC/RLD failure -- the counter is
+					 * running NOW and cannot be un-armed by any
+					 * register in this peripheral.  A PSC/RLD
+					 * timeout does NOT mean "some window applies,
+					 * just maybe not the intended one": it means
+					 * the counter is running under FWDGT's
+					 * POWER-ON-RESET DEFAULTS (PSC=/4, RLD=0xFFF),
+					 * which is roughly 0.5 s at nominal IRC32K --
+					 * dangerously short compared to the intended
+					 * ~32.8 s.  Retry exactly once (the
+					 * fwdgt_clock_ready() call above already
+					 * removes the likely root cause -- see its own
+					 * comment); this is the bootloader arming its
+					 * OWN safety net, so a retry LOOP here would
+					 * defeat the point if the watchdog itself is
+					 * the thing stuck.  If it fails AGAIN, that
+					 * ~0.5 s default window is what is left armed
+					 * and this bootloader has no further recourse
+					 * short of re-implementing the raw PSC/RLD
+					 * register writes with a longer PUD/RUD wait
+					 * than gd32g5x3_fwdgt.c's own budget -- not
+					 * done here. */
 					(void)fwdgt_config(OTA_TRIAL_FWDGT_RELOAD, FWDGT_PSC_DIV256);
 				}
 				/* last_resort candidates are always TRIAL (see

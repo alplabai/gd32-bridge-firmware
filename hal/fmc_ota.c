@@ -420,3 +420,16 @@ void ota_system_reset(void)
 	 * hal/gd32/init.c's bridge_hw_reset_reason() for the read side. */
 	NVIC_SystemReset();
 }
+
+void ota_fault_loop_clear(void)
+{
+	/* Same backup-domain unlock as hal/gd32/fault_handlers.c's
+	 * fault_backup_unlock() (RCU_APB1EN_PMUEN clocks the PMU;
+	 * PMU_CTL0_BKPWEN then gates writes to the RTC_BKPx block, UM
+	 * p.145); duplicated rather than shared for the same reason
+	 * backup_domain_unlock() in src/boot/boot_main.c is -- separate
+	 * images, two idempotent register writes, not worth a shared header. */
+	RCU_APB1EN |= RCU_APB1EN_PMUEN;
+	PMU_CTL0 |= PMU_CTL0_BKPWEN;
+	RTC_BKP7 = 0u;
+}
