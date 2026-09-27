@@ -907,8 +907,8 @@ static void drive_to_verified(void)
 	img[TEST_MARKER_OFFSET + 17u] = (uint8_t)(sv >> 8);
 	img[TEST_MARKER_OFFSET + 18u] = (uint8_t)(cap & 0xFFu);
 	img[TEST_MARKER_OFFSET + 19u] = (uint8_t)(cap >> 8);
-	const uint32_t img_len = (uint32_t)sizeof(img);
-	const uint32_t crc     = ota_crc32(0u, img, img_len);
+	const uint32_t img_len        = (uint32_t)sizeof(img);
+	const uint32_t crc            = ota_crc32(0u, img, img_len);
 
 	uint8_t req[8];
 	wr_u32(&req[0], img_len);
@@ -1952,9 +1952,9 @@ ZTEST(gd32_bridge_ota, test_commit_no_marker_refused)
 
 	/* The very next OTA_BEGIN must still work: h_begin has no
 	 * precondition on the OTA_ST_ERROR the refusal above left behind. */
-	uint8_t  reply[8];
-	size_t   rlen = 0u;
-	uint8_t  req[8];
+	uint8_t reply[8];
+	size_t  rlen = 0u;
+	uint8_t req[8];
 	wr_u32(&req[0], TEST_IMG_LEN);
 	wr_u32(&req[4], 0u);
 	zassert_equal(ota_dispatch(CMD_OTA_BEGIN, req, sizeof req, reply, sizeof reply, &rlen),

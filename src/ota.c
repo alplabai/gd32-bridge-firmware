@@ -842,7 +842,7 @@ static gd32_bridge_status_t h_commit(void)
 	 * that image has booted successfully on this unit before -- it is not
 	 * a fresh, unproven image for the FWDGT to guard. */
 	if (!ota_image_trial_capable((const uint8_t *)ota_fmc_flash_ptr(ota_inactive_base()),
-	                              s_img_len)) {
+	                             s_img_len)) {
 		s_state = OTA_ST_ERROR;
 		s_err   = 8u; /* markerless/non-confirm-capable image: COMMIT refused */
 		return STATUS_INVAL;
