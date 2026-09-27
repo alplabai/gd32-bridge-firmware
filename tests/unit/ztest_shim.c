@@ -12,9 +12,15 @@ int                       ztest_failures;
 void ztest_register(struct ztest_case *c)
 {
 	/*
-	 * Append rather than push-front so cases run in registration order.
-	 * Constructor order within one translation unit is source order, which
-	 * keeps the output reading top-to-bottom like the suite file.
+	 * Append rather than push-front, so cases run in REGISTRATION order.
+	 *
+	 * Registration order is __attribute__((constructor)) order.  That is
+	 * source order for a single translation unit on some toolchains and NOT
+	 * on others -- the C standard does not specify it, and it is observed to
+	 * differ between gcc on the CI runner and gcc 16.2 on Windows.  Callers
+	 * must therefore not depend on case order for correctness; see
+	 * test_protocol_vectors.c's classification-table comment, which
+	 * documents a case that used to.
 	 */
 	struct ztest_case **tail = &cases;
 
