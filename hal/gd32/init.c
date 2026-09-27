@@ -278,8 +278,7 @@ void bridge_hw_init(void)
      * hal/gd32/gpio.c). CAN_STBY (bit 20) is skipped here too and
      * driven OUTPUT HIGH below, for the same reason. */
 	for (size_t i = 0; i < GPIO_PAD_MAP_COUNT; ++i) {
-		if (i == GPIO_PAD_BT_REG_ON || i == GPIO_PAD_WL_REG_ON || i == GPIO_PAD_CAN_STBY)
-			continue;
+		if (i == GPIO_PAD_BT_REG_ON || i == GPIO_PAD_WL_REG_ON || i == GPIO_PAD_CAN_STBY) continue;
 		gpio_mode_set(
 		    gpio_pad_map[i].periph, GPIO_MODE_INPUT, GPIO_PUPD_PULLUP, gpio_pad_map[i].pin);
 		gpio_is_output[i] = false;
@@ -315,9 +314,13 @@ void bridge_hw_init(void)
      * re-promoted (and does not glitch) on the host's first
      * GPIO_WRITE, and reads report the driven level. */
 	gpio_bit_set(gpio_pad_map[GPIO_PAD_CAN_STBY].periph, gpio_pad_map[GPIO_PAD_CAN_STBY].pin);
-	gpio_output_options_set(gpio_pad_map[GPIO_PAD_CAN_STBY].periph, GPIO_OTYPE_PP,
-	                         GPIO_OSPEED_12MHZ, gpio_pad_map[GPIO_PAD_CAN_STBY].pin);
-	gpio_mode_set(gpio_pad_map[GPIO_PAD_CAN_STBY].periph, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE,
+	gpio_output_options_set(gpio_pad_map[GPIO_PAD_CAN_STBY].periph,
+	                        GPIO_OTYPE_PP,
+	                        GPIO_OSPEED_12MHZ,
+	                        gpio_pad_map[GPIO_PAD_CAN_STBY].pin);
+	gpio_mode_set(gpio_pad_map[GPIO_PAD_CAN_STBY].periph,
+	              GPIO_MODE_OUTPUT,
+	              GPIO_PUPD_NONE,
 	              gpio_pad_map[GPIO_PAD_CAN_STBY].pin);
 	gpio_is_output[GPIO_PAD_CAN_STBY] = true;
 

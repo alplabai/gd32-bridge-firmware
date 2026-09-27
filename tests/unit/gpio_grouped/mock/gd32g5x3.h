@@ -21,6 +21,7 @@
 #define GPIO_PIN_10 ((uint32_t)1u << 10)
 #define GPIO_PIN_11 ((uint32_t)1u << 11)
 #define GPIO_PIN_12 ((uint32_t)1u << 12)
+#define GPIO_PIN_13 ((uint32_t)1u << 13)
 #define GPIO_PIN_14 ((uint32_t)1u << 14)
 #define GPIO_PIN_15 ((uint32_t)1u << 15)
 
