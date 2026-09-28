@@ -26,9 +26,12 @@
  *   1. RESET_REASON          -- DONE: RCU_RSTSCK decode + RSTFC clear.
  *   2. GPIO_READ / WRITE     -- DONE: 20-pad map (18 E1M IO8..IO35 pads
  *                               + 2 Murata REG_ON sideband bits), boot
- *                               configures the 18 E1M pads as INPUT +
- *                               PULL_UP, write auto-promotes each to
- *                               OUTPUT push-pull.  Bits 18/19
+ *                               configures the 18 E1M pads as INPUT,
+ *                               high-Z (no pull) so the carrier's own
+ *                               pulls define the default -- see the
+ *                               boot-loop comment below -- write
+ *                               auto-promotes each to OUTPUT push-pull.
+ *                               Bits 18/19
  *                               (BT_REG_ON/WL_REG_ON) instead boot
  *                               OUTPUT LOW -- module power is host
  *                               policy, this firmware never drives them
@@ -264,18 +267,37 @@ void bridge_hw_init(void)
 	rcu_periph_clock_enable(RCU_GPIOE);
 	rcu_periph_clock_enable(RCU_GPIOF);
 
-	/* Configure every E1M entry in `gpio_pad_map` as INPUT + PULL_UP.
-     * Safe default per the GPIO direction policy: no driven
-     * contention with whatever the board might pull / drive on
-     * those pads.  bridge_hw_gpio_write() promotes individual
-     * pads to OUTPUT on demand.  The two REG_ON pads are skipped
+	/* Configure every E1M entry in `gpio_pad_map` as INPUT, high-Z
+     * (no internal pull).  Bench-proven 2026-09-26 on E1M-V2M103 /
+     * E1M-X EVK: the carrier's SDIO mux (microSD vs M.2 Wi-Fi) is
+     * steered by two of these pads (IO27 SDIO_MUX_SEL, IO29
+     * SDIO_MUX_EN) and the carrier's own pulls already select
+     * microSD when the pads are undriven -- but the GD32's internal
+     * pull-UPs used to win the moment this firmware ran, so both
+     * pads read 1 and the mux disabled / flipped away from microSD
+     * (Linux: `mmc1: tuning execution failed: -5`, `card aaaa
+     * removed`).  Driving both pads LOW by hand restored SDR104 @
+     * 200 MHz with 3x1 GiB md5-identical transfers, confirming the
+     * carrier's pulls -- not the GD32's -- must own the default.
+     * High-Z also matches every pad's own POR state and the state
+     * every pad is already in from cold power-up until this loop
+     * runs, and whenever the GD32 sits unflashed or held in reset --
+     * so this is not a new state to reason about, only the one the
+     * firmware now stops overriding.  U-Boot probes microSD with no
+     * bridge driver loaded, so the pre-Linux path can only be fixed
+     * by changing this boot default, not a runtime host write.
+     * bridge_hw_gpio_write() still promotes individual pads to
+     * OUTPUT on demand.  Known cost: a pad the carrier leaves
+     * genuinely unconnected now floats (input leakage current)
+     * instead of resting on an internal pull; acceptable, and a
+     * per-pad pull opcode can restore an opt-in pull later if a
+     * specific carrier needs one.  The two REG_ON pads are skipped
      * here and driven OUTPUT LOW below instead -- they break the
-     * INPUT+PULL_UP rule on purpose (see the pad-map comment in
+     * high-Z default on purpose (see the pad-map comment in
      * hal/gd32/gpio.c). */
 	for (size_t i = 0; i < GPIO_PAD_MAP_COUNT; ++i) {
 		if (i == GPIO_PAD_BT_REG_ON || i == GPIO_PAD_WL_REG_ON) continue;
-		gpio_mode_set(
-		    gpio_pad_map[i].periph, GPIO_MODE_INPUT, GPIO_PUPD_PULLUP, gpio_pad_map[i].pin);
+		gpio_mode_set(gpio_pad_map[i].periph, GPIO_MODE_INPUT, GPIO_PUPD_NONE, gpio_pad_map[i].pin);
 		gpio_is_output[i] = false;
 	}
 
@@ -285,7 +307,7 @@ void bridge_hw_init(void)
      * issuing CMD_GPIO_WRITE on these bits as part of its own
      * WiFi/BT bring-up; the IO-MCU only proxies the line and must
      * never assert it autonomously.  OUTPUT LOW (rather than left
-     * as the default INPUT+PULL_UP) gives a defined OFF state
+     * as the default INPUT high-Z) gives a defined OFF state
      * instead of floating against the module's internal 50 k
      * pull-downs, and a clean low->high edge once the host asserts.
      * gpio_is_output[i] is set so the pad is not re-promoted (and

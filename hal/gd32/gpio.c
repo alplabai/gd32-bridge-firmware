@@ -96,7 +96,7 @@ const gd32_gpio_pad_t gpio_pad_map[] = {
 	{ GPIOD, GPIO_PIN_1 },  /* bit 17 = E1M IO35 */
 	/* Murata LBEE5HY2FY-922 sideband (NOT E1M pads -- module power
 	 * enables; module has internal 50 k pull-downs on both).  Boot-time
-	 * these two are driven OUTPUT LOW instead of the INPUT + PULL_UP
+	 * these two are driven OUTPUT LOW instead of the INPUT high-Z
 	 * rule below -- see the GPIO_PAD_BT_REG_ON / GPIO_PAD_WL_REG_ON
 	 * boot loop in hal/gd32/init.c.  Power policy is the HOST's: the
 	 * GD32 must not autonomously drive either line high, only proxy a
@@ -107,9 +107,9 @@ const gd32_gpio_pad_t gpio_pad_map[] = {
 _Static_assert(sizeof(gpio_pad_map) / sizeof(gpio_pad_map[0]) == GPIO_PAD_MAP_COUNT,
                "gpio_pad_map size must match GPIO_PAD_MAP_COUNT");
 
-/* Per-pad direction tracking.  Boot configures every pad as INPUT +
- * PULL_UP -- except GPIO_PAD_BT_REG_ON / GPIO_PAD_WL_REG_ON (bits
- * 18/19), which boot OUTPUT driven LOW instead (see init.c and the
+/* Per-pad direction tracking.  Boot configures every pad as INPUT,
+ * high-Z (no pull) -- except GPIO_PAD_BT_REG_ON / GPIO_PAD_WL_REG_ON
+ * (bits 18/19), which boot OUTPUT driven LOW instead (see init.c and the
  * pad-map comment above); bridge_hw_gpio_write() flips an entry to
  * OUTPUT push-pull on first call (sticky until the next chip reset).
  * Avoids the need for a separate `CMD_GPIO_CONFIGURE` opcode.  Used
