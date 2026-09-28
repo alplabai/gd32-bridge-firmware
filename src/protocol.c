@@ -31,6 +31,7 @@
 #include "protocol.h"
 #include "../hal/bridge_hw.h"
 #include "bootloader/bootloader.h"
+#include "ota.h"
 
 /* --------------------------------------------------------------- */
 /* CRC-16 / CCITT-FALSE -- shared with transports.                   */
@@ -1020,6 +1021,17 @@ gd32_bridge_status_t protocol_dispatch(gd32_bridge_link_t link,
                                        size_t             reply_payload_cap,
                                        size_t            *reply_payload_len)
 {
+	/* Trial/confirm gate (bench fact 2026-09-26, E1M-V2M103): a
+	 * not-yet-confirmed OTA trial must never let the host believe a
+	 * session is stable -- it can still revert on the armed watchdog.
+	 * Note the frame (the confirm signal the base-level tick is
+	 * waiting for) and answer BUSY with an empty payload for EVERY
+	 * opcode, on EITHER link, ahead of the normal dispatch. */
+	if (ota_trial_unconfirmed()) {
+		ota_note_frame();
+		*reply_payload_len = 0u;
+		return STATUS_BUSY;
+	}
 	cmd_handler_t h = NULL;
 	switch (cmd) {
 	case CMD_PING:

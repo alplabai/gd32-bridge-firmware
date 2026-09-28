@@ -407,5 +407,29 @@ bool ota_fmc_program(uint32_t addr, const uint8_t *data, size_t len)
 
 void ota_system_reset(void)
 {
+	/* RCU_RSTSCK.RSTFC is no longer cleared here (bench fact 2026-09-26,
+	 * reset-cause ownership rework): src/boot/boot_main.c now reads
+	 * RCU_RSTSCK exactly ONCE per boot, stashes the raw value in
+	 * RTC_BKP8, and clears RSTFC itself, unconditionally, on EVERY boot
+	 * -- not just the ones this function triggers.  A write here would be
+	 * redundant (the very next boot re-clears it regardless) and would
+	 * also erase the cause bits before the bootloader ever gets to stash
+	 * them, if this function is ever reached on a path that ISN'T
+	 * followed by a reset (it isn't, today, but nothing here should
+	 * depend on that). See src/boot/boot_main.c's file header and
+	 * hal/gd32/init.c's bridge_hw_reset_reason() for the read side. */
 	NVIC_SystemReset();
+}
+
+void ota_fault_loop_clear(void)
+{
+	/* Same backup-domain unlock as hal/gd32/fault_handlers.c's
+	 * fault_backup_unlock() (RCU_APB1EN_PMUEN clocks the PMU;
+	 * PMU_CTL0_BKPWEN then gates writes to the RTC_BKPx block, UM
+	 * p.145); duplicated rather than shared for the same reason
+	 * backup_domain_unlock() in src/boot/boot_main.c is -- separate
+	 * images, two idempotent register writes, not worth a shared header. */
+	RCU_APB1EN |= RCU_APB1EN_PMUEN;
+	PMU_CTL0 |= PMU_CTL0_BKPWEN;
+	RTC_BKP7 = 0u;
 }
