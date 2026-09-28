@@ -203,7 +203,11 @@ The fix adds a **TRIAL** flag to the A/B metadata record
    uses it) rather than "only the TRIAL record is left". The extra reset
    on a successful confirm is deliberate: on a fresh, non-TRIAL boot this
    bootloader never arms the FWDGT, so rebooting is the only way to stop
-   the watchdog that's been running since the trial boot. The
+   the watchdog that's been running since the trial boot (GD32G5x3 has no
+   software FWDGT disable). That a system reset stops the FWDGT is
+   silicon-verified, not assumed: E1M-V2M103 bench, 2026-09-26 -- a
+   confirmed image ran a 60 s soak after the confirm reset with no
+   watchdog reset, against the ~32.8 s trial period (gh#249). The
    confirmed-in-RAM flag is deliberately **not** set before this reset (a
    real `ota_system_reset()` never returns; keeping the gate closed through
    it means a host-test seam that DOES return can't observe a
