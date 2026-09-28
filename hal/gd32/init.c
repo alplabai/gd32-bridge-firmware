@@ -234,6 +234,16 @@ void bridge_hw_init(void)
 	rcu_periph_clock_enable(RCU_GPIOC);
 	se_reset_init();
 
+	/* SYSCFG clock (gh#33): the encoder slave-mode fields live in
+	 * SYSCFG_TIMERxCFG0/1 and the ITI sync codes in SYSCFG_TIMERxCFG2
+	 * (hal/gd32/timer_sync_iti.c), and a write to a SYSCFG register while
+	 * RCU_SYSCFG is gated is silently dropped -- so the four encoders
+	 * never decoded.  The only enable used to be spi_cs_exti_init()
+	 * (hal/transport_hw_gd32.c), which main() runs AFTER this function.
+	 * Enable it once here, before any SYSCFG writer below; the later
+	 * enable in the transport stays harmless (idempotent). */
+	rcu_periph_clock_enable(RCU_SYSCFG);
+
 	/* #127: sample the clock the vendor's SystemInit() ACTUALLY left
      * running, before anything derived from it is programmed.  Until this
      * call the repo never referenced SystemCoreClock at all: every timing
