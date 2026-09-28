@@ -43,6 +43,19 @@ SECTIONS
         . = ALIGN(4);
     } > FLASH
 
+    /* Trial-capability marker (src/trial_marker.c, ota_layout.h), placed
+     * right after the vector table so it lands at a small, deterministic
+     * offset for build-time inspection (tools/check_trial_marker.py) --
+     * see ota_layout.h's ota_image_trial_capable() for why the RUNTIME
+     * reader still does a bounded scan rather than trusting one exact
+     * offset. */
+    .trial_marker :
+    {
+        . = ALIGN(4);
+        KEEP(*(.trial_marker))
+        . = ALIGN(4);
+    } > FLASH
+
     .text :
     {
         . = ALIGN(4);

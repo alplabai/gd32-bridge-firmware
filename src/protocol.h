@@ -36,7 +36,18 @@
  * firmware-version.txt, surfaced via GET_BUILD_ID ("<ver>+<sha>").  The
  * two axes move independently. */
 #define PROTOCOL_VERSION_MAJOR 0u
-#define PROTOCOL_VERSION_MINOR 11u
+/* v0.12 (bench fact 2026-09-26): the trial/confirm watchdog fallback makes
+ * protocol_dispatch() answer STATUS_BUSY for EVERY opcode -- not just the
+ * handful that already documented a BUSY case -- for the whole window
+ * between a TRIAL boot and its confirm.  That is new, wire-observable
+ * behaviour a host must be ready for, so this is a MINOR bump per
+ * extending-the-gd32-bridge-protocol's own rule ("adding an opcode = MINOR
+ * bump"): no opcode/payload actually changed, but a host built against an
+ * OLDER MINOR has no reason to expect BUSY from e.g. CMD_PING, so it is
+ * exactly the same "older hosts don't need it, newer ones should know"
+ * shape that rule exists for.  0.11 is already taken by the REG_ON PR off
+ * dev; this uses 0.12 to avoid a collision. */
+#define PROTOCOL_VERSION_MINOR 12u
 #define PROTOCOL_VERSION_PATCH 0u
 
 /* v0.7: opt-in link features negotiated via CMD_LINK_FEATURES.
@@ -98,14 +109,8 @@ typedef enum {
 	CMD_RESET_REASON = 0x03,
 	CMD_GPIO_READ    = 0x10,
 	CMD_GPIO_WRITE   = 0x11,
-	/* v0.11: the GPIO mask these two opcodes address grew from 18 to
-     * 20 bits -- bits 18/19 are BT_REG_ON/WL_REG_ON, the Murata
-     * LBEE5HY2FY-922 Wi-Fi/BT module's power enables (sideband, not
-     * an E1M pad; GPIO_PAD_BT_REG_ON/GPIO_PAD_WL_REG_ON in
-     * hal/gd32/gd32_common.h).  Older hosts addressing only bits
-     * 0..17 are unaffected. */
-	CMD_PWM_SET = 0x20,
-	CMD_PWM_GET = 0x21,
+	CMD_PWM_SET      = 0x20,
+	CMD_PWM_GET      = 0x21,
 	/* v0.3: sticky per-channel PWM tuning (align mode, dead time, fault
      * inputs).  On V2N every E1M PWM channel rides one of the GD32's
      * 16-bit advanced timers (PWM0..3 -> TIMER0 channels MCH0..MCH3,
