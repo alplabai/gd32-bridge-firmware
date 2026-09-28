@@ -36,7 +36,7 @@
  * firmware-version.txt, surfaced via GET_BUILD_ID ("<ver>+<sha>").  The
  * two axes move independently. */
 #define PROTOCOL_VERSION_MAJOR 0u
-#define PROTOCOL_VERSION_MINOR 10u
+#define PROTOCOL_VERSION_MINOR 11u
 #define PROTOCOL_VERSION_PATCH 0u
 
 /* v0.7: opt-in link features negotiated via CMD_LINK_FEATURES.
@@ -98,8 +98,14 @@ typedef enum {
 	CMD_RESET_REASON = 0x03,
 	CMD_GPIO_READ    = 0x10,
 	CMD_GPIO_WRITE   = 0x11,
-	CMD_PWM_SET      = 0x20,
-	CMD_PWM_GET      = 0x21,
+	/* v0.11: the GPIO mask these two opcodes address grew from 18 to
+     * 20 bits -- bits 18/19 are BT_REG_ON/WL_REG_ON, the Murata
+     * LBEE5HY2FY-922 Wi-Fi/BT module's power enables (sideband, not
+     * an E1M pad; GPIO_PAD_BT_REG_ON/GPIO_PAD_WL_REG_ON in
+     * hal/gd32/gd32_common.h).  Older hosts addressing only bits
+     * 0..17 are unaffected. */
+	CMD_PWM_SET = 0x20,
+	CMD_PWM_GET = 0x21,
 	/* v0.3: sticky per-channel PWM tuning (align mode, dead time, fault
      * inputs).  On V2N every E1M PWM channel rides one of the GD32's
      * 16-bit advanced timers (PWM0..3 -> TIMER0 channels MCH0..MCH3,

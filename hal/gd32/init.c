@@ -24,9 +24,15 @@
  * Per-hook state, in the order the bodies landed (increasing risk):
  *
  *   1. RESET_REASON          -- DONE: RCU_RSTSCK decode + RSTFC clear.
- *   2. GPIO_READ / WRITE     -- DONE: 18-pad map (E1M IO8..IO35),
- *                               boot configures all as INPUT + PULL_UP,
- *                               write auto-promotes to OUTPUT push-pull.
+ *   2. GPIO_READ / WRITE     -- DONE: 20-pad map (18 E1M IO8..IO35 pads
+ *                               + 2 Murata REG_ON sideband bits), boot
+ *                               configures the 18 E1M pads as INPUT +
+ *                               PULL_UP, write auto-promotes each to
+ *                               OUTPUT push-pull.  Bits 18/19
+ *                               (BT_REG_ON/WL_REG_ON) instead boot
+ *                               OUTPUT LOW -- module power is host
+ *                               policy, this firmware never drives them
+ *                               high on its own.
  *   3. TRNG_READ             -- DONE: NIST SP800-90B mode init in
  *                               bridge_hw_init, DRDY-polled byte read
  *                               with bounded timeout.
@@ -258,15 +264,40 @@ void bridge_hw_init(void)
 	rcu_periph_clock_enable(RCU_GPIOE);
 	rcu_periph_clock_enable(RCU_GPIOF);
 
-	/* Configure every entry in `gpio_pad_map` as INPUT + PULL_UP.
+	/* Configure every E1M entry in `gpio_pad_map` as INPUT + PULL_UP.
      * Safe default per the GPIO direction policy: no driven
      * contention with whatever the board might pull / drive on
      * those pads.  bridge_hw_gpio_write() promotes individual
-     * pads to OUTPUT on demand. */
+     * pads to OUTPUT on demand.  The two REG_ON pads are skipped
+     * here and driven OUTPUT LOW below instead -- they break the
+     * INPUT+PULL_UP rule on purpose (see the pad-map comment in
+     * hal/gd32/gpio.c). */
 	for (size_t i = 0; i < GPIO_PAD_MAP_COUNT; ++i) {
+		if (i == GPIO_PAD_BT_REG_ON || i == GPIO_PAD_WL_REG_ON) continue;
 		gpio_mode_set(
 		    gpio_pad_map[i].periph, GPIO_MODE_INPUT, GPIO_PUPD_PULLUP, gpio_pad_map[i].pin);
 		gpio_is_output[i] = false;
+	}
+
+	/* Murata LBEE5HY2FY-922 Wi-Fi/BT REG_ON lines (bits 18/19): boot
+     * OUTPUT driven LOW = module OFF.  Power policy belongs to the
+     * HOST, not this firmware -- a host turns the module on by
+     * issuing CMD_GPIO_WRITE on these bits as part of its own
+     * WiFi/BT bring-up; the IO-MCU only proxies the line and must
+     * never assert it autonomously.  OUTPUT LOW (rather than left
+     * as the default INPUT+PULL_UP) gives a defined OFF state
+     * instead of floating against the module's internal 50 k
+     * pull-downs, and a clean low->high edge once the host asserts.
+     * gpio_is_output[i] is set so the pad is not re-promoted (and
+     * does not glitch) on the host's first GPIO_WRITE, and reads
+     * report the driven level. */
+	for (size_t i = GPIO_PAD_BT_REG_ON; i <= GPIO_PAD_WL_REG_ON; ++i) {
+		gpio_bit_reset(gpio_pad_map[i].periph, gpio_pad_map[i].pin);
+		gpio_output_options_set(
+		    gpio_pad_map[i].periph, GPIO_OTYPE_PP, GPIO_OSPEED_12MHZ, gpio_pad_map[i].pin);
+		gpio_mode_set(
+		    gpio_pad_map[i].periph, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, gpio_pad_map[i].pin);
+		gpio_is_output[i] = true;
 	}
 
 	/* TRNG bring-up: configure + enable only.  The NIST pipeline's
