@@ -155,6 +155,7 @@
 #include <stdint.h>
 
 #include "bridge_hw.h"
+#include "bridge_board_config.h"
 
 /* The wrapper's PUBLIC include directories expose the GigaDevice device
  * header.  It supplies the CMSIS/core definitions and pulls this project's
@@ -184,6 +185,13 @@ bool     bridge_core_clock_matches = true;
 
 void bridge_hw_init(void)
 {
+	/* The priority numbers in bridge_board_config.h mean preemption levels
+	 * only under PRE2_SUB2. A Path-A bootloader handoff preserves AIRCR, and
+	 * the vendor helper otherwise retains a valid inherited grouping, so set
+	 * the bridge policy before configuring any NVIC line or, on Path-A,
+	 * unmasking IRQs. */
+	nvic_priority_group_set(NVIC_PRIGROUP_PRE2_SUB2);
+
 	/* SYSCFG hosts the TIMER quadrature-decoder mode fields
      * (SYSCFG_TIMERxCFG0.TSCFGy) that qenc_channel_init() programs
      * below, as well as the EXTI source mux that spi_cs_exti_init()
