@@ -664,7 +664,10 @@ h_begin(const uint8_t *req, size_t len, uint8_t *reply, size_t cap, size_t *rlen
      * self-heals the divergence instead of propagating it. */
 	const uint8_t inactive = (OTA_RUNNING_SLOT == OTA_SLOT_A) ? OTA_SLOT_B : OTA_SLOT_A;
 	uint32_t      erase_at;
-	(void)ota_slot_base_checked(inactive, &erase_at); /* A/B above is exhaustive. */
+	if (!ota_slot_base_checked(inactive, &erase_at)) {
+		erase_at =
+		    OTA_SLOT_A_BASE; /* unreachable: inactive is always A/B, see derivation above (mirrors ota_inactive_base()) */
+	}
 	const uint32_t erase_end = erase_at + OTA_SLOT_SIZE;
 	/* P3 (#3): defence in depth, NOT the primary guard -- P1 above already
      * makes s_inactive always the OTHER slot from OTA_RUNNING_SLOT by

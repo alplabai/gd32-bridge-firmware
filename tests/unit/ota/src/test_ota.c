@@ -721,6 +721,17 @@ ZTEST(gd32_bridge_ota, test_begin_arms_background_erase)
 	}
 	zassert_equal(ota_state_now(), 1u /* OTA_ST_READY */, "erase drain must reach READY");
 
+	/* gh#264: h_begin's erase_at must be the checked base of the
+	 * non-running slot -- not an uninitialised local left over from a
+	 * discarded ota_slot_base_checked() return.  g_erase_bases[0] is the
+	 * FIRST physical erase region h_begin armed, now drained. */
+	uint32_t expected_base = 0u;
+	zassert_true(ota_slot_base_checked(TEST_OTHER_SLOT, &expected_base));
+	zassert_true(g_erase_calls >= 1u, "BEGIN must have armed at least one erase region");
+	zassert_equal(g_erase_bases[0],
+	              expected_base,
+	              "BEGIN's erase must start at the non-running slot's checked base");
+
 	/* Now a chunk is accepted. */
 	zassert_equal(
 	    write_chunk(0u, data, sizeof(data), wr, &wrl), STATUS_OK, "chunk after READY must program");
