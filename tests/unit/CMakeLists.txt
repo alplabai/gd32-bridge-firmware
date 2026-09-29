@@ -514,3 +514,31 @@ target_include_directories(test_spi_dma_arm_status PRIVATE ${FW}/hal/gd32)
 target_compile_options(test_spi_dma_arm_status PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_spi_dma_arm_status PRIVATE ztest_shim)
 add_test(NAME spi_dma_arm_status COMMAND test_spi_dma_arm_status)
+
+# --- transport_hw_cs_exti: CS-edge EXTI handler clears its group on EVERY exit -
+#
+# Links (by #include) the REAL hal/transport_hw_gd32.c against a minimal
+# vendor-API mock.  The handler used to `return` early on its quiesce-timeout
+# and DMA/SPI-error paths, skipping the EXTI_PD0 group clear, so EXTI line 8
+# stayed pending and the vector re-entered forever.  i2c_timeout.c is the only
+# other firmware TU the file needs.
+add_executable(test_transport_hw_cs_exti
+    transport_hw_cs_exti/src/test_transport_hw_cs_exti.c
+    ${FW}/hal/gd32/i2c_event_priority.c
+    ${FW}/hal/gd32/i2c_timeout.c
+    ${FW}/hal/gd32/spi_dma_arm_status.c
+)
+target_include_directories(test_transport_hw_cs_exti PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/transport_hw_cs_exti/mock
+    ${FW}/hal
+    ${FW}/hal/gd32
+    ${FW}/src
+)
+# The vendor calls are swallowed by the mock, so the arguments built for them
+# are legitimately unused, and DMA addresses are 32-bit device words that a
+# 64-bit host pointer cast truncates.
+target_compile_options(test_transport_hw_cs_exti PRIVATE ${TEST_FLAGS}
+    -Wno-unused-variable -Wno-unused-parameter -Wno-unused-but-set-variable
+    -Wno-pointer-to-int-cast)
+target_link_libraries(test_transport_hw_cs_exti PRIVATE ztest_shim)
+add_test(NAME transport_hw_cs_exti COMMAND test_transport_hw_cs_exti)
