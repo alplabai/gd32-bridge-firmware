@@ -7,13 +7,12 @@
  * HAL in tests/unit/fake/bridge_hw_fake.{h,c}.
  *
  * WHY this suite exists: hal/bridge_hw_stub.c answers BRIDGE_HW_ERR_NOTIMPL
- * for essentially every call, so the transport_spi/transport_i2c suites
- * (which link the stub) can only ever reach STATUS_OK on the opcodes with no
- * hardware dependency (CMD_PING, CMD_GET_VERSION, CMD_GET_BUILD_ID,
- * CMD_LINK_FEATURES).  Every HAL-backed opcode -- the large majority of
- * protocol.c's 1025 lines -- goes untouched.  Linking the fake instead of the
- * stub lets each opcode reach STATUS_OK, and lets a test force any single
- * BRIDGE_HW_ERR_* return to check what STATUS_* the dispatcher maps it to.
+ * for essentially every call, so the stub-backed transport_spi suite can
+ * only reach STATUS_OK on opcodes with no hardware dependency (CMD_PING,
+ * CMD_GET_VERSION, CMD_GET_BUILD_ID, CMD_LINK_FEATURES).  Linking the fake
+ * here instead lets every HAL-backed opcode reach STATUS_OK, and lets a test
+ * force any single BRIDGE_HW_ERR_* return to check what STATUS_* the
+ * dispatcher maps it to.
  *
  * Four axes, table-driven, for every opcode protocol_dispatch() switches on:
  *   1. req_payload_len: the documented exact (or, for CMD_ADC_DSP_STAGE_PUSH,
@@ -1652,6 +1651,113 @@ ZTEST(protocol, test_link_features_rejects_unknown_link)
 	zassert_equal(protocol_link_features((gd32_bridge_link_t)GD32_BRIDGE_LINK_COUNT),
 	              0u,
 	              "the accessor answers 0 for an unknown link");
+}
+
+typedef struct {
+	gd32_bridge_status_t status;
+	size_t               reply_len;
+} nested_dispatch_probe_t;
+
+static void dispatch_chain_open_from_fake_hook(void *context)
+{
+	nested_dispatch_probe_t *probe = context;
+	uint8_t                  reply[REPLY_SCRATCH_CAP];
+
+	probe->reply_len = 0xDEADu;
+	probe->status    = protocol_dispatch(GD32_BRIDGE_LINK_SPI,
+	                                     CMD_ADC_DSP_CHAIN_OPEN,
+	                                     NULL,
+	                                     0u,
+	                                     reply,
+	                                     sizeof(reply),
+	                                     &probe->reply_len);
+}
+
+/* SPI's CS EXTI can pre-empt an I2C dispatch while the outer handler is in
+ * the HAL.  Use the non-atomic chain allocator from #139 as the probe: the
+ * nested request must fail before a second HAL call, and the guard must
+ * release when the outer request returns. */
+ZTEST(protocol, test_nested_dispatch_returns_busy_without_hal_mutation)
+{
+	uint8_t                 reply[REPLY_SCRATCH_CAP];
+	nested_dispatch_probe_t nested = { STATUS_OK, 0u };
+
+	bridge_hw_fake_reset();
+	bridge_hw_fake_dsp_chain_set_next_id(0x07u);
+	bridge_hw_fake_set_call_hook(
+	    FAKE_FN_ADC_DSP_CHAIN_OPEN, dispatch_chain_open_from_fake_hook, &nested);
+
+	size_t reply_len = 0xDEADu;
+	zassert_equal(protocol_dispatch(GD32_BRIDGE_LINK_I2C,
+	                                CMD_ADC_DSP_CHAIN_OPEN,
+	                                NULL,
+	                                0u,
+	                                reply,
+	                                sizeof(reply),
+	                                &reply_len),
+	              STATUS_OK,
+	              "outer I2C command completes");
+	zassert_equal(reply_len, 1u);
+	zassert_equal(reply[0], 0x07u, "outer allocator returns its chain id");
+	zassert_equal(bridge_hw_fake_call_count(FAKE_FN_ADC_DSP_CHAIN_OPEN),
+	              1u,
+	              "nested request never enters the HAL");
+	zassert_equal(nested.status, STATUS_BUSY, "pre-empting SPI dispatch is refused");
+	zassert_equal(nested.reply_len, 0u, "BUSY reply has no payload");
+
+	bridge_hw_fake_dsp_chain_set_next_id(0x08u);
+	reply_len = 0xDEADu;
+	zassert_equal(protocol_dispatch(GD32_BRIDGE_LINK_SPI,
+	                                CMD_ADC_DSP_CHAIN_OPEN,
+	                                NULL,
+	                                0u,
+	                                reply,
+	                                sizeof(reply),
+	                                &reply_len),
+	              STATUS_OK,
+	              "a later dispatch succeeds after the outer request releases the guard");
+	zassert_equal(reply_len, 1u);
+	zassert_equal(reply[0], 0x08u);
+	zassert_equal(bridge_hw_fake_call_count(FAKE_FN_ADC_DSP_CHAIN_OPEN), 2u);
+}
+
+/* Direct returns inside the inner switch must still pass through the outer
+ * guard's single release point. */
+ZTEST(protocol, test_dispatch_guard_releases_after_direct_return_paths)
+{
+	uint8_t reply[REPLY_SCRATCH_CAP];
+	uint8_t features_off[1] = { 0u };
+
+	bridge_hw_fake_reset();
+	size_t reply_len = 0u;
+	zassert_equal(protocol_dispatch(GD32_BRIDGE_LINK_SPI,
+	                                CMD_LINK_FEATURES,
+	                                features_off,
+	                                sizeof(features_off),
+	                                reply,
+	                                sizeof(reply),
+	                                &reply_len),
+	              STATUS_OK);
+
+	reply_len = 0xDEADu;
+	zassert_equal(
+	    protocol_dispatch(GD32_BRIDGE_LINK_SPI, 0x99u, NULL, 0u, reply, sizeof(reply), &reply_len),
+	    STATUS_NOSUPPORT);
+	zassert_equal(reply_len, 0u);
+
+	reply_len = 0xDEADu;
+	zassert_equal(
+	    protocol_dispatch(
+	        GD32_BRIDGE_LINK_SPI, CMD_OTA_BEGIN, NULL, 0u, reply, sizeof(reply), &reply_len),
+	    STATUS_NOSUPPORT);
+	zassert_equal(reply_len, 0u);
+
+	reply_len = 0xDEADu;
+	zassert_equal(protocol_dispatch(
+	                  GD32_BRIDGE_LINK_SPI, CMD_PING, NULL, 0u, reply, sizeof(reply), &reply_len),
+	              STATUS_OK,
+	              "normal dispatch still succeeds after every direct-return arm");
+	zassert_equal(reply_len, 0u);
 }
 
 /* ------------------------------------------------------------------ */
