@@ -69,4 +69,24 @@ ZTEST(power_wake, test_standby_without_rtc_wake_is_refused)
 	zassert_equal(bridge_hw_power_mode_set(3u, 0u, 0u), BRIDGE_HW_ERR_INVAL);
 }
 
+ZTEST(power_wake, test_run_and_sleep_reject_nonzero_wake_after_ms)
+{
+	/* gh#261: modes 0 (run) and 1 (sleep) arm no wake source at all, so a
+	 * non-zero wake_after_ms must be refused rather than answering
+	 * STATUS_OK for a timer that was never armed -- and refused before any
+	 * hardware touch, same fail-closed shape as the bitmap gate (#107). */
+	mock_power_reset();
+	zassert_equal(bridge_hw_power_mode_set(0u, 0u, 1u), BRIDGE_HW_ERR_INVAL);
+	zassert_equal(mock_power_hw_calls, 0u);
+
+	mock_power_reset();
+	zassert_equal(bridge_hw_power_mode_set(1u, 0u, 500u), BRIDGE_HW_ERR_INVAL);
+	zassert_equal(mock_power_hw_calls, 0u);
+
+	/* wake_after_ms == 0 is still the accepted no-op for both modes. */
+	mock_power_reset();
+	zassert_equal(bridge_hw_power_mode_set(0u, 0u, 0u), BRIDGE_HW_OK);
+	zassert_equal(bridge_hw_power_mode_set(1u, 0u, 0u), BRIDGE_HW_OK);
+}
+
 ZTEST_SUITE(power_wake, NULL, NULL, NULL, NULL, NULL);
