@@ -81,7 +81,7 @@ static bool     g_erase_fail;      /* meta_commit's ota_fmc_erase_range()-fails
                                 * already pins.  The target is never the
                                 * higher-ranked page, so the rank rule
                                 * covers all three. */
-static bool     g_funnel_busy;  /* #266: models ota_fmc_funnel_busy() ==
+static bool     g_funnel_busy;     /* #266: models ota_fmc_funnel_busy() ==
                                     * true -- a PREVIOUS session's
                                     * base-level ota_erase_tick() still
                                     * owns the FMC funnel when this BEGIN's
