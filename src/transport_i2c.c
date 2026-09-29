@@ -41,6 +41,14 @@ __attribute__((weak)) int bridge_transport_i2c_hw_init(void)
 	return BRIDGE_HW_OK;
 }
 
+/* Weak default for the same reason: the stuck-SDA poll (gh#39, erratum
+ * 2.3.1) is a real-HAL concern.  The gd32 backend's override reads the
+ * SDA pad and runs the documented I2C software reset when the line is
+ * confirmed stuck low. */
+__attribute__((weak)) void bridge_transport_i2c_stuck_poll(void)
+{
+}
+
 #define I2C_MAX_WRITE_BYTES \
 	(1u /* reg */ + 1u /* CMD */ + GD32_BRIDGE_MAX_PAYLOAD_BYTES + 2u /* CRC */)
 #define I2C_MAX_READ_BYTES (1u /* STATUS */ + GD32_BRIDGE_MAX_PAYLOAD_BYTES + 2u /* CRC */)

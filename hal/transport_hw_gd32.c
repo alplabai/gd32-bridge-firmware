@@ -55,7 +55,11 @@
 #include "gd32g5x3.h"
 
 #include "bridge_board_config.h"
+#include "gd32/bridge_critical.h"
 #include "bridge_hw.h" /* BRIDGE_HW_OK / BRIDGE_HW_ERR_RANGE */
+#include "gd32/fault_handlers.h"
+#include "gd32/i2c_event_priority.h"
+#include "gd32/i2c_timeout.h"
 #include "protocol.h"  /* GD32_BRIDGE_DEFAULT_I2C_ADDR */
 #include "transport.h" /* the seams we drive */
 
@@ -101,9 +105,62 @@ static void spi_gpio_init(void)
  * anything the master over-clocks beyond this simply stops being captured
  * and the CRC check fails loud).  TX holds the staged reply drained from
  * the portable seams at decode time so the DMA has a stable flat buffer. */
-#define BRIDGE_SPI_DMA_BUF_LEN 72u
-static uint8_t spi_rx_dma_buf[BRIDGE_SPI_DMA_BUF_LEN];
-static uint8_t spi_tx_dma_buf[BRIDGE_SPI_DMA_BUF_LEN];
+#define BRIDGE_SPI_DMA_BUF_LEN         72u
+#define BRIDGE_SPI_DMA_DISABLE_SPINS   64u
+#define BRIDGE_SPI_RX_FIFO_FRAMES      4u
+#define BRIDGE_SPI_DMA_ERR_IRQ_PRIO    3u
+#define BRIDGE_SPI_DMA_ERR_IRQ_SUBPRIO 0u
+static uint8_t           spi_rx_dma_buf[BRIDGE_SPI_DMA_BUF_LEN];
+static uint8_t           spi_tx_dma_buf[BRIDGE_SPI_DMA_BUF_LEN];
+static volatile uint32_t spi_dma_rx_error_count;
+static volatile uint32_t spi_dma_tx_error_count;
+static volatile bool     spi_dma_error_pending;
+
+/* DMA error IRQs deliberately run below CS EXTI (priority 1).  The CS-rising
+ * handler also samples ERRIF directly, so an error that arrives just before
+ * CS release cannot be hidden behind the pending lower-priority IRQ. */
+static void spi_dma_latch_error(dma_channel_enum channel)
+{
+	if (dma_interrupt_flag_get(BRIDGE_SPI_DMA, channel, DMA_INT_FLAG_ERR) == RESET) return;
+	dma_interrupt_flag_clear(BRIDGE_SPI_DMA, channel, DMA_INT_FLAG_ERR);
+	if (channel == BRIDGE_SPI_RX_DMA_CH) {
+		spi_dma_rx_error_count++;
+	} else {
+		spi_dma_tx_error_count++;
+	}
+	spi_dma_error_pending = true;
+}
+
+void DMA0_Channel2_IRQHandler(void)
+{
+	spi_dma_latch_error(BRIDGE_SPI_TX_DMA_CH);
+}
+
+void DMA0_Channel3_IRQHandler(void)
+{
+	spi_dma_latch_error(BRIDGE_SPI_RX_DMA_CH);
+}
+
+static bool spi_dma_error_consume(void)
+{
+	spi_dma_latch_error(BRIDGE_SPI_RX_DMA_CH);
+	spi_dma_latch_error(BRIDGE_SPI_TX_DMA_CH);
+	if (!spi_dma_error_pending) return false;
+	spi_dma_error_pending = false;
+	return true;
+}
+
+/* The SPL's dma_channel_disable() is one CHEN write.  The manual requires
+ * observing CHEN clear before MADDR/CNT are written, so never reload a
+ * channel merely because that write was issued. */
+static bool spi_dma_disable_confirm(dma_channel_enum channel)
+{
+	dma_channel_disable(BRIDGE_SPI_DMA, channel);
+	for (uint32_t spin = 0u; spin < BRIDGE_SPI_DMA_DISABLE_SPINS; ++spin) {
+		if ((DMA_CHCTL(BRIDGE_SPI_DMA, channel) & DMA_CHXCTL_CHEN) == 0u) return true;
+	}
+	return false;
+}
 
 /* One-time channel configuration (clocks, DMAMUX routing, widths).  The
  * per-transaction address/count reloads live in the arm helpers below;
@@ -113,8 +170,8 @@ static void spi_dma_init(void)
 {
 	dma_parameter_struct d;
 
-	rcu_periph_clock_enable(BRIDGE_SPI_DMA_RCU);
-	rcu_periph_clock_enable(RCU_DMAMUX);
+	bridge_rcu_periph_clock_enable(BRIDGE_SPI_DMA_RCU);
+	bridge_rcu_periph_clock_enable(RCU_DMAMUX);
 
 	/* RX: SPI1 DATA -> spi_rx_dma_buf, byte-by-byte (BYTEN makes one 8-bit
      * peripheral access == one frame), memory incrementing. */
@@ -134,6 +191,8 @@ static void spi_dma_init(void)
 	dma_circulation_disable(BRIDGE_SPI_DMA, BRIDGE_SPI_RX_DMA_CH);
 	dma_memory_to_memory_disable(BRIDGE_SPI_DMA, BRIDGE_SPI_RX_DMA_CH);
 	dmamux_synchronization_disable(DMAMUX_MULTIPLEXER_CH3);
+	dma_flag_clear(BRIDGE_SPI_DMA, BRIDGE_SPI_RX_DMA_CH, DMA_FLAG_ERR);
+	dma_interrupt_enable(BRIDGE_SPI_DMA, BRIDGE_SPI_RX_DMA_CH, DMA_INT_ERR);
 
 	/* TX: spi_tx_dma_buf -> SPI1 DATA.  Armed per-reply with the exact
      * staged length; the SPI's TBE request prefills the TX FIFO the moment
@@ -154,13 +213,19 @@ static void spi_dma_init(void)
 	dma_circulation_disable(BRIDGE_SPI_DMA, BRIDGE_SPI_TX_DMA_CH);
 	dma_memory_to_memory_disable(BRIDGE_SPI_DMA, BRIDGE_SPI_TX_DMA_CH);
 	dmamux_synchronization_disable(DMAMUX_MULTIPLEXER_CH2);
+	dma_flag_clear(BRIDGE_SPI_DMA, BRIDGE_SPI_TX_DMA_CH, DMA_FLAG_ERR);
+	dma_interrupt_enable(BRIDGE_SPI_DMA, BRIDGE_SPI_TX_DMA_CH, DMA_INT_ERR);
+	nvic_irq_enable(
+	    DMA0_Channel2_IRQn, BRIDGE_SPI_DMA_ERR_IRQ_PRIO, BRIDGE_SPI_DMA_ERR_IRQ_SUBPRIO);
+	nvic_irq_enable(
+	    DMA0_Channel3_IRQn, BRIDGE_SPI_DMA_ERR_IRQ_PRIO, BRIDGE_SPI_DMA_ERR_IRQ_SUBPRIO);
 }
 
 /* Re-arm RX for a fresh transaction: full staging buffer.  CHCNT may only
  * be written while the channel is disabled. */
 static void spi_dma_arm_rx(void)
 {
-	dma_channel_disable(BRIDGE_SPI_DMA, BRIDGE_SPI_RX_DMA_CH);
+	if (!spi_dma_disable_confirm(BRIDGE_SPI_RX_DMA_CH)) return;
 	dma_memory_address_config(BRIDGE_SPI_DMA, BRIDGE_SPI_RX_DMA_CH, (uint32_t)spi_rx_dma_buf);
 	dma_transfer_number_config(BRIDGE_SPI_DMA, BRIDGE_SPI_RX_DMA_CH, BRIDGE_SPI_DMA_BUF_LEN);
 	dma_channel_enable(BRIDGE_SPI_DMA, BRIDGE_SPI_RX_DMA_CH);
@@ -171,7 +236,7 @@ static void spi_dma_arm_rx(void)
  * the same invariant the old per-byte path enforced via tx_pending()). */
 static void spi_dma_arm_tx(uint32_t len)
 {
-	dma_channel_disable(BRIDGE_SPI_DMA, BRIDGE_SPI_TX_DMA_CH);
+	if (!spi_dma_disable_confirm(BRIDGE_SPI_TX_DMA_CH)) return;
 	if (len == 0u) {
 		return;
 	}
@@ -182,7 +247,7 @@ static void spi_dma_arm_tx(uint32_t len)
 
 static void spi_cs_exti_init(void)
 {
-	rcu_periph_clock_enable(RCU_SYSCFG);
+	bridge_rcu_periph_clock_enable(RCU_SYSCFG);
 	syscfg_exti_line_config(BRIDGE_SPI_CS_EXTI_PORT, BRIDGE_SPI_CS_EXTI_PIN);
 	exti_init(BRIDGE_SPI_CS_EXTI_LINE, EXTI_INTERRUPT, EXTI_TRIG_BOTH);
 	exti_interrupt_flag_clear(BRIDGE_SPI_CS_EXTI_LINE);
@@ -234,8 +299,11 @@ static void bridge_spi_periph_config(void)
 
 void bridge_transport_spi_hw_init(void)
 {
-	rcu_periph_clock_enable(BRIDGE_SPI_RCU);
+	bridge_rcu_periph_clock_enable(BRIDGE_SPI_RCU);
 	spi_gpio_init();
+	spi_dma_rx_error_count = 0u;
+	spi_dma_tx_error_count = 0u;
+	spi_dma_error_pending  = false;
 	spi_dma_init();
 	bridge_spi_periph_config();
 	spi_dma_arm_rx();
@@ -278,9 +346,11 @@ void BRIDGE_SPI_CS_EXTI_HANDLER(void)
 		} else {
 			/* CS released: end of transaction.
              *
-             * 1. Snapshot the RX residue FIRST: bytes captured by RX DMA =
-             *    buffer length minus the remaining transfer count.
-             * 2. Quiesce both DMA channels, then FLUSH + re-init the SPI via
+			 * 1. Quiesce RX DMA, wait for CHEN to read clear, and execute a
+			 *    DSB before taking the residue.  A pending AHB beat must be
+			 *    visible in memory/count before the snapshot.  Then drain the
+			 *    (at most four-frame) byte-mode RX FIFO into the DMA tail.
+			 * 2. Quiesce TX DMA, then FLUSH + re-init the SPI via
              *    the RCU reset (the only reliable FIFO flush; it also clears
              *    BYTEN/DMAREN/DMATEN, which bridge_spi_periph_config
              *    re-applies) so the peripheral is reception-ready while the
@@ -294,12 +364,46 @@ void BRIDGE_SPI_CS_EXTI_HANDLER(void)
              * Budget: steps 1-4 are register writes + CRC over <=69 B at
              * 216 MHz -- single-digit microseconds, well inside the master's
              * inter-transaction gap (its CS setup window alone is 60 us). */
+			const bool rx_quiesced = spi_dma_disable_confirm(BRIDGE_SPI_RX_DMA_CH);
+			const bool tx_quiesced = spi_dma_disable_confirm(BRIDGE_SPI_TX_DMA_CH);
+			if (!rx_quiesced || !tx_quiesced) {
+				/* Do not decode a count from a channel which may still be
+				 * transferring.  Reset the SPI state and let the host retry the
+				 * dropped transaction; the next CS falling edge retries the arm. */
+				rcu_periph_reset_enable(RCU_SPI1RST);
+				rcu_periph_reset_disable(RCU_SPI1RST);
+				bridge_spi_periph_config();
+				spi_slave_cs_low();
+				return;
+			}
+
+			if (spi_dma_error_consume()) {
+				/* The byte run is incomplete or the staged reply was not sent.
+				 * Reset it and stage a definite STATUS_IO for the host's next
+				 * reply-read instead of decoding a truncated frame. */
+				rcu_periph_reset_enable(RCU_SPI1RST);
+				rcu_periph_reset_disable(RCU_SPI1RST);
+				bridge_spi_periph_config();
+				spi_slave_transport_error();
+				uint32_t reply_len = 0u;
+				while (spi_slave_tx_pending() && reply_len < BRIDGE_SPI_DMA_BUF_LEN) {
+					spi_tx_dma_buf[reply_len++] = spi_slave_tx_next_byte();
+				}
+				spi_dma_arm_rx();
+				spi_dma_arm_tx(reply_len);
+				return;
+			}
+
+			__DSB();
 			uint32_t remaining = dma_transfer_number_get(BRIDGE_SPI_DMA, BRIDGE_SPI_RX_DMA_CH);
 			uint32_t received =
 			    (remaining <= BRIDGE_SPI_DMA_BUF_LEN) ? (BRIDGE_SPI_DMA_BUF_LEN - remaining) : 0u;
-
-			dma_channel_disable(BRIDGE_SPI_DMA, BRIDGE_SPI_RX_DMA_CH);
-			dma_channel_disable(BRIDGE_SPI_DMA, BRIDGE_SPI_TX_DMA_CH);
+			for (uint32_t frame = 0u;
+			     frame < BRIDGE_SPI_RX_FIFO_FRAMES && received < BRIDGE_SPI_DMA_BUF_LEN &&
+			     spi_flag_get(BRIDGE_SPI_PERIPH, SPI_FLAG_RBNE) != RESET;
+			     ++frame) {
+				spi_rx_dma_buf[received++] = (uint8_t)spi_data_receive(BRIDGE_SPI_PERIPH);
+			}
 
 			rcu_periph_reset_enable(RCU_SPI1RST);
 			rcu_periph_reset_disable(RCU_SPI1RST);
@@ -457,11 +561,14 @@ i2c_timing_derive(uint32_t apb1_hz, uint32_t *psc, uint32_t *scl_dely, uint32_t 
 int bridge_transport_i2c_hw_init(void)
 {
 	rcu_i2c_clock_config(BRIDGE_I2C_RCU_IDX, BRIDGE_I2C_CK_SRC);
-	rcu_periph_clock_enable(BRIDGE_I2C_RCU);
+	bridge_rcu_periph_clock_enable(BRIDGE_I2C_RCU);
 	i2c_gpio_init();
 
-	uint32_t psc, scl_dely, sda_dely;
-	if (!i2c_timing_derive(rcu_clock_freq_get(CK_APB1), &psc, &scl_dely, &sda_dely)) {
+	const uint32_t apb1_hz = rcu_clock_freq_get(CK_APB1);
+	uint32_t       psc, scl_dely, sda_dely;
+	uint16_t       stretch_timeout_reload;
+	if (!i2c_timing_derive(apb1_hz, &psc, &scl_dely, &sda_dely) ||
+	    !bridge_i2c_stretch_timeout_reload(apb1_hz, &stretch_timeout_reload)) {
 		/* Refuse rather than clamp: no i2c_timing_config()/i2c_enable()
          * below, so I2C0 stays disabled and every access on the bus
          * gets a hard failure the host/analyser can see, instead of a
@@ -472,6 +579,19 @@ int bridge_transport_i2c_hw_init(void)
 	}
 	i2c_timing_config(BRIDGE_I2C_PERIPH, psc, scl_dely, sda_dely);
 	i2c_analog_noise_filter_enable(BRIDGE_I2C_PERIPH);
+
+	/* UM Rev1.2 §28.3.9/§28.4.6: both counters use
+	 * (reload + 1) * 2048 * tI2CCLK. A normal low-SCL timeout covers a
+	 * continuously stretched clock; the extended counter covers cumulative
+	 * slave extension. Program both before their enable bits lock the reload
+	 * fields, then let the already-enabled ERRIE path clear TIMEOUT and
+	 * resynchronise the framing. The manual specifies TIMEOUT as a flag, not
+	 * an automatic slave abort or SCL release; a stalled pad needs an explicit
+	 * disable/reinitialise recovery path, verified on silicon (#150). */
+	i2c_bus_timeout_a_config(BRIDGE_I2C_PERIPH, stretch_timeout_reload);
+	i2c_bus_timeout_b_config(BRIDGE_I2C_PERIPH, stretch_timeout_reload);
+	i2c_clock_timeout_enable(BRIDGE_I2C_PERIPH);
+	i2c_extented_clock_timeout_enable(BRIDGE_I2C_PERIPH);
 
 	i2c_address_config(
 	    BRIDGE_I2C_PERIPH, (uint32_t)GD32_BRIDGE_DEFAULT_I2C_ADDR << 1, I2C_ADDFORMAT_7BITS);
@@ -506,11 +626,20 @@ int bridge_transport_i2c_hw_init(void)
 	nvic_irq_enable(BRIDGE_I2C_ER_IRQN, BRIDGE_I2C_IRQ_PRIO, BRIDGE_I2C_IRQ_SUBPRIO);
 
 	i2c_enable(BRIDGE_I2C_PERIPH);
+	/* SPI initialisation runs before I2C during cold boot. Reaching this
+	 * successful tail therefore marks the whole transport layer healthy;
+	 * the range-error exit above deliberately leaves the fault-loop count. */
+	fault_reset_loop_mark_healthy();
 	return BRIDGE_HW_OK;
 }
 
 /* I2C0 event ISR: address match (direction-aware), RX during a write,
  * STOP, and TX during a read.
+ *
+ * RBNE is tested AHEAD of ADDSEND.  At a combined write/repeated-START
+ * read boundary, the final write byte can still be pending in RDATA while
+ * the new address match is pending.  Drain that byte before ADDSEND calls
+ * i2c_slave_write_end(), so the staged reply validates the full frame.
  *
  * STPDET is tested AHEAD of TI.  At the end of a normal read, the last
  * envelope byte drains I2C_TDATA (setting TI) and the master then NACKs
@@ -522,7 +651,15 @@ int bridge_transport_i2c_hw_init(void)
  * for what happens if one gets written anyway). */
 void BRIDGE_I2C_EV_HANDLER(void)
 {
-	if (RESET != i2c_interrupt_flag_get(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_ADDSEND)) {
+	const bridge_i2c_event_t event = bridge_i2c_event_select(
+	    RESET != i2c_interrupt_flag_get(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_RBNE),
+	    RESET != i2c_interrupt_flag_get(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_ADDSEND),
+	    RESET != i2c_interrupt_flag_get(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_STPDET),
+	    RESET != i2c_interrupt_flag_get(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_TI));
+
+	if (event == BRIDGE_I2C_EVENT_RBNE) {
+		i2c_slave_rx_byte((uint8_t)i2c_data_receive(BRIDGE_I2C_PERIPH));
+	} else if (event == BRIDGE_I2C_EVENT_ADDSEND) {
 		const bool is_transmitter = (RESET != i2c_flag_get(BRIDGE_I2C_PERIPH, I2C_FLAG_TR));
 		i2c_interrupt_flag_clear(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_ADDSEND);
 		if (is_transmitter) {
@@ -544,9 +681,7 @@ void BRIDGE_I2C_EV_HANDLER(void)
 		} else {
 			i2c_slave_write_start();
 		}
-	} else if (RESET != i2c_interrupt_flag_get(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_RBNE)) {
-		i2c_slave_rx_byte((uint8_t)i2c_data_receive(BRIDGE_I2C_PERIPH));
-	} else if (RESET != i2c_interrupt_flag_get(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_STPDET)) {
+	} else if (event == BRIDGE_I2C_EVENT_STPDET) {
 		i2c_interrupt_flag_clear(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_STPDET);
 		/* The master NACKs the last byte of every read before STOP, so
          * NACKF is routinely set here.  It raises no interrupt now that
@@ -563,7 +698,7 @@ void BRIDGE_I2C_EV_HANDLER(void)
 		/* STOP after a write with no read: stage the reply so a later
          * separate read transaction can fetch it. */
 		(void)i2c_slave_write_end();
-	} else if (RESET != i2c_interrupt_flag_get(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_TI)) {
+	} else if (event == BRIDGE_I2C_EVENT_TI) {
 		i2c_data_transmit(BRIDGE_I2C_PERIPH, i2c_slave_tx_next_byte());
 	} else {
 		/* Terminating arm (#128).  An ISR that can return having cleared
@@ -620,6 +755,15 @@ void BRIDGE_I2C_ER_HANDLER(void)
 		i2c_interrupt_flag_clear(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_OUERR);
 		bus_error = true;
 	}
+	if (RESET != i2c_interrupt_flag_get(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_TIMEOUT)) {
+		/* A timeout leaves the request/reply framing untrustworthy even
+		 * though the IP only exposes it as a status flag. Clear it and use
+		 * the same portable-side resynchronisation as a bus error; otherwise
+		 * the next address match can append to a transaction that timed out
+		 * while this handler was pre-empted. */
+		i2c_interrupt_flag_clear(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_TIMEOUT);
+		bus_error = true;
+	}
 
 	/* Catch-all: blanket-clear every software-clearable ERROR-domain
      * status bit the snapshot shows set -- the safety net for a source
@@ -657,4 +801,90 @@ void BRIDGE_I2C_ER_HANDLER(void)
          * a half-consumed reply instead of getting a clean answer. */
 		i2c_slave_tx_abort();
 	}
+}
+
+/* =====================================================================
+ * BRD_I2C stuck-SDA detector (gh#39) -- erratum 2.3.1 workaround.
+ *
+ * "Device limitations of GD32G5x3 Rev1.0" s2.3.1: a 7-bit-address I2C
+ * slave "will enter an error state, causing it to malfunction and the
+ * SDA line to remain low" when a master that simulates I2C via IO
+ * (an i2c-gpio adapter, a bench probe, an `i2cdetect -a` sweep of the
+ * reserved head addresses) sends "Start + 10-bit Match Head Address +
+ * Start + 7-bit Address Read + Wait ACK + Start".  This bridge runs
+ * I2C0 exactly in that configuration (I2C_ADDFORMAT_7BITS).  The SDA
+ * pad held low means no master on the shared multi-drop BRD_I2C bus
+ * (OPTIGA Trust M, 5L35023B) can issue a START -- a bus-wide outage,
+ * while the SPI link keeps answering, which is the least diagnosable
+ * form this fault can take.
+ *
+ * Vendor workaround, verbatim: "Software periodically checks the status
+ * of the SDA line. If SDA is detected to be stuck low, reinitialize
+ * the I2C module."  Called from bridge_hw_tick() at base level, which
+ * runs after each main-loop wake; there is no periodic SysTick yet
+ * (gh#54), so a stuck bus with no other interrupt traffic is only caught
+ * on the next wake.
+ *
+ * Detector design: a single instantaneous pad read is ambiguous -- a
+ * legitimate in-flight byte holds SDA low ~half the bit times, so two
+ * bare tick samples could both land on data bits and tear down a
+ * healthy transfer (continuous back-to-back I2C traffic, e.g. an OTA
+ * streamed over this bus, would eventually hit that pair by chance).
+ * Instead each tick takes a BURST of samples ~1 ms apart: at 400 kHz a
+ * single SDA-low-while-not-addressed period lasts at most one bit
+ * (2.5 us) or a clock-stretch (which holds SCL low, not SDA), so
+ * BRIDGE_I2C_STUCK_SAMPLES consecutive low readings spanning ~3 ms is
+ * ~1200 bit times -- unreachable in correct traffic.  Only then does
+ * the tick count as a "low candidate", and only TWO consecutive
+ * candidate ticks act (the issue's confirmation rule).
+ *
+ * AF-mode pads still report the live line state (UM Rev1.2 p.270
+ * s7.3.8: "A read access to the port input status register gets the
+ * I/O state"), so gpio_input_bit_get() on PB9 is a valid detector.
+ *
+ * Recovery is the documented I2C software reset (UM Rev1.2 p.1262
+ * s28.3.5): "Write I2CEN = 0 / Check I2CEN = 0 / Write I2CEN = 1",
+ * I2CEN held low >= 3 APB clock cycles, which "releases SCL and SDA"
+ * and leaves I2C_TIMING / I2C_SADDR0 / configuration bits intact --
+ * safe to run from a tick, and preferable to re-running
+ * bridge_transport_i2c_hw_init().  The portable staging is resynced
+ * with i2c_slave_tx_abort() so a half-consumed reply from before the
+ * wedge is dropped rather than resumed against a fresh peripheral. */
+#define BRIDGE_I2C_STUCK_SAMPLES 4u
+
+static uint8_t i2c_sda_low_ticks;
+
+void bridge_transport_i2c_stuck_poll(void)
+{
+	/* Burst sample: SDA low across the whole burst is the candidate. */
+	bool all_low = true;
+	for (uint32_t k = 0u; k < BRIDGE_I2C_STUCK_SAMPLES; ++k) {
+		if (RESET != gpio_input_bit_get(BRIDGE_I2C_SDA_PORT, BRIDGE_I2C_SDA_PIN)) {
+			all_low = false;
+			break;
+		}
+		if (k + 1u < BRIDGE_I2C_STUCK_SAMPLES) {
+			/* ~1 ms gap: 216000 cycles at 216 MHz, ~5 cycles per
+			 * volatile iteration -> 43200 iterations.  Only paid
+			 * on the stuck path; a healthy line exits at the first
+			 * sample. */
+			for (volatile uint32_t gap = 0u; gap < 43200u; ++gap) {
+				/* spread samples ~1 ms apart */
+			}
+		}
+	}
+	if (!all_low) {
+		i2c_sda_low_ticks = 0u;
+		return;
+	}
+	if (++i2c_sda_low_ticks < 2u) return; /* confirm across two ticks */
+	i2c_sda_low_ticks = 0u;
+
+	/* Documented software reset (UM Rev1.2 p.1262 s28.3.5). */
+	I2C_CTL0(BRIDGE_I2C_PERIPH) &= ~I2C_CTL0_I2CEN; /* Write I2CEN = 0 */
+	while (0u != (I2C_CTL0(BRIDGE_I2C_PERIPH) & I2C_CTL0_I2CEN)) {
+		/* Check I2CEN = 0 -- the read-back IS the >= 3 APB cycle hold */
+	}
+	I2C_CTL0(BRIDGE_I2C_PERIPH) |= I2C_CTL0_I2CEN; /* Write I2CEN = 1 */
+	i2c_slave_tx_abort();                          /* drop a half-consumed staged reply */
 }

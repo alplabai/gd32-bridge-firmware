@@ -28,9 +28,10 @@
  * https://github.com/alplabai/alp-sdk/blob/main/docs/gd32-bridge-protocol.md)
  * for the wire-format implications.  That protocol document lives in
  * the other repository; it is not duplicated here. */
-#define BRIDGE_DSP_MAX_CHAINS      4u
-#define BRIDGE_DSP_MAX_STAGES      4u
-#define BRIDGE_DSP_MAX_STAGE_BYTES 260u
+#define BRIDGE_DSP_MAX_CHAINS           4u
+#define BRIDGE_DSP_MAX_STAGES           4u
+#define BRIDGE_DSP_MAX_STAGE_BYTES      260u
+#define BRIDGE_DSP_STAGE_COVERAGE_BYTES ((BRIDGE_DSP_MAX_STAGE_BYTES + 7u) / 8u)
 
 /* Valid `kind` byte range -- alp_dsp_stage_kind_t mirrors the wire
  * encoding: 0 FIR, 1 IIR, 2 WINDOW, 3 FFT.  Anything outside this
@@ -58,8 +59,9 @@
 typedef struct {
 	uint8_t  kind;           /* alp_dsp_stage_kind_t (valid when total_size > 0) */
 	uint16_t total_size;     /* declared in first chunk; locks for the stage    */
-	uint16_t bytes_received; /* running count toward total_size                  */
-	bool     complete;       /* bytes_received == total_size                     */
+	uint16_t bytes_received; /* number of uniquely covered byte positions       */
+	bool     complete;       /* every byte in [0, total_size) is covered         */
+	uint8_t  coverage[BRIDGE_DSP_STAGE_COVERAGE_BYTES];
 	uint8_t  data[BRIDGE_DSP_MAX_STAGE_BYTES];
 } adc_dsp_stage_t;
 
@@ -69,8 +71,9 @@ typedef struct {
 	adc_dsp_stage_t stages[BRIDGE_DSP_MAX_STAGES];
 } adc_dsp_chain_t;
 
-/* 4 chains x 4 stages x 260 B = 4160 bytes of stage-data RAM + ~80
- * bytes of metadata; well inside the GD32G553's 128 KB SRAM. */
+/* 4 chains x 4 stages reserve 4160 bytes of stage data plus 528 bytes
+ * of coverage bits and small scalar metadata; well inside the
+ * GD32G553's 128 KB SRAM. */
 extern adc_dsp_chain_t adc_dsp_chains[BRIDGE_DSP_MAX_CHAINS]; /* adc_dsp_chain.c */
 
 /* Return a chain slot to the pool.  Idempotent-safe for an out-of-range
