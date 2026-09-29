@@ -32,6 +32,7 @@
 #include "protocol.h"
 #include "../hal/bridge_hw.h"
 #include "bootloader/bootloader.h"
+#include "ota.h"
 
 /* --------------------------------------------------------------- */
 /* CRC-16 / CCITT-FALSE -- shared with transports.                   */
@@ -506,10 +507,10 @@ static gd32_bridge_status_t handle_adc_configure(const uint8_t *req,
 	const uint16_t oversample_ratio = (uint16_t)req[2] | ((uint16_t)req[3] << 8);
 	const uint16_t sample_cycles    = (uint16_t)req[4] | ((uint16_t)req[5] << 8);
 	const uint8_t  resolution_bits  = req[6];
-	/* Resolution is one of 6/8/10/12/14/16 per the GD32G5
-     * datasheet's effective-resolution table; the firmware rejects
-     * other values rather than silently rounding so callers find
-     * out at protocol time. */
+	/* The GD32G5 effective-resolution table also lists 14/16 bits.
+	 * Accept those values here so the HAL can report their deliberate
+	 * lack of implementation as STATUS_NOSUPPORT; reject all other
+	 * values rather than silently rounding them. */
 	switch (resolution_bits) {
 	case 0u: /* "use the firmware default" */
 	case 6u:
@@ -1027,6 +1028,17 @@ static gd32_bridge_status_t protocol_dispatch_inner(gd32_bridge_link_t link,
                                                     size_t             reply_payload_cap,
                                                     size_t            *reply_payload_len)
 {
+	/* Trial/confirm gate (bench fact 2026-09-26, E1M-V2M103): a
+	 * not-yet-confirmed OTA trial must never let the host believe a
+	 * session is stable -- it can still revert on the armed watchdog.
+	 * Note the frame (the confirm signal the base-level tick is
+	 * waiting for) and answer BUSY with an empty payload for EVERY
+	 * opcode, on EITHER link, ahead of the normal dispatch. */
+	if (ota_trial_unconfirmed()) {
+		ota_note_frame();
+		*reply_payload_len = 0u;
+		return STATUS_BUSY;
+	}
 	cmd_handler_t h = NULL;
 	switch (cmd) {
 	case CMD_PING:
@@ -1145,10 +1157,11 @@ static gd32_bridge_status_t protocol_dispatch_inner(gd32_bridge_link_t link,
 		break;
 	default:
 		/* Route the reserved OTA opcode range (0xF0..0xFF) through
-         * the application bootloader's dispatcher.  Bodies return
-         * STATUS_NOSUPPORT until the FMC HAL lands -- see
-         * src/bootloader/.  `cmd` is uint8_t so the upper bound 0xFFu
-         * is implicit; explicit check would trip -Wtype-limits. */
+         * the application bootloader's dispatcher.  Commands 0xF0..0xF6
+         * execute only in a partitioned build with an FMC backend; the
+         * full-flash/stub builds return STATUS_NOSUPPORT without flash I/O,
+         * as do reserved 0xF7..0xFF.  `cmd` is uint8_t so the upper bound
+         * 0xFFu is implicit; an explicit check would trip -Wtype-limits. */
 		if (cmd >= CMD_OTA_BEGIN) {
 			return bl_dispatch_ota(cmd,
 			                       req_payload,

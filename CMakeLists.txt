@@ -95,6 +95,7 @@ elseif(BRIDGE_HAL_BACKEND STREQUAL "gd32")
         hal/gd32/gpio.c
         hal/gd32/power.c
         hal/gd32/pwm.c
+        hal/gd32/pwm_set.c
         hal/gd32/pwm_capture.c
         hal/gd32/qenc.c
         hal/gd32/se_reset.c
@@ -196,6 +197,13 @@ elseif(BRIDGE_HAL_BACKEND STREQUAL "gd32")
     # gd32g5x3_libopt.h, and the vendor library's compile units
     # don't have `hal/` on their include path otherwise.
     target_include_directories(gd32_firmware_library PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/hal)
+    # -Os here too (#26): the vendor library gets no compile-option
+    # override anywhere else in its own CMakeLists.txt, so without this
+    # it links at gcc's implicit -O0 even once the firmware targets
+    # below are pinned to -Os -- confirmed against a vendor object's
+    # `Tag_ABI_optimization_goals` build attribute, which read "Aggressive
+    # Debug" before this line existed.
+    target_compile_options(gd32_firmware_library PRIVATE -Os)
 else()
     message(FATAL_ERROR "Unknown BRIDGE_HAL_BACKEND='${BRIDGE_HAL_BACKEND}' (expected: stub | gd32).")
 endif()
@@ -237,8 +245,21 @@ function(gd32_firmware_target tgt linker_script)
     # deleted; the version rides inside the build-id.
     target_compile_definitions(${tgt} PRIVATE GD32_BRIDGE_HAVE_BUILD_ID_HEADER)
     add_dependencies(${tgt} gd32-build-id)
+    # -Os pinned directly here (not via CMAKE_BUILD_TYPE) so it applies
+    # unconditionally to every target and can't be silently lost by an
+    # invocation that sets no build type -- which is exactly what both
+    # the documented command and CI's stub-build job do (#26).  -Os beats
+    # -O0 (56 vs 20 instructions on the crc16_ccitt_false framing hot
+    # path, #26/#104) on both size and speed for this codebase: -O2 comes
+    # out bigger AND slower on that same function on this target/gcc
+    # combination (24 instructions), so there is no size/speed trade-off
+    # being made here. Placed in target_compile_options (not
+    # CMAKE_C_FLAGS) so it wins over any -O a caller passes via
+    # CMAKE_C_FLAGS: CMake places target_compile_options after
+    # CMAKE_<LANG>_FLAGS on the command line, and gcc honours the last -O
+    # given.
     target_compile_options(${tgt} PRIVATE
-        -mcpu=cortex-m33 -mthumb -mfloat-abi=soft
+        -mcpu=cortex-m33 -mthumb -mfloat-abi=soft -Os
         -ffunction-sections -fdata-sections
         -Wall -Wextra -Wshadow -Wpedantic -Wconversion -Werror)
     target_link_options(${tgt} PRIVATE
@@ -283,16 +304,52 @@ else()
     configure_file(${CMAKE_SOURCE_DIR}/toolchain/gd32g553_app_slot.ld.in
                    ${CMAKE_BINARY_DIR}/gd32g553_slot_b.ld @ONLY)
 
-    add_executable(gd32-bridge-slot-a ${GD32_BRIDGE_SOURCES})
+    # src/trial_marker.c: only the two OTA-slot targets ever run as a
+    # trial candidate, so only they carry the marker (see that file's
+    # header comment).
+    add_executable(gd32-bridge-slot-a ${GD32_BRIDGE_SOURCES} src/trial_marker.c)
     gd32_firmware_target(gd32-bridge-slot-a ${CMAKE_BINARY_DIR}/gd32g553_slot_a.ld)
     target_compile_definitions(gd32-bridge-slot-a PRIVATE
         BRIDGE_OTA_PARTITIONED=1 BRIDGE_APP_SLOT_BASE=0x0800A000u)
 
-    add_executable(gd32-bridge-slot-b ${GD32_BRIDGE_SOURCES})
+    add_executable(gd32-bridge-slot-b ${GD32_BRIDGE_SOURCES} src/trial_marker.c)
     gd32_firmware_target(gd32-bridge-slot-b ${CMAKE_BINARY_DIR}/gd32g553_slot_b.ld)
     target_compile_definitions(gd32-bridge-slot-b PRIVATE
         BRIDGE_OTA_PARTITIONED=1 BRIDGE_APP_SLOT_BASE=0x08045000u)
 
+    # Build-time gate (bench fact 2026-09-26 follow-up): fail the build if
+    # the produced slot image does not actually carry a findable,
+    # confirm-capable trial marker sitting where the linker script's
+    # `.trial_marker` section actually put it -- tools/check_trial_marker.py
+    # runs the identical bounded scan ota_image_trial_capable()
+    # (src/ota_layout.h) does against the just-built .bin, THEN
+    # cross-checks the found offset against `.trial_marker`'s linked VMA
+    # (read out of the .elf via arm-none-eabi-objdump, --elf/--slot-base
+    # below) rather than trusting either side alone.  Only meaningful once
+    # the .bin/.elf exist (gd32 backend; the stub backend has no
+    # Reset_Handler to objcopy).
+    if(BRIDGE_HAL_BACKEND STREQUAL "gd32")
+        find_package(Python3 COMPONENTS Interpreter REQUIRED)
+        add_custom_command(TARGET gd32-bridge-slot-a POST_BUILD
+            COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_trial_marker.py
+                ${CMAKE_BINARY_DIR}/gd32-bridge-slot-a.bin
+                --elf ${CMAKE_BINARY_DIR}/gd32-bridge-slot-a${CMAKE_EXECUTABLE_SUFFIX}
+                --slot-base 0x0800A000
+            COMMENT "Checking gd32-bridge-slot-a.bin for a trial-capability marker")
+        add_custom_command(TARGET gd32-bridge-slot-b POST_BUILD
+            COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_trial_marker.py
+                ${CMAKE_BINARY_DIR}/gd32-bridge-slot-b.bin
+                --elf ${CMAKE_BINARY_DIR}/gd32-bridge-slot-b${CMAKE_EXECUTABLE_SUFFIX}
+                --slot-base 0x08045000
+            COMMENT "Checking gd32-bridge-slot-b.bin for a trial-capability marker")
+    endif()
+
     add_executable(gd32-bootloader src/boot/boot_main.c src/crc32.c hal/gd32_libc_stubs.c)
     gd32_firmware_target(gd32-bootloader ${CMAKE_SOURCE_DIR}/toolchain/gd32g553_bootloader.ld)
+    # This target intentionally does not consume GD32_BRIDGE_SOURCES. Keep the
+    # core-fault recorder explicit so boot-time faults cannot fall back to the
+    # vendor startup's weak Default_Handler aliases (#100).
+    target_sources(gd32-bootloader PRIVATE hal/gd32/fault_diag.c hal/gd32/fault_handlers.c)
 endif()

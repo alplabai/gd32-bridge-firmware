@@ -73,6 +73,13 @@ set(TEST_FLAGS -std=c11 -Wall -Wextra -Werror)
 # an A-resident-only test build would never compile the OTA_SLOT_B_BASE
 # arm of the #elif chain.
 #
+# protocol.c + bootloader.c + bridge_hw_stub.c (bench fact 2026-09-26):
+# the trial/confirm BUSY gate lives in protocol_dispatch(), which this
+# suite's ota_dispatch()-only predecessor never linked -- added so the
+# gate can be driven end to end (ota_boot_init() -> protocol_dispatch()
+# BUSY -> ota_confirm_tick()) against the real dispatcher, for both slot
+# builds.
+#
 # The two bases below are PARSED out of src/ota_layout.h -- the same
 # header ota.c includes -- rather than hand-copied, so this copy cannot
 # drift silently against it.  Two other independent copies of the same
@@ -103,6 +110,9 @@ foreach(_slot A B)
         ota/src/test_ota.c
         ${FW}/src/ota.c
         ${FW}/src/crc32.c
+        ${FW}/src/protocol.c
+        ${FW}/src/bootloader/bootloader.c
+        ${FW}/hal/bridge_hw_stub.c
     )
     target_include_directories(${_tgt} PRIVATE ${FW}/src ${FW}/hal)
     target_compile_definitions(${_tgt} PRIVATE
@@ -167,11 +177,9 @@ add_test(NAME fault_diag COMMAND test_fault_diag)
 
 # --- timer_sync_iti: (slave, master) -> SYSCFG ITIx router code (gh#42) ----
 #
-# hal/gd32/timer_sync.c itself needs the Cortex-M33 vendor register headers
-# and is compiled by no CI job (issue #77).  The lookup table has no such
-# dependency, so it lives in its own translation unit (hal/gd32/
-# timer_sync_iti.c, no gd32g5x3.h include) purely so it can be linked and
-# tested here.
+# The lookup table has no vendor-register dependency, so it lives in its own
+# translation unit and is tested directly here.  The production HAL body is
+# additionally linked against a minimal vendor-API mock in the next target.
 add_executable(test_timer_sync_iti
     timer_sync_iti/src/test_timer_sync_iti.c
     ${FW}/hal/gd32/timer_sync_iti.c
@@ -180,6 +188,44 @@ target_include_directories(test_timer_sync_iti PRIVATE ${FW}/hal/gd32)
 target_compile_options(test_timer_sync_iti PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_timer_sync_iti PRIVATE ztest_shim)
 add_test(NAME timer_sync_iti COMMAND test_timer_sync_iti)
+
+# --- timer_sync: production HAL id validation + register-call sequence -----
+#
+# Links the REAL hal/gd32/timer_sync.c against a minimal vendor-API mock.
+# This pins #142's fail-closed TIMER19 rejection at the responsible layer:
+# id 2 must return RANGE before any timer/SYSCFG call.  It also prevents the
+# canonical compact wire ids from drifting back to peripheral numbers (#194).
+add_executable(test_timer_sync
+    timer_sync/src/test_timer_sync.c
+    ${FW}/hal/gd32/timer_sync.c
+    ${FW}/hal/gd32/timer_sync_iti.c
+)
+target_include_directories(test_timer_sync PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/timer_sync/mock
+    ${FW}/hal
+    ${FW}/hal/gd32
+)
+target_compile_options(test_timer_sync PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_timer_sync PRIVATE ztest_shim)
+add_test(NAME timer_sync COMMAND test_timer_sync)
+
+# --- gpio_grouped: production GPIO port grouping + promotion order (#198) --
+#
+# Links the real hal/gd32/gpio.c against a minimal register/API mock.  This
+# pins the one-ISTAT-snapshot/one-final-BOP-write policy per touched port and
+# proves that newly promoted pins are preloaded before their mode changes.
+add_executable(test_gpio_grouped
+    gpio_grouped/src/test_gpio_grouped.c
+    ${FW}/hal/gd32/gpio.c
+)
+target_include_directories(test_gpio_grouped PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/gpio_grouped/mock
+    ${FW}/hal
+    ${FW}/hal/gd32
+)
+target_compile_options(test_gpio_grouped PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_gpio_grouped PRIVATE ztest_shim)
+add_test(NAME gpio_grouped COMMAND test_gpio_grouped)
 
 # --- tmu_q31_scale: Q31 FACTOR band-selection logic (gd32-bridge#46) -------
 #
@@ -195,6 +241,20 @@ target_include_directories(test_tmu_q31_scale PRIVATE ${FW}/hal/gd32)
 target_compile_options(test_tmu_q31_scale PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_tmu_q31_scale PRIVATE ztest_shim)
 add_test(NAME tmu_q31_scale COMMAND test_tmu_q31_scale)
+
+# --- pwm_gd32: real PWM validation + register-apply seam (#168) -----------
+add_executable(test_pwm_gd32
+    pwm_gd32/src/test_pwm_gd32.c
+    ztest_shim.c
+    ${FW}/hal/gd32/pwm_set.c
+)
+target_include_directories(test_pwm_gd32 PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${FW}/hal
+    ${FW}/hal/gd32
+)
+target_compile_options(test_pwm_gd32 PRIVATE ${TEST_FLAGS})
+add_test(NAME pwm_gd32 COMMAND test_pwm_gd32)
 
 # --- adc_seq: GD32 ADC register-sequence gate -------------------------------
 #
