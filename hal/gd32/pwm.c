@@ -17,6 +17,7 @@
 #include "bridge_critical.h"
 #include "gd32_common.h"
 #include "pwm_internal.h"
+#include "pwm_ownership.h"
 #include "pwm_preload_transaction.h"
 
 /* ----------------------------------------------------------------- */
@@ -184,6 +185,11 @@ void pwm_channel_init(const gd32_pwm_ch_t *ch)
  * luck, not design, and PR #106 pins -Os. */
 static volatile uint8_t pwm_align_mode[2];
 
+/* A claimed channel has a continuous PWM output or an active capture
+ * session.  TIMERx_CTL0.SPM and TIMERx_CAR are timer-wide, so a one-shot
+ * must not alter them while any sibling owns the same timer. */
+static volatile uint8_t pwm_timer_claims[2];
+
 /* TIMER base -> pwm_align_mode index. */
 static uint8_t pwm_timer_index(uint32_t periph)
 {
@@ -194,6 +200,24 @@ static uint8_t pwm_timer_index(uint32_t periph)
 	 * the cast is a no-op at runtime, added only to satisfy the warning
 	 * (#109 TODO). */
 	return (uint8_t)((periph == TIMER0) ? 0u : 1u);
+}
+
+void pwm_channel_claim(uint8_t channel)
+{
+	if (channel >= PWM_CHANNEL_COUNT) return;
+	const uint8_t  idx  = pwm_timer_index(pwm_channels[channel].periph);
+	const uint32_t sect = bridge_irq_lock();
+	pwm_timer_claims[idx] |= pwm_timer_channel_bit(channel);
+	bridge_irq_unlock(sect);
+}
+
+void pwm_channel_release(uint8_t channel)
+{
+	if (channel >= PWM_CHANNEL_COUNT) return;
+	const uint8_t  idx  = pwm_timer_index(pwm_channels[channel].periph);
+	const uint32_t sect = bridge_irq_lock();
+	pwm_timer_claims[idx] &= (uint8_t)~pwm_timer_channel_bit(channel);
+	bridge_irq_unlock(sect);
 }
 
 typedef struct {
@@ -224,6 +248,12 @@ int pwm_apply_counter_values(uint8_t channel, uint32_t arr, uint32_t compare)
 {
 	const gd32_pwm_ch_t *ch = &pwm_channels[channel];
 
+	/* Claim before changing the timer-wide mode or reload.  A higher-priority
+	 * transport ISR can then only see this channel as live and will refuse a
+	 * sibling one-shot instead of disrupting this partially-programmed PWM.
+	 * Range/duty validation already ran in pwm_set.c, so every call that
+	 * reaches here goes on to program the timer. */
+	pwm_channel_claim(channel);
 	/* Clear OPM if a prior bridge_hw_pwm_single_pulse left the timer
      * in one-pulse mode -- per the contract, a subsequent PWM_SET
      * returns the channel (and any other channels on the same timer)
@@ -468,8 +498,6 @@ int bridge_hw_pwm_single_pulse(uint8_t channel, uint32_t pulse_ns)
 	 * `pulse_us` nor even deterministic (and the output can freeze
 	 * HIGH at the halt).  Refuse rather than fire a wrong-width pulse;
 	 * the host must set align_mode back to edge (0) first. */
-	if (pwm_align_mode[pwm_timer_index(ch->periph)] != 0u) return BRIDGE_HW_ERR_NOTIMPL;
-
 	const uint32_t pulse_us = pulse_ns / PWM_TIMER_TICK_NS;
 	if (pulse_us == 0u) return BRIDGE_HW_ERR_RANGE;
 	/* ARR is the FULL one-shot window (lead-in + pulse) and it is a
@@ -480,6 +508,22 @@ int bridge_hw_pwm_single_pulse(uint8_t channel, uint32_t pulse_ns)
      * caller asking for 70 ms needs to be told, not to find out on a
      * scope. */
 	if (pulse_us > PWM_TIMER_ARR_MAX) return BRIDGE_HW_ERR_RANGE;
+
+	/* SPM and CAR are timer-wide.  Block interrupts for the ownership
+	 * decision and the complete destructive register sequence, so a sibling
+	 * cannot become live between the check and the forced update event. */
+	const uint8_t  idx  = pwm_timer_index(ch->periph);
+	const uint32_t sect = bridge_irq_lock();
+	if (pwm_align_mode[idx] != 0u) {
+		bridge_irq_unlock(sect);
+		return BRIDGE_HW_ERR_NOTIMPL;
+	}
+	if (pwm_timer_has_sibling_claim(pwm_timer_claims[idx], channel)) {
+		bridge_irq_unlock(sect);
+		return BRIDGE_HW_ERR_BUSY;
+	}
+	/* This channel stops being continuous while the one-shot runs. */
+	pwm_timer_claims[idx] &= (uint8_t)~pwm_timer_channel_bit(channel);
 
 	/* Halt the counter before reprogramming.  A prior one-shot already
      * left CEN clear, but a running continuous PWM has not, and
@@ -528,12 +572,9 @@ int bridge_hw_pwm_single_pulse(uint8_t channel, uint32_t pulse_ns)
 	 * value here would leave pwm_capture.c's shadow one tick short of
 	 * the live auto-reload after every one-shot. */
 	pwm_car_shadow_commit(ch->periph, pulse_us);
-	/* SPM is timer-wide (TIMERx_CTL0.SPM), not per-channel, so this also
-     * arms every sibling channel on this timer for the same one-shot
-     * halt -- a running sibling gets silently re-perioded and stopped.
-     * Pre-existing, out of scope here; tracked as #87. */
 	timer_single_pulse_mode_config(ch->periph, TIMER_SP_MODE_SINGLE);
 	timer_enable(ch->periph);
+	bridge_irq_unlock(sect);
 
 	/* A follow-up bridge_hw_pwm_get reports the PULSE width, not the
      * lead-in: it inverts its duty arithmetic while pwm_one_shot[] is set

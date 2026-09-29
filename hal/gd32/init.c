@@ -81,10 +81,12 @@
  *                               (config + drain + ns conversion) is
  *                               complete and exercised end-to-end.
  *   14. PWM_SINGLE_PULSE     -- DONE: TIMERx OPM (one-pulse mode).
- *                               Switches the timer's whole SP-bit so
- *                               other channels on the same timer also
- *                               run as single-pulse until a PWM_SET
- *                               flips back to repetitive.
+ *                               SPM and CAR are timer-wide, so a
+ *                               one-shot answers STATUS_BUSY while a
+ *                               sibling channel on the same timer has
+ *                               a continuous PWM or capture claim
+ *                               (#87); a PWM_SET flips back to
+ *                               repetitive.
  *   15. TIMER_SYNC           -- DONE (§C.15b): master-slave SMC
  *                               config via timer_slave_mode_select
  *                               + timer_master_output0_trigger_source_select
