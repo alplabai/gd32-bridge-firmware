@@ -73,18 +73,20 @@ __attribute__((weak)) bool ota_fmc_supported(void)
 {
 	return false;
 }
-__attribute__((weak)) bool ota_fmc_erase_range(uint32_t base, uint32_t len)
+__attribute__((weak)) ota_fmc_result_t ota_fmc_erase_range(uint32_t base, uint32_t len)
 {
 	(void)base;
 	(void)len;
-	return false;
+	return OTA_FMC_RESULT_ERROR;
 }
-__attribute__((weak)) bool ota_fmc_program(uint32_t addr, const uint8_t *data, size_t len)
+__attribute__((weak)) ota_fmc_result_t ota_fmc_program(uint32_t       addr,
+                                                       const uint8_t *data,
+                                                       size_t         len)
 {
 	(void)addr;
 	(void)data;
 	(void)len;
-	return false;
+	return OTA_FMC_RESULT_ERROR;
 }
 __attribute__((weak)) void ota_system_reset(void)
 {
@@ -442,7 +444,7 @@ static bool meta_commit(uint8_t  active_slot,
 		}
 	}
 
-	if (!ota_fmc_erase_range(target, OTA_PAGE_SIZE)) {
+	if (ota_fmc_erase_range(target, OTA_PAGE_SIZE) != OTA_FMC_RESULT_OK) {
 		return false;
 	}
 	rec.magic          = OTA_META_MAGIC;
@@ -468,7 +470,7 @@ static bool meta_commit(uint8_t  active_slot,
 		rec.img_crc32[active_slot]  = img_crc;
 	}
 	rec.rec_crc32 = ota_crc32(0u, (const uint8_t *)&rec, offsetof(ota_meta_record_t, rec_crc32));
-	return ota_fmc_program(target, (const uint8_t *)&rec, sizeof rec);
+	return ota_fmc_program(target, (const uint8_t *)&rec, sizeof rec) == OTA_FMC_RESULT_OK;
 }
 
 /* Flash base of the in-flight (inactive) slot.  s_inactive is set to
@@ -830,11 +832,16 @@ h_write(const uint8_t *req, size_t len, uint8_t *reply, size_t cap, size_t *rlen
 		s_err   = BRIDGE_OTA_ERR_PROGRAM_FAILED;
 		return STATUS_IO;
 	}
-	s_state = OTA_ST_BUSY;
-	if (!ota_fmc_program(ota_inactive_base() + off, &req[5], dlen)) {
+	s_state                            = OTA_ST_BUSY;
+	const ota_fmc_result_t prog_result = ota_fmc_program(ota_inactive_base() + off, &req[5], dlen);
+	if (prog_result != OTA_FMC_RESULT_OK) {
 		s_state = OTA_ST_ERROR;
 		s_err   = BRIDGE_OTA_ERR_PROGRAM_FAILED;
-		return STATUS_IO;
+		/* gh#281: a bounded ota_fmc_wait_ready() timeout (stuck FMC) is
+		 * reported as STATUS_TIMEOUT, distinct from every other FMC
+		 * error's STATUS_IO -- both used to read identically to the
+		 * host. */
+		return (prog_result == OTA_FMC_RESULT_TIMEOUT) ? STATUS_TIMEOUT : STATUS_IO;
 	}
 	if (off + (uint32_t)dlen > s_last_off) {
 		s_last_off = off + (uint32_t)dlen; /* cumulative high-water = received bytes */
@@ -1136,7 +1143,7 @@ void ota_erase_tick(void)
 	const uint32_t end   = s_erase_end;
 	ota_session_unlock(sect);
 
-	const bool erased = ota_fmc_erase_range(at, OTA_PAGE_SIZE);
+	const ota_fmc_result_t erase_result = ota_fmc_erase_range(at, OTA_PAGE_SIZE);
 
 	/* ABORT and a valid fresh BEGIN both bump the epoch. Re-check while
 	 * holding the publication lock: testing it before locking would leave a
@@ -1147,7 +1154,7 @@ void ota_erase_tick(void)
 		ota_session_unlock(sect);
 		return;
 	}
-	if (!erased) {
+	if (erase_result != OTA_FMC_RESULT_OK) {
 		s_erasing = false;
 		s_state   = OTA_ST_ERROR;
 		s_err     = BRIDGE_OTA_ERR_ERASE_FAILED;
