@@ -290,13 +290,19 @@ void bridge_hw_init(void)
 	__DSB();
 	__ISB();
 	/* The Path-A bootloader hands off with PRIMASK SET (it runs
-     * __disable_irq() before swapping MSP/VTOR for the jump) -- without
-     * clearing it here no interrupt ever fires in the slot app and the
-     * transports go silent (silicon-caught 2026-06-04: CM33 retried init
-     * 1600+ times against a slot app whose CS-EXTI could never run).
-     * Re-enable now that OUR vector table is live; on a plain power-on
-     * boot PRIMASK is already clear and this is a no-op. */
-	__enable_irq();
+     * __disable_irq() before swapping MSP/VTOR for the jump).  Do NOT
+     * clear it here (gh#257): everything below this point through the
+     * end of bridge_hw_init() is boot-only peripheral bring-up --
+     * roughly two dozen bare rcu_periph_clock_enable() read-modify-
+     * writes on the RCU enable registers -- and none of it needs
+     * interrupts live.  Re-enabling here used to open exactly that
+     * window: once PRIMASK is clear, a transport ISR (once its own
+     * NVIC line is unmasked by transport_spi_init/transport_i2c_init,
+     * which main() calls AFTER this function returns) could in
+     * principle pre-empt one of these RMWs and have a bit it just set
+     * silently erased -- the same hazard #224 closed for the RUNTIME
+     * call sites.  __enable_irq() now runs once, at the very end of
+     * bridge_hw_init(), after the last RCU write. */
 #endif
 
 	/* A breakpoint must preserve the state it is inspecting.  Hold the
@@ -684,6 +690,17 @@ void bridge_hw_init(void)
 	for (size_t i = 0; i < QENC_CHANNEL_COUNT; ++i) {
 		qenc_channel_init(&qenc_map[i]);
 	}
+
+#if defined(BRIDGE_OTA_PARTITIONED) && defined(BRIDGE_APP_SLOT_BASE)
+	/* gh#257: re-enable interrupts here, now that every boot-time RCU
+     * enable/config write above has landed.  On a plain power-on boot
+     * PRIMASK is already clear and this is a no-op; on a Path-A
+     * bootloader handoff (PRIMASK left SET, see the VTOR block above)
+     * this is what lets the transports' interrupts fire once
+     * transport_spi_init()/transport_i2c_init() unmask their NVIC
+     * lines after this function returns. */
+	__enable_irq();
+#endif
 }
 
 /* Called at base level after every main-loop wake.  This backend uses the

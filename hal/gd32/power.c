@@ -95,7 +95,14 @@ static bool rtc_wakeup_init_once(void)
 
 	bridge_rcu_periph_clock_enable(RCU_PMU);
 	pmu_backup_write_enable();
+	/* gh#257: rcu_rtc_clock_config() is a bare RCU_BDCTL read-modify-
+     * write, same exposure class as the RCU_*EN writes
+     * bridge_rcu_periph_clock_enable() already protects -- and this
+     * path runs at runtime (first armed power-mode-set call), with
+     * interrupts live, not just at boot. */
+	const uint32_t rtcsrc_primask_ = bridge_irq_lock();
 	rcu_rtc_clock_config(RCU_RTCSRC_IRC32K);
+	bridge_irq_unlock(rtcsrc_primask_);
 	bridge_rcu_periph_clock_enable(RCU_RTC);
 
 	rtc_wakeup_ready = true;

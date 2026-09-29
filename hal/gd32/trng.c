@@ -62,7 +62,13 @@ bool trng_start(void)
 	}
 	if (to == 0u) return false;
 
+	/* gh#257: bare RCU_CFG1 read-modify-write, same exposure class as
+     * the RCU_*EN writes bridge_rcu_periph_clock_enable() already
+     * protects.  trng_start() is not boot-only -- it is re-entered
+     * from the runtime retry path below with interrupts live. */
+	const uint32_t trngsrc_primask_ = bridge_irq_lock();
 	rcu_trng_clock_config(RCU_TRNG_CKPLLQ_DIV2);
+	bridge_irq_unlock(trngsrc_primask_);
 	bridge_rcu_periph_clock_enable(RCU_TRNG);
 
 	trng_deinit();
