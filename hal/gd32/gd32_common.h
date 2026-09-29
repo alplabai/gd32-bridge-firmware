@@ -175,7 +175,7 @@ typedef struct {
 /* _Static_assert that the sizeof-derived size matches these).        */
 /* ----------------------------------------------------------------- */
 
-#define GPIO_PAD_MAP_COUNT    20u /* _Static_assert against sizeof in gpio.c       */
+#define GPIO_PAD_MAP_COUNT    21u /* _Static_assert against sizeof in gpio.c       */
 #define ADC_CHANNEL_MAP_COUNT 8u  /* _Static_assert against sizeof in adc.c        */
 #define QENC_CHANNEL_COUNT    4u  /* _Static_assert against sizeof in qenc.c       */
 #define PWM_CHANNEL_COUNT     8u  /* _Static_assert against sizeof in pwm.c        */
@@ -195,6 +195,19 @@ _Static_assert(GPIO_PAD_WL_REG_ON == GPIO_PAD_BT_REG_ON + 1 &&
                    GPIO_PAD_WL_REG_ON < GPIO_PAD_MAP_COUNT,
                "GPIO_PAD_BT_REG_ON/GPIO_PAD_WL_REG_ON must stay adjacent and in-range -- "
                "init.c's boot loop walks BT_REG_ON..WL_REG_ON inclusive");
+
+/* Bit 20 of the GPIO mask is sideband, not an E1M pad: the shared STB
+ * (standby) line for the two on-module TCAN1044 CAN-FD transceivers
+ * (U15/U16).  Named here, not just indexed, because hal/gd32/init.c
+ * drives it differently from the rest of `gpio_pad_map` (OUTPUT HIGH
+ * at boot = standby, not INPUT high-Z -- see the boot loop in init.c
+ * and the pad-map comment in gpio.c).  CAN-bus power-up policy is the
+ * HOST's, not this firmware's: the GD32 only proxies the line; it
+ * never takes the bus out of standby on its own. */
+#define GPIO_PAD_CAN_STBY 20u
+_Static_assert(GPIO_PAD_CAN_STBY < GPIO_PAD_MAP_COUNT,
+               "GPIO_PAD_CAN_STBY must be in-range -- init.c's boot loop treats it "
+               "as a single-bit sideband pad, same posture as BT/WL_REG_ON");
 
 /* ----------------------------------------------------------------- */
 /* Shared analog + timer constants.                                   */

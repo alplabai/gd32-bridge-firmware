@@ -47,7 +47,9 @@
  * exactly the same "older hosts don't need it, newer ones should know"
  * shape that rule exists for.  0.11 is already taken by the REG_ON PR off
  * dev; this uses 0.12 to avoid a collision. */
-#define PROTOCOL_VERSION_MINOR 12u
+/* v0.13: the GPIO mask grew from 20 to 21 bits -- bit 20 is CAN_STBY
+ * (see CMD_GPIO_READ/CMD_GPIO_WRITE below). */
+#define PROTOCOL_VERSION_MINOR 13u
 #define PROTOCOL_VERSION_PATCH 0u
 
 /* v0.7: opt-in link features negotiated via CMD_LINK_FEATURES.
@@ -109,8 +111,18 @@ typedef enum {
 	CMD_RESET_REASON = 0x03,
 	CMD_GPIO_READ    = 0x10,
 	CMD_GPIO_WRITE   = 0x11,
-	CMD_PWM_SET      = 0x20,
-	CMD_PWM_GET      = 0x21,
+	/* v0.11: the GPIO mask these two opcodes address grew from 18 to
+     * 20 bits -- bits 18/19 are BT_REG_ON/WL_REG_ON, the Murata
+     * LBEE5HY2FY-922 Wi-Fi/BT module's power enables (sideband, not
+     * an E1M pad; GPIO_PAD_BT_REG_ON/GPIO_PAD_WL_REG_ON in
+     * hal/gd32/gd32_common.h).  Older hosts addressing only bits
+     * 0..17 are unaffected.
+     * v0.13: grew again, 20 to 21 bits -- bit 20 is CAN_STBY, the
+     * shared standby line for the two on-module TCAN1044 CAN-FD
+     * transceivers (sideband, not an E1M pad; GPIO_PAD_CAN_STBY).
+     * Hosts relying on bit 20 must require MINOR >= 13. */
+	CMD_PWM_SET = 0x20,
+	CMD_PWM_GET = 0x21,
 	/* v0.3: sticky per-channel PWM tuning (align mode, dead time, fault
      * inputs).  On V2N every E1M PWM channel rides one of the GD32's
      * 16-bit advanced timers (PWM0..3 -> TIMER0 channels MCH0..MCH3,

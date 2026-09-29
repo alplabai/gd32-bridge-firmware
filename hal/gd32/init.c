@@ -24,18 +24,21 @@
  * Per-hook state, in the order the bodies landed (increasing risk):
  *
  *   1. RESET_REASON          -- DONE: RCU_RSTSCK decode + RSTFC clear.
- *   2. GPIO_READ / WRITE     -- DONE: 20-pad map (18 E1M IO8..IO35 pads
- *                               + 2 Murata REG_ON sideband bits), boot
- *                               configures the 18 E1M pads as INPUT,
- *                               high-Z (no pull) so the carrier's own
- *                               pulls define the default -- see the
- *                               boot-loop comment below -- write
- *                               auto-promotes each to OUTPUT push-pull.
- *                               Bits 18/19
+ *   2. GPIO_READ / WRITE     -- DONE: 21-pad map (18 E1M IO8..IO35 pads
+ *                               + 2 Murata REG_ON sideband bits + 1
+ *                               CAN_STBY sideband bit), boot configures
+ *                               the 18 E1M pads as INPUT, high-Z (no
+ *                               pull) so the carrier's own pulls define
+ *                               the default -- see the boot-loop
+ *                               comment below -- write auto-promotes
+ *                               each to OUTPUT push-pull.  Bits 18/19
  *                               (BT_REG_ON/WL_REG_ON) instead boot
  *                               OUTPUT LOW -- module power is host
  *                               policy, this firmware never drives them
- *                               high on its own.
+ *                               high on its own.  Bit 20 (CAN_STBY)
+ *                               instead boots OUTPUT HIGH (standby) --
+ *                               CAN-bus power-up is host policy, this
+ *                               firmware never takes it live on its own.
  *   3. TRNG_READ             -- DONE: NIST SP800-90B mode init in
  *                               bridge_hw_init, DRDY-polled byte read
  *                               with bounded timeout.
@@ -364,9 +367,10 @@ void bridge_hw_init(void)
      * specific carrier needs one.  The two REG_ON pads are skipped
      * here and driven OUTPUT LOW below instead -- they break the
      * high-Z default on purpose (see the pad-map comment in
-     * hal/gd32/gpio.c). */
+     * hal/gd32/gpio.c).  CAN_STBY (bit 20) is skipped here too and
+     * driven OUTPUT HIGH below, for the same reason. */
 	for (size_t i = 0; i < GPIO_PAD_MAP_COUNT; ++i) {
-		if (i == GPIO_PAD_BT_REG_ON || i == GPIO_PAD_WL_REG_ON) continue;
+		if (i == GPIO_PAD_BT_REG_ON || i == GPIO_PAD_WL_REG_ON || i == GPIO_PAD_CAN_STBY) continue;
 		gpio_mode_set(gpio_pad_map[i].periph, GPIO_MODE_INPUT, GPIO_PUPD_NONE, gpio_pad_map[i].pin);
 		gpio_is_output[i] = false;
 	}
@@ -391,6 +395,25 @@ void bridge_hw_init(void)
 		    gpio_pad_map[i].periph, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, gpio_pad_map[i].pin);
 		gpio_is_output[i] = true;
 	}
+
+	/* CAN_STBY (bit 20): boot OUTPUT driven HIGH = both on-module
+     * TCAN1044 transceivers in standby.  Power-up policy belongs to
+     * the HOST, not this firmware -- a host takes the bus live by
+     * issuing CMD_GPIO_WRITE on this bit as part of its own CAN
+     * bring-up; the IO-MCU only proxies the line and must never drive
+     * it low autonomously.  gpio_is_output[i] is set so the pad is not
+     * re-promoted (and does not glitch) on the host's first
+     * GPIO_WRITE, and reads report the driven level. */
+	gpio_bit_set(gpio_pad_map[GPIO_PAD_CAN_STBY].periph, gpio_pad_map[GPIO_PAD_CAN_STBY].pin);
+	gpio_output_options_set(gpio_pad_map[GPIO_PAD_CAN_STBY].periph,
+	                        GPIO_OTYPE_PP,
+	                        GPIO_OSPEED_12MHZ,
+	                        gpio_pad_map[GPIO_PAD_CAN_STBY].pin);
+	gpio_mode_set(gpio_pad_map[GPIO_PAD_CAN_STBY].periph,
+	              GPIO_MODE_OUTPUT,
+	              GPIO_PUPD_NONE,
+	              gpio_pad_map[GPIO_PAD_CAN_STBY].pin);
+	gpio_is_output[GPIO_PAD_CAN_STBY] = true;
 
 	/* TRNG bring-up: configure + enable only.  The NIST pipeline's
      * first conditioned word can lag past any boot-time wait we are

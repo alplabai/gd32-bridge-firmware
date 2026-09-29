@@ -52,7 +52,7 @@
 /* mode), pwm_channels[] (hal/gd32/pwm.c: PA11, PB1, PB14, PC5, PC10, */
 /* PC11, PC12, PD0, AF mode), qenc_map[] (hal/gd32/qenc.c: PA0, PB3,  */
 /* PC6, PC7, PB6, PB7, PB2, PA1, AF mode).  None overlap today (bits  */
-/* 18/19 below, PE14/PE15, checked too).  All                        */
+/* 18/19 below, PE14/PE15, and bit 20, PB13, checked too).  All       */
 /* five tables ARE visible together at compile time -- gd32_common.h  */
 /* externs each one and init.c includes it -- so TU visibility is not */
 /* why a C _Static_assert can't do this cross-check.  The real reason */
@@ -103,6 +103,16 @@ const gd32_gpio_pad_t gpio_pad_map[] = {
 	 * host CMD_GPIO_WRITE. */
 	{ GPIOE, GPIO_PIN_14 }, /* bit 18 = BT_REG_ON */
 	{ GPIOE, GPIO_PIN_15 }, /* bit 19 = WL_REG_ON */
+	/* Sideband (NOT an E1M pad): shared STB net for the two on-module
+	 * TCAN1044 CAN-FD transceivers (U15/U16, alp-sdk
+	 * metadata/e1m_modules/v2n/gd32-io-mcu-map.csv:38).  STB HIGH =
+	 * standby (both transceivers off the bus); STB LOW = normal.  Boot
+	 * OUTPUT driven HIGH (standby) below instead of the default
+	 * INPUT high-Z rule -- transceiver power-up state is HOST policy,
+	 * same posture as GPIO_PAD_BT_REG_ON/WL_REG_ON: this firmware never
+	 * takes the bus live on its own, only proxies a host
+	 * CMD_GPIO_WRITE. */
+	{ GPIOB, GPIO_PIN_13 }, /* bit 20 = CAN_STBY */
 };
 _Static_assert(sizeof(gpio_pad_map) / sizeof(gpio_pad_map[0]) == GPIO_PAD_MAP_COUNT,
                "gpio_pad_map size must match GPIO_PAD_MAP_COUNT");
