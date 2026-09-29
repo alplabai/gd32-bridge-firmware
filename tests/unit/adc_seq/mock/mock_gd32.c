@@ -208,13 +208,27 @@ void mock_adc_set_routine_data(uint32_t code)
 
 /* --- DMA -----------------------------------------------------------------*/
 
-static uint32_t    mock_dma_remaining[2][1]; /* [dma_periph][channel] */
-static uint32_t    mock_dma_interrupt_flags[2][1];
+static uint32_t mock_dma_remaining[2][1]; /* [dma_periph][channel] */
+static uint32_t mock_dma_chctl[2][1];
+static uint32_t mock_dma_interrupt_flags[2][1];
+static bool     mock_dma_disable_hold[2][1];
+static uint32_t mock_dmamux_chcfg[14];
+
+uint32_t *mock_dma_chctl_ref(uint32_t dma_periph, dma_channel_enum channelx)
+{
+	mock_seq_log("DMA_CHCTL_READ", dma_periph, channelx);
+	return &mock_dma_chctl[dma_periph][channelx];
+}
+
+uint32_t *mock_dmamux_chcfg_ref(uint32_t channel)
+{
+	return &mock_dmamux_chcfg[channel];
+}
 static mock_hook_t mock_dma_transfer_get_hook;
 
 void dma_deinit(uint32_t dma_periph, dma_channel_enum channelx)
 {
-	(void)channelx;
+	mock_dma_chctl[dma_periph][channelx] &= ~DMA_CHXCTL_CHEN;
 	mock_seq_log("dma_deinit", dma_periph, 0u);
 }
 void dma_struct_para_init(dma_parameter_struct *init_struct)
@@ -227,6 +241,8 @@ void dma_init(uint32_t dma_periph, dma_channel_enum channelx, dma_parameter_stru
 	 * Mirror that observable contract so a new stream cannot inherit the
 	 * previous test session's remaining-count state. */
 	mock_dma_remaining[dma_periph][channelx] = init_struct->number;
+	mock_dmamux_chcfg[(dma_periph == DMA0) ? (uint32_t)channelx : (uint32_t)channelx + 7u] =
+	    init_struct->request;
 	mock_seq_log("dma_init", dma_periph, init_struct->number);
 }
 void dma_circulation_enable(uint32_t dma_periph, dma_channel_enum channelx)
@@ -236,12 +252,14 @@ void dma_circulation_enable(uint32_t dma_periph, dma_channel_enum channelx)
 }
 void dma_channel_enable(uint32_t dma_periph, dma_channel_enum channelx)
 {
-	(void)channelx;
+	mock_dma_chctl[dma_periph][channelx] |= DMA_CHXCTL_CHEN;
 	mock_seq_log("dma_channel_enable", dma_periph, 0u);
 }
 void dma_channel_disable(uint32_t dma_periph, dma_channel_enum channelx)
 {
-	(void)channelx;
+	if (!mock_dma_disable_hold[dma_periph][channelx]) {
+		mock_dma_chctl[dma_periph][channelx] &= ~DMA_CHXCTL_CHEN;
+	}
 	mock_seq_log("dma_channel_disable", dma_periph, 0u);
 }
 void dma_transfer_number_config(uint32_t dma_periph, dma_channel_enum channelx, uint32_t number)
@@ -300,6 +318,26 @@ void mock_dma_set_interrupt_flag(uint32_t         dma_periph,
 	} else {
 		mock_dma_interrupt_flags[dma_periph][channelx] &= ~flag;
 	}
+}
+
+void mock_dma_reset(void)
+{
+	memset(mock_dma_remaining, 0, sizeof mock_dma_remaining);
+	memset(mock_dma_chctl, 0, sizeof mock_dma_chctl);
+	memset(mock_dma_interrupt_flags, 0, sizeof mock_dma_interrupt_flags);
+	memset(mock_dma_disable_hold, 0, sizeof mock_dma_disable_hold);
+	memset(mock_dmamux_chcfg, 0, sizeof mock_dmamux_chcfg);
+}
+
+void mock_dma_set_disable_hold(uint32_t dma_periph, dma_channel_enum channelx, bool hold)
+{
+	mock_dma_disable_hold[dma_periph][channelx] = hold;
+	if (hold) mock_dma_chctl[dma_periph][channelx] |= DMA_CHXCTL_CHEN;
+}
+
+uint32_t mock_dmamux_request_get(uint32_t channel)
+{
+	return mock_dmamux_chcfg[channel] & DMAMUX_RM_CHXCFG_MUXID;
 }
 
 void mock_dma_set_transfer_get_hook(mock_hook_t hook)

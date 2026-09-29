@@ -82,15 +82,11 @@ set(TEST_FLAGS -std=c11 -Wall -Wextra -Werror)
 #
 # The two bases below are PARSED out of src/ota_layout.h -- the same
 # header ota.c includes -- rather than hand-copied, so this copy cannot
-# drift silently against it.  Two other independent copies of the same
-# numbers remain and are NOT derived here: the top-level CMakeLists.txt's
-# gd32-bridge-slot-a / gd32-bridge-slot-b BRIDGE_APP_SLOT_BASE compile
-# defines (:197,202) and APP_SLOT_BASE linker-script sets (:187,190) --
-# out of scope for this fix, and that file is explicitly not to be edited
-# here -- and OTA_SLOT_SIZE's separate copy in tools/gen_ota_metadata.py:34.
-# A mismatch in either of those still fails loudly: ota.c's own #error
-# chain rejects any BRIDGE_APP_SLOT_BASE that doesn't equal
-# OTA_SLOT_A_BASE/OTA_SLOT_B_BASE from the header.
+# drift silently against it.  The top-level CMakeLists.txt now parses the
+# same definitions, and its app_slot_base.S witness makes the linker verify
+# the compiled macro against the generated FLASH origin (#78).
+# OTA_SLOT_SIZE's separate copy in tools/gen_ota_metadata.py remains outside
+# this host-test setup.
 set(_OTA_LAYOUT_H ${FW}/src/ota_layout.h)
 file(STRINGS ${_OTA_LAYOUT_H} _OTA_SLOT_A_BASE_LINE
      REGEX "^#define[ \t]+OTA_SLOT_A_BASE[ \t]+0x[0-9A-Fa-f]+u")
@@ -175,6 +171,20 @@ target_compile_options(test_fault_diag PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_fault_diag PRIVATE ztest_shim)
 add_test(NAME fault_diag COMMAND test_fault_diag)
 
+# --- i2c_event_priority: simultaneous I2C0 EV-flag ordering (#136) --------
+#
+# RBNE and ADDSEND clear independently in hardware.  This pure selector pins
+# the required final-byte-before-repeated-start precedence without attempting
+# to host-model the complete vendor I2C register block.
+add_executable(test_i2c_event_priority
+    i2c_event_priority/src/test_i2c_event_priority.c
+    ${FW}/hal/gd32/i2c_event_priority.c
+)
+target_include_directories(test_i2c_event_priority PRIVATE ${FW}/hal/gd32)
+target_compile_options(test_i2c_event_priority PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_i2c_event_priority PRIVATE ztest_shim)
+add_test(NAME i2c_event_priority COMMAND test_i2c_event_priority)
+
 # --- timer_sync_iti: (slave, master) -> SYSCFG ITIx router code (gh#42) ----
 #
 # The lookup table has no vendor-register dependency, so it lives in its own
@@ -188,6 +198,27 @@ target_include_directories(test_timer_sync_iti PRIVATE ${FW}/hal/gd32)
 target_compile_options(test_timer_sync_iti PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_timer_sync_iti PRIVATE ztest_shim)
 add_test(NAME timer_sync_iti COMMAND test_timer_sync_iti)
+
+# --- power_wake: fail-closed wake-bitmap validation (gh#107) --------------
+#
+# Link the real power.c against the smallest possible PMU/RTC mock.  The mock
+# counts every vendor/transport call, so the suite proves unsupported bits
+# return before any hardware side effect -- and fails if production stops
+# calling the vendor-independent predicate in power_wake.h.
+add_executable(test_power_wake
+    power_wake/src/test_power_wake.c
+    power_wake/mock/mock_power.c
+    ${FW}/hal/gd32/power.c
+)
+target_include_directories(test_power_wake PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/power_wake/mock
+    ${FW}/hal/gd32
+    ${FW}/hal
+    ${FW}/src
+)
+target_compile_options(test_power_wake PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_power_wake PRIVATE ztest_shim)
+add_test(NAME power_wake COMMAND test_power_wake)
 
 # --- timer_sync: production HAL id validation + register-call sequence -----
 #

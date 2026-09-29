@@ -155,6 +155,7 @@
 #include <stdint.h>
 
 #include "bridge_hw.h"
+#include "bridge_board_config.h"
 
 /* The wrapper's PUBLIC include directories expose the GigaDevice device
  * header.  It supplies the CMSIS/core definitions and pulls this project's
@@ -184,6 +185,13 @@ bool     bridge_core_clock_matches = true;
 
 void bridge_hw_init(void)
 {
+	/* The priority numbers in bridge_board_config.h mean preemption levels
+	 * only under PRE2_SUB2. A Path-A bootloader handoff preserves AIRCR, and
+	 * the vendor helper otherwise retains a valid inherited grouping, so set
+	 * the bridge policy before configuring any NVIC line or, on Path-A,
+	 * unmasking IRQs. */
+	nvic_priority_group_set(NVIC_PRIGROUP_PRE2_SUB2);
+
 	/* SYSCFG hosts the TIMER quadrature-decoder mode fields
      * (SYSCFG_TIMERxCFG0.TSCFGy) that qenc_channel_init() programs
      * below, as well as the EXTI source mux that spi_cs_exti_init()
@@ -452,8 +460,9 @@ void bridge_hw_init(void)
 	vref_ok = (vref_status_get() == SET);
 
 	/* ADC bring-up: configure 8 pads as analog, enable all four ADC
-     * peripheral clocks, run the per-peripheral init.  Calibration
-     * inside adc_periph_init now runs against a LIVE reference (it
+	 * peripheral clocks, reset every converter, set each shared clock
+	 * domain once, then run the per-converter init.  Calibration
+	 * inside adc_periph_boot_init now runs against a LIVE reference (it
      * previously self-calibrated against the undriven reference node,
      * baking in a bogus offset); the VREF bring-up above is the
      * prerequisite that makes that calibration meaningful. */
@@ -472,10 +481,12 @@ void bridge_hw_init(void)
      * path op re-times against (the read path's bounded EOC wait +
      * self-heal), so the failure surfaces loudly on first use instead
      * of wedging boot. */
-	(void)adc_periph_init(ADC0);
-	(void)adc_periph_init(ADC1);
-	(void)adc_periph_init(ADC2);
-	(void)adc_periph_init(ADC3);
+	adc_periph_boot_reset_all();
+	adc_shared_clock_init();
+	(void)adc_periph_boot_init(ADC0);
+	(void)adc_periph_boot_init(ADC1);
+	(void)adc_periph_boot_init(ADC2);
+	(void)adc_periph_boot_init(ADC3);
 	for (size_t i = 0; i < ADC_CHANNEL_MAP_COUNT; ++i) {
 		adc_sample_cycles_cache[i]    = ADC_DEFAULT_SAMPLE_CYCLES;
 		adc_resolution_bits_cache[i]  = ADC_RES_BITS_DEFAULT;

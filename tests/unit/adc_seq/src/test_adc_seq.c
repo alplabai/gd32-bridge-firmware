@@ -50,6 +50,9 @@ void bridge_hw_dsp_pump(void);
  * bridge channel 0, the periph every "channel 0" test below drives. */
 #define BRIDGE_ADC_CH0        0u
 #define BRIDGE_ADC_CH0_PERIPH ADC3
+#define BRIDGE_ADC_CH2        2u
+#define BRIDGE_ADC_CH4        4u
+#define BRIDGE_ADC_CH2_PERIPH ADC2
 
 static void adc_seq_reset(void)
 {
@@ -61,6 +64,7 @@ static void adc_seq_reset(void)
 		adc_dsp_fft_release(s);
 	}
 	mock_seq_reset();
+	mock_dma_reset();
 	memset(mock_adc_ctl1, 0, sizeof mock_adc_ctl1);
 	memset(adc_dsp_chains, 0, sizeof adc_dsp_chains);
 	for (uint8_t s = 0u; s < BRIDGE_ADC_STREAM_COUNT; ++s) {
@@ -134,6 +138,91 @@ ZTEST(gd32_adc_seq, test_stream_restart_reloads_dma_count)
 	zassert_equal(dma_transfer_number_get(DMA0, DMA_CH0),
 	              BRIDGE_ADC_STREAM_RING_SAMPLES,
 	              "dma_init must reload the full count, not retain stale remainder (#183)");
+}
+
+/* #52 -- a new stream is configured only after CHEN reads clear, and ending
+ * it releases the DMAMUX request selection before the converter is offered
+ * to another stream. */
+ZTEST(gd32_adc_seq, test_stream_lifecycle_confirms_disable_and_releases_dmamux)
+{
+	adc_seq_reset();
+
+	int rc = bridge_hw_adc_stream_begin(0u, BRIDGE_ADC_CH0, 1000u);
+	zassert_equal(rc, BRIDGE_HW_OK, "stream begins against the mock");
+	zassert_equal(mock_dmamux_request_get(0u),
+	              DMA_REQUEST_ADC3,
+	              "DMA0 channel 0 selects ADC3 while the stream is live");
+	zassert_true(mock_seq_find_from("DMA_CHCTL_READ", DMA0, 0) >= 0,
+	             "begin must observe CHEN clear before configuring DMA");
+
+	rc = bridge_hw_adc_stream_end(0u);
+	zassert_equal(rc, BRIDGE_HW_OK, "stream ends against the mock");
+	zassert_equal(mock_dmamux_request_get(0u),
+	              0u,
+	              "end must return the DMAMUX channel to its no-request state");
+}
+
+ZTEST(gd32_adc_seq, test_stream_begin_refuses_a_channel_that_does_not_disable)
+{
+	adc_seq_reset();
+	mock_dma_set_disable_hold(DMA0, DMA_CH0, true);
+
+	int rc = bridge_hw_adc_stream_begin(0u, BRIDGE_ADC_CH0, 1000u);
+	zassert_equal(
+	    rc, BRIDGE_HW_ERR_IO, "begin must not configure count/address while CHEN remains set");
+	zassert_equal(mock_seq_find_from("dma_deinit", DMA0, 0),
+	              -1,
+	              "no SPL register rewrite is permitted before CHEN reads clear");
+}
+
+/* #137 -- ADC0/1/2 share ADC_SYNCCTL.  Boot resets every converter before
+ * setting the two shared clock domains once; request paths never get to
+ * perform either global operation. */
+ZTEST(gd32_adc_seq, test_boot_adc_reset_precedes_two_shared_clock_setups)
+{
+	adc_seq_reset();
+
+	adc_periph_boot_reset_all();
+	adc_shared_clock_init();
+	(void)adc_periph_boot_init(ADC0);
+	(void)adc_periph_boot_init(ADC1);
+	(void)adc_periph_boot_init(ADC2);
+	(void)adc_periph_boot_init(ADC3);
+
+	int clock0_i = mock_seq_find_from("adc_clock_config", ADC0, 0);
+	int clock3_i = mock_seq_find_from("adc_clock_config", ADC3, 0);
+	zassert_true(clock0_i >= 0 && clock3_i >= 0, "both shared ADC clock domains are configured");
+
+	int clock_count = 0;
+	for (int i = 0; i < mock_seq_n; ++i) {
+		if (strcmp(mock_seq[i].name, "adc_clock_config") == 0) ++clock_count;
+		if (strcmp(mock_seq[i].name, "adc_deinit") == 0) {
+			zassert_true(i < clock0_i && i < clock3_i,
+			             "all ADC resets precede both shared-clock writes");
+		}
+	}
+	zassert_equal(clock_count, 2, "only ADC0 and ADC3 may configure shared clock domains");
+}
+
+ZTEST(gd32_adc_seq, test_stream_end_restore_does_not_reset_or_reclock_adc)
+{
+	adc_seq_reset();
+	int rc = bridge_hw_adc_stream_begin(0u, BRIDGE_ADC_CH2, 1000u);
+	zassert_equal(rc, BRIDGE_HW_OK, "ADC2 stream begins against the mock");
+	rc = bridge_hw_adc_stream_begin(1u, BRIDGE_ADC_CH4, 1000u);
+	zassert_equal(rc, BRIDGE_HW_OK, "ADC1 sibling stream begins against the mock");
+
+	mock_seq_reset();
+	rc = bridge_hw_adc_stream_end(0u);
+	zassert_equal(rc, BRIDGE_HW_OK, "stream ends against the mock");
+	zassert_true(mock_seq_find_from("adc_disable", BRIDGE_ADC_CH2_PERIPH, 0) >= 0,
+	             "restore enters an ADCON-off configuration window");
+	zassert_equal(mock_seq_find_from("adc_deinit", BRIDGE_ADC_CH2_PERIPH, 0),
+	              -1,
+	              "stream end must not reset an ADC while a sibling may stream");
+	zassert_equal(mock_seq_find_from("adc_clock_config", BRIDGE_ADC_CH2_PERIPH, 0),
+	              -1,
+	              "stream end must not rewrite a shared ADC clock domain");
 }
 
 /* ---------------------------------------------------------------------

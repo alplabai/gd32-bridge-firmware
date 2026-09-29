@@ -17,6 +17,7 @@
 #include "gd32g5x3.h"
 
 #include "adc_dsp_chain.h"
+#include "bridge_board_config.h"
 #include "bridge_critical.h"
 #include "gd32_common.h"
 
@@ -28,8 +29,30 @@ adc_stream_state_t adc_streams[BRIDGE_ADC_STREAM_COUNT];
  * bridge_board_config.h): a lap tick fires once per ring period
  * (>= ~10 ms at the 100 kHz rate cap) and is pure bookkeeping, so it
  * must never delay the latency-sensitive link ISRs. */
-#define ADC_STREAM_LAP_IRQ_PRIO    3u
+#define ADC_STREAM_LAP_IRQ_PRIO    BRIDGE_ADC_STREAM_LAP_IRQ_PRIO
 #define ADC_STREAM_LAP_IRQ_SUBPRIO 0u
+
+/* UM Rev1.2 §8.4.7 permits writing the channel address/count registers
+ * only after CHEN reads clear.  The SPL helpers are plain register writes,
+ * so make that interlock explicit rather than assuming a preceding write
+ * has already reached the DMA controller.  This path is command-driven,
+ * not a sampling hot path; a bounded failure is therefore preferable to
+ * reusing a possibly still-live channel configuration. */
+#define ADC_STREAM_DMA_DISABLE_SPINS 64u
+
+static bool adc_stream_dma_disable_confirm(uint32_t dma_periph, dma_channel_enum channel)
+{
+	dma_channel_disable(dma_periph, channel);
+	for (uint32_t spin = 0u; spin < ADC_STREAM_DMA_DISABLE_SPINS; ++spin) {
+		if ((DMA_CHCTL(dma_periph, channel) & DMA_CHXCTL_CHEN) == 0u) return true;
+	}
+	return false;
+}
+
+static uint32_t adc_stream_dmamux_channel(const adc_stream_state_t *s)
+{
+	return (s->dma_periph == DMA0) ? (uint32_t)s->dma_channel : (uint32_t)s->dma_channel + 7u;
+}
 
 /* ERRIF means this channel has stopped delivering a trustworthy ring.  The
  * latch is used by both its DMA IRQ and the higher-priority CS handler, which
@@ -135,6 +158,9 @@ int bridge_hw_adc_stream_begin(uint8_t stream_id, uint8_t channel, uint32_t samp
      * 2026-06-04 audit: an I2C-only build would stream zero samples). */
 	rcu_periph_clock_enable(RCU_DMAMUX);
 	rcu_periph_clock_enable((stream_id == 0u) ? RCU_DMA0 : RCU_DMA1);
+	if (!adc_stream_dma_disable_confirm(s->dma_periph, (dma_channel_enum)s->dma_channel)) {
+		return BRIDGE_HW_ERR_IO;
+	}
 	dma_deinit(s->dma_periph, (dma_channel_enum)s->dma_channel);
 
 	dma_parameter_struct init;
@@ -170,7 +196,7 @@ int bridge_hw_adc_stream_begin(uint8_t stream_id, uint8_t channel, uint32_t samp
      * exactly how the v0.2.3 stream silently produced zero samples.
      * Calibration IS redone below, after ADCON re-enables: an ADCON
      * toggle does NOT preserve the boot calibration from
-     * adc_periph_init (UM Rev1.2 p.424: the factor is applied only
+     * the boot setup (UM Rev1.2 p.424: the factor is applied only
      * "until the next ADC power-off", and clearing ADCON IS that
      * power-off, p.447) -- and the recalibration is bounded
      * (adc_calibrate_bounded), so it is not the unbounded vendor spin
@@ -223,7 +249,7 @@ int bridge_hw_adc_stream_begin(uint8_t stream_id, uint8_t channel, uint32_t samp
 	adc_flag_clear(ch->periph, ADC_FLAG_ROVF);
 	adc_enable(ch->periph);
 	for (volatile uint32_t stab = 0u; stab < 4096u; ++stab) {
-		/* tSTAB dwell after ADCON, same bound adc_periph_init uses */
+		/* tSTAB dwell after ADCON, same bound the boot setup uses */
 	}
 	/* Recalibrate after the ADCON toggle above -- see the disable/
      * enable comment at the top of this bracket (#34).  Bounded, cost
@@ -356,7 +382,9 @@ static bool adc_stream_recover_rovf(adc_stream_state_t *s, const gd32_adc_ch_t *
 	 * than exactly at a circular-reload boundary.  A stale FTF (see
 	 * the function comment above) is cleared here too, alongside the
 	 * rest of the reinit, before the channel comes back up. */
-	dma_channel_disable(s->dma_periph, (dma_channel_enum)s->dma_channel);
+	if (!adc_stream_dma_disable_confirm(s->dma_periph, (dma_channel_enum)s->dma_channel)) {
+		return false;
+	}
 	dma_transfer_number_config(
 	    s->dma_periph, (dma_channel_enum)s->dma_channel, BRIDGE_ADC_STREAM_RING_SAMPLES);
 	dma_interrupt_flag_clear(s->dma_periph, (dma_channel_enum)s->dma_channel, DMA_INT_FLAG_FTF);
@@ -366,7 +394,7 @@ static bool adc_stream_recover_rovf(adc_stream_state_t *s, const gd32_adc_ch_t *
 	adc_dma_mode_enable(ch->periph); /* 6. Set DMA bit of ADC_CTL1. */
 	adc_enable(ch->periph);          /* 7. Set ADCON bit of ADC_CTL1. */
 	for (volatile uint32_t stab = 0u; stab < 4096u; ++stab) {
-		/* 8. Wait T(setup) -- same bound stream_begin/adc_periph_init use. */
+		/* 8. Wait T(setup) -- same bound stream_begin/the boot setup use. */
 	}
 	return adc_calibrate_bounded(ch->periph); /* ADCON edge above invalidated calibration. */
 }
@@ -512,7 +540,13 @@ int bridge_hw_adc_stream_end(uint8_t stream_id)
 	timer_deinit(s->pace_timer);
 	adc_dma_request_after_last_disable(ch->periph);
 	adc_dma_mode_disable(ch->periph);
-	dma_channel_disable(s->dma_periph, (dma_channel_enum)s->dma_channel);
+	if (!adc_stream_dma_disable_confirm(s->dma_periph, (dma_channel_enum)s->dma_channel)) {
+		return BRIDGE_HW_ERR_IO;
+	}
+	/* MUXID zero is the DMAMUX idle state.  Releasing it before clearing
+	 * in_use prevents a later stream from selecting the same ADC request on
+	 * the other controller's multiplexer channel (UM Rev1.2 §9.4.2). */
+	DMAMUX_RM_CHXCFG(adc_stream_dmamux_channel(s)) &= ~DMAMUX_RM_CHXCFG_MUXID;
 
 	/* Stand the lap counter down with the channel: mask the FTF
      * interrupt + NVIC line and clear a possibly-pending flag so a
@@ -534,16 +568,18 @@ int bridge_hw_adc_stream_end(uint8_t stream_id)
 		/* fixed dwell, ~tens of microseconds */
 	}
 
-	/* Full single-shot restore: deinit + reconfigure + recalibrate
-     * (calibration BOUNDED -- this runs in the CS-EXTI handler).  This
+	/* Full single-shot restore: reconfigure + recalibrate (calibration
+	 * BOUNDED -- this runs in the CS-EXTI handler).  This deliberately
+	 * does not reset an ADC or reconfigure a shared clock domain, because
+	 * ADC0/1/2 may have a sibling stream running.  It
      * puts EXTERNAL_TRIGGER_DISABLE, routine length 1 and a fresh
      * calibration back so a following bridge_hw_adc_read sees the
-     * exact converter state adc_periph_init promised it -- the same
+	 * exact converter state the boot setup promised it -- the same
      * self-heal shape the read path's timeout branch uses.  The stream
      * state clears regardless of the restore verdict (the stream IS
      * over); a calibration that never completed reports IO so the host
      * knows the converter came back in an unproven state. */
-	const bool restored = adc_periph_init(ch->periph);
+	const bool restored = adc_periph_restore(ch->periph);
 
 	/* Release the DSP chain bound to this stream back to the pool.
      * chain_open is the ONLY allocator (sets in_use=true) and nothing
