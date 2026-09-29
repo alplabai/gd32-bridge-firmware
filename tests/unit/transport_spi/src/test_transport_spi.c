@@ -184,11 +184,12 @@ ZTEST(gd32_bridge_transport, test_mangled_request_stages_io_error)
 	zassert_equal(buf[1], 0x05u, "STATUS_IO");
 }
 
-/* A hardware RX overrun is not a malformed request we can safely decode:
- * bytes may be missing entirely.  It must replace any previous reply with a
- * fresh STATUS_IO envelope, so the host retries instead of accepting a stale
- * reply from the transaction that preceded the overrun. */
-ZTEST(gd32_bridge_transport, test_rx_fault_replaces_staged_reply)
+/* A hardware transport fault -- a DMA ERRIF or an SPI RXORERR overrun -- is
+ * not a malformed request we can safely decode: bytes may be missing
+ * entirely.  It must replace any previous reply with a fresh STATUS_IO
+ * envelope, so the host retries instead of accepting a stale reply from the
+ * transaction that preceded the fault. */
+ZTEST(gd32_bridge_transport, test_hardware_transport_error_stages_io_error)
 {
 	uint8_t buf[80];
 
@@ -196,8 +197,8 @@ ZTEST(gd32_bridge_transport, test_rx_fault_replaces_staged_reply)
 	transaction(ping_frame, sizeof ping_frame);
 	(void)hal_drain(buf, sizeof buf);
 
-	spi_slave_rx_fault();
-	size_t n = hal_drain(buf, sizeof buf);
+	spi_slave_transport_error();
+	const size_t n = hal_drain(buf, sizeof buf);
 
 	zassert_equal(n, 4u, "error reply is the empty envelope");
 	zassert_equal(buf[0], 0xA5u, "SOF");
@@ -267,8 +268,8 @@ ZTEST(gd32_bridge_transport, test_status_seq_stamp_contract)
 	n = hal_drain(buf, sizeof buf);
 	zassert_equal(buf[1], 0x30u, "stamp=3 after the next decode");
 
-	/* ...and an RX-fault envelope is fresh too. */
-	spi_slave_rx_fault();
+	/* ...and a transport-error envelope is fresh too. */
+	spi_slave_transport_error();
 	n = hal_drain(buf, sizeof buf);
 	zassert_equal(n, 4u, "error envelope");
 	zassert_equal(buf[1], 0x45u, "stamp=4, code=STATUS_IO");

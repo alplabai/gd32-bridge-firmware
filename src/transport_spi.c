@@ -238,12 +238,16 @@ void spi_slave_cs_high(void)
 	decode_and_dispatch();
 }
 
-/* Call when the hardware reports that the just-finished receive was
- * overrun.  Do not decode a DMA snapshot whose request envelope may have
- * dropped bytes; replacing any previously staged reply makes the loss loud
- * and gives the host's normal re-frame/retry path a clean starting point. */
-void spi_slave_rx_fault(void)
+/* Hardware-side faults which make the captured byte run untrustworthy --
+ * a DMA ERRIF, or an SPI-peripheral RXORERR overrun on the just-finished
+ * receive -- use the same loud, CRC-valid error envelope as a malformed
+ * request.  Do not decode a DMA snapshot whose request envelope may have
+ * dropped bytes; replacing any previously staged reply makes the loss
+ * loud and gives the host's normal re-frame/retry path a clean starting
+ * point.  The next CS transaction returns it to the host. */
+void spi_slave_transport_error(void)
 {
+	spi_rx_len = 0u;
 	stage_error_reply(STATUS_IO);
 }
 
