@@ -185,7 +185,7 @@ typedef struct {
  * LBEE5HY2FY-922 Wi-Fi/BT module's power enables (module has internal
  * 50 k pull-downs on both).  Named here, not just indexed, because
  * hal/gd32/init.c drives them differently from the rest of
- * `gpio_pad_map` (OUTPUT LOW at boot, not INPUT high-Z -- see the
+ * `gpio_pad_map` (OUTPUT LOW at boot, not the analog park -- see the
  * boot loop in init.c and the pad-map comment in gpio.c).  REG_ON
  * power policy is the HOST's, not this firmware's: the GD32 only
  * proxies the line; it never drives it high on its own. */
@@ -200,7 +200,7 @@ _Static_assert(GPIO_PAD_WL_REG_ON == GPIO_PAD_BT_REG_ON + 1 &&
  * (standby) line for the two on-module TCAN1044 CAN-FD transceivers
  * (U15/U16).  Named here, not just indexed, because hal/gd32/init.c
  * drives it differently from the rest of `gpio_pad_map` (OUTPUT HIGH
- * at boot = standby, not INPUT high-Z -- see the boot loop in init.c
+ * at boot = standby, not the analog park -- see the boot loop in init.c
  * and the pad-map comment in gpio.c).  CAN-bus power-up policy is the
  * HOST's, not this firmware's: the GD32 only proxies the line; it
  * never takes the bus out of standby on its own. */
@@ -375,10 +375,14 @@ extern bool     bridge_core_clock_matches; /* init.c */
 /* Shared tables (defined in the TU named per line).                  */
 /* ----------------------------------------------------------------- */
 
-extern const gd32_gpio_pad_t gpio_pad_map[GPIO_PAD_MAP_COUNT];        /* gpio.c */
-extern bool                  gpio_is_output[GPIO_PAD_MAP_COUNT];      /* gpio.c */
-extern const gd32_adc_ch_t   adc_channels_map[ADC_CHANNEL_MAP_COUNT]; /* adc.c */
-extern uint16_t              adc_sample_cycles_cache[8];              /* adc.c */
+extern const gd32_gpio_pad_t gpio_pad_map[GPIO_PAD_MAP_COUNT];   /* gpio.c */
+extern bool                  gpio_is_output[GPIO_PAD_MAP_COUNT]; /* gpio.c */
+/* gh#66 lazy INPUT promotion state (read side; gpio.c).  Non-static so
+ * the gpio_grouped host suite can reset it between cases, same pattern
+ * as gpio_is_output. */
+extern bool                gpio_input_promoted[GPIO_PAD_MAP_COUNT];
+extern const gd32_adc_ch_t adc_channels_map[ADC_CHANNEL_MAP_COUNT]; /* adc.c */
+extern uint16_t            adc_sample_cycles_cache[8];              /* adc.c */
 
 /* Per-converter ownership interlock (#133) -- adc.c owns the flags; the
  * streaming path in adc_stream.c claims the same converter around its own
