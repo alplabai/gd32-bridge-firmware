@@ -89,6 +89,10 @@ __attribute__((weak)) bool ota_fmc_program(uint32_t addr, const uint8_t *data, s
 __attribute__((weak)) void ota_system_reset(void)
 {
 }
+__attribute__((weak)) bool ota_fmc_funnel_busy(void)
+{
+	return false; /* stub backend: no funnel, nothing to contend for */
+}
 __attribute__((weak)) const void *ota_fmc_flash_ptr(uint32_t addr)
 {
 	return (const void *)(uintptr_t)addr;
@@ -730,6 +734,19 @@ h_begin(const uint8_t *req, size_t len, uint8_t *reply, size_t cap, size_t *rlen
 		ota_meta_record_t cur;
 		uint32_t          which = 0u;
 		if (meta_current(&cur, &which)) {
+			/* #266: refuse at the state machine, not the funnel.  A BEGIN
+			 * landing while a PREVIOUS session's base-level
+			 * ota_erase_tick() still owns the FMC funnel would otherwise
+			 * run straight into meta_commit(), lose fmc_funnel_claim(),
+			 * and report STATUS_IO -- reading like a flash fault when it
+			 * is really a transient collision the host should just
+			 * retry.  Checked here, ahead of the call, so the session is
+			 * left completely untouched (no reject, no epoch bump): the
+			 * host reissues the same BEGIN once the in-flight page erase
+			 * releases the funnel. Same shape #147 gave h_rollback. */
+			if (ota_fmc_funnel_busy()) {
+				return STATUS_BUSY;
+			}
 			/* flags carried from the newest record, not zeroed: a BEGIN
 			 * during a TRIAL boot must not silently confirm the running
 			 * image (that is ota_confirm_tick()'s frame-gated job) nor

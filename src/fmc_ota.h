@@ -39,4 +39,13 @@ bool ota_fmc_program(uint32_t addr, const uint8_t *data, size_t len);
  * raw 32-bit flash address on a 64-bit host. */
 const void *ota_fmc_flash_ptr(uint32_t addr);
 
+/* True while another caller currently owns the FMC funnel (#147) -- i.e. an
+ * ota_fmc_erase_range()/ota_fmc_program() call is mid-flight elsewhere and
+ * the next one would lose the race and fail outright.  Query-only: never
+ * claims or releases.  Always false on the stub backend (weak default in
+ * ota.c), matching ota_fmc_supported() -- there is no funnel to contend
+ * for.  See #266 / ota_fmc_funnel_busy()'s definition in hal/fmc_ota.c for
+ * why h_begin (src/ota.c) needs this ahead of its metadata-demote call. */
+bool ota_fmc_funnel_busy(void);
+
 #endif /* GD32_BRIDGE_FMC_OTA_H */
