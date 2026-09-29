@@ -134,11 +134,15 @@ static size_t spi_roundtrip(const pv_vector_t *req, uint8_t *reply, size_t cap)
  * protocol.c's) -- see test_protocol.c's file header for the same fact
  * documented from the fake-HAL suite's side.  Arming it here would stamp
  * every STATUS byte this loop checks AFTER that row, corrupting every
- * PV_EXACT/PV_NOSUPP/PV_IO comparison that follows in registration order
- * (tests/unit/ztest_shim.c runs cases in source order, but everything
- * WITHIN one ZTEST body runs in array order with no isolation).
- * LINK_FEATURES gets its own dedicated case below, positioned after this
- * loop for exactly that reason.
+ * PV_EXACT/PV_NOSUPP/PV_IO comparison that follows.
+ *
+ * "AFTER that row" is why this is load-bearing, and it is not something this
+ * file can arrange: the loop is one ZTEST body, and the LINK_FEATURES case is
+ * a separate one, so their relative order is ztest_shim.c's constructor
+ * order, which is unspecified.  It is therefore not enough for LINK_FEATURES
+ * to be positioned late -- that case disarms the feature again when it
+ * finishes, so the suite is correct in ANY order.  Everything WITHIN one
+ * ZTEST body still runs in array order, with no isolation.
  */
 typedef enum {
 	PV_EXACT,
@@ -397,15 +401,52 @@ ZTEST(protocol_vectors, test_link_features_request_matches_committed_vector)
 	zassert_equal(n, want->len, "spi_link_features_reply_granted_seq1: reply length");
 	zassert_mem_equal(
 	    reply, want->bytes, want->len, "spi_link_features_reply_granted_seq1: reply bytes");
+
+	/* Negotiate back OFF.  This case is the only one that ARMS
+	 * protocol.c's process-lifetime `link_features`, and once armed every
+	 * later SPI reply carries the stamp, so any case that runs after it and
+	 * compares an unstamped vector sees STATUS 0x1N instead of 0x00.
+	 *
+	 * It used to rely on being positioned last instead -- see the
+	 * classification table's header comment.  That is not a property this
+	 * file can have: ztest_shim.c registers cases from
+	 * __attribute__((constructor)) functions, and constructor order within a
+	 * translation unit is NOT specified, so "source order" is a hope, not a
+	 * guarantee.  It happens to hold for gcc on the CI runner and does not
+	 * hold everywhere -- on this bench (gcc 16.2, Windows) it does not, and
+	 * the two cases below fail with reply[1] == 0x10.  Disarming here makes
+	 * the suite order-independent instead of order-lucky.
+	 *
+	 * Hand-built frame, same shape as the stamp5 case below and
+	 * test_transport_spi.c's negotiate() helper: there is no committed
+	 * "disable" vector.  handle_link_features() documents that a request of
+	 * 0 disables everything and is idempotent in both directions. */
+	{
+		uint8_t        lf_off[5] = { GD32_BRIDGE_SOF, CMD_LINK_FEATURES, 0x00u, 0, 0 };
+		const uint16_t crc       = crc16_ccitt_false(lf_off, 3u);
+
+		lf_off[3] = (uint8_t)(crc & 0xFFu);
+		lf_off[4] = (uint8_t)(crc >> 8);
+
+		spi_slave_cs_low();
+		for (size_t i = 0; i < sizeof lf_off; i++) {
+			spi_slave_rx_byte(lf_off[i]);
+		}
+		spi_slave_cs_high();
+		while (spi_slave_tx_pending()) {
+			(void)spi_slave_tx_next_byte();
+		}
+	}
 }
 
 /* spi_ping_reply_ok_seq5: the file's own worked example of the STATUS_SEQ
  * stamp reaching 5 (code = STATUS & 0x0F, stamp = STATUS >> 4).  Walks the
  * exact sequence the vector assumes -- negotiate ON (stamp 1, drained), four
  * more fresh PING decodes (stamps 2..5) -- and disables the feature again at
- * the end so this being the LAST case in the file (registration order,
- * tests/unit/ztest_shim.c) does not leave protocol.c's link_features global
- * armed for whatever case a future PR appends after it. */
+ * the end.  The disarm is what keeps this suite order-independent, not this
+ * case's position in the file: it negotiates ON like the LINK_FEATURES case
+ * does, so leaving it armed would stamp whatever case ran next.  Position in
+ * the file is constructor order and therefore not a guarantee. */
 ZTEST(protocol_vectors, test_spi_stamp5_matches_committed_vector)
 {
 	const pv_vector_t *lf_on = pv_find("spi_link_features_request");

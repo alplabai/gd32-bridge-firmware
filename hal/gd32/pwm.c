@@ -16,6 +16,7 @@
 
 #include "bridge_critical.h"
 #include "gd32_common.h"
+#include "pwm_internal.h"
 #include "pwm_preload_transaction.h"
 
 /* ----------------------------------------------------------------- */
@@ -198,7 +199,7 @@ static uint8_t pwm_timer_index(uint32_t periph)
 typedef struct {
 	const gd32_pwm_ch_t *ch;
 	uint32_t             arr;
-	uint32_t             cmp;
+	uint32_t             compare;
 } pwm_preload_load_t;
 
 /* This is the entire callback passed to pwm_preload_transaction(): keeping
@@ -209,14 +210,19 @@ static void pwm_preload_load(void *context)
 {
 	const pwm_preload_load_t *load = context;
 	timer_autoreload_value_config(load->ch->periph, load->arr);
-	timer_channel_output_pulse_value_config(load->ch->periph, load->ch->channel, load->cmp);
+	timer_channel_output_pulse_value_config(load->ch->periph, load->ch->channel, load->compare);
 	pwm_car_shadow_defer(load->ch->periph, load->arr);
 }
 
-int bridge_hw_pwm_set(uint8_t channel, uint32_t period_ns, uint32_t duty_ns)
+bool pwm_channel_center_aligned(uint8_t channel)
 {
-	if (channel >= PWM_CHANNEL_COUNT) return BRIDGE_HW_ERR_RANGE;
-	if (duty_ns > period_ns) return BRIDGE_HW_ERR_INVAL;
+	const gd32_pwm_ch_t *ch = &pwm_channels[channel];
+	return pwm_align_mode[pwm_timer_index(ch->periph)] != 0u;
+}
+
+int pwm_apply_counter_values(uint8_t channel, uint32_t arr, uint32_t compare)
+{
+	const gd32_pwm_ch_t *ch = &pwm_channels[channel];
 
 	/* Clear OPM if a prior bridge_hw_pwm_single_pulse left the timer
      * in one-pulse mode -- per the contract, a subsequent PWM_SET
@@ -235,57 +241,11 @@ int bridge_hw_pwm_set(uint8_t channel, uint32_t period_ns, uint32_t duty_ns)
 	    pwm_channels[channel].periph, pwm_channels[channel].channel, TIMER_OC_MODE_PWM0);
 	pwm_one_shot[channel] = false;
 
-	/* Round period + duty to whole microseconds (the timer tick). */
-	uint32_t period_us = period_ns / PWM_TIMER_TICK_NS;
-	uint32_t duty_us   = duty_ns / PWM_TIMER_TICK_NS;
-	if (period_us == 0u) return BRIDGE_HW_ERR_RANGE;
-
-	const gd32_pwm_ch_t *ch = &pwm_channels[channel];
-
 	/* Snapshot CEN before the write block below decides whether to
 	 * force a software update event.  Read here, before anything in
 	 * this function touches CTL0, so it reflects the timer's state as
 	 * this call found it. */
 	const bool was_running = (TIMER_CTL0(ch->periph) & (uint32_t)TIMER_CTL0_CEN) != 0u;
-
-	/* Convert commanded period/duty to ARR + compare, honouring the
-	 * timer's configured alignment (bridge_hw_pwm_configure).  The
-	 * up-counter (edge) counts 0..ARR inclusive -> period == ARR+1
-	 * ticks and high-time == compare ticks.  A center-aligned counter
-	 * runs 0->ARR->0 -> period == 2*ARR ticks and high-time ==
-	 * 2*compare ticks (compare on the up-ramp + compare on the
-	 * down-ramp), so both ARR and compare are the commanded value
-	 * halved.  ARR must fit in 16 bits either way; clamp on over-range
-	 * so the timer never gets an invalid reload. */
-	uint32_t arr, cmp;
-	if (pwm_align_mode[pwm_timer_index(ch->periph)] == 0u) {
-		if (period_us > PWM_TIMER_ARR_MAX + 1u) period_us = PWM_TIMER_ARR_MAX + 1u;
-		if (duty_us > period_us) duty_us = period_us;
-		arr = period_us - 1u;
-		cmp = duty_us;
-	} else {
-		uint32_t half_period = period_us / 2u;
-		uint32_t half_duty   = duty_us / 2u;
-		if (half_period == 0u) return BRIDGE_HW_ERR_RANGE; /* period < 2 us */
-		if (half_period > PWM_TIMER_ARR_MAX) half_period = PWM_TIMER_ARR_MAX;
-		if (half_duty > half_period) half_duty = half_period;
-		arr = half_period;
-		cmp = half_duty;
-	}
-
-	/* cmp must fit the 16-bit CHxCV.  The edge-aligned branch above
-	 * clamps period_us but not the resulting compare, so a 100 %-duty
-	 * request at the clamped max period (cmp == PWM_TIMER_ARR_MAX + 1,
-	 * i.e. 65536) would otherwise truncate to 0 in CHxCV and park the
-	 * pad at the complementary rail while still answering STATUS_OK
-	 * (#16).  Reject rather than silently honour a different duty than
-	 * commanded -- bridge_hw_pwm_get reads the live registers back for a
-	 * host that wants to poll what IS running instead. The
-	 * centre-aligned branch above already keeps half_duty <=
-	 * PWM_TIMER_ARR_MAX so this never trips there; the guard lives at
-	 * this single write site so neither branch can reintroduce the
-	 * truncation. */
-	if (cmp > PWM_TIMER_ARR_MAX) return BRIDGE_HW_ERR_RANGE;
 
 	/* Updates ALL channels of the same timer -- the contract documents
 	 * this shared-ARR constraint.  CHxCOMSEN + ARSE are enabled
@@ -329,11 +289,11 @@ int bridge_hw_pwm_set(uint8_t channel, uint32_t period_ns, uint32_t duty_ns)
 		 * the capture-side pending-CAR handoff are complete; it then puts
 		 * UPDIS back exactly as this caller found it.  No UPG is generated
 		 * and CNT is never reset on this normal running path (#177). */
-		pwm_preload_load_t load = { .ch = ch, .arr = arr, .cmp = cmp };
+		pwm_preload_load_t load = { .ch = ch, .arr = arr, .compare = compare };
 		pwm_preload_transaction(ch->periph, pwm_preload_load, &load);
 	} else {
 		timer_autoreload_value_config(ch->periph, arr);
-		timer_channel_output_pulse_value_config(ch->periph, ch->channel, cmp);
+		timer_channel_output_pulse_value_config(ch->periph, ch->channel, compare);
 		/* #89: on a sync-master timer this also fires TRGO0, glitching a slave synced off it. */
 		timer_event_software_generate(ch->periph, TIMER_EVENT_SRC_UPG);
 		pwm_car_shadow_commit(ch->periph, arr);
@@ -478,16 +438,9 @@ int bridge_hw_pwm_configure(uint8_t  channel,
      * The section covers a disable, one RMW, an enable and a store --
      * short enough for the CS-EXTI handler's deadline (bridge_critical.h).
      *
-     * RESIDUAL, deliberately not fixed here: the REVERSE direction is
-     * still open.  If bridge_hw_pwm_configure is the one reached from
-     * CS-EXTI (priority 1) and bridge_hw_pwm_single_pulse from I2C0_EV
-     * (priority 2), configure pre-empts single_pulse mid-sequence --
-     * between its SPM write and its timer_enable -- and single_pulse then
-     * resumes and enables a one-shot whose alignment guard was checked
-     * against the alignment configure has since changed.  Closing that
-     * needs single_pulse's own register sequence to become a section too,
-     * which lands squarely in open PR #82's rewrite of that function.
-     * Tracked under #19. */
+     * The reverse cross-transport sequence is excluded by #19's atomic
+     * protocol-dispatch guard: a CS-EXTI request that pre-empts I2C is
+     * answered STATUS_BUSY before either PWM handler can run. */
 	const uint32_t sect        = bridge_irq_lock();
 	const bool     was_running = (TIMER_CTL0(ch->periph) & (uint32_t)TIMER_CTL0_CEN) != 0u;
 	timer_disable(ch->periph);
