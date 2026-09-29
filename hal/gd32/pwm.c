@@ -17,6 +17,7 @@
 #include "bridge_critical.h"
 #include "gd32_common.h"
 #include "pwm_internal.h"
+#include "timer_sync_master.h"
 #include "pwm_ownership.h"
 #include "pwm_preload_transaction.h"
 
@@ -248,6 +249,28 @@ int pwm_apply_counter_values(uint8_t channel, uint32_t arr, uint32_t compare)
 {
 	const gd32_pwm_ch_t *ch = &pwm_channels[channel];
 
+	/* Snapshot CEN before the write block below decides whether to
+	 * force a software update event.  Read here, before anything in
+	 * this function touches CTL0, so it reflects the timer's state as
+	 * this call found it. */
+	const bool was_running = (TIMER_CTL0(ch->periph) & (uint32_t)TIMER_CTL0_CEN) != 0u;
+
+	/* A halted timer needs UPG to promote its new ARR/compare preload.
+	 * TIMER_TRI_OUT0_SRC_UPDATE exposes that forced event to a configured
+	 * sync slave (#89), so guard the whole destructive sequence against a
+	 * route being enabled between this check and UPG.  A running PWM_SET
+	 * never forces UPG and remains valid for a sync master.  The guard
+	 * precedes every register write below so BUSY leaves the timer
+	 * unchanged. */
+	uint32_t sync_guard = 0u;
+	if (!was_running) {
+		sync_guard = bridge_irq_lock();
+		if (!timer_sync_forced_update_allowed(pwm_timer_index(ch->periph))) {
+			bridge_irq_unlock(sync_guard);
+			return BRIDGE_HW_ERR_BUSY;
+		}
+	}
+
 	/* Claim before changing the timer-wide mode or reload.  A higher-priority
 	 * transport ISR can then only see this channel as live and will refuse a
 	 * sibling one-shot instead of disrupting this partially-programmed PWM.
@@ -270,12 +293,6 @@ int pwm_apply_counter_values(uint8_t channel, uint32_t arr, uint32_t compare)
 	timer_channel_output_mode_config(
 	    pwm_channels[channel].periph, pwm_channels[channel].channel, TIMER_OC_MODE_PWM0);
 	pwm_one_shot[channel] = false;
-
-	/* Snapshot CEN before the write block below decides whether to
-	 * force a software update event.  Read here, before anything in
-	 * this function touches CTL0, so it reflects the timer's state as
-	 * this call found it. */
-	const bool was_running = (TIMER_CTL0(ch->periph) & (uint32_t)TIMER_CTL0_CEN) != 0u;
 
 	/* Updates ALL channels of the same timer -- the contract documents
 	 * this shared-ARR constraint.  CHxCOMSEN + ARSE are enabled
@@ -324,13 +341,14 @@ int pwm_apply_counter_values(uint8_t channel, uint32_t arr, uint32_t compare)
 	} else {
 		timer_autoreload_value_config(ch->periph, arr);
 		timer_channel_output_pulse_value_config(ch->periph, ch->channel, compare);
-		/* #89: on a sync-master timer this also fires TRGO0, glitching a slave synced off it. */
+		/* #89: the sync guard above refused this path on a live TRGO0 master. */
 		timer_event_software_generate(ch->periph, TIMER_EVENT_SRC_UPG);
 		pwm_car_shadow_commit(ch->periph, arr);
 	}
 	timer_enable(ch->periph); /* idempotent if already running; re-arms
 	                            * CEN after a prior single-pulse left it
 	                            * clear (#8) */
+	if (!was_running) bridge_irq_unlock(sync_guard);
 	return BRIDGE_HW_OK;
 }
 
@@ -517,6 +535,14 @@ int bridge_hw_pwm_single_pulse(uint8_t channel, uint32_t pulse_ns)
 	if (pwm_align_mode[idx] != 0u) {
 		bridge_irq_unlock(sect);
 		return BRIDGE_HW_ERR_NOTIMPL;
+	}
+	/* The preload transfer below requires a forced UPG.  While this timer
+	 * is a live TRGO0 sync master, that UPG would be an unrequested slave
+	 * trigger (#89); the same lock keeps an overlapping TIMER_SYNC from
+	 * creating that route halfway through this sequence. */
+	if (!timer_sync_forced_update_allowed(idx)) {
+		bridge_irq_unlock(sect);
+		return BRIDGE_HW_ERR_BUSY;
 	}
 	if (pwm_timer_has_sibling_claim(pwm_timer_claims[idx], channel)) {
 		bridge_irq_unlock(sect);

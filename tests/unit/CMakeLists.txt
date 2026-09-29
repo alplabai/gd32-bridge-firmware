@@ -220,16 +220,20 @@ target_compile_options(test_power_wake PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_power_wake PRIVATE ztest_shim)
 add_test(NAME power_wake COMMAND test_power_wake)
 
-# --- timer_sync: production HAL id validation + register-call sequence -----
+# --- timer_sync: production timer-sync/PWM guard + register-call sequence ---
 #
-# Links the REAL hal/gd32/timer_sync.c against a minimal vendor-API mock.
-# This pins #142's fail-closed TIMER19 rejection at the responsible layer:
-# id 2 must return RANGE before any timer/SYSCFG call.  It also prevents the
-# canonical compact wire ids from drifting back to peripheral numbers (#194).
+# Links the REAL hal/gd32/timer_sync.c and pwm.c against a minimal vendor-API
+# mock. This pins #142's fail-closed TIMER19 rejection and #89's no-forced-UPG
+# guard at the responsible layers. It also prevents the canonical compact wire
+# ids from drifting back to peripheral numbers (#194).
 add_executable(test_timer_sync
     timer_sync/src/test_timer_sync.c
+    ${FW}/hal/gd32/pwm.c
+    ${FW}/hal/gd32/pwm_set.c
+    ${FW}/hal/gd32/pwm_preload_transaction.c
     ${FW}/hal/gd32/timer_sync.c
     ${FW}/hal/gd32/timer_sync_iti.c
+    ${FW}/hal/gd32/timer_sync_master.c
 )
 target_include_directories(test_timer_sync PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/timer_sync/mock

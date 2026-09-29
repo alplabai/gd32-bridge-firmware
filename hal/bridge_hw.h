@@ -112,7 +112,10 @@ int bridge_hw_gpio_write(uint32_t mask, uint32_t levels);
 /* period_ns > 0 required (BRIDGE_HW_ERR_RANGE otherwise); duty_ns must not
  * exceed period_ns (BRIDGE_HW_ERR_INVAL).  A period or duty that does not fit
  * the timer's 16-bit ARR/compare registers answers BRIDGE_HW_ERR_RANGE before
- * any timer register is changed; requests are never silently clamped. */
+ * any timer register is changed; requests are never silently clamped.  If the
+ * timer is halted and currently drives an enabled bridge_hw_timer_sync route,
+ * the forced preload transfer would trigger its slave, so the call returns
+ * BRIDGE_HW_ERR_BUSY without changing PWM state. */
 int bridge_hw_pwm_set(uint8_t channel, uint32_t period_ns, uint32_t duty_ns);
 
 /* Report what the channel's pad is ACTUALLY generating by reading the
@@ -367,7 +370,10 @@ int bridge_hw_pwm_capture_end(uint8_t channel);
  * an active capture session.  pulse_ns == 0 answers
  * BRIDGE_HW_ERR_RANGE; the widest pulse the 16-bit timer can produce is
  * 65535 us (65535000 ns) -- a wider request answers BRIDGE_HW_ERR_RANGE
- * rather than silently firing a shorter pulse than commanded. */
+ * rather than silently firing a shorter pulse than commanded.  A timer that
+ * is currently a live bridge_hw_timer_sync master returns BRIDGE_HW_ERR_BUSY:
+ * its required forced preload-transfer event would otherwise trigger the
+ * configured slave. */
 int bridge_hw_pwm_single_pulse(uint8_t channel, uint32_t pulse_ns);
 
 /* Configure master-slave timer sync.  @p master and @p slave name TIMER0
@@ -388,7 +394,9 @@ int bridge_hw_pwm_single_pulse(uint8_t channel, uint32_t pulse_ns);
  * trigger route used for each (master, slave) pair is per GD32G553
  * User Manual Rev1.2 p.570; a pair the SYSCFG router cannot connect returns
  * BRIDGE_HW_ERR_INVAL rather than wiring the slave to an unrelated
- * timer. */
+ * timer.  While mode is nonzero, forced-update PWM operations on @p master
+ * return BRIDGE_HW_ERR_BUSY rather than emitting a spurious slave trigger;
+ * disable the route before requesting one. */
 int bridge_hw_timer_sync(uint8_t master, uint8_t slave, uint8_t mode);
 
 /* --------------------------------------------------------------- */
