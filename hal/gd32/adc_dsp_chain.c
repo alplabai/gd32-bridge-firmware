@@ -481,6 +481,7 @@ int bridge_hw_adc_dsp_chain_bind(uint8_t chain_id, uint8_t stream_id)
 	s->dsp_terminal  = chain->stages[last_populated_index].kind;
 	s->proc_write    = 0u;
 	s->proc_read     = 0u;
+	s->proc_gap      = false;
 	s->pump_raw_read = s->total_read; /* pump picks up where the raw reader is */
 	s->dsp_chain_id  = chain_id;
 	s->dsp_bound     = true;
