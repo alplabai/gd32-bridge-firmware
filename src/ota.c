@@ -381,13 +381,21 @@ static uint8_t meta_page_rank(bool valid, const ota_meta_record_t *r)
  * degrading to "reverted" the way an interrupted write should.
  *
  * `invalidate_slot`: OTA_SLOT_A or OTA_SLOT_B clears that slot's
- * slot_valid bit in the written record (in addition to setting
- * `active_slot`'s bit); 0xFFu means "touch no additional bit".  Used by
+ * slot_valid bit AND zeroes its img_len/img_crc32 in the written record
+ * (applied AFTER `active_slot`'s bit is set, so invalidating the active
+ * slot itself wins); 0xFFu means "touch no additional bit".  Used by
  * ota_boot_init()'s self-heal path (bench fact 2026-09-26) to invalidate
  * a hung/rejected TRIAL slot so a later ROLLBACK can never re-select it
  * (h_rollback's own guard already refuses an invalid `other` slot -- this
  * is what makes that guard fire for a slot the bootloader just steered
- * away from). */
+ * away from).  h_begin (gh#36) uses it too, to demote the erase target
+ * BEFORE the erase is armed: a power cut mid-erase/program then leaves
+ * metadata that already says the slot is invalid, so the bootloader's
+ * CRC walk (boot_main.c) never touches a half-programmed 72-bit
+ * doubleword -- the reachable flash-ECC NMI gh#36 opened with.  The
+ * target may legitimately be `active_slot` there (the bootloader's
+ * newest-first fallback shape); the clear still lands and boot falls to
+ * the older record's slot. */
 static bool meta_commit(uint8_t  active_slot,
                         bool     update_entry,
                         uint32_t fw_ver,
@@ -442,7 +450,11 @@ static bool meta_commit(uint8_t  active_slot,
 	rec.active_slot = active_slot;
 	rec.slot_valid |= (uint8_t)(1u << active_slot);
 	if (invalidate_slot == OTA_SLOT_A || invalidate_slot == OTA_SLOT_B) {
+		/* AFTER the OR above, so invalidating the active slot's own bit
+		 * wins (gh#36's h_begin fallback-shape case). */
 		rec.slot_valid &= (uint8_t)~(1u << invalidate_slot);
+		rec.img_len[invalidate_slot]   = 0u;
+		rec.img_crc32[invalidate_slot] = 0u;
 	}
 	/* ALWAYS set explicitly -- never carry the surviving record's flags
 	 * forward.  It describes a different boot's trial state (and on a
@@ -694,6 +706,38 @@ h_begin(const uint8_t *req, size_t len, uint8_t *reply, size_t cap, size_t *rlen
 	 * reject does invalidate an in-flight tick's epoch so the host-visible
 	 * ERROR cannot be overwritten by its later READY writeback; the physical
 	 * erase continues to completion. */
+	/* gh#36, fix item 2: demote the erase target in metadata BEFORE the
+	 * erase is armed.  Until now slot_valid was only ever OR'd in
+	 * (meta_commit), so a BEGIN whose erase or program run was cut by
+	 * power loss left metadata still describing the target slot as
+	 * valid with its OLD img_len/img_crc32 -- and the bootloader's
+	 * CRC walk (boot_main.c) then read half-programmed 72-bit flash
+	 * doublewords, the one concretely reachable flash-ECC NMI in this
+	 * design.  Commit a metadata generation now that clears the
+	 * target's valid bit and zeroes its len/CRC, so the bootloader
+	 * never walks the damaged slot regardless of where the cut
+	 * lands.  Skipped entirely when no valid metadata exists
+	 * (factory): there is nothing to demote, and writing a synthetic
+	 * record here would invent an active-slot entry with no len/CRC.
+	 * This adds one 1 KB page erase + 44 B program (~21 ms, tERASE
+	 * p.126) to BEGIN's dispatch -- same class of cost as one
+	 * ota_erase_tick() step, and COMMIT/ROLLBACK already pay it
+	 * inline. */
+	{
+		ota_meta_record_t cur;
+		uint32_t          which = 0u;
+		if (meta_current(&cur, &which)) {
+			/* flags carried from the newest record, not zeroed: a BEGIN
+			 * during a TRIAL boot must not silently confirm the running
+			 * image (that is ota_confirm_tick()'s frame-gated job) nor
+			 * drop the bootloader's FWDGT arming for it. */
+			if (!meta_commit(cur.active_slot, false, 0u, 0u, 0u, cur.flags, 0u, inactive)) {
+				ota_session_reject(9u); /* 7 = P3 range guard, 8 = markerless COMMIT */
+				return STATUS_IO;
+			}
+		}
+	}
+
 	/* Arm the background erase and ack NOW -- do NOT erase inline (#770).
      * ota_erase_tick() walks the slot a page-region per main-loop tick;
      * state stays BUSY until it finishes, then flips to READY.  The host
