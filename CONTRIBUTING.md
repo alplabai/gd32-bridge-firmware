@@ -94,11 +94,15 @@ python3 tests/gen_protocol_vectors.py && git diff --exit-code tests/protocol_vec
 clang-format -i <your files> && clang-format --dry-run --Werror <your files>
 ```
 
-### The wire vectors are shared across repositories
+### A wire change still needs a matching alp-sdk change
 
 `tests/gen_protocol_vectors.py` is the authoritative source for the canonical
-vectors, and they have **two** consumers: `tests/unit/protocol_vectors/` here,
-and the host-side driver tests in alp-sdk under `tests/zephyr/chips/gd32g553/`.
+vectors, and they have exactly **one** test consumer: `tests/unit/protocol_vectors/`
+here. There is no alp-sdk test consumer -- alp-sdk's own
+`docs/gd32-bridge-protocol.md` says so directly ("No test currently consumes
+this file ... A host<->firmware divergence test built on these vectors remains
+an open gap, not existing coverage"), and no `tests/zephyr/chips/gd32g553/`
+path exists there.
 
 The firmware-side consumer drives the real `transport_spi.c` / `transport_i2c.c`
 -> `protocol.c`, on the stub HAL backend, and asserts the emitted bytes against
@@ -111,9 +115,30 @@ own separate link target) instead. See
 `tests/unit/protocol_vectors/src/test_protocol_vectors.c`'s file header for the
 exact, itemized list of what is and is not covered and why.
 
-Nothing in this repo fails when the alp-sdk side drifts. So a wire change is not
-finished when CI here is green — it needs the matching alp-sdk change, and the
-two should land close together. Say in your PR which alp-sdk PR pairs with it.
+Nothing in this repo fails when the alp-sdk side drifts, and no test on either
+side catches it. The real cross-repo guardrails are narrower: the
+`GD32G553_OTA_MIN_PROTOCOL_MINOR` / `GD32G553_REG_ON_MIN_PROTOCOL_MINOR` gates
+in alp-sdk's `chips/gd32g553/gd32g553.c`, and the per-opcode minimum-version
+notes in alp-sdk's `docs/gd32-bridge-protocol.md`. A wire change is not
+finished when CI here is green -- it needs the matching alp-sdk change (new
+gates and doc notes where a minor bump changes behavior), and the two should
+land close together. Say in your PR which alp-sdk PR pairs with it.
+
+### Host unit test cases must be self-contained
+
+`tests/unit/ztest_shim.c` registers every ZTEST case from an
+`__attribute__((constructor))` function, in whatever order the toolchain
+runs constructors -- the C standard does not specify that order, and it is
+observed to differ between gcc on the CI runner and gcc 16.2 on Windows
+(#248, #277). The harness runs every suite's cases in a single process with
+no per-case setup/teardown (every `ZTEST_SUITE` in this repo passes NULL for
+all five hooks), so a case that mutates module-static or process-lifetime
+state and does not restore it before returning is a latent, toolchain-
+dependent bug even while CI is green.
+
+Write every case to not depend on which cases ran before it, and to leave any
+state it armed back the way it found it before returning -- do not rely on
+the harness enforcing source order, because it does not.
 
 ## Bench evidence is part of the change
 

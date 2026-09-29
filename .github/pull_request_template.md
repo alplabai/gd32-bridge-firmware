@@ -27,9 +27,12 @@ change has two (host counters and firmware counters together).
 
 - [ ] Unchanged
 - [ ] Changed — `tests/gen_protocol_vectors.py` re-run and
-      `tests/protocol_vectors.txt` committed in the SAME change. Note the other
-      consumer of these vectors is alp-sdk's host-side driver tests, in a
-      different repository: nothing here fails if that side is not updated too.
+      `tests/protocol_vectors.txt` committed in the SAME change. This file has
+      no alp-sdk test consumer, so nothing here or in alp-sdk fails if the
+      other side is not updated too. The real obligation is the matching
+      alp-sdk change: the GD32G553_OTA_MIN_PROTOCOL_MINOR /
+      GD32G553_REG_ON_MIN_PROTOCOL_MINOR gates and the per-opcode version
+      notes in docs/gd32-bridge-protocol.md, where the change affects them.
 
 ## Supervised outputs
 
