@@ -198,6 +198,7 @@ add_test(NAME timer_sync_iti COMMAND test_timer_sync_iti)
 add_executable(test_timer_sync
     timer_sync/src/test_timer_sync.c
     ${FW}/hal/gd32/pwm.c
+    ${FW}/hal/gd32/pwm_set.c
     ${FW}/hal/gd32/timer_sync.c
     ${FW}/hal/gd32/timer_sync_iti.c
     ${FW}/hal/gd32/timer_sync_master.c
