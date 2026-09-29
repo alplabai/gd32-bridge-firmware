@@ -34,6 +34,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #define OTA_PAGE_SIZE 0x00000800u /* 2 KB single-bank page */
 
@@ -73,13 +74,27 @@ enum { OTA_SLOT_A = 0u, OTA_SLOT_B = 1u };
 #define OTA_META_MAGIC      0x4F544D31u /* "OTM1" */
 #define OTA_META_STRUCT_VER 2u
 
+/* Trial/confirm + watchdog fallback (bench fact 2026-09-26, E1M-V2M103):
+ * an OTA'd slot-B image passed VERIFY and COMMIT, then hung before
+ * main() (stock SystemInit spinning on HXTALSTB) -- the bootloader had
+ * no watchdog/confirm and jumped to the newest CRC-valid slot
+ * unconditionally, bricking the bridge on both transports until an SWD
+ * recovery.  `flags` marks a freshly-committed/rolled-back slot TRIAL
+ * until the app notes a live wire frame and confirms it (src/ota.c
+ * ota_boot_init/ota_trial_unconfirmed/ota_note_frame/ota_confirm_tick);
+ * the bootloader (src/boot/boot_main.c) arms the FWDGT before jumping to
+ * a TRIAL candidate so a hang before main() reverts to the previous slot
+ * instead of repeating the bench incident. */
+#define OTA_META_FLAG_TRIAL 0x01u
+
 typedef struct {
 	uint32_t magic;          /* OTA_META_MAGIC */
 	uint32_t struct_version; /* OTA_META_STRUCT_VER */
 	uint32_t counter;        /* monotonic; highest valid record wins */
 	uint8_t  active_slot;    /* OTA_SLOT_A | OTA_SLOT_B */
 	uint8_t  slot_valid;     /* bit0 = slot A valid, bit1 = slot B valid */
-	uint8_t  _pad[2];
+	uint8_t  flags;          /* OTA_META_FLAG_* -- TRIAL until confirmed */
+	uint8_t  _pad1;
 	uint32_t fw_version[2]; /* per-slot firmware semver (A, B); 0 = unknown */
 	uint32_t img_len[2];    /* per-slot image length (A, B) */
 	uint32_t img_crc32[2];  /* per-slot image CRC-32 (A, B) */
@@ -103,6 +118,7 @@ _Static_assert(offsetof(ota_meta_record_t, struct_version) == 4u, "meta.struct_v
 _Static_assert(offsetof(ota_meta_record_t, counter) == 8u, "meta.counter offset");
 _Static_assert(offsetof(ota_meta_record_t, active_slot) == 12u, "meta.active_slot offset");
 _Static_assert(offsetof(ota_meta_record_t, slot_valid) == 13u, "meta.slot_valid offset");
+_Static_assert(offsetof(ota_meta_record_t, flags) == 14u, "meta.flags offset");
 _Static_assert(offsetof(ota_meta_record_t, fw_version) == 16u, "meta.fw_version offset");
 _Static_assert(offsetof(ota_meta_record_t, img_len) == 24u, "meta.img_len offset");
 _Static_assert(offsetof(ota_meta_record_t, img_crc32) == 32u, "meta.img_crc32 offset");
@@ -125,6 +141,64 @@ static inline bool ota_slot_base_checked(uint8_t slot, uint32_t *base_out)
 		return true;
 	}
 	return false;
+}
+
+/* Boot-time trial/confirm gate: a TRIAL candidate that already ran a
+ * watchdog reset on this power cycle must not be re-tried -- it hung
+ * before confirming once and the fallback slot is the safe choice.
+ * A non-TRIAL (confirmed) candidate is never rejected on this basis. */
+static inline bool ota_boot_candidate_ok(const ota_meta_record_t *r, bool wdt_fired)
+{
+	return !(((r->flags & OTA_META_FLAG_TRIAL) != 0u) && wdt_fired);
+}
+
+/* Composed bootloader candidate-selection loop (#754's newest-first
+ * fallback + the trial/watchdog gate + a last-resort pass) -- pure and
+ * host-testable, so src/boot/boot_main.c and its test suite share the
+ * exact same decision instead of a mirrored copy that can drift.  It does
+ * NOT touch flash: `cands` are records already resident in RAM (read by
+ * meta_read()/meta_candidates() on real hardware, or planted directly by
+ * a test), newest-first; `valid[i]` is the caller's precomputed
+ * active_slot_valid(cands[i]) (that check needs a real image CRC walk
+ * over flash, which is exactly what a host test fakes -- keeping it out
+ * of this function is what makes the function itself flash-free); `n` is
+ * 0..2; `wdt_fired` is the reset cause read once by the caller.
+ *
+ * Pass 1 (strict, ordinary #754 behaviour): the first candidate that is
+ * both valid and passes ota_boot_candidate_ok() wins.
+ *
+ * Pass 2 (last resort): a bootloader must never idle while a CRC-valid,
+ * vector-valid image exists, even if every such candidate happens to be
+ * an unconfirmed TRIAL that already burned a watchdog reset this power
+ * cycle.  If pass 1 finds nothing, boot the newest candidate that is
+ * valid but was rejected ONLY by the trial/watchdog gate -- under a
+ * freshly-armed watchdog (the caller re-arms FWDGT for any TRIAL
+ * candidate regardless of which pass picked it), so a transient failure
+ * gets another confirm/revert cycle instead of a guaranteed brick.
+ * `*last_resort_out` reports whether this pass had to fire.
+ *
+ * Returns the winning index into `cands`/`valid` (0..n-1), or -1 if
+ * NOTHING is even valid -- the genuine "nothing to boot" case the
+ * recovery WFI loop exists for. */
+static inline int ota_boot_select(const ota_meta_record_t **cands,
+                                  const bool               *valid,
+                                  int                       n,
+                                  bool                      wdt_fired,
+                                  bool                     *last_resort_out)
+{
+	*last_resort_out = false;
+	for (int i = 0; i < n; ++i) {
+		if (valid[i] && ota_boot_candidate_ok(cands[i], wdt_fired)) {
+			return i;
+		}
+	}
+	for (int i = 0; i < n; ++i) {
+		if (valid[i] && !ota_boot_candidate_ok(cands[i], wdt_fired)) {
+			*last_resort_out = true;
+			return i;
+		}
+	}
+	return -1;
 }
 
 /* Minimum bootable image = at least the initial-MSP + reset-vector
@@ -174,6 +248,113 @@ static inline bool ota_image_bootable(uint32_t base, const uint8_t *img, uint32_
 		return false; /* reset must land inside the image */
 	}
 	return true;
+}
+
+/* Trial-capability marker (bench fact 2026-09-26 follow-up): the
+ * downgrade guard that decides whether COMMIT/ROLLBACK marks a slot
+ * OTA_META_FLAG_TRIAL used to trust the fw_version the HOST declared in
+ * OTA_BEGIN (the now-removed OTA_TRIAL_MIN_FW_VERSION/
+ * fw_version_trial_capable() in ota.c) -- but the 2026-09-26 bench
+ * incident this whole trial/confirm dance responds to was the host
+ * declaring the BAD image's TRUE, pre-fix version at OTA_BEGIN, which
+ * that guard would have believed and committed the same image WITHOUT
+ * trial protection. Eligibility must come from the IMAGE ITSELF: every
+ * app image built from this branch onward plants this 20-byte struct
+ * right after its vector table (toolchain/gd32g553_app_slot.ld.in's
+ * `.trial_marker` section, src/trial_marker.c) and
+ * ota_image_trial_capable() below scans a bounded window of the SLOT'S
+ * OWN flash bytes for it at COMMIT/ROLLBACK -- not a numeric offset
+ * shared with the linker script, so a future vector-table size change
+ * (an added IRQ, a different startup file) does not need a matching
+ * constant edited here. tools/check_trial_marker.py runs the identical
+ * scan against the built .bin as a build-time gate: a slot image
+ * produced without a findable marker fails the build.
+ *
+ * Policy, stated plainly (do not soften this on a future edit; CLOSED on
+ * PR #246): ONLY an image that carries this marker (with the
+ * confirm-capability bit set) ever gets the FWDGT safety net. A
+ * markerless image -- no marker at all, or a marker whose
+ * confirm-capability bit is clear -- has no confirm path at all: it
+ * never calls ota_note_frame()/ota_confirm_tick(), so nothing would ever
+ * clear a TRIAL flag forced onto it. Forcing TRIAL onto it would instead
+ * make the FWDGT revert it (or, with no older CONFIRMED record to fall
+ * back to, reset-loop it every ~32.8 s) even when the image is perfectly
+ * healthy; committing it CONFIRMED and unprotected is exactly the
+ * 2026-09-26 incident shape again. `h_commit()` (src/ota.c) therefore
+ * REFUSES the OTA_COMMIT outright for such an image -- STATUS_INVAL, a
+ * dedicated s_err code, the active slot left untouched, the next
+ * OTA_BEGIN unaffected -- rather than choosing between those two bad
+ * outcomes. A pre-marker image stays installable only via SWD/factory
+ * programming. `h_rollback()` (src/ota.c) is unchanged by this: rolling
+ * back to a markerless slot that already ran on this unit still commits
+ * CONFIRMED, because that image has booted here before and is not the
+ * fresh, unproven case this guard exists for. */
+#define OTA_TRIAL_MARKER_MAGIC_BYTES \
+	{ 'G', 'D', '3', '2', 'B', 'R', 'I', 'D', 'G', 'E', '-', 'T', 'R', 'I', 'A', 'L' }
+#define OTA_TRIAL_MARKER_STRUCT_VER 1u
+/* bit0: the image implements the confirm handshake (ota_note_frame() /
+ * ota_confirm_tick()) -- the only capability this marker records today. */
+#define OTA_TRIAL_CAP_CONFIRM 0x0001u
+
+typedef struct {
+	uint8_t  magic[16];
+	uint16_t struct_version;
+	uint16_t capability_flags;
+} ota_trial_marker_t;
+_Static_assert(sizeof(ota_trial_marker_t) == 20u, "ota_trial_marker_t on-flash size drifted");
+
+/* Bounded scan window: comfortably covers the GD32G553 vector table
+ * (154 vectors * 4 B = 616 B, ALIGN(4)) plus the marker this build
+ * places right after it, with slack for a future startup-file change --
+ * generous on purpose so this reader needs no numeric offset kept in
+ * lockstep with the linker script. */
+#define OTA_TRIAL_SCAN_LIMIT 2048u
+
+/* Minimum offset a genuine marker can ever sit at: the 16-word (64-byte)
+ * ARMv8-M CORE exception vector block (initial SP + 15 core exceptions)
+ * that precedes ANY device-specific IRQ vector, on every Cortex-M part,
+ * regardless of how many device-specific vectors this or a future
+ * silicon revision adds after it. A match before this offset cannot be
+ * the planted marker -- it would have to overlap the core vector table
+ * itself -- so the scan below refuses it rather than treat a coincidental
+ * byte pattern there as a real marker. This is a FLOOR, not the real
+ * (larger, GD32G553-specific) vector table size: see OTA_TRIAL_SCAN_LIMIT's
+ * comment for why the reader deliberately does not hardcode that exact,
+ * device-specific value either. */
+#define OTA_TRIAL_MARKER_MIN_OFFSET 64u
+
+static inline uint16_t ota_trial_rd_u16(const uint8_t *p)
+{
+	return (uint16_t)((uint32_t)p[0] | ((uint32_t)p[1] << 8));
+}
+
+/* True iff `img` (length `len`, the SLOT'S OWN recorded image length --
+ * never the host-declared OTA_BEGIN version) carries a confirm-capable
+ * trial marker within the bounded scan window, at or past
+ * OTA_TRIAL_MARKER_MIN_OFFSET. An image with no marker at all (every
+ * pre-marker build) or a struct_version this reader does not recognise
+ * is NOT trial-capable -- see this file's policy comment above
+ * ota_trial_marker_t for what that means (CONFIRMED, not a stuck gate). */
+static inline bool ota_image_trial_capable(const uint8_t *img, uint32_t len)
+{
+	if (img == NULL) {
+		return false;
+	}
+	const uint32_t limit = (len < OTA_TRIAL_SCAN_LIMIT) ? len : OTA_TRIAL_SCAN_LIMIT;
+	if (limit < sizeof(ota_trial_marker_t)) {
+		return false;
+	}
+	const uint8_t magic[16] = OTA_TRIAL_MARKER_MAGIC_BYTES;
+	for (uint32_t off = OTA_TRIAL_MARKER_MIN_OFFSET; off + sizeof(ota_trial_marker_t) <= limit;
+	     off += 4u) {
+		if (memcmp(&img[off], magic, sizeof magic) == 0) {
+			if (ota_trial_rd_u16(&img[off + 16u]) != OTA_TRIAL_MARKER_STRUCT_VER) {
+				return false; /* unknown layout: don't guess at it */
+			}
+			return (ota_trial_rd_u16(&img[off + 18u]) & OTA_TRIAL_CAP_CONFIRM) != 0u;
+		}
+	}
+	return false;
 }
 
 #endif /* GD32_BRIDGE_OTA_LAYOUT_H */
