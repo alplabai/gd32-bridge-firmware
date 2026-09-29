@@ -27,9 +27,11 @@
  *
  * Mapping notes per V2N hardware reality:
  *
- *   - GPIO : routes through PMU_WAKEUP_PIN0..4 -- five fixed pads
- *            on the GD32G553 + board wires the desired triggers
- *            onto them.  Landed §C.15c.
+ *   - GPIO : no usable pad on this SoM, so the firmware rejects it
+ *            (BRIDGE_HW_ERR_NOTIMPL).  The GD32G553 PMU wake pads are
+ *            WKUP0=PA0 (encoder), WKUP1=PC13 (SE_RST), WKUP3=PA2 (ADC)
+ *            and WKUP4=PC5 (PWM3), all claimed by live bridge functions;
+ *            WKUP2=PE6 has no ball on the WLCSP81 package (#20).
  *   - RTC  : RTC alarm 0 fires on a scheduled wallclock; the
  *            wakeup timer also surfaces under this bit so the
  *            firmware uses the timer (simpler than absolute-time
@@ -52,8 +54,9 @@
 #define POWER_WAKE_TIMER          0x00000008u
 #define POWER_WAKE_USB            0x00000010u
 #define POWER_WAKE_ETH_LINK       0x00000020u
-#define POWER_WAKE_MASK_SUPPORTED (POWER_WAKE_RTC | POWER_WAKE_GPIO | POWER_WAKE_TIMER)
-#define POWER_WAKE_MASK_HW_GATED  (POWER_WAKE_UART_RX | POWER_WAKE_USB | POWER_WAKE_ETH_LINK)
+#define POWER_WAKE_MASK_SUPPORTED (POWER_WAKE_RTC | POWER_WAKE_TIMER)
+#define POWER_WAKE_MASK_HW_GATED \
+	(POWER_WAKE_GPIO | POWER_WAKE_UART_RX | POWER_WAKE_USB | POWER_WAKE_ETH_LINK)
 
 /* RTC wakeup timer LSB.  POWER_WAKE_LSB_HZ = 2000 Hz assumes an exact
  * 32000 Hz IRC32K with the /16 divider -- 0.5 ms/tick nominal, max
@@ -128,16 +131,6 @@ static int rtc_wakeup_arm_ms(uint32_t wake_after_ms)
 	return BRIDGE_HW_OK;
 }
 
-static void power_wake_pins_enable(uint32_t wake_bitmap)
-{
-	if ((wake_bitmap & POWER_WAKE_GPIO) == 0u) return;
-	pmu_wakeup_pin_enable(PMU_WAKEUP_PIN0);
-	pmu_wakeup_pin_enable(PMU_WAKEUP_PIN1);
-	pmu_wakeup_pin_enable(PMU_WAKEUP_PIN2);
-	pmu_wakeup_pin_enable(PMU_WAKEUP_PIN3);
-	pmu_wakeup_pin_enable(PMU_WAKEUP_PIN4);
-}
-
 int bridge_hw_power_mode_set(uint8_t mode, uint32_t wake_bitmap, uint32_t wake_after_ms)
 {
 	/* Mode 0 (run) + mode 1 (sleep) are accepted no-ops -- main()'s
@@ -150,7 +143,7 @@ int bridge_hw_power_mode_set(uint8_t mode, uint32_t wake_bitmap, uint32_t wake_a
      * sources the host wants armed; `wake_after_ms` is a timed
      * fallback that arms the RTC wakeup timer regardless of the
      * bitmap (per the <alp/power.h> contract: the timer is implicit
-     * when wake_after_ms > 0).  Unsupported bits (UART_RX / USB /
+     * when wake_after_ms > 0).  Unsupported bits (GPIO / UART_RX / USB /
      * ETH_LINK on the GD32G5 baseline) reject so the host knows the
      * request was not honoured. */
 	if ((wake_bitmap & POWER_WAKE_MASK_HW_GATED) != 0u) return BRIDGE_HW_ERR_NOTIMPL;
@@ -161,7 +154,6 @@ int bridge_hw_power_mode_set(uint8_t mode, uint32_t wake_bitmap, uint32_t wake_a
 		return BRIDGE_HW_OK;
 	case 2u: /* deep-sleep */
 		rcu_periph_clock_enable(RCU_PMU);
-		power_wake_pins_enable(wake_bitmap);
 		if (wake_after_ms != 0u || (wake_bitmap & (POWER_WAKE_RTC | POWER_WAKE_TIMER)) != 0u) {
 			const uint32_t ms = (wake_after_ms != 0u) ? wake_after_ms : POWER_WAKE_TIMER_MAX_MS;
 			int            rc = rtc_wakeup_arm_ms(ms);
@@ -209,7 +201,6 @@ int bridge_hw_power_mode_set(uint8_t mode, uint32_t wake_bitmap, uint32_t wake_a
 		return bridge_transport_i2c_hw_init();
 	case 3u: /* standby */
 		rcu_periph_clock_enable(RCU_PMU);
-		power_wake_pins_enable(wake_bitmap);
 		if (wake_after_ms != 0u || (wake_bitmap & (POWER_WAKE_RTC | POWER_WAKE_TIMER)) != 0u) {
 			const uint32_t ms = (wake_after_ms != 0u) ? wake_after_ms : POWER_WAKE_TIMER_MAX_MS;
 			int            rc = rtc_wakeup_arm_ms(ms);
