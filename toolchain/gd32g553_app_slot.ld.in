@@ -48,6 +48,14 @@ ENTRY(Reset_Handler)
 
 SECTIONS
 {
+    /* app_slot_base.S exports the BRIDGE_APP_SLOT_BASE value seen by the
+     * firmware compiler as an absolute symbol.  Keep its equality to the
+     * actual link origin at link time: a legal-but-swapped A/B macro would
+     * move VTOR and the OTA erase guard to the other slot and could erase
+     * the image currently executing (#78). */
+    ASSERT(__bridge_compiled_app_slot_base == ORIGIN(FLASH),
+           "BRIDGE_APP_SLOT_BASE does not match linker FLASH origin")
+
     __stack_size = DEFINED(__stack_size) ? __stack_size : 2K;
     __heap_size  = DEFINED(__heap_size)  ? __heap_size  : 1K;
 
