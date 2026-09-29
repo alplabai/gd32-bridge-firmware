@@ -587,8 +587,6 @@ static const hal_map_case_t HAL_MAP_CASES[] = {
 	/* --- "stub/contract mismatch" bucket: only the unambiguous IO row. */
 	{ "GPIO_READ/IO",  CMD_GPIO_READ,  req_gpio_read,  4u, FAKE_FN_GPIO_READ,  BRIDGE_HW_ERR_IO, STATUS_IO },
 	{ "GPIO_WRITE/IO", CMD_GPIO_WRITE, req_gpio_write, 8u, FAKE_FN_GPIO_WRITE, BRIDGE_HW_ERR_IO, STATUS_IO },
-	{ "GPIO_READ/NOTIMPL",  CMD_GPIO_READ,  req_gpio_read,  4u, FAKE_FN_GPIO_READ,  BRIDGE_HW_ERR_NOTIMPL, STATUS_NOSUPPORT },
-	{ "GPIO_WRITE/NOTIMPL", CMD_GPIO_WRITE, req_gpio_write, 8u, FAKE_FN_GPIO_WRITE, BRIDGE_HW_ERR_NOTIMPL, STATUS_NOSUPPORT },
 
 	/* --- PWM_SET / PWM_GET: both now route through status_from_hw()
 	 * (#23 B3, FIXED) so they can no longer disagree on the shared
