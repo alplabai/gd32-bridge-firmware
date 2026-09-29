@@ -98,6 +98,15 @@ typedef struct {
  * got-count mismatch over a timed dwell. */
 #define BRIDGE_ADC_PACE_CLK_HZ 216000000u
 
+/* gh#149 per-consumer DMA position tracker (see adc_stream_state_t's
+ * rd_pos/pump_pos fields and adc_stream_total_written() in
+ * adc_stream.c). */
+typedef struct {
+	uint32_t laps;
+	uint16_t w;
+	bool     valid;
+} adc_dma_pos_t;
+
 typedef struct {
 	bool     in_use;
 	uint8_t  channel;     /* ADC channel index this stream watches */
@@ -116,9 +125,26 @@ typedef struct {
 	 * volatile: written in ISR context, read from the CS-EXTI-driven
 	 * stream_read path. */
 	volatile uint32_t lap_count;
+	/* Set by the DMA ERRIF ISR.  A transfer error stops the channel, so
+	 * stream_read must fail loudly instead of reporting a permanently empty
+	 * but apparently healthy ring. */
+	volatile uint32_t dma_error_count;
 	uint32_t          total_read;
-	uint8_t           dsp_chain_id;
-	bool              dsp_bound;
+	/* gh#149 DMA-lap coalescing recovery: per-consumer last-observed
+	 * DMA position (raw lap_count + write index), used by
+	 * adc_stream_total_written() to detect a ring reload whose FTF
+	 * the lap ISR had not counted yet at sample time (write index
+	 * regressed while lap_count stood still) and add the missed lap
+	 * to that consumer's total.  Two consumers, two trackers, no
+	 * shared mutation: the read path (stream_read, CS-EXTI prio 1)
+	 * owns rd_pos; the base-level pump owns pump_pos.  Either may
+	 * observe the same missed lap and correct its OWN total; neither
+	 * writes lap_count, so the count the ISR eventually makes can
+	 * never double-credit. */
+	adc_dma_pos_t rd_pos;
+	adc_dma_pos_t pump_pos;
+	uint8_t       dsp_chain_id;
+	bool          dsp_bound;
 
 	/* --- #496 DSP runtime dispatch: filtered data plane --- */
 	/* When a FIR/IIR chain is bound, the base-level pump
@@ -135,6 +161,13 @@ typedef struct {
 	uint32_t          proc_read;     /* stream_read-consumed count      */
 	uint32_t          pump_raw_read; /* pump's raw-ring consumer count  */
 	uint8_t           dsp_terminal;  /* terminal stage kind (0 FIR/1 IIR/3 FFT) */
+	/* gh#35 sticky per-stream fault flags, set by the base-level pump,
+	 * surfaced (and never cleared short of stream_end) by the DSP
+	 * branch of bridge_hw_adc_stream_read: */
+	bool dsp_cfg_bad; /* FAC config refused the bound chain (coeff out of
+	                   * range) -> reads answer RANGE */
+	bool dsp_sat;     /* FAC output/gain saturation observed -> reads
+	                   * answer IO, never STATUS_OK on railed data */
 } adc_stream_state_t;
 
 /* ----------------------------------------------------------------- */
@@ -230,7 +263,7 @@ _Static_assert(GPIO_PAD_CAN_STBY < GPIO_PAD_MAP_COUNT,
  *
  * The residency model, all of it sourced in this tree:
  *   ADCCK   = HCLK / 6 = 216 MHz / 6 = 36 MHz (ADC_CLK_SYNC_HCLK_DIV6,
- *             adc_periph_init)
+ *             adc_shared_clock_init)
  *   one conversion = sample_cycles + 12.5 ADCCK  (the 12-bit figure this
  *             header already quotes above: 240 + 12.5 at 36 MHz ~= 7.0 us)
  *   one triggered sample with oversampling = ratio x that
@@ -371,17 +404,24 @@ extern bool                vref_ok;                              /* vref.c */
 /* Shared helpers (defined in the TU named per line).                 */
 /* ----------------------------------------------------------------- */
 
-bool trng_start(void);                 /* trng.c */
-bool trng_poll_ready(void);            /* trng.c */
-bool vref_ready_check(void);           /* vref.c */
-bool adc_periph_init(uint32_t periph); /* adc.c */
+bool trng_start(void);       /* trng.c */
+bool trng_poll_ready(void);  /* trng.c */
+bool vref_ready_check(void); /* vref.c */
+/* Boot-only sequence: reset all converters, set the two shared clock domains
+ * once (ADC0 covers ADC0/1/2; ADC3 covers itself), then initialise each
+ * converter.  Request paths must use adc_periph_restore() instead so a
+ * sibling stream never sees a shared-clock rewrite. */
+void adc_periph_boot_reset_all(void);       /* adc.c */
+void adc_shared_clock_init(void);           /* adc.c */
+bool adc_periph_boot_init(uint32_t periph); /* adc.c */
+bool adc_periph_restore(uint32_t periph);   /* adc.c */
 
 /* Bounded RSTCLB/CLB calibration cycle (UM Rev1.2 17.4.1, p.424-425),
  * shared with the stream path: any ADCON toggle invalidates the
  * calibration factor (it is applied only "until the next ADC
  * power-off"), so every re-enable on the request path -- single-shot
  * read, stream_begin, and the stream ROVF recovery -- must recalibrate
- * rather than assume adc_periph_init's boot calibration survived. */
+ * rather than assume boot calibration survived. */
 bool adc_calibrate_bounded(uint32_t periph); /* adc.c */
 
 /* Resolution/oversample helpers (adc.c) shared with the stream path.
@@ -394,6 +434,8 @@ void     adc_apply_conv_format(uint32_t periph, uint8_t channel); /* adc.c */
 void     qenc_channel_init(const gd32_qenc_t *e);                 /* qenc.c */
 void     pwm_timer_init(uint32_t periph);                         /* pwm.c */
 void     pwm_channel_init(const gd32_pwm_ch_t *ch);               /* pwm.c */
+void     pwm_channel_claim(uint8_t channel);                      /* pwm.c */
+void     pwm_channel_release(uint8_t channel);                    /* pwm.c */
 void     se_reset_init(void);                                     /* se_reset.c */
 
 /* Per-timer CAR shadow-promotion tracking (pwm_capture.c owns the

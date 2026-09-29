@@ -84,10 +84,12 @@
  *                               (config + drain + ns conversion) is
  *                               complete and exercised end-to-end.
  *   14. PWM_SINGLE_PULSE     -- DONE: TIMERx OPM (one-pulse mode).
- *                               Switches the timer's whole SP-bit so
- *                               other channels on the same timer also
- *                               run as single-pulse until a PWM_SET
- *                               flips back to repetitive.
+ *                               SPM and CAR are timer-wide, so a
+ *                               one-shot answers STATUS_BUSY while a
+ *                               sibling channel on the same timer has
+ *                               a continuous PWM or capture claim
+ *                               (#87); a PWM_SET flips back to
+ *                               repetitive.
  *   15. TIMER_SYNC           -- DONE (§C.15b): master-slave SMC
  *                               config via timer_slave_mode_select
  *                               + timer_master_output0_trigger_source_select
@@ -158,6 +160,7 @@
 #include <stdint.h>
 
 #include "bridge_hw.h"
+#include "bridge_board_config.h"
 
 /* The wrapper's PUBLIC include directories expose the GigaDevice device
  * header.  It supplies the CMSIS/core definitions and pulls this project's
@@ -165,6 +168,7 @@
  * used by the real backend.  The vendor wrapper compiles its driver archive
  * independently; libopt controls declarations, not which driver units link. */
 #include "gd32g5x3.h"
+#include "gd32g5x3_dbg.h"
 #include "gd32_common.h"
 
 /* ----------------------------------------------------------------- */
@@ -187,6 +191,13 @@ bool     bridge_core_clock_matches = true;
 
 void bridge_hw_init(void)
 {
+	/* The priority numbers in bridge_board_config.h mean preemption levels
+	 * only under PRE2_SUB2. A Path-A bootloader handoff preserves AIRCR, and
+	 * the vendor helper otherwise retains a valid inherited grouping, so set
+	 * the bridge policy before configuring any NVIC line or, on Path-A,
+	 * unmasking IRQs. */
+	nvic_priority_group_set(NVIC_PRIGROUP_PRE2_SUB2);
+
 	/* SYSCFG hosts the TIMER quadrature-decoder mode fields
      * (SYSCFG_TIMERxCFG0.TSCFGy) that qenc_channel_init() programs
      * below, as well as the EXTI source mux that spi_cs_exti_init()
@@ -217,6 +228,18 @@ void bridge_hw_init(void)
      * boot PRIMASK is already clear and this is a no-op. */
 	__enable_irq();
 #endif
+
+	/* A breakpoint must preserve the state it is inspecting.  Hold the
+	 * timer counters this backend owns (PWM 0/7, quadrature 1..4 and ADC
+	 * pacing 5/6), both watchdog counters and I2C0's SMBus timeout while
+	 * the CM33 is halted (#55).  These bits affect only debug halt, not
+	 * normal execution.  Do not enable DBG_CTL0 low-power holds here: the
+	 * manual changes their clock source/standby behaviour, so that remains
+	 * an explicit SWD bench choice rather than shipped firmware policy. */
+	DBG_CTL1 |= DBG_CTL1_TIMER1_HOLD | DBG_CTL1_TIMER2_HOLD | DBG_CTL1_TIMER3_HOLD |
+	            DBG_CTL1_TIMER4_HOLD | DBG_CTL1_TIMER5_HOLD | DBG_CTL1_TIMER6_HOLD |
+	            DBG_CTL1_WWDGT_HOLD | DBG_CTL1_FWDGT_HOLD | DBG_CTL1_I2C0_HOLD;
+	DBG_CTL2 |= DBG_CTL2_TIMER0_HOLD | DBG_CTL2_TIMER7_HOLD;
 
 	/* ORDERING (merge of #61's se_reset_init and #127's clock sample):
      * se_reset_init() goes FIRST and that is load-bearing -- see its
@@ -271,6 +294,40 @@ void bridge_hw_init(void)
 	SystemCoreClockUpdate();
 	bridge_core_clock_hz      = SystemCoreClock;
 	bridge_core_clock_matches = (SystemCoreClock == PWM_TIMER_CLK_HZ);
+
+	/* --- Explicit NMI-source arming (gh#36) ---------------------------
+	 *
+	 * Five NMI sources come up ARMED by the reset values of
+	 * SYSCFG_CFG3 (0xXXXX X00F), CFG4 (0xXXX0 XX03) and CFG5
+	 * (0xXXXX XX03) (UM Rev1.2 p.64-67): CKNMIIE (HXTAL clock
+	 * failure), FLASHECCIE (flash double-bit ECC -- unconditional,
+	 * UM p.93 "When two errors are detected, the ECCDET0 bit ... is
+	 * set and a NMI is generated"), and the SRAM0/SRAM1/TCMSRAM
+	 * multi-bit + single-bit ECC enables.  Until gh#36's handler
+	 * work (hal/gd32/fault_handlers.c) every one of them vectored
+	 * into the vendor Default_Handler's infinite loop with no
+	 * watchdog armed -- a permanent, undiagnosable wedge.
+	 *
+	 * The handlers exist now, so the armed set is KEPT -- but written
+	 * explicitly, read-modify-write on exactly the enable bits, so
+	 * the set of live NMI sources is a decision recorded in this
+	 * source rather than an accident of a reset value the manual
+	 * prints with X digits.  The three single-bit-correction enables
+	 * stay armed but inert: they route to the SYSCFG NVIC line,
+	 * which this firmware never enables.  The SRAM multi-bit paths
+	 * are option-byte dependent (FMC_OBCTL bit 24 SRAM_ECCEN, p.121
+	 * -- unread on a bench part, see gh#36's verification list); the
+	 * flash path needs no such confirmation and is live on every
+	 * part.
+	 *
+	 * The BOOTLOADER runs on the same reset defaults and links the
+	 * same handler set (#182), but does not write these registers
+	 * yet; it arms the identical set by reset value.  Any future
+	 * change here must be mirrored there -- both images must agree. */
+	SYSCFG_CFG3 |= (SYSCFG_CFG3_CKMNMIIE | SYSCFG_CFG3_FLASHECCIE | SYSCFG_CFG3_SRAM0ECCSEIE |
+	                SYSCFG_CFG3_SRAM0ECCMEIE);
+	SYSCFG_CFG4 |= (SYSCFG_CFG4_SRAM1ECCSEIE | SYSCFG_CFG4_SRAM1ECCMEIE);
+	SYSCFG_CFG5 |= (SYSCFG_CFG5_TCMSRAMECCSEIE | SYSCFG_CFG5_TCMSRAMECCMEIE);
 
 	/* Enable AHB2 clocks for every GPIO port the pad map references.
      * The chip's RCU keeps unused GPIO ports clock-gated to save
@@ -475,8 +532,9 @@ void bridge_hw_init(void)
 	vref_ok = (vref_status_get() == SET);
 
 	/* ADC bring-up: configure 8 pads as analog, enable all four ADC
-     * peripheral clocks, run the per-peripheral init.  Calibration
-     * inside adc_periph_init now runs against a LIVE reference (it
+	 * peripheral clocks, reset every converter, set each shared clock
+	 * domain once, then run the per-converter init.  Calibration
+	 * inside adc_periph_boot_init now runs against a LIVE reference (it
      * previously self-calibrated against the undriven reference node,
      * baking in a bogus offset); the VREF bring-up above is the
      * prerequisite that makes that calibration meaningful. */
@@ -495,10 +553,12 @@ void bridge_hw_init(void)
      * path op re-times against (the read path's bounded EOC wait +
      * self-heal), so the failure surfaces loudly on first use instead
      * of wedging boot. */
-	(void)adc_periph_init(ADC0);
-	(void)adc_periph_init(ADC1);
-	(void)adc_periph_init(ADC2);
-	(void)adc_periph_init(ADC3);
+	adc_periph_boot_reset_all();
+	adc_shared_clock_init();
+	(void)adc_periph_boot_init(ADC0);
+	(void)adc_periph_boot_init(ADC1);
+	(void)adc_periph_boot_init(ADC2);
+	(void)adc_periph_boot_init(ADC3);
 	for (size_t i = 0; i < ADC_CHANNEL_MAP_COUNT; ++i) {
 		adc_sample_cycles_cache[i]    = ADC_DEFAULT_SAMPLE_CYCLES;
 		adc_resolution_bits_cache[i]  = ADC_RES_BITS_DEFAULT;
@@ -530,6 +590,17 @@ extern void bridge_hw_dsp_pump(void);
  * page-region per tick so BEGIN never blocks the SPI reply inline.  No-op
  * in the OTA-inert build. */
 extern void ota_erase_tick(void);
+/* Deferred low-power entry (gh#63): executes a mode 2/3 request latched
+ * by bridge_hw_power_mode_set() on a quiet link, at base level -- never
+ * from a transport ISR.  Strong impl in hal/gd32/power.c. */
+extern void bridge_power_tick(void);
+
+/* BRD_I2C stuck-SDA detector (gh#39, erratum 2.3.1): polls the SDA pad
+ * and runs the documented I2C software reset when the line is confirmed
+ * stuck low.  Weak no-op on the stub backend (src/transport_i2c.c);
+ * strong impl in hal/transport_hw_gd32.c. */
+extern void bridge_transport_i2c_stuck_poll(void);
+
 /* OTA trial/confirm pump (bench fact 2026-09-26, E1M-V2M103): once the
  * wire has noted a frame during an unconfirmed trial, commits the slot
  * permanent and reboots.  No-op in the OTA-inert build, and a no-op on
@@ -541,6 +612,8 @@ void bridge_hw_tick(void)
 	bridge_hw_dsp_pump();
 	ota_erase_tick();
 	ota_confirm_tick();
+	bridge_transport_i2c_stuck_poll();
+	bridge_power_tick();
 }
 
 /* ----------------------------------------------------------------- */

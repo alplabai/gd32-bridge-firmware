@@ -7,8 +7,10 @@
 
 #include <string.h>
 
-mock_seq_evt_t mock_seq[MOCK_SEQ_MAX];
-int            mock_seq_n;
+mock_seq_evt_t    mock_seq[MOCK_SEQ_MAX];
+int               mock_seq_n;
+volatile uint32_t mock_primask;
+uint32_t          mock_rcu_lock_violations;
 
 static mock_hook_t mock_irq_lock_hook;
 static uint32_t    mock_irq_locks_until_hook;
@@ -27,13 +29,25 @@ uint32_t mock_irq_get_primask(void)
 		mock_irq_set_lock_hook(0u, 0);
 		hook();
 	}
-	return 0u;
+	return mock_primask;
 }
 
 void mock_seq_reset(void)
 {
 	mock_seq_n = 0;
 	memset(mock_seq, 0, sizeof mock_seq);
+	/* gh#35 FAC captures reset with the rest of the mock. */
+	memset(mock_fac_coeffb, 0, sizeof mock_fac_coeffb);
+	memset(mock_fac_coeffa, 0, sizeof mock_fac_coeffa);
+	mock_fac_coeffb_size     = 0u;
+	mock_fac_coeffa_size     = 0u;
+	mock_fac_func            = 0u;
+	mock_fac_ipr             = 0u;
+	mock_fac_last_write      = 0;
+	mock_fac_read_value      = 0;
+	mock_fac_flags           = 0u;
+	mock_primask             = 0u;
+	mock_rcu_lock_violations = 0u;
 	mock_irq_set_lock_hook(0u, 0);
 	mock_dma_set_transfer_get_hook(0);
 	mock_fac_set_init_hook(0);
@@ -41,6 +55,18 @@ void mock_seq_reset(void)
 	mock_fft_set_init_hook(0);
 	mock_fft_set_poll_hook(0);
 }
+
+/* --- gh#35 FAC capture surface ------------------------------------ */
+
+int16_t  mock_fac_coeffb[MOCK_FAC_MAX_COEFFS];
+uint8_t  mock_fac_coeffb_size;
+int16_t  mock_fac_coeffa[MOCK_FAC_MAX_COEFFS];
+uint8_t  mock_fac_coeffa_size;
+uint32_t mock_fac_func;
+uint8_t  mock_fac_ipr;
+int16_t  mock_fac_last_write;
+int16_t  mock_fac_read_value;
+uint32_t mock_fac_flags;
 
 void mock_seq_log(const char *name, uint32_t periph, uint32_t arg)
 {
@@ -208,12 +234,27 @@ void mock_adc_set_routine_data(uint32_t code)
 
 /* --- DMA -----------------------------------------------------------------*/
 
-static uint32_t    mock_dma_remaining[2][1]; /* [dma_periph][channel] */
+static uint32_t mock_dma_remaining[2][1]; /* [dma_periph][channel] */
+static uint32_t mock_dma_chctl[2][1];
+static uint32_t mock_dma_interrupt_flags[2][1];
+static bool     mock_dma_disable_hold[2][1];
+static uint32_t mock_dmamux_chcfg[14];
+
+uint32_t *mock_dma_chctl_ref(uint32_t dma_periph, dma_channel_enum channelx)
+{
+	mock_seq_log("DMA_CHCTL_READ", dma_periph, channelx);
+	return &mock_dma_chctl[dma_periph][channelx];
+}
+
+uint32_t *mock_dmamux_chcfg_ref(uint32_t channel)
+{
+	return &mock_dmamux_chcfg[channel];
+}
 static mock_hook_t mock_dma_transfer_get_hook;
 
 void dma_deinit(uint32_t dma_periph, dma_channel_enum channelx)
 {
-	(void)channelx;
+	mock_dma_chctl[dma_periph][channelx] &= ~DMA_CHXCTL_CHEN;
 	mock_seq_log("dma_deinit", dma_periph, 0u);
 }
 void dma_struct_para_init(dma_parameter_struct *init_struct)
@@ -226,6 +267,8 @@ void dma_init(uint32_t dma_periph, dma_channel_enum channelx, dma_parameter_stru
 	 * Mirror that observable contract so a new stream cannot inherit the
 	 * previous test session's remaining-count state. */
 	mock_dma_remaining[dma_periph][channelx] = init_struct->number;
+	mock_dmamux_chcfg[(dma_periph == DMA0) ? (uint32_t)channelx : (uint32_t)channelx + 7u] =
+	    init_struct->request;
 	mock_seq_log("dma_init", dma_periph, init_struct->number);
 }
 void dma_circulation_enable(uint32_t dma_periph, dma_channel_enum channelx)
@@ -235,12 +278,14 @@ void dma_circulation_enable(uint32_t dma_periph, dma_channel_enum channelx)
 }
 void dma_channel_enable(uint32_t dma_periph, dma_channel_enum channelx)
 {
-	(void)channelx;
+	mock_dma_chctl[dma_periph][channelx] |= DMA_CHXCTL_CHEN;
 	mock_seq_log("dma_channel_enable", dma_periph, 0u);
 }
 void dma_channel_disable(uint32_t dma_periph, dma_channel_enum channelx)
 {
-	(void)channelx;
+	if (!mock_dma_disable_hold[dma_periph][channelx]) {
+		mock_dma_chctl[dma_periph][channelx] &= ~DMA_CHXCTL_CHEN;
+	}
 	mock_seq_log("dma_channel_disable", dma_periph, 0u);
 }
 void dma_transfer_number_config(uint32_t dma_periph, dma_channel_enum channelx, uint32_t number)
@@ -276,20 +321,49 @@ void dma_interrupt_disable(uint32_t dma_periph, dma_channel_enum channelx, uint3
 }
 FlagStatus dma_interrupt_flag_get(uint32_t dma_periph, dma_channel_enum channelx, uint32_t int_flag)
 {
-	(void)dma_periph;
-	(void)channelx;
-	(void)int_flag;
-	return RESET;
+	return (mock_dma_interrupt_flags[dma_periph][channelx] & int_flag) ? SET : RESET;
 }
 void dma_interrupt_flag_clear(uint32_t dma_periph, dma_channel_enum channelx, uint32_t int_flag)
 {
-	(void)channelx;
+	mock_dma_interrupt_flags[dma_periph][channelx] &= ~int_flag;
 	mock_seq_log("dma_interrupt_flag_clear", dma_periph, int_flag);
 }
 
 void mock_dma_set_remaining(uint32_t dma_periph, dma_channel_enum channelx, uint32_t remaining)
 {
 	mock_dma_remaining[dma_periph][channelx] = remaining;
+}
+
+void mock_dma_set_interrupt_flag(uint32_t         dma_periph,
+                                 dma_channel_enum channelx,
+                                 uint32_t         flag,
+                                 FlagStatus       state)
+{
+	if (state == SET) {
+		mock_dma_interrupt_flags[dma_periph][channelx] |= flag;
+	} else {
+		mock_dma_interrupt_flags[dma_periph][channelx] &= ~flag;
+	}
+}
+
+void mock_dma_reset(void)
+{
+	memset(mock_dma_remaining, 0, sizeof mock_dma_remaining);
+	memset(mock_dma_chctl, 0, sizeof mock_dma_chctl);
+	memset(mock_dma_interrupt_flags, 0, sizeof mock_dma_interrupt_flags);
+	memset(mock_dma_disable_hold, 0, sizeof mock_dma_disable_hold);
+	memset(mock_dmamux_chcfg, 0, sizeof mock_dmamux_chcfg);
+}
+
+void mock_dma_set_disable_hold(uint32_t dma_periph, dma_channel_enum channelx, bool hold)
+{
+	mock_dma_disable_hold[dma_periph][channelx] = hold;
+	if (hold) mock_dma_chctl[dma_periph][channelx] |= DMA_CHXCTL_CHEN;
+}
+
+uint32_t mock_dmamux_request_get(uint32_t channel)
+{
+	return mock_dmamux_chcfg[channel] & DMAMUX_RM_CHXCFG_MUXID;
 }
 
 void mock_dma_set_transfer_get_hook(mock_hook_t hook)
@@ -301,6 +375,7 @@ void mock_dma_set_transfer_get_hook(mock_hook_t hook)
 
 void rcu_periph_clock_enable(uint32_t periph_clk)
 {
+	if (mock_primask != 1u) mock_rcu_lock_violations++;
 	mock_seq_log("rcu_periph_clock_enable", periph_clk, 0u);
 }
 void trigsel_init(trigsel_periph_enum target_periph, trigsel_source_enum trigger_source)
@@ -371,11 +446,25 @@ void fac_fixed_data_preload_init(fac_fixed_data_preload_struct *p)
 }
 void fac_fixed_buffer_preload(fac_fixed_data_preload_struct *p)
 {
-	(void)p;
+	/* gh#35: capture the decoded coefficient vectors the production
+	 * decode hands to the FAC, so the AN208 / Iir_dma numbers can be
+	 * asserted directly. */
+	if (p->coeffb_size > MOCK_FAC_MAX_COEFFS || p->coeffa_size > MOCK_FAC_MAX_COEFFS) return;
+	memset(mock_fac_coeffb, 0, sizeof mock_fac_coeffb);
+	memset(mock_fac_coeffa, 0, sizeof mock_fac_coeffa);
+	for (uint8_t k = 0u; k < p->coeffb_size; ++k)
+		mock_fac_coeffb[k] = p->coeffb_ctx[k];
+	for (uint8_t k = 0u; k < p->coeffa_size; ++k)
+		mock_fac_coeffa[k] = p->coeffa_ctx[k];
+	mock_fac_coeffb_size = p->coeffb_size;
+	mock_fac_coeffa_size = p->coeffa_size;
+	mock_seq_log("fac_fixed_buffer_preload", 0u, 0u);
 }
 void fac_function_config(fac_parameter_struct *p)
 {
-	(void)p;
+	mock_fac_func = p->func;
+	mock_fac_ipr  = p->ipr; /* gh#35: the headroom exponent must land here */
+	mock_seq_log("fac_function_config", p->func, p->ipr);
 }
 void fac_start(void)
 {
@@ -387,16 +476,18 @@ void fac_stop(void)
 }
 void fac_fixed_data_write(int16_t data)
 {
+	mock_fac_last_write = data; /* gh#35 bias test */
 	mock_seq_log("fac_fixed_data_write", 0u, (uint32_t)(uint16_t)data);
 }
 int16_t fac_fixed_data_read(void)
 {
-	return 0;
+	return mock_fac_read_value;
 }
 FlagStatus fac_flag_get(uint32_t flag)
 {
-	(void)flag;
-	return RESET;
+	/* YBEF must read RESET for the pump's output path to run; the
+	 * saturation flags are settable per test (gh#35). */
+	return (mock_fac_flags & flag) ? SET : RESET;
 }
 void mock_fac_set_init_hook(mock_dsp_init_hook_t hook)
 {
