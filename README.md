@@ -94,15 +94,39 @@ so prefer an absolute path. That build emits the monolithic
 `0xF0..0xFF` range answers `STATUS_NOSUPPORT`, so the image cannot
 brick itself).
 
+**A flashable image needs the IRC8M clock override, not just a vendor
+tree.** The stock vendor `system_gd32g5x3.c` selects
+`__SYSTEM_CLOCK_216M_PLL_HXTAL`, whose startup spins `while(1){}`
+waiting for `HXTALSTB` — which never sets on this SoM, so the part
+hangs before `main()` and the flashed board looks bricked, with SPI
+and I2C never coming up. `GD32_VENDOR_DIR` must therefore point at a
+tree that also carries `overrides/system_gd32g5x3.c` (selects
+`__SYSTEM_CLOCK_216M_PLL_IRC8M` instead) — an alp-sdk checkout's
+`vendors/gd32_firmware_library/` carries this override; the public
+[`gd32g5x3-firmware-library`](https://github.com/alplabai/gd32g5x3-firmware-library)
+mirror alone does not. Configure fails fast with a clear message if
+the override is missing. **`-DBRIDGE_ALLOW_STOCK_SYSTEM_INIT=ON`**
+silences that failure and links the stock, hanging `SystemInit()`
+instead — it exists only for compile-and-link coverage (CI's `gd32
+backend build` job, which never runs on silicon); never pass it for an
+image you intend to flash.
+
 **`-DBRIDGE_OTA_PARTITIONED=ON`** (requires `BRIDGE_HAL_BACKEND=gd32`)
 arms the in-system upgrade path and emits the partitioned set instead:
 `gd32-bootloader` (32 KB at flash base), `gd32-bridge-slot-a` and
 `gd32-bridge-slot-b` (the app linked per A/B slot, `.ramfunc` FMC loop
 in RAM, `SCB->VTOR` relocated).  First-flash of a partitioned part also
 needs the factory A/B metadata record —
-[`tools/gen_ota_metadata.py`](tools/gen_ota_metadata.py) generates it
-(flash to `0x08008000`); without it the bootloader idles in its
-recovery loop.  The full Path-A wire contract is
+[`tools/gen_ota_metadata.py`](tools/gen_ota_metadata.py) generates it:
+
+```bash
+python3 tools/gen_ota_metadata.py --slot-image build/gd32-bridge-slot-a.bin --out ota-meta-rec0.bin
+```
+
+flash the result to `0x08008000` (`OTA_META_REC0`) alongside the
+bootloader (`0x08000000`) and the slot-A image (`0x0800A000`); without
+it the bootloader idles in its recovery loop.  The full Path-A wire
+contract is
 [`docs/gd32-bridge-protocol.md` (alp-sdk)](https://github.com/alplabai/alp-sdk/blob/main/docs/gd32-bridge-protocol.md) §10.
 
 Validated on silicon 2026-06-04 (bench, protocol v0.6) for the A→B
@@ -197,6 +221,19 @@ repeating it:
 |  18 | PE14     | BT_REG_ON   |
 |  19 | PE15     | WL_REG_ON   |
 |  20 | PB13     | CAN_STBY    |
+
+Bits 8/9 (`PC14`/`PC15`, E1M IO24/IO25) are not ordinary pads: they are
+supplied through the backup-domain power switch together with SE_RST
+(`PC13`, the OPTIGA Trust M reset line), sharing a typical 3 mA source
+budget, capped at 2 MHz output toggle rate with a 30 pF max load
+(GD32G553xx Datasheet Rev2.0 p.130 Table 4-29 footnote 2; GD32G553 User
+Manual Rev1.2 p.133 §3.3.1). `GPIO_OSPEED_12MHZ` is already the slowest
+speed class the part offers, so the 2 MHz cap cannot be met by a
+firmware register change -- the host must not toggle IO24/IO25 faster
+than 2 MHz or load them beyond 30 pF, and current drawn through them
+competes with the milliamps holding SE_RST released. A carrier or host
+that ignores this budget can sag SE_RST below the OPTIGA's released
+threshold without either side seeing why.
 
 Any GD32 reset (WDT, fault, OTA A/B swap, SE reset) drops both REG_ON
 lines low and drives CAN_STBY high again -- the boot-time defaults in
