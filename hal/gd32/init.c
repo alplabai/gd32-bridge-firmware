@@ -533,6 +533,11 @@ extern void bridge_hw_dsp_pump(void);
  * page-region per tick so BEGIN never blocks the SPI reply inline.  No-op
  * in the OTA-inert build. */
 extern void ota_erase_tick(void);
+/* Deferred low-power entry (gh#63): executes a mode 2/3 request latched
+ * by bridge_hw_power_mode_set() on a quiet link, at base level -- never
+ * from a transport ISR.  Strong impl in hal/gd32/power.c. */
+extern void bridge_power_tick(void);
+
 /* BRD_I2C stuck-SDA detector (gh#39, erratum 2.3.1): polls the SDA pad
  * and runs the documented I2C software reset when the line is confirmed
  * stuck low.  Weak no-op on the stub backend (src/transport_i2c.c);
@@ -551,6 +556,7 @@ void bridge_hw_tick(void)
 	ota_erase_tick();
 	ota_confirm_tick();
 	bridge_transport_i2c_stuck_poll();
+	bridge_power_tick();
 }
 
 /* ----------------------------------------------------------------- */
