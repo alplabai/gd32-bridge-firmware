@@ -129,6 +129,15 @@ SECTIONS
         PROVIDE ( _heap_end = . );
         . = . + __stack_size;
         PROVIDE ( _sp       = . );
+        /* gh#146 / gh#259: the stack region's LOWER bound, programmed into
+         * MSPLIM by main() in src/boot/boot_main.c.  This is the one
+         * linked image with no host-driven SWD recovery on this HW rev --
+         * an unguarded overflow here bricks the part, not just reboots a
+         * supervisor -- so it gets the same limit as the app images even
+         * though this bootloader has no fault_handlers.c of its own to
+         * record the fault; see main()'s comment for what MSPLIM buys it
+         * without one. */
+        PROVIDE ( _stack_limit = _sp - __stack_size );
         . = ALIGN(8);
     } > RAM
 

@@ -189,6 +189,12 @@
 uint32_t bridge_core_clock_hz      = PWM_TIMER_CLK_HZ;
 bool     bridge_core_clock_matches = true;
 
+/* gh#146: the stack region's lower bound, provided by both linker
+ * scripts (toolchain/gd32g553_flash.ld, gd32g553_app_slot.ld.in --
+ * _stack_limit = _sp - __stack_size).  Programmed into MSPLIM at the
+ * head of bridge_hw_init(). */
+extern uint32_t _stack_limit[];
+
 /* I/O compensation cell verdict (gh#66): true after bridge_hw_init()
  * iff SYSCFG_CPSCTL.CPS_RDY confirmed the cell ready within its
  * bounded spin.  Volatile so a bench probe can read it after boot;
@@ -197,6 +203,64 @@ volatile bool gpio_compensation_ready;
 
 void bridge_hw_init(void)
 {
+	/* --- Stack costing + MSPLIM limit (gh#146) -----------------------
+	 *
+	 * THE COSTING (measured, not asserted): a full -Os build of the
+	 * gd32 backend with -fstack-usage (real vendor tree,
+	 * BRIDGE_OTA_PARTITIONED on) reports the worst single frame in the
+	 * firmware's own TUs at 248 bytes (adc_stream.c's FAC decode: the
+	 * int16 taps[BRIDGE_DSP_MAX_FIR_TAPS] + float fv[] pair, #132's
+	 * bounded stack), then 120 (transport_i2c), then a band of 88-104
+	 * (protocol dispatch frames, adc_stream, tmu, gpio).  The deepest
+	 * executable chains:
+	 *
+	 *   CS-EXTI (prio 1) -> protocol_dispatch -> worst opcode handler
+	 *     -> adc_stream path .......... <= ~248 + 104 + 88 + frame ~700
+	 *   + nested I2C-EV (prio 2) -> protocol_dispatch -> handler ~300
+	 *   + 2 exception frames (no FPU context: 32 B each) ........ ~64
+	 *   ---------------------------------------------------- approx 1.1 K
+	 *
+	 * against __stack_size = 2K: roughly 55% of the region on the
+	 * worst legal nesting, which is margin, not slack -- the ring of
+	 * #36's NMI_Handler on top costs another frame, and #132's taps[]
+	 * bound is what keeps the 248 from doubling.  Remeasure after any
+	 * change to adc_stream.c's decode (see the -fstack-usage recipe in
+	 * the commit message: cmake with -DCMAKE_C_FLAGS="-fstack-usage
+	 * -Os", then read the .su files; the bootloader image is measured
+	 * the same way against the SAME 2K).
+	 *
+	 * The limit is enforced, not just measured: MSPLIM (ARMv8-M,
+	 * ARMv8-M ARM B3.1) turns any excursion below _stack_limit into a
+	 * fault instead of a silent overflow into .heap / .bss.  This
+	 * firmware never sets SHCSR.USGFAULTENA (reset default: 0), so
+	 * that fault does NOT land in UsageFault_Handler -- it escalates
+	 * straight to HardFault_Handler, which fault_handlers.c's #36
+	 * work already records and resets from (CFSR/HFSR are the same
+	 * registers either way; see that file's header for what "record"
+	 * means).  This is FAIL-STOP, not just a record: the corruption
+	 * is caught before the write lands, not diagnosed after.
+	 *
+	 * That escalation is also why STKOFHFNMIGN is set right after
+	 * MSPLIM.  HardFault's own exception-entry stacking is, by
+	 * default, checked against the SAME limit it exists to report --
+	 * so a caught overflow can escalate a SECOND time, and the
+	 * ARMv8-M ARM (B1.5.3) defines a limit violation during
+	 * HardFault's own entry as a lockup, not a further escalation:
+	 * the core halts with no vector taken at all, invisible to
+	 * fault_handlers.c and, on some implementations, to an attached
+	 * debugger.  STKOFHFNMIGN (SCB->CCR bit 10) tells HardFault (and
+	 * NMI) to ignore the stack limit on their OWN entry so they are
+	 * guaranteed to actually run; the cost is that this one
+	 * exception-frame push can land up to 32 B below _stack_limit,
+	 * trading a sliver of the containment guarantee for a fault
+	 * record and reset over a silent lockup.  Set first thing -- ahead
+	 * of even the NVIC priority-group / SYSCFG-clock setup below -- so
+	 * everything but the vendor startup's own frames (which are
+	 * shallow, register-only) is guarded; neither write needs special
+	 * care beyond running once before any nesting. */
+	__set_MSPLIM((uint32_t)_stack_limit);
+	SCB->CCR |= SCB_CCR_STKOFHFNMIGN_Msk;
+
 	/* The priority numbers in bridge_board_config.h mean preemption levels
 	 * only under PRE2_SUB2. A Path-A bootloader handoff preserves AIRCR, and
 	 * the vendor helper otherwise retains a valid inherited grouping, so set

@@ -192,8 +192,42 @@ static void jump_to_slot(uint32_t slot_base)
 	((void (*)(void))reset)(); /* no return */
 }
 
+/* gh#146 / gh#259: the stack region's lower bound, provided by
+ * toolchain/gd32g553_bootloader.ld (_stack_limit = _sp - __stack_size,
+ * same derivation as the app images' linker scripts). */
+extern uint32_t _stack_limit[];
+
 int main(void)
 {
+	/* --- Stack-overflow guard (gh#146 / gh#259) -----------------------
+	 *
+	 * This image gets the SAME MSPLIM enforcement as
+	 * hal/gd32/init.c's bridge_hw_init(), and for a sharper reason: this
+	 * is the one linked image with no host-driven SWD reflash on this HW
+	 * rev (see the file header) -- an unguarded overflow here does not
+	 * just reboot a supervisor, it can corrupt the very metadata/slot
+	 * state this code is about to read and brick the part outright.
+	 *
+	 * Unlike hal/gd32/init.c, this file links no fault_handlers.c (the
+	 * bootloader has none of its own yet, per gh#259's "Also" note) --
+	 * without USGFAULTENA (never set here, matching the app image's
+	 * reset-default posture) a caught overflow escalates straight to
+	 * HardFault, which this bootloader leaves at the vendor startup's
+	 * weak `b .` alias.  That is still strictly better than the
+	 * unguarded case: a bounded hang an attached SWD probe can halt and
+	 * inspect (PC pinned in the fault vector, MSP at _stack_limit) beats
+	 * silent corruption of .bss/.data below the stack with no signal at
+	 * all.  STKOFHFNMIGN is set for the same lockup-avoidance reason as
+	 * bridge_hw_init(): without it, the HardFault entry's own exception-
+	 * frame push can itself violate the same limit it is trying to
+	 * report, which the architecture defines as an unrecoverable lockup
+	 * rather than a vector to `b .` -- setting the bit trades a few
+	 * bytes of the guarantee for landing in a state a debugger can
+	 * actually see and halt.  Set before anything else, including the
+	 * reset-cause read below, so the whole function body is covered. */
+	__set_MSPLIM((uint32_t)_stack_limit);
+	SCB->CCR |= SCB_CCR_STKOFHFNMIGN_Msk;
+
 	/* Read the reset cause ONCE, up front, then hand ownership of
 	 * RCU_RSTSCK's cause bits to the stash: after this point they are
 	 * cleared, so nothing later in this boot (or a future one) can
