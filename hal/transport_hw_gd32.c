@@ -372,24 +372,34 @@ void BRIDGE_SPI_CS_EXTI_HANDLER(void)
 		} else {
 			/* CS released: end of transaction.
              *
-			 * 1. Quiesce RX DMA, wait for CHEN to read clear, and execute a
-			 *    DSB before taking the residue.  A pending AHB beat must be
-			 *    visible in memory/count before the snapshot.  Then drain the
-			 *    (at most four-frame) byte-mode RX FIFO into the DMA tail.
-			 * 2. Quiesce TX DMA, then FLUSH + re-init the SPI via
-             *    the RCU reset (the only reliable FIFO flush; it also clears
-             *    BYTEN/DMAREN/DMATEN, which bridge_spi_periph_config
-             *    re-applies) so the peripheral is reception-ready while the
-             *    heavier decode below runs.
-             * 3. Feed the captured bytes through the byte seams and decode
-             *    (spi_slave_cs_high stages the reply; the all-0x00 reply-
-             *    drain gate in the portable layer is unchanged).
-             * 4. Drain the staged reply into the flat TX DMA buffer and
-             *    re-arm: RX for a full buffer, TX for exactly the reply.
+             * 1. Quiesce RX DMA, wait for CHEN to read clear, and execute a
+             *    DSB before taking the residue.  A pending AHB beat must be
+             *    visible in memory/count before the snapshot.  Then drain the
+             *    (at most four-frame) byte-mode RX FIFO into the DMA tail.
+             * 2. Quiesce TX DMA.  Read the SPI peripheral's RXORERR flag
+             *    HERE, before anything resets it: an overrun on the
+             *    just-finished receive makes the captured byte run just as
+             *    untrustworthy as a DMA ERRIF, so it feeds the SAME error
+             *    seam below rather than a second one.
+             * 3. FLUSH + re-init the SPI via the RCU reset (the only
+             *    reliable FIFO flush; it also clears BYTEN/DMAREN/DMATEN,
+             *    which bridge_spi_periph_config re-applies) so the
+             *    peripheral is reception-ready while the heavier decode
+             *    below runs.
+             * 4. Feed the captured bytes through the byte seams, then
+             *    re-arm RX BEFORE decoding.  The portable layer has copied
+             *    them, so a following transaction can safely reuse the DMA
+             *    buffer while protocol_dispatch() handles this one -- it
+             *    can perform ADC, FMC, or image-validation work, which
+             *    must not leave SPI deaf to the next transaction (#152).
+             * 5. Drain the staged reply into the flat TX DMA buffer and
+             *    arm TX for exactly that reply.
              *
              * Budget: steps 1-4 are register writes + CRC over <=69 B at
              * 216 MHz -- single-digit microseconds, well inside the master's
-             * inter-transaction gap (its CS setup window alone is 60 us). */
+             * inter-transaction gap (its CS setup window alone is 60 us);
+             * protocol_dispatch() in step 4 is deliberately outside that
+             * budget (see above). */
 			const bool rx_quiesced = spi_dma_disable_confirm(BRIDGE_SPI_RX_DMA_CH);
 			const bool tx_quiesced = spi_dma_disable_confirm(BRIDGE_SPI_TX_DMA_CH);
 			if (!rx_quiesced || !tx_quiesced) {
@@ -403,10 +413,25 @@ void BRIDGE_SPI_CS_EXTI_HANDLER(void)
 				return;
 			}
 
-			if (spi_dma_error_consume()) {
-				/* The byte run is incomplete or the staged reply was not sent.
-				 * Reset it and stage a definite STATUS_IO for the host's next
-				 * reply-read instead of decoding a truncated frame. */
+			const bool rx_overrun = (SPI_STAT(BRIDGE_SPI_PERIPH) & SPI_STAT_RXORERR) != 0u;
+
+			/* ONE error seam for every hardware-side fault that makes the
+			 * captured byte run untrustworthy -- a DMA ERRIF (a DMA-side
+			 * transfer error) OR an SPI-side RXORERR overrun -- both route
+			 * through spi_slave_transport_error() so the host sees a single,
+			 * consistent STATUS_IO envelope regardless of which layer
+			 * caught the fault.  spi_dma_error_consume() is called
+			 * unconditionally (never short-circuited away) so its latched
+			 * DMA error state is always drained even when rx_overrun alone
+			 * would already trip this branch. */
+			const bool dma_error = spi_dma_error_consume();
+			if (dma_error || rx_overrun) {
+				/* The byte run is incomplete, corrupt, or the staged reply
+				 * was not sent.  Reset it and stage a definite STATUS_IO for
+				 * the host's next reply-read instead of decoding a truncated
+				 * or overrun frame.  Re-arm RX before returning -- same
+				 * arm-before-dispatch posture as the success path below,
+				 * even though this path never reaches protocol_dispatch(). */
 				rcu_periph_reset_enable(RCU_SPI1RST);
 				rcu_periph_reset_disable(RCU_SPI1RST);
 				bridge_spi_periph_config();
@@ -442,6 +467,12 @@ void BRIDGE_SPI_CS_EXTI_HANDLER(void)
 			for (uint32_t i = 0; i < received; i++) {
 				spi_slave_rx_byte(spi_rx_dma_buf[i]);
 			}
+			/* The portable staging owns a copy now. Do not defer this arm until
+			 * after dispatch: a new frame arriving during a slow command must
+			 * be captured, not dropped at SPI1.  rx_overrun was already ruled
+			 * out above (it took the error-seam return), so this is always
+			 * the clean-decode path. */
+			spi_dma_arm_rx();
 			spi_slave_cs_high();
 
 			uint32_t reply_len = 0;
@@ -449,7 +480,6 @@ void BRIDGE_SPI_CS_EXTI_HANDLER(void)
 				spi_tx_dma_buf[reply_len++] = spi_slave_tx_next_byte();
 			}
 
-			spi_dma_arm_rx();
 			spi_dma_arm_tx(reply_len);
 		}
 	}
