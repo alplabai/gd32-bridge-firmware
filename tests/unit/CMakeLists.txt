@@ -495,3 +495,22 @@ target_include_directories(test_protocol_vectors PRIVATE ${FW}/src ${FW}/hal ${P
 target_compile_options(test_protocol_vectors PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_protocol_vectors PRIVATE ztest_shim)
 add_test(NAME protocol_vectors COMMAND test_protocol_vectors)
+
+# --- spi_dma_arm_status: gh#268 arm-failure status/counter -----------------
+#
+# hal/gd32/spi_dma_arm_status.c is the vendor-header-free half of the
+# gh#268 fix: spi_dma_arm_rx()/spi_dma_arm_tx() (hal/transport_hw_gd32.c)
+# now return bool and call this on a spi_dma_disable_confirm() timeout so a
+# failed arm is counted and surfaced via spi_dma_error_pending instead of
+# silently leaving the channel unarmed.  transport_hw_gd32.c itself is NOT
+# linked here (it pulls "gd32g5x3.h" plus the full SPI+I2C register
+# surface, same adc_stream.c trade the adc_dsp target above documents) --
+# this pins the shared side-effect helper directly.
+add_executable(test_spi_dma_arm_status
+    spi_dma_arm_status/src/test_spi_dma_arm_status.c
+    ${FW}/hal/gd32/spi_dma_arm_status.c
+)
+target_include_directories(test_spi_dma_arm_status PRIVATE ${FW}/hal/gd32)
+target_compile_options(test_spi_dma_arm_status PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_spi_dma_arm_status PRIVATE ztest_shim)
+add_test(NAME spi_dma_arm_status COMMAND test_spi_dma_arm_status)

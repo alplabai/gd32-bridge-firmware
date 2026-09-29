@@ -102,6 +102,7 @@ elseif(BRIDGE_HAL_BACKEND STREQUAL "gd32")
         hal/gd32/pwm_preload_transaction.c
         hal/gd32/qenc.c
         hal/gd32/se_reset.c
+        hal/gd32/spi_dma_arm_status.c
         hal/gd32/timer_sync.c
         hal/gd32/timer_sync_iti.c
         hal/gd32/timer_sync_master.c

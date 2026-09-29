@@ -61,6 +61,7 @@
 #include "gd32/i2c_event_priority.h"
 #include "gd32/i2c_recovery.h"
 #include "gd32/i2c_timeout.h"
+#include "gd32/spi_dma_arm_status.h"
 #include "protocol.h"  /* GD32_BRIDGE_DEFAULT_I2C_ADDR */
 #include "transport.h" /* the seams we drive */
 
@@ -116,6 +117,17 @@ static uint8_t           spi_tx_dma_buf[BRIDGE_SPI_DMA_BUF_LEN];
 static volatile uint32_t spi_dma_rx_error_count;
 static volatile uint32_t spi_dma_tx_error_count;
 static volatile bool     spi_dma_error_pending;
+/* CHEN-confirmation failures at arm time (gh#268): spi_dma_disable_confirm()
+ * timing out before spi_dma_arm_{rx,tx}() reload the channel leaves that
+ * channel unarmed -- RX silently deaf, or a staged reply silently never
+ * sent.  Sticky counters make the failure observable over SWD even though
+ * neither arm site has anywhere else to report it (init runs before any
+ * host exists, and the CS EXTI handler is void); spi_dma_error_pending is
+ * also set so the very next CS-rising decode routes the transaction through
+ * the same STATUS_IO seam as a DMA ERRIF, instead of silently returning a
+ * truncated/empty capture the host can't tell apart from "no traffic". */
+static volatile uint32_t spi_dma_rx_arm_fail_count;
+static volatile uint32_t spi_dma_tx_arm_fail_count;
 
 /* DMA error IRQs deliberately run below CS EXTI (priority 1).  The CS-rising
  * handler also samples ERRIF directly, so an error that arrives just before
@@ -224,26 +236,34 @@ static void spi_dma_init(void)
 
 /* Re-arm RX for a fresh transaction: full staging buffer.  CHCNT may only
  * be written while the channel is disabled. */
-static void spi_dma_arm_rx(void)
+static bool spi_dma_arm_rx(void)
 {
-	if (!spi_dma_disable_confirm(BRIDGE_SPI_RX_DMA_CH)) return;
+	if (!spi_dma_disable_confirm(BRIDGE_SPI_RX_DMA_CH)) {
+		spi_dma_arm_record_confirm_fail(&spi_dma_rx_arm_fail_count, &spi_dma_error_pending);
+		return false;
+	}
 	dma_memory_address_config(BRIDGE_SPI_DMA, BRIDGE_SPI_RX_DMA_CH, (uint32_t)spi_rx_dma_buf);
 	dma_transfer_number_config(BRIDGE_SPI_DMA, BRIDGE_SPI_RX_DMA_CH, BRIDGE_SPI_DMA_BUF_LEN);
 	dma_channel_enable(BRIDGE_SPI_DMA, BRIDGE_SPI_RX_DMA_CH);
+	return true;
 }
 
 /* Arm TX with exactly the staged reply (never more: the GD32 SPI has no
  * TX-underrun error and no FIFO flush, so over-queued bytes would stick --
  * the same invariant the old per-byte path enforced via tx_pending()). */
-static void spi_dma_arm_tx(uint32_t len)
+static bool spi_dma_arm_tx(uint32_t len)
 {
-	if (!spi_dma_disable_confirm(BRIDGE_SPI_TX_DMA_CH)) return;
+	if (!spi_dma_disable_confirm(BRIDGE_SPI_TX_DMA_CH)) {
+		spi_dma_arm_record_confirm_fail(&spi_dma_tx_arm_fail_count, &spi_dma_error_pending);
+		return false;
+	}
 	if (len == 0u) {
-		return;
+		return true;
 	}
 	dma_memory_address_config(BRIDGE_SPI_DMA, BRIDGE_SPI_TX_DMA_CH, (uint32_t)spi_tx_dma_buf);
 	dma_transfer_number_config(BRIDGE_SPI_DMA, BRIDGE_SPI_TX_DMA_CH, len);
 	dma_channel_enable(BRIDGE_SPI_DMA, BRIDGE_SPI_TX_DMA_CH);
+	return true;
 }
 
 static void spi_cs_exti_init(void)
@@ -302,9 +322,11 @@ void bridge_transport_spi_hw_init(void)
 {
 	bridge_rcu_periph_clock_enable(BRIDGE_SPI_RCU);
 	spi_gpio_init();
-	spi_dma_rx_error_count = 0u;
-	spi_dma_tx_error_count = 0u;
-	spi_dma_error_pending  = false;
+	spi_dma_rx_error_count    = 0u;
+	spi_dma_tx_error_count    = 0u;
+	spi_dma_error_pending     = false;
+	spi_dma_rx_arm_fail_count = 0u;
+	spi_dma_tx_arm_fail_count = 0u;
 	spi_dma_init();
 	bridge_spi_periph_config();
 	spi_dma_arm_rx();
