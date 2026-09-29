@@ -2014,8 +2014,11 @@ ZTEST(gd32_bridge_ota, test_commit_no_marker_refused)
 	ota_meta_record_t after;
 	uint32_t          which;
 	zassert_true(meta_current_for_test(&after, &which));
-	zassert_equal(which, OTA_META_REC0, "a refused COMMIT must not touch either metadata page");
-	zassert_equal(after.counter, 5u, "a refused COMMIT must leave the metadata record untouched");
+	/* The only generation written is BEGIN's gh#36 demotion of the
+	 * target (counter 5 -> 6, onto the blank REC1 page); the refused
+	 * COMMIT itself adds none. */
+	zassert_equal(which, OTA_META_REC1, "only BEGIN's demotion generation may be written");
+	zassert_equal(after.counter, 6u, "a refused COMMIT must not add a metadata generation");
 	zassert_equal(
 	    after.active_slot, TEST_RUNNING_SLOT, "a refused COMMIT must not flip the active slot");
 	zassert_equal(after.flags, 0u, "a refused COMMIT must not touch flags");
