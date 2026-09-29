@@ -497,6 +497,59 @@ ZTEST(gd32_adc_seq, test_fac_pump_biases_input_and_rebiases_output)
 	bridge_hw_adc_stream_end(0u);
 }
 
+ZTEST(gd32_adc_seq, test_fac_pump_biases_a_10bit_stream_by_its_own_full_scale)
+{
+	/* gh#253: hal/gd32/adc_stream.c hardcoded the FAC pump's input
+	 * bias/scale to the 12-bit mid-scale (2048) and a fixed <<3, and
+	 * the output re-bias clamped to a hardcoded [0, 4095].  A legal
+	 * 10-bit stream (adc_full_scale_for_bits(10) == 1023, see adc.c)
+	 * rails on every sample instead: this pins the fix deriving both
+	 * from the stream's OWN s->full_scale. */
+	adc_seq_reset();
+	fac_latch_release();
+	zassert_equal(
+	    bridge_hw_adc_stream_begin(0u, BRIDGE_ADC_CH0, 1000u), BRIDGE_HW_OK, "stream_begin");
+	bind_f32_iir(0.25f, 0.5f, 0.25f, -1.561018075800718f, 0.641351538057563f);
+	adc_streams[0].full_scale = 1023u; /* simulate a 10-bit stream */
+
+	/* code 640 = 10-bit mid-scale (512) + 128.  A correct 10-bit
+	 * decode hands the FAC x = (640 - 512) << 5 = +4096 -- the SAME
+	 * FAC input the 12-bit test drives with (2560 - 2048) << 3, so a
+	 * hardcoded-12-bit decode is caught by comparing against this
+	 * exact word, not just by "did not crash". */
+	adc_streams[0].ring[0] = 640u;
+	mock_dma_set_remaining(DMA0, DMA_CH0, BRIDGE_ADC_STREAM_RING_SAMPLES - 1u);
+
+	/* Same -8192 FAC output as the 12-bit test.  A hardcoded 12-bit
+	 * decode re-biases this to ((-8192 >> 3) + 2048) = 1024, clipped
+	 * into [0, 4095] -- silently wrong AND silently in-range for a
+	 * 10-bit stream.  The correct 10-bit decode is
+	 * ((-8192 >> 5) + 512) = 256, inside [0, 1023]. */
+	mock_fac_read_value = -8192;
+	bridge_hw_dsp_pump();
+
+	zassert_equal(mock_fac_last_write, 4096, "10-bit input must bias off its OWN full_scale");
+	zassert_equal(adc_streams[0].proc_write, 1u, "one processed sample produced");
+	zassert_equal(adc_streams[0].proc_ring[0],
+	              256u,
+	              "10-bit output re-bias must map -8192 to code 256, not the 12-bit answer 1024");
+
+	/* A large positive FAC output must clip to the STREAM's full_scale
+	 * (1023), not the hardcoded 4095 -- a hardcoded clamp would still
+	 * silently hand the host an out-of-range 10-bit code. */
+	adc_streams[0].ring[1] = 640u;
+	mock_dma_set_remaining(DMA0, DMA_CH0, BRIDGE_ADC_STREAM_RING_SAMPLES - 2u);
+	mock_fac_read_value = 32767;
+	bridge_hw_dsp_pump();
+
+	zassert_equal(adc_streams[0].proc_write, 2u, "second processed sample produced");
+	zassert_equal(adc_streams[0].proc_ring[1],
+	              1023u,
+	              "positive rail must clip to the stream's own full_scale (1023), not 4095");
+
+	bridge_hw_adc_stream_end(0u);
+}
+
 ZTEST(gd32_adc_seq, test_fac_saturation_is_sticky)
 {
 	adc_seq_reset();

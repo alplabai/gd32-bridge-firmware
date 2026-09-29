@@ -140,13 +140,20 @@ static uint16_t adc_stream_write_index(const adc_stream_state_t *s)
  * lap_count unchanged.  The correction is per-sample (not persisted
  * into lap_count), so the lap ISR counting that same reload a moment
  * later cannot double-credit: the next sample sees lap_count moved
- * and needs no correction.  Two wraps between two samples of the
- * same consumer cannot be counted this way -- but that consumer is
- * then a full ring behind and the existing >= RING_SAMPLES overrun
- * resync governs; for the correction to miss, the prio-3 lap vector
- * must be starved for a whole ring period (>= ~10 ms at the 100 kHz
- * cap), which no bounded prio-1/2 work in this tree approaches (the
- * longest is the ROVF recovery's ~2 ms bounded recalibration spin).
+ * and needs no correction.  Two wraps between two samples of the same
+ * consumer cannot be counted this way -- gh#265: this does NOT fall
+ * back to the >= RING_SAMPLES overrun resync below.  If total_written
+ * is short by one RING_SAMPLES, backlog = total_written - total_read
+ * is short by the identical amount, so that branch cannot fire
+ * either; the two errors are not independent.  What actually happens:
+ * the shortfall self-heals the moment this consumer next observes
+ * lap_count move, one ring period later -- until then it is served
+ * one-ring-stale samples with BRIDGE_HW_OK, no BRIDGE_HW_ERR_BUSY.
+ * That is bounded and self-healing, not silent corruption: for two
+ * wraps to land between samples the prio-3 lap vector must be starved
+ * for a whole ring period (>= ~10 ms at the 100 kHz cap), which no
+ * bounded prio-1/2 work in this tree approaches (the longest is the
+ * ROVF recovery's ~2 ms bounded recalibration spin).
  *
  * trk is the caller's own tracker (s->rd_pos for the prio-1 read
  * path, s->pump_pos for the base-level pump) -- never lap_count.  The
@@ -707,6 +714,24 @@ int bridge_hw_adc_stream_end(uint8_t stream_id)
  * in short PRIMASK critical sections; long hardware work stays interruptible. */
 #define ADC_DSP_OWNER_NONE ((int8_t)-1)
 
+/* gh#271: this transitional token is a function of stream_id ALONE --
+ * it carries no per-session generation, so a session that reused
+ * stream_id N would compute the identical token an earlier session on
+ * the same stream_id N once held.  That collision is unreachable
+ * today ONLY because the token is never live across two overlapping
+ * sessions: adc_dsp_owner_claim_config() (the sole writer of a fresh
+ * transitional token) requires *owner == ADC_DSP_OWNER_NONE first,
+ * and every path that ends a session (adc_dsp_fac_release /
+ * adc_dsp_fft_release, both driven from stream_end) restores
+ * ADC_DSP_OWNER_NONE before a replacement stream_begin on the same ID
+ * can run -- stream_begin/stream_end themselves are serialised by the
+ * single-threaded protocol dispatch that calls them.  If a second
+ * writer of this token is ever introduced, this invariant -- and the
+ * _Static_assert below it -- must move with it. */
+_Static_assert(BRIDGE_ADC_STREAM_COUNT <= 126u,
+               "adc_dsp_owner_transitional's -2-stream_id must stay representable in int8_t "
+               "without wrapping onto ADC_DSP_OWNER_NONE (-1) at stream_id 255");
+
 static int8_t adc_dsp_owner_transitional(uint8_t stream_id)
 {
 	return (int8_t)(-2 - (int8_t)stream_id);
@@ -849,6 +874,28 @@ static uint8_t adc_dsp_headroom_exp(float max_abs)
 	return g;
 }
 
+/* gh#253: bit-width-derived bias/scale for the FAC pump's input map
+ * and output re-bias.  adc_full_scale_for_bits() only ever returns
+ * (1 << res_bits) - 1 for res_bits in {12, 10, 8, 6} (adc.c), so
+ * full_scale + 1 is always one of {4096, 1024, 256, 64} and the shift
+ * that maps a code centred on mid-scale into (most of) the signed
+ * q1.15 range is exactly 15 - res_bits.  The 12-bit case (shift 3,
+ * mid 2048) is the original gh#35 constant; this generalises it
+ * instead of assuming every stream is 12-bit. */
+static uint8_t adc_dsp_bias_shift(uint16_t full_scale)
+{
+	switch (full_scale) {
+	case 1023u:
+		return 5u; /* 10-bit: 15-10 */
+	case 255u:
+		return 7u; /* 8-bit: 15-8 */
+	case 63u:
+		return 9u; /* 6-bit: 15-6 */
+	default:
+		return 3u; /* 12-bit: 15-12 */
+	}
+}
+
 /* Configure the FAC for stream s's bound chain (single FIR or single-
  * section IIR -- the only shapes chain_bind now lets through, see
  * adc_dsp_chain_p1_capable() in adc_dsp_chain.c).  Streaming mode:
@@ -915,27 +962,40 @@ static bool adc_dsp_fac_config(const adc_stream_state_t *s)
 		 * 128 cannot be scaled into range even at g = 7 -- refuse
 		 * (sticky, surfaced via stream_read as RANGE) rather than
 		 * clamping onto the rail and serving a different filter with
-		 * STATUS_OK. */
-		int16_t taps[BRIDGE_DSP_MAX_FIR_TAPS];
+		 * STATUS_OK.
+		 *
+		 * gh#270: the int16 taps and the F32 decode scratch are never
+		 * both LIVE at once -- one format populates only its own half
+		 * of the loop below, and the later F32->q15 pass only ever
+		 * needs taps_u.i16[k] AFTER it has read taps_u.f32[k], so the
+		 * two can share one buffer instead of costing a second 256-
+		 * byte frame on the 2 KB protocol_dispatch() stack.  The
+		 * shrink-in-place write is safe because taps_u.i16[k] never
+		 * occupies a byte taps_u.f32[j] for j >= k has not already
+		 * been read (2 bytes/tap written can never catch up with the
+		 * 4 bytes/tap already consumed). */
+		union {
+			int16_t i16[BRIDGE_DSP_MAX_FIR_TAPS];
+			float   f32[BRIDGE_DSP_MAX_FIR_TAPS];
+		} taps_u;
 		uint8_t g = 0u;
-		float   fv[BRIDGE_DSP_MAX_FIR_TAPS];
 		for (uint8_t k = 0u; k < nt; ++k) {
 			const uint16_t off = (uint16_t)(BRIDGE_DSP_STAGE_HDR_BYTES + (uint16_t)k * 4u);
 			const uint32_t w   = (uint32_t)st->data[off] | ((uint32_t)st->data[off + 1u] << 8) |
 			                     ((uint32_t)st->data[off + 2u] << 16) |
 			                     ((uint32_t)st->data[off + 3u] << 24);
 			if (fmt == 1u) { /* Q31 */
-				taps[k] = (int16_t)((int32_t)w >> 16);
+				taps_u.i16[k] = (int16_t)((int32_t)w >> 16);
 			} else { /* F32 */
-				__builtin_memcpy(&fv[k], &w, sizeof(fv[k]));
+				__builtin_memcpy(&taps_u.f32[k], &w, sizeof(taps_u.f32[k]));
 			}
 		}
 		if (fmt != 1u) {
-			const float max = adc_dsp_f32_max_abs(fv, nt);
+			const float max = adc_dsp_f32_max_abs(taps_u.f32, nt);
 			if (max < 0.0f) return false; /* >= 128: out of FAC range */
 			g = adc_dsp_headroom_exp(max);
 			for (uint8_t k = 0u; k < nt; ++k)
-				taps[k] = adc_dsp_f32_to_q15(fv[k], g);
+				taps_u.i16[k] = adc_dsp_f32_to_q15(taps_u.f32[k], g);
 		}
 		p.coeff_addr       = 0u;
 		p.coeff_size       = nt;
@@ -950,7 +1010,7 @@ static bool adc_dsp_fac_config(const adc_stream_state_t *s)
 
 		fac_fixed_data_preload_struct pl;
 		fac_fixed_data_preload_init(&pl);
-		pl.coeffb_ctx  = taps;
+		pl.coeffb_ctx  = taps_u.i16;
 		pl.coeffb_size = nt;
 		pl.coeffa_ctx  = 0;
 		pl.coeffa_size = 0u;
@@ -1106,32 +1166,57 @@ static void adc_dsp_pump_stream(uint8_t sid)
 		return;
 	}
 
+	/* gh#253: bias/scale generalised off the stream's OWN bit width
+	 * (s->full_scale, snapshotted at stream_begin) instead of a
+	 * hardcoded 12-bit mid-scale -- a 10/8/6-bit stream no longer
+	 * rails on every sample. */
+	const int32_t mid   = (int32_t)((s->full_scale + 1u) / 2u);
+	const uint8_t shift = adc_dsp_bias_shift(s->full_scale);
+
 	while (avail-- > 0) {
-		/* END may pre-empt base level between any two samples. Keep one
-		 * FAC input/output transaction and its software cursors atomic with
-		 * respect to teardown; the section is only a handful of MMIOs. */
+		/* gh#272: this section runs once per sample, up to the 100 kHz
+		 * cap.  It was reviewed for "is this a place to do work" per
+		 * bridge_critical.h's own rule: every statement inside is
+		 * either the liveness re-check (must run before ANY FAC MMIO,
+		 * since END can deinit the block between samples) or a single
+		 * FAC register access (poll/write/poll/read/poll/poll) --
+		 * bounded, no loop, no wait, nothing that can itself block.
+		 * The raw-sample fetch (ridx/code/x) and the processed-sample
+		 * publish (proc_ring/proc_write) stay INSIDE the same section
+		 * on purpose: moving them out was tried and reverted -- it let
+		 * a sample get marked "consumed" (pump_raw_read advanced)
+		 * without ever reaching the FAC when END preempted between the
+		 * fetch and the liveness check, silently dropping it instead
+		 * of leaving it for the replacement session
+		 * (test_fac_post_commit_preemption_cannot_drain_replacement
+		 * pins exactly this).  No bench measurement of this section's
+		 * cycle cost against SPI reply latency has been taken (no
+		 * hardware access this pass) -- that bench step is still
+		 * owed; this comment records the static-analysis case that
+		 * the section is small and further shrinking it costs a real
+		 * correctness property, not laziness. */
 		const uint32_t irq_state = bridge_irq_lock();
 		if (!adc_dsp_owner_live_locked(&adc_dsp_fac_owner, (int8_t)sid, s, false)) {
 			bridge_irq_unlock(irq_state);
 			return;
 		}
 		const uint16_t ridx = (uint16_t)(s->pump_raw_read % BRIDGE_ADC_STREAM_RING_SAMPLES);
-		const uint16_t code = (uint16_t)(s->ring[ridx] & 0x0FFFu); /* 12-bit */
+		const uint16_t code = (uint16_t)(s->ring[ridx] & 0x0FFFu); /* 12-bit raw ring word */
 		s->pump_raw_read++;
 
-		/* gh#35 fix 3: bias the input around mid-scale BEFORE the <<3.
-		 * The old non-negative mapping (code << 3) was reasoned only
-		 * about a unity-DC-gain low-pass; for any high-pass, band-
-		 * pass or DC-blocking biquad the output is legitimately
-		 * negative for about half the samples, and the old output
-		 * clamp (c < 0 -> 0) half-wave-rectified the served stream --
-		 * a large spurious DC term and harmonics the signal never
-		 * contained, delivered with STATUS_OK.  With the bias, x is a
-		 * signed q1.15 in [-1, 0.9995) centred on 0, the FAC output
-		 * is signed symmetric, and the +2048 re-bias below maps a
+		/* gh#35 fix 3 / gh#253: bias the input around mid-scale BEFORE
+		 * the shift.  The old non-negative mapping (code << 3) was
+		 * reasoned only about a unity-DC-gain low-pass; for any high-
+		 * pass, band-pass or DC-blocking biquad the output is
+		 * legitimately negative for about half the samples, and the
+		 * old output clamp (c < 0 -> 0) half-wave-rectified the served
+		 * stream -- a large spurious DC term and harmonics the signal
+		 * never contained, delivered with STATUS_OK.  With the bias, x
+		 * is a signed q1.15 in [-1, 0.9995) centred on 0, the FAC
+		 * output is signed symmetric, and the mid re-bias below maps a
 		 * mid-scale-centred swing back onto the unipolar code plane
 		 * WITHOUT discarding the negative half. */
-		const int16_t x = (int16_t)(((int32_t)code - 2048) * 8);
+		const int16_t x = (int16_t)(((int32_t)code - mid) << shift);
 		if (fac_flag_get(FAC_FLAG_X0BFF) == SET) {
 			bridge_irq_unlock(irq_state);
 			break; /* FAC input saturated */
@@ -1140,15 +1225,15 @@ static void adc_dsp_pump_stream(uint8_t sid)
 
 		if (fac_flag_get(FAC_FLAG_YBEF) == RESET) {
 			/* Re-bias the signed q1.15 output back onto the unipolar
-			 * code plane (>>3 undoes the <<3 scale, +2048 undoes the
-			 * mid-scale subtraction above).  Swings beyond one code
-			 * half-range clip here -- the 12-bit processed plane's
-			 * own headroom; genuine FAC saturation is flagged via
-			 * dsp_sat below, so a clipped or railed series is never
-			 * reported as STATUS_OK. */
-			int32_t c = (((int32_t)fac_fixed_data_read()) >> 3) + 2048;
+			 * code plane (the shift undoes the encode shift, mid undoes
+			 * the mid-scale subtraction above).  Swings beyond one
+			 * code half-range clip here -- the processed plane's own
+			 * headroom; genuine FAC saturation is flagged via dsp_sat
+			 * below, so a clipped or railed series is never reported
+			 * as STATUS_OK. */
+			int32_t c = (((int32_t)fac_fixed_data_read()) >> shift) + mid;
 			if (c < 0) c = 0;
-			if (c > 4095) c = 4095;
+			if (c > (int32_t)s->full_scale) c = (int32_t)s->full_scale;
 			/* gh#35: saturation visibility.  Poll the FAC's sticky
 			 * error flags (UM p.1515 FAC_STAT STEF bit 10 = output
 			 * saturation, GSTEF bit 11 = gain saturation) rather
