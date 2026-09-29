@@ -101,6 +101,27 @@ ZTEST(gd32_adc_seq, test_stream_begin_recalibrates_after_enable)
 	zassert_true(calib_i > enable_i, "calibration must run AFTER adc_enable, not before (#34)");
 }
 
+/* #183 -- dma_init() must reload the DMA count for a new session.  Without
+ * that mock contract, a DSP pump after restart sees samples which only
+ * existed in the preceding stream. */
+ZTEST(gd32_adc_seq, test_stream_restart_reloads_dma_count)
+{
+	adc_seq_reset();
+
+	int rc = bridge_hw_adc_stream_begin(0u, BRIDGE_ADC_CH0, 1000u);
+	zassert_equal(rc, BRIDGE_HW_OK, "first stream begins against the mock");
+	mock_dma_set_remaining(DMA0, DMA_CH0, BRIDGE_ADC_STREAM_RING_SAMPLES - 32u);
+
+	rc = bridge_hw_adc_stream_end(0u);
+	zassert_equal(rc, BRIDGE_HW_OK, "first stream ends against the mock");
+	rc = bridge_hw_adc_stream_begin(0u, BRIDGE_ADC_CH0, 1000u);
+	zassert_equal(rc, BRIDGE_HW_OK, "replacement stream begins against the mock");
+
+	zassert_equal(dma_transfer_number_get(DMA0, DMA_CH0),
+	              BRIDGE_ADC_STREAM_RING_SAMPLES,
+	              "dma_init must reload the full count, not retain stale remainder (#183)");
+}
+
 /* ---------------------------------------------------------------------
  * #44 test 1 -- stream_begin clears ROVF before adc_enable.
  * --------------------------------------------------------------------- */

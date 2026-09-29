@@ -642,9 +642,10 @@ static bool adc_dsp_fac_config(const adc_stream_state_t *s)
 		 * is provably in range from THIS function alone, without the
 		 * reader (or a future editor of adc_dsp_chain.c) having to
 		 * carry the bound across a translation-unit boundary.  `taps`
-		 * lives on the single 2 KB stack that also carries the I2C
-		 * ISR's protocol_dispatch() and a nested CS-EXTI ISR, with no
-		 * MSPLIM and no stack painting: an overflow here is silent. */
+		 * lives on the single 2 KB stack used by the transport ISR's
+		 * protocol_dispatch().  Nested dispatch is refused by #19, but
+		 * there is still no MSPLIM or stack painting: an overflow here
+		 * is silent. */
 		if (nt == 0u || nt > BRIDGE_DSP_MAX_FIR_TAPS) return false;
 		if (st->total_size != (uint16_t)(BRIDGE_DSP_STAGE_HDR_BYTES + (uint16_t)nt * 4u))
 			return false;

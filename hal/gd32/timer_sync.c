@@ -14,13 +14,14 @@
 #include "bridge_hw.h"
 #include "gd32g5x3.h"
 
-#include "gd32_common.h"
 #include "timer_sync_iti.h"
 
 /* Master/slave id (host-side enum) -> GD32 peripheral base address.
- * The protocol-level contract numbers the three advanced timers
- * compactly as 0 = TIMER0, 1 = TIMER7, 2 = TIMER19; this keeps the
- * wire byte small without naming the underlying SoC peripheral. */
+ * The protocol-level contract numbers the two initialised PWM timers
+ * compactly as 0 = TIMER0 and 1 = TIMER7.  TIMER19 is deliberately not
+ * exposed: this firmware never clocks, initialises or starts it, so
+ * accepting the old id 2 would report success after programming only
+ * the other half of a master/slave pair (#142). */
 static uint32_t timer_sync_periph(uint8_t id)
 {
 	switch (id) {
@@ -28,8 +29,6 @@ static uint32_t timer_sync_periph(uint8_t id)
 		return TIMER0;
 	case 1u:
 		return TIMER7;
-	case 2u:
-		return TIMER19;
 	default:
 		return 0u;
 	}
@@ -37,10 +36,10 @@ static uint32_t timer_sync_periph(uint8_t id)
 
 int bridge_hw_timer_sync(uint8_t master, uint8_t slave, uint8_t mode)
 {
-	if (master == slave) return BRIDGE_HW_ERR_INVAL;
 	const uint32_t mp = timer_sync_periph(master);
 	const uint32_t sp = timer_sync_periph(slave);
 	if (mp == 0u || sp == 0u) return BRIDGE_HW_ERR_RANGE;
+	if (master == slave) return BRIDGE_HW_ERR_INVAL;
 
 	/* Translate the wire `mode` byte (host-defined: 0 disabled,
      * 1 reset, 2 gated, 3 trigger, 4 external-clock, 5 encoder-mode-1)
