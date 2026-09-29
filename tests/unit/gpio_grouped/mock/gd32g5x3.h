@@ -21,13 +21,16 @@
 #define GPIO_PIN_10 ((uint32_t)1u << 10)
 #define GPIO_PIN_11 ((uint32_t)1u << 11)
 #define GPIO_PIN_12 ((uint32_t)1u << 12)
+#define GPIO_PIN_13 ((uint32_t)1u << 13)
 #define GPIO_PIN_14 ((uint32_t)1u << 14)
 #define GPIO_PIN_15 ((uint32_t)1u << 15)
 
 #define GPIO_OTYPE_PP     ((uint32_t)0u)
 #define GPIO_OSPEED_12MHZ ((uint32_t)0u)
+#define GPIO_MODE_INPUT   ((uint32_t)0u)
 #define GPIO_MODE_OUTPUT  ((uint32_t)1u)
 #define GPIO_PUPD_NONE    ((uint32_t)0u)
+#define GPIO_PUPD_PULLUP  ((uint32_t)1u)
 
 uint32_t *mock_gpio_bop_lvalue(uint32_t gpio_periph);
 #define GPIO_BOP(gpio_periph) (*mock_gpio_bop_lvalue(gpio_periph))

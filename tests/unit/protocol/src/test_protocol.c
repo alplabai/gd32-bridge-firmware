@@ -7,13 +7,12 @@
  * HAL in tests/unit/fake/bridge_hw_fake.{h,c}.
  *
  * WHY this suite exists: hal/bridge_hw_stub.c answers BRIDGE_HW_ERR_NOTIMPL
- * for essentially every call, so the transport_spi/transport_i2c suites
- * (which link the stub) can only ever reach STATUS_OK on the opcodes with no
- * hardware dependency (CMD_PING, CMD_GET_VERSION, CMD_GET_BUILD_ID,
- * CMD_LINK_FEATURES).  Every HAL-backed opcode -- the large majority of
- * protocol.c's 1025 lines -- goes untouched.  Linking the fake instead of the
- * stub lets each opcode reach STATUS_OK, and lets a test force any single
- * BRIDGE_HW_ERR_* return to check what STATUS_* the dispatcher maps it to.
+ * for essentially every call, so the stub-backed transport_spi suite can
+ * only reach STATUS_OK on opcodes with no hardware dependency (CMD_PING,
+ * CMD_GET_VERSION, CMD_GET_BUILD_ID, CMD_LINK_FEATURES).  Linking the fake
+ * here instead lets every HAL-backed opcode reach STATUS_OK, and lets a test
+ * force any single BRIDGE_HW_ERR_* return to check what STATUS_* the
+ * dispatcher maps it to.
  *
  * Four axes, table-driven, for every opcode protocol_dispatch() switches on:
  *   1. req_payload_len: the documented exact (or, for CMD_ADC_DSP_STAGE_PUSH,
@@ -74,14 +73,12 @@
  * (via `gh issue view`) before writing this file, each of them left
  * deliberately UNCOVERED rather than pinned either way (a case asserting the
  * documented/corrected mapping would be red today; a case asserting today's
- * mapping would cement the bug and fight the eventual fix).  #23's B2/B3/B4
- * are now FIXED (see below); B5 is still open.
+ * mapping would cement the bug and fight the eventual fix).  #23's B2-B5
+ * are now fixed (see below).
  *
  *   - #23 -- several handlers flattened distinct HAL errors to STATUS_IO
  *     instead of running them through the central status_from_hw() mapper
- *     every other handler uses.  B2/B3/B4 are fixed as of this change; B5
- *     is a separate, still-open defect this suite continues to leave
- *     uncovered:
+ *     every other handler uses.  B2-B5 are fixed:
  *       * handle_adc_read (src/protocol.c) now routes its whole
  *         BRIDGE_HW_ERR_* -> STATUS_* translation through status_from_hw()
  *         (issue's B2, FIXED).  RANGE, BUSY, INVAL and the generic IO
@@ -98,30 +95,12 @@
  *         previously-swallowed INVAL and RANGE -- through status_from_hw()
  *         (issue's B4, FIXED).  NOTIMPL, BUSY, INVAL and RANGE are all
  *         pinned below.
- *       * handle_pwm_capture_read (src/protocol.c:691) routes through
- *         status_from_hw() -- correct plumbing -- but the HAL contract it
- *         is fed (hal/bridge_hw.h:279-281, hal/gd32/pwm_capture.c:248)
- *         overloads BRIDGE_HW_ERR_NOTIMPL to also mean "capture ring empty,
- *         poll again", the same code every OTHER opcode uses for "this HAL
- *         body doesn't exist" (issue's B5, STILL OPEN).  The correct wire
- *         code is STATUS_NOT_READY (0x02): <alp/pwm.h>'s
- *         alp_pwm_capture_read() ALREADY documents "if no edge has been
- *         seen since the last call, returns ALP_ERR_NOT_READY", which is
- *         exactly the status_from_wire() mapping of wire STATUS_NOT_READY
- *         -- so the host-side contract this firmware must satisfy is
- *         already written down and is NOT STATUS_BUSY.  Fixing this needs
- *         a HAL-side change (hal/gd32/pwm_capture.c:248's ring-empty return
- *         must stop reusing BRIDGE_HW_ERR_NOTIMPL, which hal/bridge_hw_stub.c
- *         also returns for "this build has no capture HAL at all" -- the
- *         two meanings need two different BRIDGE_HW_ERR_* codes so a live,
- *         merely-empty channel stays distinguishable on the wire from a
- *         stub build) plus a hal/bridge_hw.h doc update, neither of which
- *         is in scope for this change (hal/gd32/pwm_capture.c is owned by
- *         another in-flight branch; hal/bridge_hw.h is owned by several).
- *         This suite pins pwm_capture_read's INVAL, RANGE, BUSY and IO rows
- *         (all unambiguous) and leaves its NOTIMPL row untested rather than
- *         assert today's NOTIMPL->STATUS_NOSUPPORT only for it to need to
- *         become something->STATUS_NOT_READY later.
+ *       * handle_pwm_capture_read (src/protocol.c) routes through
+ *         status_from_hw().  An armed channel with no complete edge pair
+ *         returns BRIDGE_HW_ERR_NOT_READY, distinct from the stub HAL's
+ *         BRIDGE_HW_ERR_NOTIMPL.  The former maps to STATUS_NOT_READY
+ *         (0x02), matching <alp/pwm.h>'s ALP_ERR_NOT_READY contract; the
+ *         latter remains STATUS_NOSUPPORT for a build without capture.
  *
  *   - Unnumbered "stub/contract mismatch": CMD_GPIO_READ and CMD_GPIO_WRITE
  *     never special-case BRIDGE_HW_ERR_NOTIMPL (src/protocol.c:157, :175)
@@ -672,16 +651,17 @@ static const hal_map_case_t HAL_MAP_CASES[] = {
 	{ "ADC_STREAM_END/IO",      CMD_ADC_STREAM_END, req_adc_stream_end, 1u, FAKE_FN_ADC_STREAM_END, BRIDGE_HW_ERR_IO,      STATUS_IO },
 
 	/* --- Centralised status_from_hw() mapper: full, correct coverage
-	 * (INVAL/RANGE/NOTIMPL/BUSY/IO) -- no known defect. */
+	 * (INVAL/RANGE/NOTIMPL/BUSY/NOT_READY/IO) -- no known defect. */
 	{ "PWM_CAPTURE_BEGIN/INVAL",   CMD_PWM_CAPTURE_BEGIN, req_pwm_capture_begin, 2u, FAKE_FN_PWM_CAPTURE_BEGIN, BRIDGE_HW_ERR_INVAL,   STATUS_INVAL },
 	{ "PWM_CAPTURE_BEGIN/RANGE",   CMD_PWM_CAPTURE_BEGIN, req_pwm_capture_begin, 2u, FAKE_FN_PWM_CAPTURE_BEGIN, BRIDGE_HW_ERR_RANGE,   STATUS_OUT_OF_RANGE },
 	{ "PWM_CAPTURE_BEGIN/NOTIMPL", CMD_PWM_CAPTURE_BEGIN, req_pwm_capture_begin, 2u, FAKE_FN_PWM_CAPTURE_BEGIN, BRIDGE_HW_ERR_NOTIMPL, STATUS_NOSUPPORT },
 	{ "PWM_CAPTURE_BEGIN/BUSY",    CMD_PWM_CAPTURE_BEGIN, req_pwm_capture_begin, 2u, FAKE_FN_PWM_CAPTURE_BEGIN, BRIDGE_HW_ERR_BUSY,    STATUS_BUSY },
 	{ "PWM_CAPTURE_BEGIN/IO",      CMD_PWM_CAPTURE_BEGIN, req_pwm_capture_begin, 2u, FAKE_FN_PWM_CAPTURE_BEGIN, BRIDGE_HW_ERR_IO,      STATUS_IO },
-	/* PWM_CAPTURE_READ: NOTIMPL is the #23 B5 ring-empty overload --
-	 * not injected here (see this file's header comment). */
+	/* PWM_CAPTURE_READ: an active capture channel with no edge pair yet
+	 * returns NOT_READY; absent capture hardware still returns NOTIMPL. */
 	{ "PWM_CAPTURE_READ/INVAL", CMD_PWM_CAPTURE_READ, req_pwm_capture_read, 1u, FAKE_FN_PWM_CAPTURE_READ, BRIDGE_HW_ERR_INVAL, STATUS_INVAL },
 	{ "PWM_CAPTURE_READ/RANGE", CMD_PWM_CAPTURE_READ, req_pwm_capture_read, 1u, FAKE_FN_PWM_CAPTURE_READ, BRIDGE_HW_ERR_RANGE, STATUS_OUT_OF_RANGE },
+	{ "PWM_CAPTURE_READ/NOT_READY", CMD_PWM_CAPTURE_READ, req_pwm_capture_read, 1u, FAKE_FN_PWM_CAPTURE_READ, BRIDGE_HW_ERR_NOT_READY, STATUS_NOT_READY },
 	{ "PWM_CAPTURE_READ/BUSY",  CMD_PWM_CAPTURE_READ, req_pwm_capture_read, 1u, FAKE_FN_PWM_CAPTURE_READ, BRIDGE_HW_ERR_BUSY,  STATUS_BUSY },
 	{ "PWM_CAPTURE_READ/IO",    CMD_PWM_CAPTURE_READ, req_pwm_capture_read, 1u, FAKE_FN_PWM_CAPTURE_READ, BRIDGE_HW_ERR_IO,    STATUS_IO },
 	{ "PWM_CAPTURE_END/INVAL",   CMD_PWM_CAPTURE_END, req_pwm_capture_end, 1u, FAKE_FN_PWM_CAPTURE_END, BRIDGE_HW_ERR_INVAL,   STATUS_INVAL },
@@ -738,12 +718,13 @@ static const hal_map_case_t HAL_MAP_CASES[] = {
 	{ "ADC_STREAM_READ/INVAL",   CMD_ADC_STREAM_READ, req_adc_stream_read, 2u, FAKE_FN_ADC_STREAM_READ, BRIDGE_HW_ERR_INVAL,   STATUS_INVAL },
 	{ "ADC_STREAM_READ/RANGE",   CMD_ADC_STREAM_READ, req_adc_stream_read, 2u, FAKE_FN_ADC_STREAM_READ, BRIDGE_HW_ERR_RANGE,   STATUS_OUT_OF_RANGE },
 
-	/* --- ADC_SPECTRUM_READ: NOTIMPL explicit; IO is the documented
+	/* --- ADC_SPECTRUM_READ: NOTIMPL explicit; BUSY is the documented
 	 * "no frame yet" -> STATUS_BUSY special-case (src/protocol.c:546),
 	 * distinct from every other opcode's IO handling -- worth pinning
 	 * on its own. */
 	{ "ADC_SPECTRUM_READ/NOTIMPL", CMD_ADC_SPECTRUM_READ, req_adc_spectrum_read, 4u, FAKE_FN_ADC_SPECTRUM_READ, BRIDGE_HW_ERR_NOTIMPL, STATUS_NOSUPPORT },
-	{ "ADC_SPECTRUM_READ/IO_is_BUSY", CMD_ADC_SPECTRUM_READ, req_adc_spectrum_read, 4u, FAKE_FN_ADC_SPECTRUM_READ, BRIDGE_HW_ERR_IO, STATUS_BUSY },
+	{ "ADC_SPECTRUM_READ/BUSY", CMD_ADC_SPECTRUM_READ, req_adc_spectrum_read, 4u, FAKE_FN_ADC_SPECTRUM_READ, BRIDGE_HW_ERR_BUSY, STATUS_BUSY },
+	{ "ADC_SPECTRUM_READ/IO", CMD_ADC_SPECTRUM_READ, req_adc_spectrum_read, 4u, FAKE_FN_ADC_SPECTRUM_READ, BRIDGE_HW_ERR_IO, STATUS_IO },
 };
 /* clang-format on */
 
@@ -1652,6 +1633,113 @@ ZTEST(protocol, test_link_features_rejects_unknown_link)
 	zassert_equal(protocol_link_features((gd32_bridge_link_t)GD32_BRIDGE_LINK_COUNT),
 	              0u,
 	              "the accessor answers 0 for an unknown link");
+}
+
+typedef struct {
+	gd32_bridge_status_t status;
+	size_t               reply_len;
+} nested_dispatch_probe_t;
+
+static void dispatch_chain_open_from_fake_hook(void *context)
+{
+	nested_dispatch_probe_t *probe = context;
+	uint8_t                  reply[REPLY_SCRATCH_CAP];
+
+	probe->reply_len = 0xDEADu;
+	probe->status    = protocol_dispatch(GD32_BRIDGE_LINK_SPI,
+	                                     CMD_ADC_DSP_CHAIN_OPEN,
+	                                     NULL,
+	                                     0u,
+	                                     reply,
+	                                     sizeof(reply),
+	                                     &probe->reply_len);
+}
+
+/* SPI's CS EXTI can pre-empt an I2C dispatch while the outer handler is in
+ * the HAL.  Use the non-atomic chain allocator from #139 as the probe: the
+ * nested request must fail before a second HAL call, and the guard must
+ * release when the outer request returns. */
+ZTEST(protocol, test_nested_dispatch_returns_busy_without_hal_mutation)
+{
+	uint8_t                 reply[REPLY_SCRATCH_CAP];
+	nested_dispatch_probe_t nested = { STATUS_OK, 0u };
+
+	bridge_hw_fake_reset();
+	bridge_hw_fake_dsp_chain_set_next_id(0x07u);
+	bridge_hw_fake_set_call_hook(
+	    FAKE_FN_ADC_DSP_CHAIN_OPEN, dispatch_chain_open_from_fake_hook, &nested);
+
+	size_t reply_len = 0xDEADu;
+	zassert_equal(protocol_dispatch(GD32_BRIDGE_LINK_I2C,
+	                                CMD_ADC_DSP_CHAIN_OPEN,
+	                                NULL,
+	                                0u,
+	                                reply,
+	                                sizeof(reply),
+	                                &reply_len),
+	              STATUS_OK,
+	              "outer I2C command completes");
+	zassert_equal(reply_len, 1u);
+	zassert_equal(reply[0], 0x07u, "outer allocator returns its chain id");
+	zassert_equal(bridge_hw_fake_call_count(FAKE_FN_ADC_DSP_CHAIN_OPEN),
+	              1u,
+	              "nested request never enters the HAL");
+	zassert_equal(nested.status, STATUS_BUSY, "pre-empting SPI dispatch is refused");
+	zassert_equal(nested.reply_len, 0u, "BUSY reply has no payload");
+
+	bridge_hw_fake_dsp_chain_set_next_id(0x08u);
+	reply_len = 0xDEADu;
+	zassert_equal(protocol_dispatch(GD32_BRIDGE_LINK_SPI,
+	                                CMD_ADC_DSP_CHAIN_OPEN,
+	                                NULL,
+	                                0u,
+	                                reply,
+	                                sizeof(reply),
+	                                &reply_len),
+	              STATUS_OK,
+	              "a later dispatch succeeds after the outer request releases the guard");
+	zassert_equal(reply_len, 1u);
+	zassert_equal(reply[0], 0x08u);
+	zassert_equal(bridge_hw_fake_call_count(FAKE_FN_ADC_DSP_CHAIN_OPEN), 2u);
+}
+
+/* Direct returns inside the inner switch must still pass through the outer
+ * guard's single release point. */
+ZTEST(protocol, test_dispatch_guard_releases_after_direct_return_paths)
+{
+	uint8_t reply[REPLY_SCRATCH_CAP];
+	uint8_t features_off[1] = { 0u };
+
+	bridge_hw_fake_reset();
+	size_t reply_len = 0u;
+	zassert_equal(protocol_dispatch(GD32_BRIDGE_LINK_SPI,
+	                                CMD_LINK_FEATURES,
+	                                features_off,
+	                                sizeof(features_off),
+	                                reply,
+	                                sizeof(reply),
+	                                &reply_len),
+	              STATUS_OK);
+
+	reply_len = 0xDEADu;
+	zassert_equal(
+	    protocol_dispatch(GD32_BRIDGE_LINK_SPI, 0x99u, NULL, 0u, reply, sizeof(reply), &reply_len),
+	    STATUS_NOSUPPORT);
+	zassert_equal(reply_len, 0u);
+
+	reply_len = 0xDEADu;
+	zassert_equal(
+	    protocol_dispatch(
+	        GD32_BRIDGE_LINK_SPI, CMD_OTA_BEGIN, NULL, 0u, reply, sizeof(reply), &reply_len),
+	    STATUS_NOSUPPORT);
+	zassert_equal(reply_len, 0u);
+
+	reply_len = 0xDEADu;
+	zassert_equal(protocol_dispatch(
+	                  GD32_BRIDGE_LINK_SPI, CMD_PING, NULL, 0u, reply, sizeof(reply), &reply_len),
+	              STATUS_OK,
+	              "normal dispatch still succeeds after every direct-return arm");
+	zassert_equal(reply_len, 0u);
 }
 
 /* ------------------------------------------------------------------ */

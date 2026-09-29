@@ -11,10 +11,10 @@
  *   bootloader 0x08000000 (32 KB) | metadata 0x08008000 (8 KB) | slots ...
  *
  * Derived from gd32g553_flash.ld.  Besides its 32 KB FLASH window, this
- * bootloader script omits the application's .ramfunc fold and .tcmsram
- * output section.  Nothing linked into the bootloader currently emits a
- * .tcmsram input section; add the application script's block and startup
- * copy support before placing bootloader code or data in TCMSRAM.
+ * bootloader script deliberately rejects `.tcmsram` input until startup
+ * code grows a TCMSRAM copy/zero loop.  Its NOLOAD output section retains
+ * input so the assertion still fires under --gc-sections instead of an
+ * orphan section silently booting with uninitialised TCM contents.
  * Validated on silicon 2026-06-04 (bench, protocol v0.6): A→B update and
  * rollback.  The B→A direction has NOT been exercised.  Still HIL-gated:
  * a bug bricks the part — no host-driven SWD reflash this HW rev; recover
@@ -129,8 +129,29 @@ SECTIONS
         PROVIDE ( _heap_end = . );
         . = . + __stack_size;
         PROVIDE ( _sp       = . );
+        /* gh#146 / gh#259: the stack region's LOWER bound, programmed into
+         * MSPLIM by main() in src/boot/boot_main.c.  This is the one
+         * linked image with no host-driven SWD recovery on this HW rev --
+         * an unguarded overflow here bricks the part, not just reboots a
+         * supervisor -- so it gets the same limit as the app images even
+         * though this bootloader has no fault_handlers.c of its own to
+         * record the fault; see main()'s comment for what MSPLIM buys it
+         * without one. */
+        PROVIDE ( _stack_limit = _sp - __stack_size );
         . = ALIGN(8);
     } > RAM
+
+    /* The vendor Reset_Handler initialises only .data and .bss.  KEEP the
+     * input even under --gc-sections so unsupported TCMSRAM use fails at
+     * link time instead of silently booting with uninitialised contents. */
+    .tcmsram (NOLOAD) :
+    {
+        . = ALIGN(4);
+        KEEP(*(.tcmsram*))
+        . = ALIGN(4);
+    } > TCMSRAM
+    ASSERT(SIZEOF(.tcmsram) == 0,
+           "TCMSRAM sections require startup copy/zero initialization")
 }
 
 GROUP(libgcc.a libc.a libm.a libnosys.a)
