@@ -36,7 +36,18 @@
  * firmware-version.txt, surfaced via GET_BUILD_ID ("<ver>+<sha>").  The
  * two axes move independently. */
 #define PROTOCOL_VERSION_MAJOR 0u
-#define PROTOCOL_VERSION_MINOR 10u
+/* v0.12 (bench fact 2026-09-26): the trial/confirm watchdog fallback makes
+ * protocol_dispatch() answer STATUS_BUSY for EVERY opcode -- not just the
+ * handful that already documented a BUSY case -- for the whole window
+ * between a TRIAL boot and its confirm.  That is new, wire-observable
+ * behaviour a host must be ready for, so this is a MINOR bump per
+ * extending-the-gd32-bridge-protocol's own rule ("adding an opcode = MINOR
+ * bump"): no opcode/payload actually changed, but a host built against an
+ * OLDER MINOR has no reason to expect BUSY from e.g. CMD_PING, so it is
+ * exactly the same "older hosts don't need it, newer ones should know"
+ * shape that rule exists for.  0.11 is already taken by the REG_ON PR off
+ * dev; this uses 0.12 to avoid a collision. */
+#define PROTOCOL_VERSION_MINOR 12u
 #define PROTOCOL_VERSION_PATCH 0u
 
 /* v0.7: opt-in link features negotiated via CMD_LINK_FEATURES.
@@ -104,11 +115,11 @@ typedef enum {
      * inputs).  On V2N every E1M PWM channel rides one of the GD32's
      * 16-bit advanced timers (PWM0..3 -> TIMER0 channels MCH0..MCH3,
      * PWM4..7 -> TIMER7 channels MCH0..MCH3 per
-     * alp-sdk `metadata/e1m_modules/v2n/gd32-io-mcu-map.tsv`).  The 16-bit
-     * counter at the GD32's 216 MHz core clock gives ~4.63 ns LSB
-     * resolution + 303 us maximum period; CMD_PWM_GET reports the
-     * actual programmed value so callers can see what rounding the
-     * firmware applied. */
+     * alp-sdk `metadata/e1m_modules/v2n/gd32-io-mcu-map.tsv`).  The firmware
+     * prescales the 216 MHz timer clock to a 1 us tick: the 16-bit limit is
+     * 65.536 ms edge-aligned or 131.070 ms center-aligned, and longer
+     * periods return STATUS_OUT_OF_RANGE.  CMD_PWM_GET reports the actual
+     * programmed value so callers can see the round-down to whole ticks. */
 	CMD_PWM_CONFIGURE = 0x22,
 	CMD_ADC_READ      = 0x30,
 	/* v0.3: sticky per-channel ADC tuning -- oversampling ratio,

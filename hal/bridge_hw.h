@@ -106,13 +106,9 @@ int bridge_hw_gpio_write(uint32_t mask, uint32_t levels);
 /* --------------------------------------------------------------- */
 
 /* period_ns > 0 required (BRIDGE_HW_ERR_RANGE otherwise); duty_ns must not
- * exceed period_ns (BRIDGE_HW_ERR_INVAL).  period_ns beyond what the 16-bit
- * timer can hold is silently reduced to the hardware max (ARR always fits),
- * but a duty request that would not fit the 16-bit compare register at the
- * (possibly-reduced) period -- only reachable via 100 % duty at the
- * clamped-max edge-aligned period -- answers BRIDGE_HW_ERR_RANGE rather
- * than silently truncating; poll bridge_hw_pwm_get for what is actually
- * live. */
+ * exceed period_ns (BRIDGE_HW_ERR_INVAL).  A period or duty that does not fit
+ * the timer's 16-bit ARR/compare registers answers BRIDGE_HW_ERR_RANGE before
+ * any timer register is changed; requests are never silently clamped. */
 int bridge_hw_pwm_set(uint8_t channel, uint32_t period_ns, uint32_t duty_ns);
 
 /* Report what the channel's pad is ACTUALLY generating by reading the
