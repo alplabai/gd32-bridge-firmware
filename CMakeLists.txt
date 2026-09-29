@@ -95,6 +95,7 @@ elseif(BRIDGE_HAL_BACKEND STREQUAL "gd32")
         hal/gd32/gpio.c
         hal/gd32/power.c
         hal/gd32/pwm.c
+        hal/gd32/pwm_set.c
         hal/gd32/pwm_capture.c
         hal/gd32/qenc.c
         hal/gd32/se_reset.c
