@@ -45,6 +45,10 @@ typedef struct {
 	uint32_t gpio_y_port;
 	uint32_t gpio_y_pin;
 	uint32_t gpio_af;
+	bool     wide; /* true: 32-bit counter (TIMER1, TIMER4).
+	                * false: 16-bit counter (TIMER2, TIMER3) --
+	                * bridge_hw_qenc_read() must sign-extend from
+	                * int16_t instead of casting the raw uint32_t. */
 } gd32_qenc_t;
 
 /* PWM channel map element (table lives in pwm.c). */
@@ -148,7 +152,7 @@ typedef struct {
  * LBEE5HY2FY-922 Wi-Fi/BT module's power enables (module has internal
  * 50 k pull-downs on both).  Named here, not just indexed, because
  * hal/gd32/init.c drives them differently from the rest of
- * `gpio_pad_map` (OUTPUT LOW at boot, not INPUT+PULL_UP -- see the
+ * `gpio_pad_map` (OUTPUT LOW at boot, not INPUT high-Z -- see the
  * boot loop in init.c and the pad-map comment in gpio.c).  REG_ON
  * power policy is the HOST's, not this firmware's: the GD32 only
  * proxies the line; it never drives it high on its own. */
@@ -163,7 +167,7 @@ _Static_assert(GPIO_PAD_WL_REG_ON == GPIO_PAD_BT_REG_ON + 1 &&
  * (standby) line for the two on-module TCAN1044 CAN-FD transceivers
  * (U15/U16).  Named here, not just indexed, because hal/gd32/init.c
  * drives it differently from the rest of `gpio_pad_map` (OUTPUT HIGH
- * at boot = standby, not INPUT+PULL_UP -- see the boot loop in init.c
+ * at boot = standby, not INPUT high-Z -- see the boot loop in init.c
  * and the pad-map comment in gpio.c).  CAN-bus power-up policy is the
  * HOST's, not this firmware's: the GD32 only proxies the line; it
  * never takes the bus out of standby on its own. */
@@ -177,9 +181,13 @@ _Static_assert(GPIO_PAD_CAN_STBY < GPIO_PAD_MAP_COUNT,
 /* ----------------------------------------------------------------- */
 
 /* VREF for the ADC's right-aligned code -> millivolt conversion.
- * V2N's analog supply is 1.8 V (maintainer-confirmed the same rail
- * used by DAC_VREF_MV).  ADC_FULL_SCALE is the 12-bit default; when a
- * channel is reconfigured to a lower resolution via
+ * V2N's analog supply is 1.8 V (maintainer-confirmed against the
+ * schematic).  This is the SOLE definition of that figure -- dac.c's
+ * DAC_VREF_MV is `#define`d from this macro rather than repeating the
+ * literal, so the ADC and DAC sides of the bridge cannot drift apart
+ * on the reference voltage (they did once; alp-sdk-internal
+ * gd32-bridge-firmware#59).  ADC_FULL_SCALE is the 12-bit default;
+ * when a channel is reconfigured to a lower resolution via
  * bridge_hw_adc_configure the code range shrinks (10b -> 1023, 8b ->
  * 255, 6b -> 63), so the read paths divide by adc_full_scale_for_bits()
  * of the channel's cached resolution rather than this constant.
@@ -282,11 +290,10 @@ _Static_assert(GPIO_PAD_CAN_STBY < GPIO_PAD_MAP_COUNT,
  * 216MHz").  NOTE 2026-06-04: this was wrongly coded as 240 MHz
  * through v0.2.3 -- every PWM period was ~11 % long (a commanded
  * 1 kHz physically ran ~900 Hz).  1 ns LSB resolution would need a
- * faster counter; we instead round period_ns + duty_ns to the
- * nearest 1 us cycle by fixing the prescaler at (216 - 1) so the
- * counter ticks at exactly 1 MHz.  ARR is then `period_us - 1`,
- * fitting in 16 bits for periods up to ~65 ms which covers every
- * realistic control PWM frequency (>=15 Hz). */
+ * faster counter; we instead round period_ns + duty_ns down to a
+ * 1 us cycle by fixing the prescaler at (216 - 1) so the
+ * counter ticks at exactly 1 MHz.  ARR fits edge-aligned periods up
+ * to 65.536 ms and center-aligned periods up to 131.070 ms. */
 #define PWM_TIMER_CLK_HZ    216000000u
 #define PWM_TIMER_PRESCALER (216u - 1u) /* 216 MHz -> 1 MHz tick    */
 #define PWM_TIMER_TICK_NS   1000u       /* 1 us per timer tick      */

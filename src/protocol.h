@@ -36,6 +36,19 @@
  * firmware-version.txt, surfaced via GET_BUILD_ID ("<ver>+<sha>").  The
  * two axes move independently. */
 #define PROTOCOL_VERSION_MAJOR 0u
+/* v0.12 (bench fact 2026-09-26): the trial/confirm watchdog fallback makes
+ * protocol_dispatch() answer STATUS_BUSY for EVERY opcode -- not just the
+ * handful that already documented a BUSY case -- for the whole window
+ * between a TRIAL boot and its confirm.  That is new, wire-observable
+ * behaviour a host must be ready for, so this is a MINOR bump per
+ * extending-the-gd32-bridge-protocol's own rule ("adding an opcode = MINOR
+ * bump"): no opcode/payload actually changed, but a host built against an
+ * OLDER MINOR has no reason to expect BUSY from e.g. CMD_PING, so it is
+ * exactly the same "older hosts don't need it, newer ones should know"
+ * shape that rule exists for.  0.11 is already taken by the REG_ON PR off
+ * dev; this uses 0.12 to avoid a collision. */
+/* v0.13: the GPIO mask grew from 20 to 21 bits -- bit 20 is CAN_STBY
+ * (see CMD_GPIO_READ/CMD_GPIO_WRITE below). */
 #define PROTOCOL_VERSION_MINOR 13u
 #define PROTOCOL_VERSION_PATCH 0u
 
@@ -107,23 +120,18 @@ typedef enum {
      * v0.13: grew again, 20 to 21 bits -- bit 20 is CAN_STBY, the
      * shared standby line for the two on-module TCAN1044 CAN-FD
      * transceivers (sideband, not an E1M pad; GPIO_PAD_CAN_STBY).
-     * v0.12 is skipped here on purpose: it is reserved by the
-     * independent, not-stacked-on-this-branch feat/ota-trial-confirm-dev
-     * (#246), which bumped MINOR for an unrelated OTA wire change off
-     * dev directly. This branch stacks on feat/wifi-bt-reg-on (#244)
-     * instead (see README's merge-order note) and picks v0.13 so it
-     * cannot collide with #246's v0.12 whichever merges first. */
+     * Hosts relying on bit 20 must require MINOR >= 13. */
 	CMD_PWM_SET = 0x20,
 	CMD_PWM_GET = 0x21,
 	/* v0.3: sticky per-channel PWM tuning (align mode, dead time, fault
      * inputs).  On V2N every E1M PWM channel rides one of the GD32's
      * 16-bit advanced timers (PWM0..3 -> TIMER0 channels MCH0..MCH3,
      * PWM4..7 -> TIMER7 channels MCH0..MCH3 per
-     * alp-sdk `metadata/e1m_modules/v2n/gd32-io-mcu-map.tsv`).  The 16-bit
-     * counter at the GD32's 216 MHz core clock gives ~4.63 ns LSB
-     * resolution + 303 us maximum period; CMD_PWM_GET reports the
-     * actual programmed value so callers can see what rounding the
-     * firmware applied. */
+     * alp-sdk `metadata/e1m_modules/v2n/gd32-io-mcu-map.tsv`).  The firmware
+     * prescales the 216 MHz timer clock to a 1 us tick: the 16-bit limit is
+     * 65.536 ms edge-aligned or 131.070 ms center-aligned, and longer
+     * periods return STATUS_OUT_OF_RANGE.  CMD_PWM_GET reports the actual
+     * programmed value so callers can see the round-down to whole ticks. */
 	CMD_PWM_CONFIGURE = 0x22,
 	CMD_ADC_READ      = 0x30,
 	/* v0.3: sticky per-channel ADC tuning -- oversampling ratio,
@@ -333,6 +341,11 @@ typedef enum {
  *   reply_payload      -- buffer for M reply payload bytes.
  *   reply_payload_cap  -- capacity of reply_payload.
  *   reply_payload_len  -- [out] M (bytes actually written).
+ *
+ * Only one dispatch may execute at a time across both transport ISRs.
+ * A nested request returns STATUS_BUSY with a zero-length payload before
+ * entering any command handler; the host may retry it after the active
+ * request completes.
  *
  * Return:  STATUS_OK on success; STATUS_NOSUPPORT for unknown
  *          opcodes; STATUS_INVAL on bad payload lengths /
