@@ -350,11 +350,28 @@ HEADER = """\
 """
 
 
-def build_vectors() -> list[tuple[str, str, str | None]]:
-    """Return [(name, hex_value, comment_or_none)] in emission order."""
-    out: list[tuple[str, str, str | None]] = []
+class _Section:
+    """A section boundary carried in the vector stream by build_vectors().
+
+    Holding the boundary in the stream is the whole point: section membership
+    can no longer be derived from a vector's position, so inserting or removing
+    a vector cannot silently move a later section's start.
+    """
+
+    __slots__ = ("header",)
+
+    def __init__(self, header: list[str]) -> None:
+        self.header = header
+
+
+def build_vectors() -> list[tuple[str, str, str | None] | _Section]:
+    """Return [_Section | (name, hex_value, comment_or_none)] in emission order."""
+    out: list[tuple[str, str, str | None] | _Section] = []
 
     # ----- §1. Foundational CRC-16/CCITT-FALSE vector ----------------
+    out.append(_Section([
+        "§1. Foundational CRC-16/CCITT-FALSE vector",
+    ]))
     out.append((
         "crc16_ccitt_false_ref_string",
         b"123456789".hex().upper(),
@@ -373,6 +390,9 @@ def build_vectors() -> list[tuple[str, str, str | None]]:
     ))
 
     # ----- §2. SPI envelopes -----------------------------------------
+    out.append(_Section([
+        "§2. SPI envelopes -- two-transaction request / reply pattern",
+    ]))
     out.append((
         "spi_ping_request",
         spi_frame(SOF, CMD_PING).hex().upper(),
@@ -396,6 +416,9 @@ def build_vectors() -> list[tuple[str, str, str | None]]:
     ))
 
     # ----- §3. I2C envelopes -----------------------------------------
+    out.append(_Section([
+        "§3. I2C envelopes -- register-style framing",
+    ]))
     out.append((
         "i2c_ping_write",
         i2c_write(CMD_PING).hex().upper(),
@@ -408,6 +431,9 @@ def build_vectors() -> list[tuple[str, str, str | None]]:
     ))
 
     # ----- §4. v0.2 additions: DAC / QENC / COUNTER ------------------
+    out.append(_Section([
+        "§4. v0.2 additions -- DAC, quadrature encoder, free-running counter",
+    ]))
     # Request envelopes (host -> firmware).  Stub firmware replies
     # NOSUPPORT (0x06) for every body; the gd32 backend's real
     # bridge_hw_*_set / *_read / *_reset live under hal/gd32/.  The
@@ -458,6 +484,10 @@ def build_vectors() -> list[tuple[str, str, str | None]]:
     ))
 
     # ----- §5. v0.3 additions: GD32G5 HW knobs -----------------------
+    out.append(_Section([
+        "§5. v0.3 additions -- GD32G5 HW knobs (PWM_CONFIGURE, ADC_CONFIGURE,",
+        "                      ADC_STREAM_BEGIN / READ / END, TRNG_READ)",
+    ]))
     # Sticky-configure opcodes + DMA-backed ADC streaming.  Firmware
     # auto-selects HRPWM when achievable, so no separate
     # CMD_PWM_SET_HIGHRES -- the existing CMD_PWM_SET routes there
@@ -515,6 +545,9 @@ def build_vectors() -> list[tuple[str, str, str | None]]:
     ))
 
     # ----- §6. v0.4 additions: TMU (CORDIC) math accelerator --------
+    out.append(_Section([
+        "§6. v0.4 additions -- GD32G5 TMU (CORDIC) math accelerator",
+    ]))
     # Single representative vector: alp_tmu_sqrt(4.0f) -> 2.0f as
     # encoded on the wire.  Function = SQRT (5); format = IEEE-754
     # single (1); in_a = 0x40800000 (float bits for 4.0f); in_b = 0.
@@ -535,6 +568,9 @@ def build_vectors() -> list[tuple[str, str, str | None]]:
     ))
 
     # ----- §7. v0.5 additions: ADC-stream DSP pipeline (reserved) ---
+    out.append(_Section([
+        "§7. v0.5 additions -- ADC-stream DSP pipeline (reserved opcode)",
+    ]))
     # The CMD_ADC_STREAM_CONFIGURE_DSP opcode is RESERVED at v0.5.0
     # for the wave-2 bridge-wired surfaces alp_adc_filter_t /
     # alp_adc_spectrum_t (see <alp/adc.h>, ships in v0.5.x).  The
@@ -554,6 +590,9 @@ def build_vectors() -> list[tuple[str, str, str | None]]:
     ))
 
     # ----- §8. v0.5 additions (§2B.2): advanced timer extras --------
+    out.append(_Section([
+        "§8. v0.5 additions (§2B.2) -- advanced timer extras",
+    ]))
     # CMD_PWM_CAPTURE_{BEGIN, READ, END}, CMD_PWM_SINGLE_PULSE, and
     # CMD_TIMER_SYNC are implemented by the GD32 HAL.  Representative
     # vectors below pin their request framing; the protocol-vector host
@@ -586,6 +625,9 @@ def build_vectors() -> list[tuple[str, str, str | None]]:
     ))
 
     # ----- §9. v0.5 additions (§2B.3): system power-mode set ---------
+    out.append(_Section([
+        "§9. v0.5 additions (§2B.3) -- system power-mode set",
+    ]))
     # CMD_POWER_MODE_SET is RESERVED at v0.5 for the host->supervisor
     # sleep-transition request.  Portable surface lives in
     # <alp/power.h>; firmware HAL body lands in a follow-up drop.
@@ -609,6 +651,10 @@ def build_vectors() -> list[tuple[str, str, str | None]]:
     ))
 
     # ----- §10. v0.5 additions (§2B wave-2): chunked DSP-chain upload -
+    out.append(_Section([
+        "§10. v0.5 additions (§2B wave-2) -- chunked DSP-chain upload",
+        "      (CHAIN_OPEN / STAGE_PUSH / CHAIN_BIND)",
+    ]))
     # CMD_ADC_DSP_{CHAIN_OPEN, STAGE_PUSH, CHAIN_BIND} are RESERVED at
     # v0.5 for the wave-2 bridge-wired DSP pipeline that lets raw ADC
     # samples never traverse the wire when filtered or spectral data
@@ -662,6 +708,11 @@ def build_vectors() -> list[tuple[str, str, str | None]]:
     ))
 
     # ----- §11. OTA Path-A opcodes (0xF0..0xF6) ----------------------
+    out.append(_Section([
+        "§11. OTA Path-A opcodes (0xF0..0xF6) -- in-system upgrade over the",
+        "      bridge (alp-sdk docs/gd32-bridge-protocol.md §10 Path A).  Unarmed",
+        "      firmware replies STATUS_NOSUPPORT to every OTA opcode.",
+    ]))
     # Payload layouts per alp-sdk docs/gd32-bridge-protocol.md §10 / src/ota.c.
     # Unarmed firmware (no -DBRIDGE_OTA_PARTITIONED) replies
     # STATUS_NOSUPPORT to every OTA opcode; the vectors lock the
@@ -760,9 +811,11 @@ def build_vectors() -> list[tuple[str, str, str | None]]:
                                                            # slot, see below)
                          0x01,                            # pending_slot = B
                          0x01, 0x00,                      # boot_count = 1 (LE)
+                         0x00,                            # err = NONE (gh#101)
                   ])).hex().upper(),
         "SOF | STATUS=0x00 | state=READY(1) | active=A(0) | pending=B(1) |"
-        " boot_count=1 (LE, metadata generation) | CRC -- pending=0xFF when"
+        " boot_count=1 (LE, metadata generation) | err=NONE(0) (gh#101) | CRC"
+        " -- pending=0xFF when"
         " no session is open. active is ota.c's compile-time OTA_RUNNING_SLOT"
         " (#3), a BUILD property reporting the slot THIS firmware executes"
         " from -- NOT metadata's active_slot field.  The two normally agree,"
@@ -770,6 +823,20 @@ def build_vectors() -> list[tuple[str, str, str | None]]:
         " (boot_main.c), where metadata can legitimately name a slot that"
         " is not running; this byte is what lets the host observe that"
         " divergence.  This example value (A) is a slot-A-resident build",
+    ))
+    out.append((
+        "spi_ota_get_state_reply_error_verify_crc",
+        spi_frame(SOF, STATUS_OK,
+                  bytes([0x04,          # state = ERROR
+                         0x00,          # active = A
+                         0xFF,          # pending = none
+                         0x01, 0x00,    # boot_count = 1
+                         0x05,          # err = VERIFY_CRC (gh#101)
+                  ])).hex().upper(),
+        "SOF | STATUS=0x00 | state=ERROR(4) | active=A(0) | pending=none(0xFF) |"
+        " boot_count=1 | err=VERIFY_CRC(0x05) (gh#101: the failure cause that"
+        " used to be written in nine places and read in none) | CRC.  The err"
+        " byte is BRIDGE_OTA_ERR_* in protocol.h; cleared by OTA_ABORT.",
     ))
     out.append((
         "spi_ota_abort_request",
@@ -784,6 +851,10 @@ def build_vectors() -> list[tuple[str, str, str | None]]:
     ))
 
     # ----- §12. v0.7 additions: link-feature negotiation -------------
+    out.append(_Section([
+        "§12. v0.7 additions -- link-feature negotiation (CMD_LINK_FEATURES)",
+        "      + the STATUS_SEQ stamped-reply framing (SPI only)",
+    ]))
     # CMD_LINK_FEATURES (0x81) + the STATUS_SEQ stamped-reply framing.
     # The stamp value is per-session state, so the canonical vectors fix
     # an EXAMPLE stamp; the unstamped reply is simultaneously the exact
@@ -810,6 +881,11 @@ def build_vectors() -> list[tuple[str, str, str | None]]:
     ))
 
     # ----- §13. Day-one opcode coverage (#31 E4) ----------------------
+    out.append(_Section([
+        "§13. Day-one opcode coverage (#31 E4) -- GET_BUILD_ID, RESET_REASON,",
+        "      GPIO_READ/WRITE, legacy PWM_SET/GET, ADC_READ,",
+        "      DA9292_STATUS_FORWARD",
+    ]))
     # CMD_GET_BUILD_ID, CMD_RESET_REASON, CMD_GPIO_{READ,WRITE},
     # CMD_PWM_{SET,GET}, CMD_ADC_READ and CMD_DA9292_STATUS_FORWARD
     # predate the versioned §4+ additions above but had no wire vector
@@ -923,6 +999,10 @@ def build_vectors() -> list[tuple[str, str, str | None]]:
     ))
 
     # ----- §14. v0.5 additions (§2B.2), continued (#31 E4) ------------
+    out.append(_Section([
+        "§14. v0.5 additions (§2B.2), continued (#31 E4) -- PWM_CAPTURE_READ/",
+        "      END, TIMER_SYNC",
+    ]))
     # CMD_PWM_CAPTURE_READ / CMD_PWM_CAPTURE_END / CMD_TIMER_SYNC round
     # out the advanced-timer-extras trio §8 already introduces
     # (CMD_PWM_CAPTURE_BEGIN, CMD_PWM_SINGLE_PULSE); their handlers
@@ -959,6 +1039,9 @@ def build_vectors() -> list[tuple[str, str, str | None]]:
     ))
 
     # ----- §15. CMD_ADC_SPECTRUM_READ (#496, #31 E2) -------------------
+    out.append(_Section([
+        "§15. CMD_ADC_SPECTRUM_READ (#496, #31 E2) -- FFT-chain bin readback",
+    ]))
     # req: stream_id:u8 bin_offset:u16(LE) max_bins:u8 (protocol.c:530).
     # reply: seq:u32(LE) total_bins:u16(LE) got:u8 bins[max_bins*4]
     # (float32 LE, zero-padded past `got`; protocol.c:552-566).  The
@@ -998,152 +1081,44 @@ def build_vectors() -> list[tuple[str, str, str | None]]:
     return out
 
 
-def emit(vectors: list[tuple[str, str, str | None]]) -> str:
-    """Render the vector list back to the on-disk format."""
+def emit(vectors: list[tuple[str, str, str | None] | _Section]) -> str:
+    """Render the vector list back to the on-disk format.
+
+    Sections come from the _Section markers build_vectors() placed in the
+    stream.  This used to slice `vectors` by hard-coded index ranges held in
+    this function, a second copy of the layout build_vectors() already owned;
+    adding a vector shifted every later boundary and dropped the last one from
+    the file without any error.  A vector outside a section, or a section with
+    no vectors, is now a hard error rather than a quietly missing line in a
+    file that a second repository reads.
+    """
+    rule = "# " + "-" * 69
     chunks: list[str] = [HEADER]
 
-    # ----- §1 block --------------------------------------------------
-    chunks.append("\n# ---------------------------------------------------------------------")
-    chunks.append("# §1. Foundational CRC-16/CCITT-FALSE vector")
-    chunks.append("# ---------------------------------------------------------------------")
-    for name, value, comment in vectors[:3]:
-        if comment:
-            chunks.append(f"# {comment}")
-        chunks.append(f"{name:<30} = {value}")
+    in_section = False
+    empty_tail = True
 
-    # ----- §2 block --------------------------------------------------
-    chunks.append("\n# ---------------------------------------------------------------------")
-    chunks.append("# §2. SPI envelopes -- two-transaction request / reply pattern")
-    chunks.append("# ---------------------------------------------------------------------")
-    for name, value, comment in vectors[3:7]:
-        if comment:
-            chunks.append(f"# {comment}")
-        chunks.append(f"{name:<30} = {value}")
+    for item in vectors:
+        if isinstance(item, _Section):
+            in_section = True
+            empty_tail = True
+            chunks.append("")
+            chunks.append(rule)
+            chunks.extend("# " + line for line in item.header)
+            chunks.append(rule)
+            continue
 
-    # ----- §3 block --------------------------------------------------
-    chunks.append("\n# ---------------------------------------------------------------------")
-    chunks.append("# §3. I2C envelopes -- register-style framing")
-    chunks.append("# ---------------------------------------------------------------------")
-    for name, value, comment in vectors[7:9]:
-        if comment:
-            chunks.append(f"# {comment}")
-        chunks.append(f"{name:<30} = {value}")
+        if not in_section:
+            raise ValueError(f"vector {item[0]!r} precedes any section marker")
 
-    # ----- §4 block --------------------------------------------------
-    chunks.append("\n# ---------------------------------------------------------------------")
-    chunks.append("# §4. v0.2 additions -- DAC, quadrature encoder, free-running counter")
-    chunks.append("# ---------------------------------------------------------------------")
-    for name, value, comment in vectors[9:17]:
+        name, value, comment = item
         if comment:
             chunks.append(f"# {comment}")
         chunks.append(f"{name:<30} = {value}")
+        empty_tail = False
 
-    # ----- §5 block --------------------------------------------------
-    chunks.append("\n# ---------------------------------------------------------------------")
-    chunks.append("# §5. v0.3 additions -- GD32G5 HW knobs (PWM_CONFIGURE, ADC_CONFIGURE,")
-    chunks.append("#                       ADC_STREAM_BEGIN / READ / END, TRNG_READ)")
-    chunks.append("# ---------------------------------------------------------------------")
-    for name, value, comment in vectors[17:23]:
-        if comment:
-            chunks.append(f"# {comment}")
-        chunks.append(f"{name:<30} = {value}")
-
-    # ----- §6 block --------------------------------------------------
-    chunks.append("\n# ---------------------------------------------------------------------")
-    chunks.append("# §6. v0.4 additions -- GD32G5 TMU (CORDIC) math accelerator")
-    chunks.append("# ---------------------------------------------------------------------")
-    for name, value, comment in vectors[23:24]:
-        if comment:
-            chunks.append(f"# {comment}")
-        chunks.append(f"{name:<30} = {value}")
-
-    # ----- §7 block --------------------------------------------------
-    chunks.append("\n# ---------------------------------------------------------------------")
-    chunks.append("# §7. v0.5 additions -- ADC-stream DSP pipeline (reserved opcode)")
-    chunks.append("# ---------------------------------------------------------------------")
-    for name, value, comment in vectors[24:25]:
-        if comment:
-            chunks.append(f"# {comment}")
-        chunks.append(f"{name:<30} = {value}")
-
-    # ----- §8 block --------------------------------------------------
-    chunks.append("\n# ---------------------------------------------------------------------")
-    chunks.append("# §8. v0.5 additions (§2B.2) -- advanced timer extras")
-    chunks.append("# ---------------------------------------------------------------------")
-    for name, value, comment in vectors[25:27]:
-        if comment:
-            chunks.append(f"# {comment}")
-        chunks.append(f"{name:<30} = {value}")
-
-    # ----- §9 block --------------------------------------------------
-    chunks.append("\n# ---------------------------------------------------------------------")
-    chunks.append("# §9. v0.5 additions (§2B.3) -- system power-mode set")
-    chunks.append("# ---------------------------------------------------------------------")
-    for name, value, comment in vectors[27:28]:
-        if comment:
-            chunks.append(f"# {comment}")
-        chunks.append(f"{name:<30} = {value}")
-
-    # ----- §10 block -------------------------------------------------
-    chunks.append("\n# ---------------------------------------------------------------------")
-    chunks.append("# §10. v0.5 additions (§2B wave-2) -- chunked DSP-chain upload")
-    chunks.append("#       (CHAIN_OPEN / STAGE_PUSH / CHAIN_BIND)")
-    chunks.append("# ---------------------------------------------------------------------")
-    for name, value, comment in vectors[28:31]:
-        if comment:
-            chunks.append(f"# {comment}")
-        chunks.append(f"{name:<30} = {value}")
-
-    # ----- §11 block -------------------------------------------------
-    chunks.append("\n# ---------------------------------------------------------------------")
-    chunks.append("# §11. OTA Path-A opcodes (0xF0..0xF6) -- in-system upgrade over the")
-    chunks.append("#       bridge (alp-sdk docs/gd32-bridge-protocol.md §10 Path A).  Unarmed")
-    chunks.append("#       firmware replies STATUS_NOSUPPORT to every OTA opcode.")
-    chunks.append("# ---------------------------------------------------------------------")
-    for name, value, comment in vectors[31:44]:
-        if comment:
-            chunks.append(f"# {comment}")
-        chunks.append(f"{name:<30} = {value}")
-
-    # ----- §12 block -------------------------------------------------
-    chunks.append("\n# ---------------------------------------------------------------------")
-    chunks.append("# §12. v0.7 additions -- link-feature negotiation (CMD_LINK_FEATURES)")
-    chunks.append("#       + the STATUS_SEQ stamped-reply framing (SPI only)")
-    chunks.append("# ---------------------------------------------------------------------")
-    for name, value, comment in vectors[44:47]:
-        if comment:
-            chunks.append(f"# {comment}")
-        chunks.append(f"{name:<30} = {value}")
-
-    # ----- §13 block -------------------------------------------------
-    chunks.append("\n# ---------------------------------------------------------------------")
-    chunks.append("# §13. Day-one opcode coverage (#31 E4) -- GET_BUILD_ID, RESET_REASON,")
-    chunks.append("#       GPIO_READ/WRITE, legacy PWM_SET/GET, ADC_READ,")
-    chunks.append("#       DA9292_STATUS_FORWARD")
-    chunks.append("# ---------------------------------------------------------------------")
-    for name, value, comment in vectors[47:58]:
-        if comment:
-            chunks.append(f"# {comment}")
-        chunks.append(f"{name:<30} = {value}")
-
-    # ----- §14 block -------------------------------------------------
-    chunks.append("\n# ---------------------------------------------------------------------")
-    chunks.append("# §14. v0.5 additions (§2B.2), continued (#31 E4) -- PWM_CAPTURE_READ/")
-    chunks.append("#       END, TIMER_SYNC")
-    chunks.append("# ---------------------------------------------------------------------")
-    for name, value, comment in vectors[58:61]:
-        if comment:
-            chunks.append(f"# {comment}")
-        chunks.append(f"{name:<30} = {value}")
-
-    # ----- §15 block -------------------------------------------------
-    chunks.append("\n# ---------------------------------------------------------------------")
-    chunks.append("# §15. CMD_ADC_SPECTRUM_READ (#496, #31 E2) -- FFT-chain bin readback")
-    chunks.append("# ---------------------------------------------------------------------")
-    for name, value, comment in vectors[61:63]:
-        if comment:
-            chunks.append(f"# {comment}")
-        chunks.append(f"{name:<30} = {value}")
+    if in_section and empty_tail:
+        raise ValueError("a section marker is followed by no vectors")
 
     chunks.append("")  # final newline
     return "\n".join(chunks)

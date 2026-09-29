@@ -49,7 +49,14 @@
  * dev; this uses 0.12 to avoid a collision. */
 /* v0.13: the GPIO mask grew from 20 to 21 bits -- bit 20 is CAN_STBY
  * (see CMD_GPIO_READ/CMD_GPIO_WRITE below). */
-#define PROTOCOL_VERSION_MINOR 13u
+/* v0.14 (gh#101): CMD_OTA_GET_STATE's reply widens 5 -> 6 bytes, adding
+ * an `err` byte (gd32_bridge_ota_err_t) that attributes an OTA_ST_ERROR
+ * to its cause instead of leaving every failure indistinguishable.
+ * Additive per the opcode-derived-length rule (no length is carried on
+ * the wire; the reply already decodes by opcode) -- an older host that
+ * only reads the first 5 bytes keeps working unchanged, so this is a
+ * MINOR bump ("adding an opcode/payload field = MINOR"), not MAJOR. */
+#define PROTOCOL_VERSION_MINOR 14u
 #define PROTOCOL_VERSION_PATCH 0u
 
 /* v0.7: opt-in link features negotiated via CMD_LINK_FEATURES.
@@ -322,6 +329,39 @@ typedef enum {
 	GD32_BRIDGE_LINK_I2C = 1,
 	GD32_BRIDGE_LINK_COUNT
 } gd32_bridge_link_t;
+
+/*
+ * OTA failure causes (gh#101) -- the `err` byte of CMD_OTA_GET_STATE's
+ * reply.  Nine distinct non-zero causes used to collapse into
+ * `state = ERROR` with nothing else on the wire, so a failed session
+ * was unattributable for the host and indistinguishable on the bench
+ * (the 2026-06-04 campaign's seven silicon bugs all presented the
+ * same).  The values are the same bare integers ota.c always assigned
+ * (s_err was written in nine places and read in none); they are now a
+ * documented enum so the next write site cannot collide by accident.
+ * Do NOT renumber: the wire pins them, and the host driver decodes
+ * them by value.  0 = no error recorded (idle / clean session).
+ */
+typedef enum {
+	BRIDGE_OTA_ERR_NONE               = 0x00,
+	BRIDGE_OTA_ERR_SESSION_RANGE      = 0x01, /* BEGIN/VERIFY/COMMIT image size
+	                                     * out of range */
+	BRIDGE_OTA_ERR_ERASE_FAILED       = 0x02, /* background page erase failed */
+	BRIDGE_OTA_ERR_CHUNK_RANGE        = 0x03, /* chunk offset / length rejected */
+	BRIDGE_OTA_ERR_PROGRAM_FAILED     = 0x04, /* flash program failed (PGERR/PGSERR) */
+	BRIDGE_OTA_ERR_VERIFY_CRC         = 0x05, /* VERIFY's CRC comparison failed */
+	BRIDGE_OTA_ERR_COMMIT_FAILED      = 0x06, /* COMMIT: bootability check or
+	                                     * metadata commit failed */
+	BRIDGE_OTA_ERR_ERASE_TARGET       = 0x07, /* erase target would intersect
+	                                     * the running slot (#3 guard) */
+	BRIDGE_OTA_ERR_NOT_TRIAL_CAPABLE  = 0x08, /* COMMIT refused: the candidate
+	                                     * image has no valid trial marker,
+	                                     * so it cannot be confirm-gated */
+	BRIDGE_OTA_ERR_META_DEMOTE_FAILED = 0x09, /* BEGIN: the metadata commit
+	                                     * that demotes the stale target
+	                                     * slot's valid bit before erase
+	                                     * failed */
+} gd32_bridge_ota_err_t;
 
 /*
  * protocol_dispatch -- called by either transport when a complete
