@@ -282,4 +282,35 @@ ZTEST(gpio_grouped, test_first_read_promotes_input_once)
 	zassert_equal(mock_events[0].kind, MOCK_EVENT_INPUT_READ);
 }
 
+/* gh#255: a pad the host promoted to OUTPUT via CMD_GPIO_WRITE must
+ * never be lazily re-promoted to INPUT by a later CMD_GPIO_READ that
+ * happens to name the same bit -- that strands the pad as a pulled-up
+ * input until reset while the host still believes it is driving. */
+ZTEST(gpio_grouped, test_read_does_not_demote_a_driven_output_pad)
+{
+	mock_reset();
+	zassert_equal(bridge_hw_gpio_write(1u << 0, 1u << 0), BRIDGE_HW_OK);
+	zassert_true(gpio_is_output[0]);
+
+	memset(mock_events, 0, sizeof mock_events);
+	mock_event_count = 0u;
+
+	uint32_t levels = 0u;
+	zassert_equal(bridge_hw_gpio_read(1u << 0, &levels), BRIDGE_HW_OK);
+	for (size_t i = 0; i < mock_event_count; ++i) {
+		zassert_true(mock_events[i].kind != MOCK_EVENT_MODE,
+		             "read must not reconfigure an already-driven output pad");
+	}
+	zassert_false(gpio_input_promoted[0]);
+	zassert_true(gpio_is_output[0]);
+
+	/* A subsequent write must still land as a plain BOP write -- no
+	 * dangling gpio_input_promoted state should force a re-promotion. */
+	memset(mock_events, 0, sizeof mock_events);
+	mock_event_count = 0u;
+	zassert_equal(bridge_hw_gpio_write(1u << 0, 0u), BRIDGE_HW_OK);
+	zassert_equal(mock_event_count, 1u);
+	zassert_equal(mock_events[0].kind, MOCK_EVENT_BOP);
+}
+
 ZTEST_SUITE(gpio_grouped, NULL, NULL, NULL, NULL, NULL);
