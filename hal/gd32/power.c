@@ -15,7 +15,9 @@
 #include "gd32g5x3.h"
 
 #include "bridge_board_config.h" /* BRIDGE_I2C_PERIPH */
+#include "bridge_critical.h"
 #include "gd32_common.h"
+#include "power_wake.h"
 #include "transport.h" /* bridge_transport_i2c_hw_init() */
 
 /* ----------------------------------------------------------------- */
@@ -27,9 +29,11 @@
  *
  * Mapping notes per V2N hardware reality:
  *
- *   - GPIO : routes through PMU_WAKEUP_PIN0..4 -- five fixed pads
- *            on the GD32G553 + board wires the desired triggers
- *            onto them.  Landed §C.15c.
+ *   - GPIO : no usable pad on this SoM, so the firmware rejects it
+ *            (BRIDGE_HW_ERR_NOTIMPL).  The GD32G553 PMU wake pads are
+ *            WKUP0=PA0 (encoder), WKUP1=PC13 (SE_RST), WKUP3=PA2 (ADC)
+ *            and WKUP4=PC5 (PWM3), all claimed by live bridge functions;
+ *            WKUP2=PE6 has no ball on the WLCSP81 package (#20).
  *   - RTC  : RTC alarm 0 fires on a scheduled wallclock; the
  *            wakeup timer also surfaces under this bit so the
  *            firmware uses the timer (simpler than absolute-time
@@ -46,15 +50,6 @@
  *            opcode; today the firmware rejects them so the host
  *            knows the request is moot.
  */
-#define POWER_WAKE_RTC            0x00000001u
-#define POWER_WAKE_GPIO           0x00000002u
-#define POWER_WAKE_UART_RX        0x00000004u
-#define POWER_WAKE_TIMER          0x00000008u
-#define POWER_WAKE_USB            0x00000010u
-#define POWER_WAKE_ETH_LINK       0x00000020u
-#define POWER_WAKE_MASK_SUPPORTED (POWER_WAKE_RTC | POWER_WAKE_GPIO | POWER_WAKE_TIMER)
-#define POWER_WAKE_MASK_HW_GATED  (POWER_WAKE_UART_RX | POWER_WAKE_USB | POWER_WAKE_ETH_LINK)
-
 /* RTC wakeup timer LSB.  POWER_WAKE_LSB_HZ = 2000 Hz assumes an exact
  * 32000 Hz IRC32K with the /16 divider -- 0.5 ms/tick nominal, max
  * wake 65535/2000 = 32.7 s -- but IRC32K is NOT a fixed 32000 Hz.
@@ -98,10 +93,10 @@ static bool rtc_wakeup_init_once(void)
 	}
 	if (to == 0u) return false;
 
-	rcu_periph_clock_enable(RCU_PMU);
+	bridge_rcu_periph_clock_enable(RCU_PMU);
 	pmu_backup_write_enable();
 	rcu_rtc_clock_config(RCU_RTCSRC_IRC32K);
-	rcu_periph_clock_enable(RCU_RTC);
+	bridge_rcu_periph_clock_enable(RCU_RTC);
 
 	rtc_wakeup_ready = true;
 	return true;
@@ -199,16 +194,6 @@ void RTC_WKUP_IRQHandler(void)
 	rtc_flag_clear(RTC_FLAG_WT);
 }
 
-static void power_wake_pins_enable(uint32_t wake_bitmap)
-{
-	if ((wake_bitmap & POWER_WAKE_GPIO) == 0u) return;
-	pmu_wakeup_pin_enable(PMU_WAKEUP_PIN0);
-	pmu_wakeup_pin_enable(PMU_WAKEUP_PIN1);
-	pmu_wakeup_pin_enable(PMU_WAKEUP_PIN2);
-	pmu_wakeup_pin_enable(PMU_WAKEUP_PIN3);
-	pmu_wakeup_pin_enable(PMU_WAKEUP_PIN4);
-}
-
 int bridge_hw_power_mode_set(uint8_t mode, uint32_t wake_bitmap, uint32_t wake_after_ms)
 {
 	/* Mode 0 (run) + mode 1 (sleep) are accepted no-ops -- main()'s
@@ -221,32 +206,17 @@ int bridge_hw_power_mode_set(uint8_t mode, uint32_t wake_bitmap, uint32_t wake_a
      * sources the host wants armed; `wake_after_ms` is a timed
      * fallback that arms the RTC wakeup timer regardless of the
      * bitmap (per the <alp/power.h> contract: the timer is implicit
-     * when wake_after_ms > 0).  Unsupported bits (UART_RX / USB /
-     * ETH_LINK on the GD32G5 baseline) reject so the host knows the
-     * request was not honoured. */
-	if ((wake_bitmap & POWER_WAKE_MASK_HW_GATED) != 0u) return BRIDGE_HW_ERR_NOTIMPL;
+	 * when wake_after_ms > 0).  Any bit outside the supported set rejects,
+	 * including future bits this firmware does not know, so the host is never
+	 * told that an unarmed source will wake the part. */
+	if (!power_wake_bitmap_supported(wake_bitmap)) return BRIDGE_HW_ERR_NOTIMPL;
 
 	switch (mode) {
 	case 0u: /* run -- no-op */
 	case 1u: /* sleep -- already in WFI between transport ISRs */
 		return BRIDGE_HW_OK;
 	case 2u: /* deep-sleep */
-		rcu_periph_clock_enable(RCU_PMU);
-		/* WKUP pins are a STANDBY-only wake mechanism (UM Rev1.2
-		 * p.142 Table 3-1: Deep-sleep wake = "Any interrupt from
-		 * EXTI lines for WFI"; Standby wake = "NRST pin / WKUP
-		 * pins / FWDGT reset / RTC / LCKMD").  Arming PMU_CS.WUPENx
-		 * for mode 2 (the pre-gh#53 behaviour) does nothing -- and
-		 * worse, the SPI CS edge CANNOT wake this entry even though
-		 * EXTI line 8 exists, because the entry WFI executes from
-		 * inside the CS-EXTI handler at preempt priority 1 (until
-		 * gh#63 moves it to base level) and a same-or-lower-priority
-		 * interrupt cannot end it.  Reject the bit honestly until
-		 * the opcode carries a pad selector: STATUS_NOSUPPORT tells
-		 * the host its request was not honoured (gh#53 fix item 3).
-		 * Mode 3 keeps power_wake_pins_enable() below -- WKUP pins
-		 * are its documented wake set. */
-		if ((wake_bitmap & POWER_WAKE_GPIO) != 0u) return BRIDGE_HW_ERR_NOTIMPL;
+		bridge_rcu_periph_clock_enable(RCU_PMU);
 		if (wake_after_ms != 0u || (wake_bitmap & (POWER_WAKE_RTC | POWER_WAKE_TIMER)) != 0u) {
 			const uint32_t ms = (wake_after_ms != 0u) ? wake_after_ms : POWER_WAKE_TIMER_MAX_MS;
 			int            rc = rtc_wakeup_arm_ms(ms);
@@ -293,8 +263,7 @@ int bridge_hw_power_mode_set(uint8_t mode, uint32_t wake_bitmap, uint32_t wake_a
          * transition that left the I2C bridge transport down. */
 		return bridge_transport_i2c_hw_init();
 	case 3u: /* standby */
-		rcu_periph_clock_enable(RCU_PMU);
-		power_wake_pins_enable(wake_bitmap);
+		bridge_rcu_periph_clock_enable(RCU_PMU);
 		if (wake_after_ms != 0u || (wake_bitmap & (POWER_WAKE_RTC | POWER_WAKE_TIMER)) != 0u) {
 			const uint32_t ms = (wake_after_ms != 0u) ? wake_after_ms : POWER_WAKE_TIMER_MAX_MS;
 			int            rc = rtc_wakeup_arm_ms(ms);
@@ -313,5 +282,4 @@ int bridge_hw_power_mode_set(uint8_t mode, uint32_t wake_bitmap, uint32_t wake_a
 	default:
 		return BRIDGE_HW_ERR_INVAL;
 	}
-	(void)POWER_WAKE_MASK_SUPPORTED;
 }
