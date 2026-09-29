@@ -31,23 +31,49 @@ const gd32_dac_ch_t dac_channels[] = {
 _Static_assert(sizeof(dac_channels) / sizeof(dac_channels[0]) == DAC_CHANNEL_COUNT,
                "dac_channels size must match DAC_CHANNEL_COUNT");
 
-/* DAC VREF.  The V2N's analog supply is 1.8 V (maintainer-confirmed
- * 2026-05-13 against the schematic).  Revisit if a future hw-revision
- * moves to a buffered VREFINT source or a different rail.  Full-scale
- * code is 4095 for 12-bit alignment; code = (value_mv * 4095) /
- * VREF_mV with overflow clamped. */
-#define DAC_VREF_MV    1800u
+/* DAC VREF.  `#define`d from ADC_VREF_MV (gd32_common.h) rather than
+ * repeating the 1.8 V literal -- see that macro's comment; the two
+ * copies drifting apart is exactly alp-sdk-internal
+ * gd32-bridge-firmware#59.  Revisit if a future hw-revision moves to a
+ * buffered VREFINT source or a different rail.  Full-scale code is
+ * 4095 for 12-bit alignment; code = (value_mv * 4095) / VREF_mV with
+ * overflow clamped. */
+#define DAC_VREF_MV    ADC_VREF_MV
 #define DAC_FULL_SCALE 4095u
+
+/* Both E1M DAC channels are brought up in NORMAL_PIN_BUFFON (buffer
+ * enabled -- hal/gd32/init.c), and Datasheet Rev2.0 p.136 Table 4-42
+ * (1MSPS DAC characteristics, the applicable table per p.99 SS3.17:
+ * "Maximum sampling rate of 1 MSPS for DAC0 and DAC1") gives the
+ * buffered output window as VDAC_OUT: 0.2 V .. VDDA-0.2 V.  A
+ * value_mv outside that window is physically unreachable at the pad
+ * even though the 0..DAC_VREF_MV code map accepts it -- clamp the
+ * REQUEST to the achievable window so CMD_DAC_GET reads back what the
+ * pad can actually do instead of echoing an unreachable setpoint
+ * (alp-sdk-internal gd32-bridge-firmware#45).  Whether the buffer
+ * could instead be turned off to recover the full 0..VREFP-1LSB range
+ * depends on what PA4/PA6 drive on the E1M carrier (Ro rises to up to
+ * 15 kOhm buffer-OFF, same table) -- that needs a schematic read this
+ * change doesn't have, so the buffer stays on and the window is
+ * reported instead. */
+#define DAC_BUFFERED_MIN_MV 200u
+#define DAC_BUFFERED_MAX_MV (DAC_VREF_MV - 200u)
 
 int bridge_hw_dac_set(uint8_t channel, uint16_t value_mv)
 {
 	if (channel >= DAC_CHANNEL_COUNT) return BRIDGE_HW_ERR_RANGE;
 	if (!vref_ready_check()) return BRIDGE_HW_ERR_IO; /* dead reference -- fail loud */
+	/* Clamp to the buffer's achievable output window BEFORE the mV ->
+     * code map, so a request past either edge programs the nearest
+     * reachable code rather than a code the pad cannot produce. */
+	uint16_t clamped_mv = value_mv;
+	if (clamped_mv < DAC_BUFFERED_MIN_MV) clamped_mv = DAC_BUFFERED_MIN_MV;
+	if (clamped_mv > DAC_BUFFERED_MAX_MV) clamped_mv = DAC_BUFFERED_MAX_MV;
 	/* mV -> 12-bit code, clamp on over-range (the host doesn't see
      * BRIDGE_HW_ERR_RANGE for this case -- saturating is friendlier
      * than rejecting a request the user can recover from by reading
      * back the actual programmed value). */
-	uint32_t code = ((uint32_t)value_mv * DAC_FULL_SCALE) / DAC_VREF_MV;
+	uint32_t code = ((uint32_t)clamped_mv * DAC_FULL_SCALE) / DAC_VREF_MV;
 	if (code > DAC_FULL_SCALE) code = DAC_FULL_SCALE;
 	dac_data_set(
 	    dac_channels[channel].periph, dac_channels[channel].out, DAC_ALIGN_12B_R, (uint16_t)code);
@@ -60,11 +86,15 @@ int bridge_hw_dac_get(uint8_t channel, uint16_t *value_mv)
 	*value_mv = 0u;
 	if (channel >= DAC_CHANNEL_COUNT) return BRIDGE_HW_ERR_RANGE;
 	if (!vref_ready_check()) return BRIDGE_HW_ERR_IO; /* dead reference -- fail loud */
-	/* dac_output_value_get reads the DAC's hold register (the value
-     * currently driving the pad), not the input setpoint -- this is
-     * what we want for read-back: callers see the actual code in
-     * play, which may differ from the last `set` if the DAC was
-     * concurrent-paired or DMA-driven elsewhere. */
+	/* dac_output_value_get reads DAC_OUTx_DO, the read-only DATA OUTPUT
+     * register (User Manual Rev1.2 p.484 SS18.4.12: "storage the data
+     * that is being converted by DACx_OUT0") -- NOT the DAC_OUTx_DH
+     * holding register (p.466 SS18.3.3), and NOT a measurement of the
+     * pad voltage.  It is still the right read for read-back purposes:
+     * callers see the actual code in play, which may differ from the
+     * last `set` if the DAC was concurrent-paired or DMA-driven
+     * elsewhere -- it just is not proof the pad reached that code's
+     * voltage (alp-sdk-internal gd32-bridge-firmware#45). */
 	uint16_t code = dac_output_value_get(dac_channels[channel].periph, dac_channels[channel].out);
 	if (code > DAC_FULL_SCALE) code = DAC_FULL_SCALE;
 	*value_mv = (uint16_t)(((uint32_t)code * DAC_VREF_MV) / DAC_FULL_SCALE);

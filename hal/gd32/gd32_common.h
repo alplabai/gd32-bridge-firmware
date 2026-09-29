@@ -45,6 +45,10 @@ typedef struct {
 	uint32_t gpio_y_port;
 	uint32_t gpio_y_pin;
 	uint32_t gpio_af;
+	bool     wide; /* true: 32-bit counter (TIMER1, TIMER4).
+	                * false: 16-bit counter (TIMER2, TIMER3) --
+	                * bridge_hw_qenc_read() must sign-extend from
+	                * int16_t instead of casting the raw uint32_t. */
 } gd32_qenc_t;
 
 /* PWM channel map element (table lives in pwm.c). */
@@ -112,6 +116,10 @@ typedef struct {
 	 * volatile: written in ISR context, read from the CS-EXTI-driven
 	 * stream_read path. */
 	volatile uint32_t lap_count;
+	/* Set by the DMA ERRIF ISR.  A transfer error stops the channel, so
+	 * stream_read must fail loudly instead of reporting a permanently empty
+	 * but apparently healthy ring. */
+	volatile uint32_t dma_error_count;
 	uint32_t          total_read;
 	uint8_t           dsp_chain_id;
 	bool              dsp_bound;
@@ -138,20 +146,39 @@ typedef struct {
 /* _Static_assert that the sizeof-derived size matches these).        */
 /* ----------------------------------------------------------------- */
 
-#define GPIO_PAD_MAP_COUNT    18u /* _Static_assert against sizeof in gpio.c       */
+#define GPIO_PAD_MAP_COUNT    20u /* _Static_assert against sizeof in gpio.c       */
 #define ADC_CHANNEL_MAP_COUNT 8u  /* _Static_assert against sizeof in adc.c        */
 #define QENC_CHANNEL_COUNT    4u  /* _Static_assert against sizeof in qenc.c       */
 #define PWM_CHANNEL_COUNT     8u  /* _Static_assert against sizeof in pwm.c        */
 #define DAC_CHANNEL_COUNT     2u  /* _Static_assert against sizeof in dac.c        */
+
+/* Bits 18/19 of the GPIO mask are sideband, not E1M pads: the Murata
+ * LBEE5HY2FY-922 Wi-Fi/BT module's power enables (module has internal
+ * 50 k pull-downs on both).  Named here, not just indexed, because
+ * hal/gd32/init.c drives them differently from the rest of
+ * `gpio_pad_map` (OUTPUT LOW at boot, not INPUT high-Z -- see the
+ * boot loop in init.c and the pad-map comment in gpio.c).  REG_ON
+ * power policy is the HOST's, not this firmware's: the GD32 only
+ * proxies the line; it never drives it high on its own. */
+#define GPIO_PAD_BT_REG_ON 18u
+#define GPIO_PAD_WL_REG_ON 19u
+_Static_assert(GPIO_PAD_WL_REG_ON == GPIO_PAD_BT_REG_ON + 1 &&
+                   GPIO_PAD_WL_REG_ON < GPIO_PAD_MAP_COUNT,
+               "GPIO_PAD_BT_REG_ON/GPIO_PAD_WL_REG_ON must stay adjacent and in-range -- "
+               "init.c's boot loop walks BT_REG_ON..WL_REG_ON inclusive");
 
 /* ----------------------------------------------------------------- */
 /* Shared analog + timer constants.                                   */
 /* ----------------------------------------------------------------- */
 
 /* VREF for the ADC's right-aligned code -> millivolt conversion.
- * V2N's analog supply is 1.8 V (maintainer-confirmed the same rail
- * used by DAC_VREF_MV).  ADC_FULL_SCALE is the 12-bit default; when a
- * channel is reconfigured to a lower resolution via
+ * V2N's analog supply is 1.8 V (maintainer-confirmed against the
+ * schematic).  This is the SOLE definition of that figure -- dac.c's
+ * DAC_VREF_MV is `#define`d from this macro rather than repeating the
+ * literal, so the ADC and DAC sides of the bridge cannot drift apart
+ * on the reference voltage (they did once; alp-sdk-internal
+ * gd32-bridge-firmware#59).  ADC_FULL_SCALE is the 12-bit default;
+ * when a channel is reconfigured to a lower resolution via
  * bridge_hw_adc_configure the code range shrinks (10b -> 1023, 8b ->
  * 255, 6b -> 63), so the read paths divide by adc_full_scale_for_bits()
  * of the channel's cached resolution rather than this constant.
@@ -194,7 +221,7 @@ typedef struct {
  *
  * The residency model, all of it sourced in this tree:
  *   ADCCK   = HCLK / 6 = 216 MHz / 6 = 36 MHz (ADC_CLK_SYNC_HCLK_DIV6,
- *             adc_periph_init)
+ *             adc_shared_clock_init)
  *   one conversion = sample_cycles + 12.5 ADCCK  (the 12-bit figure this
  *             header already quotes above: 240 + 12.5 at 36 MHz ~= 7.0 us)
  *   one triggered sample with oversampling = ratio x that
@@ -254,11 +281,10 @@ typedef struct {
  * 216MHz").  NOTE 2026-06-04: this was wrongly coded as 240 MHz
  * through v0.2.3 -- every PWM period was ~11 % long (a commanded
  * 1 kHz physically ran ~900 Hz).  1 ns LSB resolution would need a
- * faster counter; we instead round period_ns + duty_ns to the
- * nearest 1 us cycle by fixing the prescaler at (216 - 1) so the
- * counter ticks at exactly 1 MHz.  ARR is then `period_us - 1`,
- * fitting in 16 bits for periods up to ~65 ms which covers every
- * realistic control PWM frequency (>=15 Hz). */
+ * faster counter; we instead round period_ns + duty_ns down to a
+ * 1 us cycle by fixing the prescaler at (216 - 1) so the
+ * counter ticks at exactly 1 MHz.  ARR fits edge-aligned periods up
+ * to 65.536 ms and center-aligned periods up to 131.070 ms. */
 #define PWM_TIMER_CLK_HZ    216000000u
 #define PWM_TIMER_PRESCALER (216u - 1u) /* 216 MHz -> 1 MHz tick    */
 #define PWM_TIMER_TICK_NS   1000u       /* 1 us per timer tick      */
@@ -336,17 +362,24 @@ extern bool                vref_ok;                              /* vref.c */
 /* Shared helpers (defined in the TU named per line).                 */
 /* ----------------------------------------------------------------- */
 
-bool trng_start(void);                 /* trng.c */
-bool trng_poll_ready(void);            /* trng.c */
-bool vref_ready_check(void);           /* vref.c */
-bool adc_periph_init(uint32_t periph); /* adc.c */
+bool trng_start(void);       /* trng.c */
+bool trng_poll_ready(void);  /* trng.c */
+bool vref_ready_check(void); /* vref.c */
+/* Boot-only sequence: reset all converters, set the two shared clock domains
+ * once (ADC0 covers ADC0/1/2; ADC3 covers itself), then initialise each
+ * converter.  Request paths must use adc_periph_restore() instead so a
+ * sibling stream never sees a shared-clock rewrite. */
+void adc_periph_boot_reset_all(void);       /* adc.c */
+void adc_shared_clock_init(void);           /* adc.c */
+bool adc_periph_boot_init(uint32_t periph); /* adc.c */
+bool adc_periph_restore(uint32_t periph);   /* adc.c */
 
 /* Bounded RSTCLB/CLB calibration cycle (UM Rev1.2 17.4.1, p.424-425),
  * shared with the stream path: any ADCON toggle invalidates the
  * calibration factor (it is applied only "until the next ADC
  * power-off"), so every re-enable on the request path -- single-shot
  * read, stream_begin, and the stream ROVF recovery -- must recalibrate
- * rather than assume adc_periph_init's boot calibration survived. */
+ * rather than assume boot calibration survived. */
 bool adc_calibrate_bounded(uint32_t periph); /* adc.c */
 
 /* Resolution/oversample helpers (adc.c) shared with the stream path.
@@ -359,6 +392,8 @@ void     adc_apply_conv_format(uint32_t periph, uint8_t channel); /* adc.c */
 void     qenc_channel_init(const gd32_qenc_t *e);                 /* qenc.c */
 void     pwm_timer_init(uint32_t periph);                         /* pwm.c */
 void     pwm_channel_init(const gd32_pwm_ch_t *ch);               /* pwm.c */
+void     pwm_channel_claim(uint8_t channel);                      /* pwm.c */
+void     pwm_channel_release(uint8_t channel);                    /* pwm.c */
 void     se_reset_init(void);                                     /* se_reset.c */
 
 /* Per-timer CAR shadow-promotion tracking (pwm_capture.c owns the
