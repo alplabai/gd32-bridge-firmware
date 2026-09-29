@@ -205,6 +205,12 @@ jobs:
       # time unless something checks it.
       - name: byte-compile
         run: python3 -m compileall -q tests tools
+      # tools/test_*.py (e.g. test_check_trial_marker.py, bench fact
+      # 2026-09-26 follow-up) are the only host coverage for the gates
+      # CMakeLists.txt shells out to at build time -- run them all, the
+      # same way a contributor would locally.
+      - name: tools unit tests
+        run: python3 -m unittest discover -s tools -p 'test_*.py' -v
 
   gd32-backend-build:
     name: gd32 backend build

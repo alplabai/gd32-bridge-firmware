@@ -29,20 +29,19 @@
 #include <stdint.h>
 
 /* SQRT (mode9), UM Table 14-26, restricted to the Q31-reachable
- * sub-range x in [0,1): the table's third band (1.75 <= x < 2.341,
+ * sub-range 0.027 < x < 1: the table's third band (1.75 <= x < 2.341,
  * f=2) needs an operand >= 1 and is unreachable in this wire format.
  *
  *   0.027 < x < 0.75   -> FACTOR 3'b000 (f=0)
  *   0.75 <= x < 1.75   -> FACTOR 3'b001 (f=1)   (only the < 1 slice reachable)
  *
- * sqrt(x) for x in [0,1) is itself in [0,1) (sqrt is monotone increasing
- * and sqrt(1)=1), so every legally encodable operand is representable --
- * this never needs to refuse.  Negative operands are a separate,
- * pre-existing hardware-detected error (TMU_FLAG_OVRF), unrelated to
- * FACTOR selection; this function returns f=0 for a negative-looking
- * word, matching the unconditional FACTOR this driver used for every
- * mode before the FACTOR fix, so that already-verified path is
- * unaffected. */
+ * The manual's recommended scaling table has a strict lower bound of
+ * x > 0.027.  Returns nonzero when a signed Q31 operand is inside that
+ * documented domain, or zero for zero, negative, and positive operands
+ * at or below the largest Q31 word not greater than 0.027. */
+int tmu_q31_sqrt_representable(uint32_t q31_operand);
+
+/* Select the manual's FACTOR band after representability has been checked. */
 unsigned tmu_q31_sqrt_factor(uint32_t q31_operand);
 
 /* LN (mode8), UM Table 14-23's only Q31-reachable band is

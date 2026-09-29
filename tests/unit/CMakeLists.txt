@@ -9,10 +9,10 @@
 #   ctest --test-dir build-tests --output-on-failure
 #
 # The `ota` and `transport_spi` suites moved here from alp-sdk when the firmware
-# split into its own repository (alp-sdk ADR 0031).  They, and `transport_i2c`,
-# link the REAL firmware sources against hal/bridge_hw_stub.c -- not mocks -- so
-# the bounds checks and the CS/register framing seams under test are the same
-# code paths the device runs.
+# split into its own repository (alp-sdk ADR 0031).  They link the REAL firmware
+# sources against hal/bridge_hw_stub.c; transport_i2c uses the injectable fake
+# so non-idempotent commands can expose duplicate dispatches (#4).  The framing
+# and dispatcher sources under test are the same code paths the device runs.
 #
 # `crc32` (#26 C2, #104) pins the table-driven ota_crc32() bit-identical to
 # the bit-serial implementation it replaced, against a reference copy of the
@@ -23,11 +23,11 @@
 # `crc16` (#26, #104) is the same proof for src/protocol.c's table-driven
 # crc16_ccitt_false() -- the FRAMING CRC, called twice per round trip.  It
 # links protocol.c itself (not a standalone crc16.c/.h -- see the comment
-# ahead of crc16_table[] in protocol.c for why) plus protocol.c's other
-# dependencies, the same set transport_spi/transport_i2c below link.
+# ahead of crc16_table[] in protocol.c for why) plus the same firmware
+# dependencies the transport suites use; their test HAL backends differ below.
 #
-# `protocol` is the deliberate exception: it links tests/unit/fake/bridge_hw_fake.c
-# INSTEAD of the stub.  The stub answers BRIDGE_HW_ERR_NOTIMPL for nearly
+# `protocol` and `transport_i2c` link tests/unit/fake/bridge_hw_fake.c INSTEAD
+# of the stub.  The stub answers BRIDGE_HW_ERR_NOTIMPL for nearly
 # everything, so only about two hardware opcodes can reach STATUS_OK through it,
 # which left src/protocol.c's reply encoding and its BRIDGE_HW_ERR_* -> STATUS_*
 # ladders unreachable from any host test.  The fake is injectable (a forced return
@@ -73,6 +73,13 @@ set(TEST_FLAGS -std=c11 -Wall -Wextra -Werror)
 # an A-resident-only test build would never compile the OTA_SLOT_B_BASE
 # arm of the #elif chain.
 #
+# protocol.c + bootloader.c + bridge_hw_stub.c (bench fact 2026-09-26):
+# the trial/confirm BUSY gate lives in protocol_dispatch(), which this
+# suite's ota_dispatch()-only predecessor never linked -- added so the
+# gate can be driven end to end (ota_boot_init() -> protocol_dispatch()
+# BUSY -> ota_confirm_tick()) against the real dispatcher, for both slot
+# builds.
+#
 # The two bases below are PARSED out of src/ota_layout.h -- the same
 # header ota.c includes -- rather than hand-copied, so this copy cannot
 # drift silently against it.  Two other independent copies of the same
@@ -103,6 +110,9 @@ foreach(_slot A B)
         ota/src/test_ota.c
         ${FW}/src/ota.c
         ${FW}/src/crc32.c
+        ${FW}/src/protocol.c
+        ${FW}/src/bootloader/bootloader.c
+        ${FW}/hal/bridge_hw_stub.c
     )
     target_include_directories(${_tgt} PRIVATE ${FW}/src ${FW}/hal)
     target_compile_definitions(${_tgt} PRIVATE
@@ -167,11 +177,9 @@ add_test(NAME fault_diag COMMAND test_fault_diag)
 
 # --- timer_sync_iti: (slave, master) -> SYSCFG ITIx router code (gh#42) ----
 #
-# hal/gd32/timer_sync.c itself needs the Cortex-M33 vendor register headers
-# and is compiled by no CI job (issue #77).  The lookup table has no such
-# dependency, so it lives in its own translation unit (hal/gd32/
-# timer_sync_iti.c, no gd32g5x3.h include) purely so it can be linked and
-# tested here.
+# The lookup table has no vendor-register dependency, so it lives in its own
+# translation unit and is tested directly here.  The production HAL body is
+# additionally linked against a minimal vendor-API mock in the next target.
 add_executable(test_timer_sync_iti
     timer_sync_iti/src/test_timer_sync_iti.c
     ${FW}/hal/gd32/timer_sync_iti.c
@@ -180,6 +188,44 @@ target_include_directories(test_timer_sync_iti PRIVATE ${FW}/hal/gd32)
 target_compile_options(test_timer_sync_iti PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_timer_sync_iti PRIVATE ztest_shim)
 add_test(NAME timer_sync_iti COMMAND test_timer_sync_iti)
+
+# --- timer_sync: production HAL id validation + register-call sequence -----
+#
+# Links the REAL hal/gd32/timer_sync.c against a minimal vendor-API mock.
+# This pins #142's fail-closed TIMER19 rejection at the responsible layer:
+# id 2 must return RANGE before any timer/SYSCFG call.  It also prevents the
+# canonical compact wire ids from drifting back to peripheral numbers (#194).
+add_executable(test_timer_sync
+    timer_sync/src/test_timer_sync.c
+    ${FW}/hal/gd32/timer_sync.c
+    ${FW}/hal/gd32/timer_sync_iti.c
+)
+target_include_directories(test_timer_sync PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/timer_sync/mock
+    ${FW}/hal
+    ${FW}/hal/gd32
+)
+target_compile_options(test_timer_sync PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_timer_sync PRIVATE ztest_shim)
+add_test(NAME timer_sync COMMAND test_timer_sync)
+
+# --- gpio_grouped: production GPIO port grouping + promotion order (#198) --
+#
+# Links the real hal/gd32/gpio.c against a minimal register/API mock.  This
+# pins the one-ISTAT-snapshot/one-final-BOP-write policy per touched port and
+# proves that newly promoted pins are preloaded before their mode changes.
+add_executable(test_gpio_grouped
+    gpio_grouped/src/test_gpio_grouped.c
+    ${FW}/hal/gd32/gpio.c
+)
+target_include_directories(test_gpio_grouped PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/gpio_grouped/mock
+    ${FW}/hal
+    ${FW}/hal/gd32
+)
+target_compile_options(test_gpio_grouped PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_gpio_grouped PRIVATE ztest_shim)
+add_test(NAME gpio_grouped COMMAND test_gpio_grouped)
 
 # --- tmu_q31_scale: Q31 FACTOR band-selection logic (gd32-bridge#46) -------
 #
@@ -255,7 +301,7 @@ target_compile_options(test_fmc_ota_guard PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_fmc_ota_guard PRIVATE ztest_shim)
 add_test(NAME fmc_ota_guard COMMAND test_fmc_ota_guard)
 
-# --- transport_i2c: transport + dispatcher over the stub HAL ---------------
+# --- transport_i2c: transport + dispatcher over the injectable fake HAL ----
 add_executable(test_transport_i2c
     transport_i2c/src/test_transport_i2c.c
     ${FW}/src/transport_i2c.c
@@ -263,9 +309,13 @@ add_executable(test_transport_i2c
     ${FW}/src/bootloader/bootloader.c
     ${FW}/src/ota.c
     ${FW}/src/crc32.c
-    ${FW}/hal/bridge_hw_stub.c
+    fake/bridge_hw_fake.c
 )
-target_include_directories(test_transport_i2c PRIVATE ${FW}/src ${FW}/hal)
+target_include_directories(test_transport_i2c PRIVATE
+    ${FW}/src
+    ${FW}/hal
+    ${CMAKE_CURRENT_SOURCE_DIR}/fake
+)
 target_compile_options(test_transport_i2c PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_transport_i2c PRIVATE ztest_shim)
 add_test(NAME transport_i2c COMMAND test_transport_i2c)
@@ -275,7 +325,7 @@ add_test(NAME transport_i2c COMMAND test_transport_i2c)
 # hal/bridge_hw_stub.c answers BRIDGE_HW_ERR_NOTIMPL for essentially every
 # call, so it can only ever prove STATUS_OK on the opcodes with no hardware
 # dependency (PING/GET_VERSION/GET_BUILD_ID/LINK_FEATURES) -- the rest of
-# src/protocol.c's 1025 lines goes untouched by transport_spi/transport_i2c.
+# src/protocol.c's 1025 lines goes untouched by the stub-backed suites.
 # fake/bridge_hw_fake.c stands in for hal/bridge_hw_stub.c here instead, so
 # every opcode's success path AND its BRIDGE_HW_ERR_* -> STATUS_* mapping is
 # reachable.  Not -DBRIDGE_OTA_PARTITIONED (matching transport_spi/
@@ -317,8 +367,7 @@ add_test(NAME adc_dsp COMMAND test_adc_dsp)
 #     CONTRIBUTING.md claims (#31 finding E5) -------------------------------
 #
 # Feeds the canonical vectors' own bytes through the REAL transport_spi.c /
-# transport_i2c.c -> protocol.c seams (same link set as test_transport_spi /
-# test_transport_i2c above: hal/bridge_hw_stub.c, unpartitioned OTA) and
+# transport_i2c.c -> protocol.c seams (stub-backed, unpartitioned OTA) and
 # asserts the emitted reply bytes.  Before this target, nothing under
 # tests/unit/ read tests/protocol_vectors.txt at all -- the only automation
 # touching the file was the generator's own regenerate-and-diff, a comparison

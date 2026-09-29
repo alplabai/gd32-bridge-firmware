@@ -36,7 +36,18 @@
  * firmware-version.txt, surfaced via GET_BUILD_ID ("<ver>+<sha>").  The
  * two axes move independently. */
 #define PROTOCOL_VERSION_MAJOR 0u
-#define PROTOCOL_VERSION_MINOR 10u
+/* v0.12 (bench fact 2026-09-26): the trial/confirm watchdog fallback makes
+ * protocol_dispatch() answer STATUS_BUSY for EVERY opcode -- not just the
+ * handful that already documented a BUSY case -- for the whole window
+ * between a TRIAL boot and its confirm.  That is new, wire-observable
+ * behaviour a host must be ready for, so this is a MINOR bump per
+ * extending-the-gd32-bridge-protocol's own rule ("adding an opcode = MINOR
+ * bump"): no opcode/payload actually changed, but a host built against an
+ * OLDER MINOR has no reason to expect BUSY from e.g. CMD_PING, so it is
+ * exactly the same "older hosts don't need it, newer ones should know"
+ * shape that rule exists for.  0.11 is already taken by the REG_ON PR off
+ * dev; this uses 0.12 to avoid a collision. */
+#define PROTOCOL_VERSION_MINOR 12u
 #define PROTOCOL_VERSION_PATCH 0u
 
 /* v0.7: opt-in link features negotiated via CMD_LINK_FEATURES.
@@ -209,14 +220,12 @@ typedef enum {
      * PWM channel's pin into an input-capture source for frequency
      * / pulse-width measurement; PWM_SINGLE_PULSE drives a one-shot
      * pulse of caller-specified duration on a PWM channel then
-     * stops; TIMER_SYNC links TIMER0 / TIMER7 / TIMER19 in
-     * master-slave configuration for synchronised multi-channel
-     * output.  All five opcodes are RESERVED at protocol v0.5;
-     * the firmware default-case path returns STATUS_NOSUPPORT
-     * until the corresponding bridge_hw_* HAL bodies land in
-     * the GD32 firmware tree.  The portable surfaces are declared
-     * in <alp/pwm.h> / <alp/counter.h> with the same NOSUPPORT
-     * contract on builds that don't ship the bridge HAL yet. */
+     * stops; TIMER_SYNC links the initialised TIMER0 / TIMER7 groups
+     * (wire ids 0 / 1) in master-slave configuration for synchronised
+     * multi-channel output.  TIMER19's former id 2 is rejected because
+     * this firmware never clocks or initialises it (#142).  The GD32 HAL
+     * implements these opcodes; builds without the corresponding HAL
+     * body retain the STATUS_NOSUPPORT contract. */
 	CMD_PWM_CAPTURE_BEGIN = 0x23,
 	CMD_PWM_CAPTURE_READ  = 0x24,
 	CMD_PWM_CAPTURE_END   = 0x25,

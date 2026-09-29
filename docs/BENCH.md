@@ -432,6 +432,122 @@ regression — nothing regressed, because nothing ran there before.
 SWD probe, and be ready to reflash both slots plus the metadata records if
 the erase corrupts the running image mid-cycle.
 
+### 2.5 — trial/confirm + watchdog fallback (bench fact 2026-09-26, E1M-V2M103)
+
+**Proves:** a TRIAL image that hangs before `main()` (the exact incident
+this fix responds to: a slot-B image passed VERIFY/COMMIT then hung in
+stock `SystemInit` spinning on `HXTALSTB`) reverts via the armed FWDGT
+(`src/boot/boot_main.c`, `OTA_TRIAL_FWDGT_RELOAD` ≈ 32.8 s nominal at
+IRC32K/256 -- nominal, not an asserted tolerance, see DESIGN.md) instead of
+bricking the bridge on both transports; that a healthy TRIAL image confirms
+itself (`ota_confirm_tick()`, `src/ota.c`) on the first wire frame after
+boot, rather than staying gated forever; and that a failed/interrupted
+confirm degrades to the OLDER, already-confirmed record surviving, not to
+"only the TRIAL record is left".
+
+**Marker precondition (bench fact 2026-09-26 follow-up):** TRIAL is now
+decided from a marker baked into the image (`ota_image_trial_capable()`,
+`src/ota_layout.h`; `tools/check_trial_marker.py` fails the build if it is
+missing), not from the fw_version the host declares in `OTA_BEGIN`. Both
+the KNOWN-GOOD image in step 1 and the KNOWN-BAD image in step 2 must be
+built from this tree (any `gd32-bridge-slot-a`/`-b` build carries the
+marker automatically) so this runbook actually exercises the TRIAL path --
+an image built without the marker (a pre-fix binary, or one hand-assembled
+without going through this repo's build) commits/rolls back straight to
+CONFIRMED and none of steps 1-6 below observe TRIAL/watchdog behaviour at
+all.
+
+**Brick-risk precondition -- read before running step 2:** this step's
+bad-image case is the one place in this runbook that DELIBERATELY commits
+an image known not to come up. That is only safe with the NEW bootloader
+(this fix) already flashed AND read back over SWD to confirm the binary in
+flash is the one just built -- on an OLD (pre-fix) bootloader, the exact
+same bad image bricks the part with no watchdog to revert it, recoverable
+only via a bench SWD probe. Do not run step 2 against a part whose
+bootloader has not been freshly, verifiably reflashed.
+
+**Procedure:**
+1. Commit a KNOWN-GOOD image (one that reaches `main()` and services the
+   wire normally) via the usual OTA cycle. Immediately after the reset,
+   issue `CMD_PING` repeatedly and confirm the reply is `STATUS_BUSY` with
+   an empty payload until the confirm tick's own reset lands, then `STATUS_OK`
+   on the reboot that follows.  Measure the total window: it should be one
+   reboot, not the ~32.8 s watchdog window (a confirmed image should never
+   need the watchdog).
+2. Commit a KNOWN-BAD image built to hang before `main()` (e.g. an infinite
+   loop before the reset handler reaches `main`, or a genuine repro of the
+   `HXTALSTB` spin if the clock config under test can reproduce it safely).
+   Time from the self-reset to the fallback boot's console/link becoming
+   responsive again; confirm it lands close to the ~32.8 s nominal reload
+   and that the bridge is servicing PING again on the *previous* (pre-OTA)
+   image, not the hung one.
+3. Confirm `CMD_RESET_REASON` on the fallback boot reports **WDT** (decoded
+   from the bootloader's `RTC_BKP8` stash, not a live `RCU_RSTSCK` read --
+   see DESIGN.md's "reset-cause ownership"; this is the FWDGTRSTF-priority
+   reorder ahead of EPRSTF, so confirm the fallback specifically reports WDT
+   and not NRST_PIN even if the part's own reset tree happens to latch both)
+   and confirm a SECOND OTA attempt onto the same (now doubly-rejected) slot
+   is not itself blocked by a stale TRIAL flag from the first attempt
+   (`ota_boot_init()`'s self-heal path, which also clears that slot's
+   `slot_valid` bit -- confirm a ROLLBACK attempt targeting the
+   just-rejected slot is refused, not merely a fresh BEGIN).
+4. With a debugger attached and a breakpoint set inside the TRIAL image
+   before `ota_confirm_tick()` would fire, confirm the core halt does NOT
+   let the FWDGT reset it out from under the debug session (`DBG_FWDGT_HOLD`
+   -- the counter FREEZES while halted, it does not keep running).
+5. **Forced confirm-commit failure:** with a way to force
+   `ota_fmc_program()`/`ota_fmc_erase_range()` to fail during the confirm
+   commit specifically (a debug hook, or a deliberately corrupted/locked
+   metadata page if the bench setup allows inducing one safely), commit a
+   KNOWN-GOOD TRIAL image, let it boot, send a frame, and force the confirm
+   commit to fail. Confirm: no reset happens (the image keeps running,
+   still gated `STATUS_BUSY`); the watchdog is still armed and, left alone,
+   eventually reverts to the previous confirmed image at the nominal
+   window; and post-revert, the OLDER confirmed metadata record is intact
+   (read it back) -- this is the `target_override` fix (`meta_commit()`,
+   `src/ota.c`): the confirm's erase target is the TRIAL record's OWN page,
+   never the other page holding the fallback.
+6. **Watch 60 s after a successful confirm reboot** (comfortably past the
+   ~32.8 s nominal window) to prove `NVIC_SystemReset()` actually stops the
+   FWDGT: the confirmed (non-TRIAL) image never arms a watchdog of its own,
+   so if the part is still alive and un-reset 60 s later, the confirm
+   reboot genuinely cleared the prior arming rather than leaving a stale
+   countdown running across the reboot.
+
+**PASS:** the good-image case confirms in one reboot with no ~32.8 s stall;
+the bad-image case recovers automatically within roughly the nominal FWDGT
+window and lands back on a serviceable link; `CMD_RESET_REASON` reports WDT
+correctly after the fallback; a second OTA/ROLLBACK attempt is not wedged by
+or able to re-select the first attempt's rejected slot; a halted debug
+session survives past the nominal timeout without a spurious reset; a
+forced confirm-commit failure leaves the older confirmed record intact and
+still eventually reverts, un-reset by the failed commit itself; the part
+survives 60 s post-confirm-reboot with no further reset.
+
+**FAIL:** the good image never confirms (stays gated on `STATUS_BUSY`
+forever); the bad image's hang is NOT reverted (bridge stays dead — the
+original 2026-09-26 incident, unfixed); `CMD_RESET_REASON` reports the wrong
+cause after the fallback; a second OTA/ROLLBACK attempt is refused because
+of stale TRIAL state OR is able to re-select the rejected slot; a debugger
+halt trips a spurious watchdog reset; a forced confirm-commit failure
+destroys the older confirmed record (leaving ONLY the TRIAL record); or a
+watchdog reset recurs more than ~32.8 s after a successful confirm reboot.
+
+**Falsifies:** the whole premise of this fix -- that arming a device-side
+watchdog around an unconfirmed OTA image, gated by a host-driven confirm
+signal, converts a boot-time hang into an automatic, bounded-time recovery
+instead of a bricked link needing a bench SWD probe, AND that an
+interrupted confirm degrades gracefully to "reverted" instead of "the only
+record left is the one that was never confirmed."
+
+**Brick risk:** step 2 is real brick risk on anything but a freshly
+verified NEW bootloader (see the precondition above) -- recovery is a bench
+SWD probe. The rest of this step (1, 3, 4, 5, 6) carries no risk beyond
+what Phase 2's other steps already carry: this is explicitly the safety net
+for boot hangs a prior OTA attempt could introduce, so a bad result in
+those sub-steps means "no worse than before this fix landed," not a new
+brick class.
+
 ---
 
 ## Phase 3 — I2C transport (#83)
@@ -519,7 +635,8 @@ already the slowest class the part offers).
    reads 1 before `GPIOC_CTL` field `CTL13[1:0]` reads `01`.
 2. **E1M IO pads.** Scope one E1M IO pad (e.g. IO8) across the host's
    first `CMD_GPIO_WRITE` commanding it HIGH; confirm the pad rises
-   monotonically from the pull-up level with no LOW dip.
+   monotonically from its boot level (high-Z, no internal pull -- see
+   `hal/gd32/init.c`) with no LOW dip.
 3. **GPIO read reports the pad, not the write.** Command an E1M IO pad
    HIGH via `CMD_GPIO_WRITE`, then pull it toward ground through a
    resistor sized to cross the input threshold against the push-pull
@@ -566,20 +683,21 @@ post-`bridge_hw_init()` half is.
 
 ## Phase 5 — timers and PWM (#86 + #82)
 
-Grouped because both PRs touch the same TIMER0/TIMER7/TIMER19 hardware and
+Grouped because both PRs touch the same TIMER0/TIMER7 hardware and
 because review on both surfaced a shared, unresolved cross-PR hazard
 (issue #89: forcing a timer-wide update event for one purpose can glitch a
 sync-slave relationship set up by the other). Run #86 first — it is the
 prerequisite for a meaningful multi-timer capture in #82's sibling-isolation
 step.
 
-### 5.1 — internal-trigger routing, all six ordered pairs (#86 / issue #42)
+### 5.1 — internal-trigger routing, supported pairs + fail-closed ID (#86 / issues #42, #142)
 
 **Proves:** the per-(master, slave) `SYSCFG_TIMERxCFG2` lookup table
-replaces the old hardwired-to-ITI0 routing, which was wrong for four of the
-six reachable (master, slave) pairs.
+replaces the old hardwired-to-ITI0 routing for the two initialised timer
+groups.  TIMER19 is not clocked or initialised, so its former wire id 2 is
+rejected rather than reporting success for a half-applied configuration.
 
-**Procedure:** for each of the six pairs, send `CMD_TIMER_SYNC` (`0x27`)
+**Procedure:** for each of the two supported pairs, send `CMD_TIMER_SYNC` (`0x27`)
 in reset mode (mode=1), then scope both timers' PWM outputs and confirm
 the slave's period locks to and resets in phase with the master's, at the
 master's rate — not free-running, not locked to a different timer. A
@@ -590,16 +708,19 @@ confirm it matches the table in the PR body.
 | Master | Slave | What proves it |
 |---|---|---|
 | TIMER7 | TIMER0 | Locks to TIMER7's period (was: free-running or dead) |
-| TIMER19 | TIMER0 | Locks to TIMER19's period (was: free-running or dead) |
 | TIMER0 | TIMER7 | Still locks to TIMER0 (regression check — was already correct) |
-| TIMER19 | TIMER7 | Locks to TIMER19, not TIMER0 (was: wrong master) |
-| TIMER0 | TIMER19 | Still locks to TIMER0 (regression check) |
-| TIMER7 | TIMER19 | Locks to TIMER7, not TIMER0 (was: wrong master) |
 
-**PASS:** all six lock as tabled. **FAIL:** any pair free-runs, locks to
-the wrong master, or reads back the wrong `TSCFG15` value.
+Then send one request with TIMER19 as master (`2,0,1`) and one with TIMER19
+as slave (`0,2,1`).  Both must return `STATUS_OUT_OF_RANGE`, and the timer
+and SYSCFG registers must remain unchanged.
 
-**Falsifies:** #86's lookup-table fix, per pair.
+**PASS:** both supported pairs lock as tabled and both TIMER19 requests fail
+closed. **FAIL:** a supported pair free-runs, locks to the wrong master, or
+reads back the wrong `TSCFG15` value; or an id-2 request returns success or
+changes a register.
+
+**Falsifies:** #86's lookup-table fix per supported pair and #142's id-2
+rejection.
 
 **Brick risk:** none — a wrong timer route is a functional bug, not a
 flash/boot hazard.
@@ -764,11 +885,11 @@ concern, not a flash/boot hazard.
 
 ## Phase 8 — TMU Q31 band representability (#85 / issue #46)
 
-**Proves:** Q31 `SQRT` now always answers (previously refused wholesale by
-an earlier, over-corrected draft of this PR); Q31 `SINH`/`LN` answer within
-their representable input bands and reject with `STATUS_OUT_OF_RANGE`
-outside them; Q31 `COSH` remains correctly refused (`cosh(x) >= 1` for
-every `x`, so no Q31 input is ever representable).
+**Proves:** Q31 `SQRT` answers inside the GD32 manual's documented
+`0.027 < x` band and rejects the lower interval with
+`STATUS_OUT_OF_RANGE`; Q31 `SINH`/`LN` answer within their representable
+input bands and reject outside them; Q31 `COSH` remains correctly refused
+(`cosh(x) >= 1` for every `x`, so no Q31 input is ever representable).
 
 **Procedure (per the PR's own bench section — all inputs/outputs are exact
 Q31 hex values computed independently in the PR, reproduced here
@@ -776,17 +897,18 @@ verbatim):**
 
 | # | Opcode / mode | format | in_a | Expect |
 |---|---|---|---|---|
-| 1 | `CMD_TMU_COMPUTE`, SQRT(5) | Q31(0) | `0x20000000` (0.25) | `STATUS_OK`, reply ≈ `0x40000000` (0.5) |
-| 2 | `CMD_TMU_COMPUTE`, SQRT(5) | Q31(0) | `0x73333333` (0.9) | `STATUS_OK`, reply ≈ `0x796E744E` |
-| 3 | `CMD_TMU_COMPUTE`, SINH(8) | Q31(0) | `0x40000000` (0.5) | `STATUS_OK`, reply ≈ `0x42B34040` |
-| 4 | `CMD_TMU_COMPUTE`, SINH(8) | Q31(0) | `0x70D0D986` (asinh(1) boundary) | `STATUS_OUT_OF_RANGE` (`0x08`) |
-| 5 | `CMD_TMU_COMPUTE`, LOG(6) | Q31(0) | `0x40000000` (0.5) | `STATUS_OK`, reply ≈ `0xA746F404` |
-| 6 | `CMD_TMU_COMPUTE`, LOG(6) | Q31(0) | `0x1999999A` (0.2) | `STATUS_OUT_OF_RANGE` |
-| 7 | `CMD_TMU_COMPUTE`, COSH(9) | Q31(0) | any | `STATUS_NOSUPPORT` (`0x06`), unchanged |
-| 8 | `CMD_TMU_COMPUTE`, SQRT(5) | F32(1) | `4.0f` (`0x40800000`) | `STATUS_OK`, reply `2.0f` — regression check, confirms F32 untouched |
+| 1 | `CMD_TMU_COMPUTE`, SQRT(5) | Q31(0) | `0x0374BC6A` (largest word not greater than 0.027) | `STATUS_OUT_OF_RANGE` (`0x08`) |
+| 2 | `CMD_TMU_COMPUTE`, SQRT(5) | Q31(0) | `0x20000000` (0.25) | `STATUS_OK`, reply ≈ `0x40000000` (0.5) |
+| 3 | `CMD_TMU_COMPUTE`, SQRT(5) | Q31(0) | `0x73333333` (0.9) | `STATUS_OK`, reply ≈ `0x796E744E` |
+| 4 | `CMD_TMU_COMPUTE`, SINH(8) | Q31(0) | `0x40000000` (0.5) | `STATUS_OK`, reply ≈ `0x42B34040` |
+| 5 | `CMD_TMU_COMPUTE`, SINH(8) | Q31(0) | `0x70D0D986` (asinh(1) boundary) | `STATUS_OUT_OF_RANGE` (`0x08`) |
+| 6 | `CMD_TMU_COMPUTE`, LOG(6) | Q31(0) | `0x40000000` (0.5) | `STATUS_OK`, reply ≈ `0xA746F404` |
+| 7 | `CMD_TMU_COMPUTE`, LOG(6) | Q31(0) | `0x1999999A` (0.2) | `STATUS_OUT_OF_RANGE` |
+| 8 | `CMD_TMU_COMPUTE`, COSH(9) | Q31(0) | any | `STATUS_NOSUPPORT` (`0x06`), unchanged |
+| 9 | `CMD_TMU_COMPUTE`, SQRT(5) | F32(1) | `4.0f` (`0x40800000`) | `STATUS_OK`, reply `2.0f` — regression check, confirms F32 untouched |
 
-**PASS:** all eight match. **FAIL:** any mismatch — in particular, cases 4
-and 6 returning `STATUS_OK` with a wrong number would mean the
+**PASS:** all nine match. **FAIL:** any mismatch — in particular, cases 5
+and 7 returning `STATUS_OK` with a wrong number would mean the
 representability band is wider on real hardware than the manual's tables
 say (this fix has zero dependency on GD32 register semantics for the
 band arithmetic itself — `hal/gd32/tmu_q31_scale.c` is host-tested — so a

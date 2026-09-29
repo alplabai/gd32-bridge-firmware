@@ -44,9 +44,9 @@ int bridge_transport_i2c_hw_init(void);
 
 /* ---- SPI slave seams (defined in transport_spi.c) -------------- */
 void    spi_slave_cs_low(void);       /* CS falling edge: reset RX staging   */
-void    spi_slave_rx_byte(uint8_t b); /* one received byte (per SPI RBNE)     */
+void    spi_slave_rx_byte(uint8_t b); /* one received request byte            */
 void    spi_slave_cs_high(void);      /* CS rising edge: decode + dispatch    */
-uint8_t spi_slave_tx_next_byte(void); /* next reply byte (per SPI TBE), 0xFF idle */
+uint8_t spi_slave_tx_next_byte(void); /* next staged reply byte; 0xFF if empty */
 bool    spi_slave_tx_pending(void);   /* true while staged reply has bytes left   */
 
 /* ---- I2C slave seams (defined in transport_i2c.c) -------------- */
