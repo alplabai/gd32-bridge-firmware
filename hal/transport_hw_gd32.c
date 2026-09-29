@@ -657,7 +657,14 @@ i2c_timing_derive(uint32_t apb1_hz, uint32_t *psc, uint32_t *scl_dely, uint32_t 
 
 int bridge_transport_i2c_hw_init(void)
 {
+	/* gh#257: bare RCU_CFG3 read-modify-write, same exposure class as
+     * the RCU_*EN writes bridge_rcu_periph_clock_enable() already
+     * protects.  bridge_transport_i2c_hw_init() also runs on the wake
+     * path (hal/gd32/power.c), with interrupts live, not just at
+     * boot. */
+	const uint32_t i2csrc_primask_ = bridge_irq_lock();
 	rcu_i2c_clock_config(BRIDGE_I2C_RCU_IDX, BRIDGE_I2C_CK_SRC);
+	bridge_irq_unlock(i2csrc_primask_);
 	bridge_rcu_periph_clock_enable(BRIDGE_I2C_RCU);
 	i2c_gpio_init();
 

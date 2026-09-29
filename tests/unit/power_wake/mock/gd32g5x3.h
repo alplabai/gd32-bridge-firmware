@@ -52,23 +52,31 @@ extern mock_scb_t mock_scb;
 #define SCB (&mock_scb)
 
 /* CMSIS PRIMASK intrinsics reached through hal/gd32/bridge_critical.h.
- * No-ops here: this suite checks wake-bitmap validation, not masking. */
+ * Real (if trivial) tracking via mock_primask -- gh#257's test needs to
+ * observe whether a given mock hardware call landed inside a
+ * bridge_irq_lock()/bridge_irq_unlock() section. */
+extern uint32_t mock_primask;
+
 static inline uint32_t __get_PRIMASK(void)
 {
-	return 0u;
+	return mock_primask;
 }
 static inline void __disable_irq(void)
 {
+	mock_primask = 1u;
 }
 static inline void __set_PRIMASK(uint32_t primask)
 {
-	(void)primask;
+	mock_primask = primask;
 }
 static inline void __DSB(void)
 {
 }
 
 extern uint32_t mock_power_hw_calls;
+/* gh#257: true iff mock_primask was set (interrupts masked) the last
+ * time rcu_rtc_clock_config() ran. */
+extern int mock_rtc_clock_config_saw_irq_masked;
 
 void mock_power_reset(void);
 

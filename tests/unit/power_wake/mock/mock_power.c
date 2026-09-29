@@ -9,10 +9,14 @@ uint32_t   EXTI_PD0;
 uint32_t   EXTI_PD1;
 uint32_t   FWDGT_STAT;
 mock_scb_t mock_scb;
+uint32_t   mock_primask;
+int        mock_rtc_clock_config_saw_irq_masked;
 
 void mock_power_reset(void)
 {
-	mock_power_hw_calls = 0u;
+	mock_power_hw_calls                  = 0u;
+	mock_primask                         = 0u;
+	mock_rtc_clock_config_saw_irq_masked = 0;
 }
 
 void rcu_osci_on(uint32_t osci)
@@ -42,6 +46,7 @@ void pmu_backup_write_enable(void)
 void rcu_rtc_clock_config(uint32_t source)
 {
 	(void)source;
+	mock_rtc_clock_config_saw_irq_masked = (mock_primask != 0u);
 	++mock_power_hw_calls;
 }
 

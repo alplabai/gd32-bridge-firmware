@@ -69,4 +69,20 @@ ZTEST(power_wake, test_standby_without_rtc_wake_is_refused)
 	zassert_equal(bridge_hw_power_mode_set(3u, 0u, 0u), BRIDGE_HW_ERR_INVAL);
 }
 
+ZTEST(power_wake, test_rtc_clock_config_runs_masked)
+{
+	/* gh#257: rcu_rtc_clock_config() is a bare RCU_BDCTL read-modify-
+	 * write reached at runtime (first armed standby request), with
+	 * interrupts live -- it must run inside a
+	 * bridge_irq_lock()/bridge_irq_unlock() section, same exposure
+	 * class as the RCU_*EN writes bridge_rcu_periph_clock_enable()
+	 * already protects. */
+	mock_power_reset();
+	zassert_equal(bridge_hw_power_mode_set(3u, POWER_WAKE_RTC, 0u), BRIDGE_HW_OK);
+	zassert_true(mock_rtc_clock_config_saw_irq_masked,
+	             "rcu_rtc_clock_config() ran with interrupts unmasked");
+	/* The section must also restore: no net mask left behind. */
+	zassert_equal(mock_primask, 0u);
+}
+
 ZTEST_SUITE(power_wake, NULL, NULL, NULL, NULL, NULL);
