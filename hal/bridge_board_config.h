@@ -9,8 +9,8 @@
  * (hal/transport_hw_gd32.c); it references GigaDevice register macros.
  *
  * SOURCE OF TRUTH for the pin map (alp-sdk):
- *   metadata/e1m_modules/v2n/gd32-io-mcu-map.tsv
- *   metadata/chips/gd32g553.yaml
+ *   alp-sdk metadata/e1m_modules/v2n/gd32-io-mcu-map.tsv
+ *   alp-sdk metadata/chips/gd32g553.yaml
  * Peripheral + pin assignments below are CONFIRMED against the
  * GD32G553xx datasheet (Rev2.0) pin-definition table and the team
  * "GD32 Pin Config" sheet: PA8/PA9/PA10/PB15 = SPI1 NSS/SCK/MISO/MOSI,
@@ -51,7 +51,7 @@
 #define BRIDGE_SPI_TX_DMA_REQ DMA_REQUEST_SPI1_TX
 #define BRIDGE_SPI_RX_DMA_REQ DMA_REQUEST_SPI1_RX
 
-/* GD32-side pins (gd32-io-mcu-map.tsv): SCLK PA9, MISO PA10,
+/* GD32-side pins (alp-sdk gd32-io-mcu-map.tsv): SCLK PA9, MISO PA10,
  * MOSI PB15, NSS/CS PA8. */
 #define BRIDGE_SPI_SCK_PORT  GPIOA
 #define BRIDGE_SPI_SCK_PIN   GPIO_PIN_9
@@ -89,7 +89,7 @@
 #define BRIDGE_I2C_ER_IRQN    I2C0_ER_IRQn
 #define BRIDGE_I2C_ER_HANDLER I2C0_ER_IRQHandler
 
-/* GD32-side pins (gd32-io-mcu-map.tsv): SCL PA15, SDA PB9. */
+/* GD32-side pins (alp-sdk gd32-io-mcu-map.tsv): SCL PA15, SDA PB9. */
 #define BRIDGE_I2C_SCL_PORT GPIOA
 #define BRIDGE_I2C_SCL_PIN  GPIO_PIN_15
 #define BRIDGE_I2C_SDA_PORT GPIOB

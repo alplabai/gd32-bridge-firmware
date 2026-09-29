@@ -36,7 +36,18 @@
  * firmware-version.txt, surfaced via GET_BUILD_ID ("<ver>+<sha>").  The
  * two axes move independently. */
 #define PROTOCOL_VERSION_MAJOR 0u
-#define PROTOCOL_VERSION_MINOR 9u
+/* v0.12 (bench fact 2026-09-26): the trial/confirm watchdog fallback makes
+ * protocol_dispatch() answer STATUS_BUSY for EVERY opcode -- not just the
+ * handful that already documented a BUSY case -- for the whole window
+ * between a TRIAL boot and its confirm.  That is new, wire-observable
+ * behaviour a host must be ready for, so this is a MINOR bump per
+ * extending-the-gd32-bridge-protocol's own rule ("adding an opcode = MINOR
+ * bump"): no opcode/payload actually changed, but a host built against an
+ * OLDER MINOR has no reason to expect BUSY from e.g. CMD_PING, so it is
+ * exactly the same "older hosts don't need it, newer ones should know"
+ * shape that rule exists for.  0.11 is already taken by the REG_ON PR off
+ * dev; this uses 0.12 to avoid a collision. */
+#define PROTOCOL_VERSION_MINOR 12u
 #define PROTOCOL_VERSION_PATCH 0u
 
 /* v0.7: opt-in link features negotiated via CMD_LINK_FEATURES.
@@ -104,11 +115,11 @@ typedef enum {
      * inputs).  On V2N every E1M PWM channel rides one of the GD32's
      * 16-bit advanced timers (PWM0..3 -> TIMER0 channels MCH0..MCH3,
      * PWM4..7 -> TIMER7 channels MCH0..MCH3 per
-     * alp-sdk `metadata/e1m_modules/v2n/gd32-io-mcu-map.tsv`).  The 16-bit
-     * counter at the GD32's 216 MHz core clock gives ~4.63 ns LSB
-     * resolution + 303 us maximum period; CMD_PWM_GET reports the
-     * actual programmed value so callers can see what rounding the
-     * firmware applied. */
+     * alp-sdk `metadata/e1m_modules/v2n/gd32-io-mcu-map.tsv`).  The firmware
+     * prescales the 216 MHz timer clock to a 1 us tick: the 16-bit limit is
+     * 65.536 ms edge-aligned or 131.070 ms center-aligned, and longer
+     * periods return STATUS_OUT_OF_RANGE.  CMD_PWM_GET reports the actual
+     * programmed value so callers can see the round-down to whole ticks. */
 	CMD_PWM_CONFIGURE = 0x22,
 	CMD_ADC_READ      = 0x30,
 	/* v0.3: sticky per-channel ADC tuning -- oversampling ratio,
@@ -137,7 +148,7 @@ typedef enum {
      * firmware-owned (OPTIGA RST is active-low; see hal/gd32/se_reset.c). */
 	CMD_SE_RESET = 0x41,
 	/* v0.2 additions -- the GD32 carries every E1M-standard analog
-     * and counter peripheral on V2N (per gd32-io-mcu-map.tsv); the
+	 * and counter peripheral on V2N (per alp-sdk gd32-io-mcu-map.tsv); the
      * SDK's portable surface routes through these. */
 	CMD_DAC_SET      = 0x50,
 	CMD_DAC_GET      = 0x51,
@@ -192,7 +203,7 @@ typedef enum {
      * All three are RESERVED at protocol v0.5; firmware default-case
      * dispatch returns STATUS_NOSUPPORT until the bridge_hw_adc_dsp_*
      * HAL bodies land in the GD32 firmware tree.  Host helpers in
-     * chips/gd32g553/ honour the same NOSUPPORT contract by routing
+     * alp-sdk chips/gd32g553/ honour the same NOSUPPORT contract by routing
      * the wire dispatch through cmd_send unchanged. */
 	CMD_ADC_DSP_CHAIN_OPEN = 0x37,
 	CMD_ADC_DSP_STAGE_PUSH = 0x38,
@@ -209,14 +220,12 @@ typedef enum {
      * PWM channel's pin into an input-capture source for frequency
      * / pulse-width measurement; PWM_SINGLE_PULSE drives a one-shot
      * pulse of caller-specified duration on a PWM channel then
-     * stops; TIMER_SYNC links TIMER0 / TIMER7 / TIMER19 in
-     * master-slave configuration for synchronised multi-channel
-     * output.  All five opcodes are RESERVED at protocol v0.5;
-     * the firmware default-case path returns STATUS_NOSUPPORT
-     * until the corresponding bridge_hw_* HAL bodies land in
-     * the GD32 firmware tree.  The portable surfaces are declared
-     * in <alp/pwm.h> / <alp/counter.h> with the same NOSUPPORT
-     * contract on builds that don't ship the bridge HAL yet. */
+     * stops; TIMER_SYNC links the initialised TIMER0 / TIMER7 groups
+     * (wire ids 0 / 1) in master-slave configuration for synchronised
+     * multi-channel output.  TIMER19's former id 2 is rejected because
+     * this firmware never clocks or initialises it (#142).  The GD32 HAL
+     * implements these opcodes; builds without the corresponding HAL
+     * body retain the STATUS_NOSUPPORT contract. */
 	CMD_PWM_CAPTURE_BEGIN = 0x23,
 	CMD_PWM_CAPTURE_READ  = 0x24,
 	CMD_PWM_CAPTURE_END   = 0x25,
@@ -287,11 +296,30 @@ typedef enum {
 /* Dispatcher                                                         */
 /* --------------------------------------------------------------- */
 
+/* Which transport a request arrived on.  protocol_dispatch() takes this
+ * so a handler whose effect is scoped to ONE link cannot reach across to
+ * the other: the command table is shared by design, but state armed by a
+ * command is not always shareable.  CMD_LINK_FEATURES is the first such
+ * command (#130) -- STATUS_SEQ is declared SPI-only above, and the SPI
+ * transport is its only consumer.
+ *
+ * Values are a dense index into protocol.c's per-link feature array; do
+ * not renumber without updating it. */
+typedef enum {
+	GD32_BRIDGE_LINK_SPI = 0,
+	GD32_BRIDGE_LINK_I2C = 1,
+	GD32_BRIDGE_LINK_COUNT
+} gd32_bridge_link_t;
+
 /*
  * protocol_dispatch -- called by either transport when a complete
  * request envelope has been validated (CRC OK, framing OK).
  *
  * Inputs:
+ *   link           -- the transport this request arrived on
+ *                     (GD32_BRIDGE_LINK_SPI / _I2C).  Only link-scoped
+ *                     handlers consult it; the shared command table is
+ *                     otherwise identical on both links.
  *   cmd            -- opcode (one of CMD_*).
  *   req_payload    -- pointer to N request payload bytes (may be
  *                     NULL when req_payload_len == 0).
@@ -302,23 +330,36 @@ typedef enum {
  *   reply_payload_cap  -- capacity of reply_payload.
  *   reply_payload_len  -- [out] M (bytes actually written).
  *
+ * Only one dispatch may execute at a time across both transport ISRs.
+ * A nested request returns STATUS_BUSY with a zero-length payload before
+ * entering any command handler; the host may retry it after the active
+ * request completes.
+ *
  * Return:  STATUS_OK on success; STATUS_NOSUPPORT for unknown
  *          opcodes; STATUS_INVAL on bad payload lengths /
  *          out-of-range args; STATUS_TIMEOUT / STATUS_IO for
  *          downstream peripheral errors (e.g. an ADC or timer
  *          peripheral fault).
  */
-gd32_bridge_status_t protocol_dispatch(uint8_t        cmd,
-                                       const uint8_t *req_payload,
-                                       size_t         req_payload_len,
-                                       uint8_t       *reply_payload,
-                                       size_t         reply_payload_cap,
-                                       size_t        *reply_payload_len);
+gd32_bridge_status_t protocol_dispatch(gd32_bridge_link_t link,
+                                       uint8_t            cmd,
+                                       const uint8_t     *req_payload,
+                                       size_t             req_payload_len,
+                                       uint8_t           *reply_payload,
+                                       size_t             reply_payload_cap,
+                                       size_t            *reply_payload_len);
 
-/* Currently armed link features (GD32_BRIDGE_LINK_FEAT_* bits, set by
- * CMD_LINK_FEATURES).  Consulted by the SPI transport when staging
- * replies; 0 = legacy framing. */
-uint8_t protocol_link_features(void);
+/* Link features currently armed ON `link` (GD32_BRIDGE_LINK_FEAT_* bits,
+ * set by a CMD_LINK_FEATURES that arrived on that same link).  Consulted
+ * by the SPI transport when staging replies; 0 = legacy framing.
+ *
+ * Per-link since #132's sibling #130: the feature set used to be one
+ * process-wide byte, so an I2C-side negotiation re-framed the SPI wire
+ * for a host that never asked -- and an I2C-side `features = 0` silently
+ * disarmed an active SPI STATUS_SEQ session mid-flight, switching off the
+ * SPI host's ONLY detector for the stale-reply residual hazard
+ * fingerprinted on silicon 2026-06-06. */
+uint8_t protocol_link_features(gd32_bridge_link_t link);
 
 /* --------------------------------------------------------------- */
 /* CRC-16 / CCITT-FALSE -- shared between transports.                */
