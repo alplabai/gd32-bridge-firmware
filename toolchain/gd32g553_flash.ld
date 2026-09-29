@@ -21,13 +21,18 @@
  *     `-nostartfiles` the toolchain's `crti.o` (which normally supplies
  *     these symbols) is dropped from the link.
  *
+ *   * `.tcmsram` is deliberately unsupported until startup code grows a
+ *     TCMSRAM copy/zero loop.  The output section is NOLOAD and retained
+ *     so an assertion rejects every `.tcmsram` input instead of producing
+ *     an image that boots with uninitialised TCM contents.
+ *
  *   * SPDX-License-Identifier tag (vendor file uses prose attribution
  *     only).
  *
- * The vendor file's structure -- section ordering, alignment rules,
- * `__stack_size` / `__heap_size` defaults, GROUP() of newlib archives --
- * is preserved verbatim so the runtime semantics match anything built
- * against the vendor's own template projects.
+ * Apart from that fail-closed TCMSRAM policy, the vendor file's structure
+ * -- section ordering, alignment rules, `__stack_size` / `__heap_size`
+ * defaults, GROUP() of newlib archives -- is preserved so the runtime
+ * semantics match anything built against the vendor's own templates.
  */
 
 MEMORY
@@ -163,16 +168,17 @@ SECTIONS
         . = ALIGN(8);
     } > RAM
 
-    _sitcmsram = LOADADDR(.tcmsram);
-    .tcmsram :
+    /* The vendor Reset_Handler initialises only .data and .bss.  KEEP the
+     * input even under --gc-sections so unsupported TCMSRAM use fails at
+     * link time instead of silently booting with uninitialised contents. */
+    .tcmsram (NOLOAD) :
     {
         . = ALIGN(4);
-        _stcmsram = .;
-        *(.tcmsram)
-        *(.tcmsram*)
+        KEEP(*(.tcmsram*))
         . = ALIGN(4);
-        _etcmsram = .;
-    } > TCMSRAM AT > FLASH
+    } > TCMSRAM
+    ASSERT(SIZEOF(.tcmsram) == 0,
+           "TCMSRAM sections require startup copy/zero initialization")
 }
 
 GROUP(libgcc.a libc.a libm.a libnosys.a)
