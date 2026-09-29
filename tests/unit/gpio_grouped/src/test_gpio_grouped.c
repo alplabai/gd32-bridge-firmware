@@ -134,14 +134,14 @@ ZTEST(gpio_grouped, test_write_groups_set_and_clear_by_port)
 	for (size_t i = 0; i < GPIO_PAD_MAP_COUNT; ++i)
 		gpio_is_output[i] = true;
 
-	const uint32_t mask   = (1u << 0) | (1u << 3) | (1u << 4) | (1u << 8) | (1u << 15);
+	const uint32_t mask   = (1u << 0) | (1u << 3) | (1u << 4) | (1u << 7) | (1u << 15);
 	const uint32_t levels = (1u << 0) | (1u << 4) | (1u << 15);
 	zassert_equal(bridge_hw_gpio_write(mask, levels), BRIDGE_HW_OK);
 
 	zassert_equal(mock_bop_count[mock_port_index(GPIOB)], 1u);
 	zassert_equal(mock_bop[mock_port_index(GPIOB)], GPIO_PIN_10 | (GPIO_PIN_0 << 16));
 	zassert_equal(mock_bop_count[mock_port_index(GPIOC)], 1u);
-	zassert_equal(mock_bop[mock_port_index(GPIOC)], GPIO_PIN_1 | (GPIO_PIN_14 << 16));
+	zassert_equal(mock_bop[mock_port_index(GPIOC)], GPIO_PIN_1 | (GPIO_PIN_0 << 16));
 	zassert_equal(mock_bop_count[mock_port_index(GPIOD)], 1u);
 	zassert_equal(mock_bop[mock_port_index(GPIOD)], GPIO_PIN_2);
 	zassert_equal(mock_event_count, 3u);
@@ -314,3 +314,31 @@ ZTEST(gpio_grouped, test_read_does_not_demote_a_driven_output_pad)
 }
 
 ZTEST_SUITE(gpio_grouped, NULL, NULL, NULL, NULL, NULL);
+
+ZTEST(gpio_grouped, test_unrouted_io24_bit_is_rejected_and_touches_nothing)
+{
+	/* gh#298: E1M IO24 is not routed to the GD32 on the SoM.  Naming bit 8
+	 * must answer NOTIMPL (wire STATUS_NOSUPPORT) and sample/drive no port,
+	 * even when other valid bits are named alongside it. */
+	mock_reset();
+	uint32_t levels = 0u;
+	zassert_equal(bridge_hw_gpio_read((1u << 8) | (1u << 0), &levels), BRIDGE_HW_ERR_NOTIMPL);
+	for (size_t p = 0; p < 6; ++p)
+		zassert_equal(mock_read_count[p], 0u);
+	zassert_equal(bridge_hw_gpio_write((1u << 8) | (1u << 0), UINT32_MAX), BRIDGE_HW_ERR_NOTIMPL);
+	for (size_t p = 0; p < 6; ++p)
+		zassert_equal(mock_bop_count[p], 0u);
+	zassert_equal(mock_event_count, 0u);
+}
+
+ZTEST(gpio_grouped, test_io28_bit_routes_to_gpioe_9)
+{
+	/* gh#298: E1M IO28 is GD32 PE9 on SoM rev 2625-R2 (PC2 is E1M IO26). */
+	mock_reset();
+	mock_inputs[mock_port_index(GPIOE)] = GPIO_PIN_9;
+	uint32_t levels                     = 0u;
+	zassert_equal(bridge_hw_gpio_read(1u << 11, &levels), BRIDGE_HW_OK);
+	zassert_equal(levels, 1u << 11);
+	zassert_equal(mock_read_count[mock_port_index(GPIOE)], 1u);
+	zassert_equal(mock_read_count[mock_port_index(GPIOC)], 0u);
+}

@@ -84,10 +84,13 @@ const gd32_gpio_pad_t gpio_pad_map[] = {
 	{ GPIOF, GPIO_PIN_1 },  /* bit  5 = E1M IO13 */
 	{ GPIOB, GPIO_PIN_5 },  /* bit  6 = E1M IO14 */
 	{ GPIOC, GPIO_PIN_0 },  /* bit  7 = E1M IO16 */
-	{ GPIOC, GPIO_PIN_14 }, /* bit  8 = E1M IO24 -- power-switch pad, see block comment above */
+	{ GPIOC, GPIO_PIN_14 }, /* bit  8 = E1M IO24 -- NOT routed to the GD32 on the SoM (gh#298);
+	                         * rejected via GPIO_PAD_UNROUTED_MASK, entry kept so the bit
+	                         * numbering of every later pad is unchanged */
 	{ GPIOC, GPIO_PIN_15 }, /* bit  9 = E1M IO25 -- power-switch pad, see block comment above */
 	{ GPIOB, GPIO_PIN_11 }, /* bit 10 = E1M IO27 */
-	{ GPIOC, GPIO_PIN_2 },  /* bit 11 = E1M IO28 */
+	{ GPIOE,
+	  GPIO_PIN_9 }, /* bit 11 = E1M IO28 (PE9 per SoM rev 2625-R2, gh#298; PC2 is E1M IO26) */
 	{ GPIOD, GPIO_PIN_11 }, /* bit 12 = E1M IO29 */
 	{ GPIOD, GPIO_PIN_10 }, /* bit 13 = E1M IO30 */
 	{ GPIOE, GPIO_PIN_12 }, /* bit 14 = E1M IO31 */
@@ -150,6 +153,9 @@ static size_t gpio_mapped_port_index(uint32_t periph)
 int bridge_hw_gpio_read(uint32_t mask, uint32_t *levels)
 {
 	if (levels == 0) return BRIDGE_HW_ERR_INVAL;
+	/* gh#298: a pad with no GD32 route answers NOSUPPORT instead of
+	 * sampling a pin that is not wired to the named E1M IO. */
+	if ((mask & GPIO_PAD_UNROUTED_MASK) != 0u) return BRIDGE_HW_ERR_NOTIMPL;
 	*levels                                       = 0u;
 	uint16_t port_inputs[GPIO_MAPPED_PORT_COUNT]  = { 0u };
 	bool     port_sampled[GPIO_MAPPED_PORT_COUNT] = { false };
@@ -216,6 +222,8 @@ int bridge_hw_gpio_read(uint32_t mask, uint32_t *levels)
 
 int bridge_hw_gpio_write(uint32_t mask, uint32_t levels)
 {
+	/* gh#298: never drive a pin the host believes is an unrouted E1M IO. */
+	if ((mask & GPIO_PAD_UNROUTED_MASK) != 0u) return BRIDGE_HW_ERR_NOTIMPL;
 	uint32_t bop_words[GPIO_MAPPED_PORT_COUNT]    = { 0u };
 	uint32_t promote_pins[GPIO_MAPPED_PORT_COUNT] = { 0u };
 
