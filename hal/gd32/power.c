@@ -15,6 +15,7 @@
 #include "gd32g5x3.h"
 
 #include "bridge_board_config.h" /* BRIDGE_I2C_PERIPH */
+#include "bridge_critical.h"
 #include "gd32_common.h"
 #include "power_wake.h"
 #include "transport.h" /* bridge_transport_i2c_hw_init() */
