@@ -261,6 +261,12 @@ int bridge_hw_power_mode_set(uint8_t mode, uint32_t wake_bitmap, uint32_t wake_a
 	switch (mode) {
 	case 0u: /* run -- no-op */
 	case 1u: /* sleep -- already in WFI between transport ISRs */
+		/* Neither mode arms any wake source -- a non-zero
+		 * wake_after_ms here would report STATUS_OK for a timer
+		 * that was never armed (gh#261), the same fail-open #107
+		 * closed for the wake_bitmap axis.  Refuse before any
+		 * hardware touch, matching the standby gate below. */
+		if (wake_after_ms != 0u) return BRIDGE_HW_ERR_INVAL;
 		return BRIDGE_HW_OK;
 	case 2u: /* deep-sleep */
 		/* Deep-sleep can only be left through an EXTI line (UM
