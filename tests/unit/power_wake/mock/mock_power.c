@@ -4,7 +4,11 @@
 
 #include "bridge_hw.h"
 
-uint32_t mock_power_hw_calls;
+uint32_t   mock_power_hw_calls;
+uint32_t   EXTI_PD0;
+uint32_t   EXTI_PD1;
+uint32_t   FWDGT_STAT;
+mock_scb_t mock_scb;
 
 void mock_power_reset(void)
 {
@@ -128,4 +132,22 @@ int bridge_transport_i2c_hw_init(void)
 {
 	++mock_power_hw_calls;
 	return BRIDGE_HW_OK;
+}
+
+void fwdgt_counter_reload(void)
+{
+	++mock_power_hw_calls;
+}
+
+FlagStatus gpio_input_bit_get(uint32_t gpio_periph, uint32_t pin)
+{
+	(void)gpio_periph;
+	(void)pin;
+	return SET;
+}
+
+uint32_t NVIC_GetPendingIRQ(int32_t irqn)
+{
+	(void)irqn;
+	return 0u;
 }
