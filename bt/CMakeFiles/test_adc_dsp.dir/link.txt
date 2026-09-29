@@ -1,0 +1,1 @@
+/usr/bin/cc -g CMakeFiles/test_adc_dsp.dir/adc_dsp/src/test_adc_dsp.c.o "CMakeFiles/test_adc_dsp.dir/home/caner/gd32-int/upd/hal/gd32/adc_dsp_chain.c.o" -o test_adc_dsp  libztest_shim.a 

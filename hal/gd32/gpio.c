@@ -169,6 +169,11 @@ int bridge_hw_gpio_read(uint32_t mask, uint32_t *levels)
 	 * master's 60 us inter-transaction gap. */
 	for (size_t i = 0; i < GPIO_PAD_MAP_COUNT; ++i) {
 		if ((mask & ((uint32_t)1u << i)) == 0u) continue;
+		/* gh#255: a pad the host already promoted to OUTPUT (write
+		 * path, below) must never be lazily re-promoted to INPUT
+		 * here just because a read named it -- that silently takes
+		 * a driven net away from the host until reset. */
+		if (gpio_is_output[i]) continue;
 		if (gpio_input_promoted[i]) continue;
 		gpio_input_promoted[i] = true;
 		gpio_mode_set(
@@ -246,7 +251,12 @@ int bridge_hw_gpio_write(uint32_t mask, uint32_t levels)
 	}
 
 	for (size_t i = 0; i < GPIO_PAD_MAP_COUNT; ++i) {
-		if ((mask & ((uint32_t)1u << i)) != 0u) gpio_is_output[i] = true;
+		if ((mask & ((uint32_t)1u << i)) != 0u) {
+			gpio_is_output[i] = true;
+			/* gh#255: keep the two promotion views tied together --
+			 * a pad driven here can no longer be "input-promoted". */
+			gpio_input_promoted[i] = false;
+		}
 	}
 
 	/* GPIOx_BOP atomically sets its low-half mask and clears its high-half

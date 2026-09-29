@@ -324,20 +324,23 @@ def _fw_version_from_header() -> tuple[int, int, int]:
 FW_VERSION = _fw_version_from_header()
 
 
-HEADER = """\
-# gd32-bridge canonical wire-test vectors
+HEADER = """# gd32-bridge canonical wire-test vectors
 #
-# Consumed by the host-side driver tests in alp-sdk, under
-# tests/zephyr/chips/gd32g553/, and by this repo's own firmware-side
-# consumer, tests/unit/protocol_vectors/ -- which drives MOST (not all) of
-# these vectors through the real transport_spi.c / transport_i2c.c ->
-# protocol.c, on the stub HAL backend, and asserts the emitted bytes.  See
+# Consumed by this repo's own firmware-side consumer,
+# tests/unit/protocol_vectors/ -- which drives MOST (not all) of these
+# vectors through the real transport_spi.c / transport_i2c.c -> protocol.c,
+# on the stub HAL backend, and asserts the emitted bytes.  See
 # tests/unit/protocol_vectors/src/test_protocol_vectors.c's file header for
 # exactly which vectors it reaches, and which it does not and why (five
 # armed-OTA reply vectors + one fake-HAL-only spectrum reply, all needing a
-# link target this suite deliberately does not stitch together); see
-# CONTRIBUTING.md's "The wire vectors are shared across repositories"
-# section for the two-repository picture.
+# link target this suite deliberately does not stitch together).
+#
+# There is no alp-sdk test consumer of this file; alp-sdk's own
+# docs/gd32-bridge-protocol.md says as much.  A wire change still needs a
+# matching alp-sdk change -- the GD32G553_OTA_MIN_PROTOCOL_MINOR /
+# GD32G553_REG_ON_MIN_PROTOCOL_MINOR gates and the per-opcode version notes
+# in that doc -- see CONTRIBUTING.md's "A wire change still needs a matching
+# alp-sdk change" section.
 #
 # Format: one vector per non-comment line, `<name> = <hex>` where
 # <hex> is a sequence of byte values with no separators.  Whitespace

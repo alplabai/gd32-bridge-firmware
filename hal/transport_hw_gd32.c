@@ -59,6 +59,7 @@
 #include "bridge_hw.h" /* BRIDGE_HW_OK / BRIDGE_HW_ERR_RANGE */
 #include "gd32/fault_handlers.h"
 #include "gd32/i2c_event_priority.h"
+#include "gd32/i2c_recovery.h"
 #include "gd32/i2c_timeout.h"
 #include "protocol.h"  /* GD32_BRIDGE_DEFAULT_I2C_ADDR */
 #include "transport.h" /* the seams we drive */
@@ -770,6 +771,51 @@ int bridge_transport_i2c_hw_init(void)
 	return BRIDGE_HW_OK;
 }
 
+/* Documented I2C0 software reset (UM Rev1.2 p.1262 SS28.3.5): "Write
+ * I2CEN = 0 / Check I2CEN = 0 / Write I2CEN = 1", I2CEN held low for
+ * >= 3 APB clock cycles, which "releases SCL and SDA" while leaving
+ * I2C_TIMING/I2C_SADDR0/configuration bits intact.  The read-back spin
+ * IS that >= 3 cycle hold and normally clears within single-digit
+ * iterations.
+ *
+ * #251: that spin was unbounded, so a dropped I2CEN=0 write (or any
+ * fault that keeps the peripheral from ever reading it back clear) hung
+ * this call forever at whatever level called it, and dev has no
+ * watchdog to recover the resulting hang.  Bound it with
+ * bridge_i2c_en_clear_spin_exhausted() (hal/gd32/i2c_recovery.h,
+ * vendor-header-free and host-tested) and escalate to a full RCU_I2C0RST
+ * pulse plus a from-scratch re-init on exhaustion -- the same per-
+ * peripheral reset bridge_transport_spi_hw_init()'s CS handler already
+ * relies on as its own "only reliable FIFO flush" (see :~305 above), and
+ * the alternative this issue named explicitly.
+ *
+ * #252: clearing a bus-error/timeout status flag records that the IP saw
+ * a wedge, but UM SS28.3.9 documents TIMEOUT as a flag only, not an
+ * automatic SCL/SDA release -- clearing it alone leaves a genuinely
+ * stalled pad exactly as stalled with the evidence erased.  This helper
+ * is the slave's own bounded way to force the physical release, shared
+ * by the stuck-SDA poll (#39, below) and the ER-vector bus-error path
+ * (below) so neither one merely reports the wedge. */
+static void bridge_i2c_force_bus_release(void)
+{
+	I2C_CTL0(BRIDGE_I2C_PERIPH) &= ~I2C_CTL0_I2CEN; /* Write I2CEN = 0 */
+	uint32_t spins = 0u;
+	while (0u != (I2C_CTL0(BRIDGE_I2C_PERIPH) & I2C_CTL0_I2CEN)) {
+		/* Check I2CEN = 0 -- the read-back IS the >= 3 APB cycle hold */
+		if (bridge_i2c_en_clear_spin_exhausted(++spins)) {
+			/* I2CEN never read back clear: the documented software
+			 * reset alone cannot recover this peripheral.  Force it
+			 * with the RCU peripheral reset and bring I2C0 back up
+			 * from scratch rather than spin any further. */
+			rcu_periph_reset_enable(RCU_I2C0RST);
+			rcu_periph_reset_disable(RCU_I2C0RST);
+			(void)bridge_transport_i2c_hw_init();
+			return;
+		}
+	}
+	I2C_CTL0(BRIDGE_I2C_PERIPH) |= I2C_CTL0_I2CEN; /* Write I2CEN = 1 */
+}
+
 /* I2C0 event ISR: address match (direction-aware), RX during a write,
  * STOP, and TX during a read.
  *
@@ -899,6 +945,14 @@ void BRIDGE_I2C_ER_HANDLER(void)
 		 * the next address match can append to a transaction that timed out
 		 * while this handler was pre-empted. */
 		i2c_interrupt_flag_clear(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_TIMEOUT);
+		/* #252: clearing the flag only records that the IP saw the
+		 * wedge -- UM SS28.3.9 specifies TIMEOUT as a flag, not an
+		 * automatic slave abort or SCL/SDA release, so a genuinely
+		 * stalled pad stays stalled with the evidence now erased.
+		 * Force the documented release so this vector is the slave's
+		 * own bounded way out, instead of waiting on whatever else
+		 * next touches the bus. */
+		bridge_i2c_force_bus_release();
 		bus_error = true;
 	}
 
@@ -1017,11 +1071,9 @@ void bridge_transport_i2c_stuck_poll(void)
 	if (++i2c_sda_low_ticks < 2u) return; /* confirm across two ticks */
 	i2c_sda_low_ticks = 0u;
 
-	/* Documented software reset (UM Rev1.2 p.1262 s28.3.5). */
-	I2C_CTL0(BRIDGE_I2C_PERIPH) &= ~I2C_CTL0_I2CEN; /* Write I2CEN = 0 */
-	while (0u != (I2C_CTL0(BRIDGE_I2C_PERIPH) & I2C_CTL0_I2CEN)) {
-		/* Check I2CEN = 0 -- the read-back IS the >= 3 APB cycle hold */
-	}
-	I2C_CTL0(BRIDGE_I2C_PERIPH) |= I2C_CTL0_I2CEN; /* Write I2CEN = 1 */
-	i2c_slave_tx_abort();                          /* drop a half-consumed staged reply */
+	/* Documented software reset (UM Rev1.2 p.1262 s28.3.5), bounded and
+	 * shared with the ER-vector path -- see bridge_i2c_force_bus_release()
+	 * above (#251). */
+	bridge_i2c_force_bus_release();
+	i2c_slave_tx_abort(); /* drop a half-consumed staged reply */
 }

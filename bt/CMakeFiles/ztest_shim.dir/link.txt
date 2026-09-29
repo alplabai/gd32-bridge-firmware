@@ -1,0 +1,2 @@
+/usr/bin/ar qc libztest_shim.a CMakeFiles/ztest_shim.dir/ztest_shim.c.o
+/usr/bin/ranlib libztest_shim.a

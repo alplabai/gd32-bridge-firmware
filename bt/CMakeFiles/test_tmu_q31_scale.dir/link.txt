@@ -1,0 +1,1 @@
+/usr/bin/cc -g CMakeFiles/test_tmu_q31_scale.dir/tmu_q31_scale/src/test_tmu_q31_scale.c.o "CMakeFiles/test_tmu_q31_scale.dir/home/caner/gd32-int/upd/hal/gd32/tmu_q31_scale.c.o" -o test_tmu_q31_scale  libztest_shim.a 

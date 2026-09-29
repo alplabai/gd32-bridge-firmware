@@ -1,0 +1,1 @@
+/usr/bin/cc -g CMakeFiles/test_i2c_event_priority.dir/i2c_event_priority/src/test_i2c_event_priority.c.o "CMakeFiles/test_i2c_event_priority.dir/home/caner/gd32-int/upd/hal/gd32/i2c_event_priority.c.o" -o test_i2c_event_priority  libztest_shim.a 

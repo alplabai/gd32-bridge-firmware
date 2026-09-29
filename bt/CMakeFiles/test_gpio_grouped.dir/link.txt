@@ -1,0 +1,1 @@
+/usr/bin/cc -g CMakeFiles/test_gpio_grouped.dir/gpio_grouped/src/test_gpio_grouped.c.o "CMakeFiles/test_gpio_grouped.dir/home/caner/gd32-int/upd/hal/gd32/gpio.c.o" -o test_gpio_grouped  libztest_shim.a 

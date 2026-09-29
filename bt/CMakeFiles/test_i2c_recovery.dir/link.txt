@@ -1,0 +1,1 @@
+/usr/bin/cc -g CMakeFiles/test_i2c_recovery.dir/i2c_recovery/src/test_i2c_recovery.c.o -o test_i2c_recovery  libztest_shim.a 

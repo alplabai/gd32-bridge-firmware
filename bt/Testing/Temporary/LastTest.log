@@ -1,0 +1,718 @@
+Start testing: Sep 29 13:52 UTC
+----------------------------------------------------------
+1/23 Testing: ota_slot_a
+1/23 Test: ota_slot_a
+Command: "/home/caner/gd32-int/upd/bt/test_ota_slot_a"
+Directory: /home/caner/gd32-int/upd/bt
+"ota_slot_a" start time: Sep 29 13:52 UTC
+Output:
+----------------------------------------------------------
+  PASS gd32_bridge_ota.test_begin_then_normal_chunk_programs
+  PASS gd32_bridge_ota.test_write_chunk_program_timeout_reports_status_timeout
+  PASS gd32_bridge_ota.test_overlong_chunk_span_rejected_without_program
+  PASS gd32_bridge_ota.test_truncated_chunk_span_rejected_without_program
+  PASS gd32_bridge_ota.test_zero_chunk_length_rejected_without_program
+  PASS gd32_bridge_ota.test_wrapped_offset_rejected_without_program
+  PASS gd32_bridge_ota.test_offset_past_slot_rejected_without_program
+  PASS gd32_bridge_ota.test_exact_end_chunk_accepted
+  PASS gd32_bridge_ota.test_replay_is_idempotent
+  PASS gd32_bridge_ota.test_slot_base_checked_validates_slot
+  PASS gd32_bridge_ota.test_image_bootable_validates_vector_head
+  PASS gd32_bridge_ota.test_begin_arms_background_erase
+  PASS gd32_bridge_ota.test_get_state_surfaces_err_cause
+  PASS gd32_bridge_ota.test_begin_demotes_target_in_metadata
+  PASS gd32_bridge_ota.test_begin_demote_reports_busy_not_io_when_funnel_busy
+  PASS gd32_bridge_ota.test_erase_tick_does_not_resurrect_aborted_session
+  PASS gd32_bridge_ota.test_erase_tick_does_not_report_error_after_abort
+  PASS gd32_bridge_ota.test_erase_tick_does_not_advance_fresh_begin_cursor
+  PASS gd32_bridge_ota.test_erase_tick_does_not_resurrect_rejected_begin
+  PASS gd32_bridge_ota.test_erase_tick_locks_final_check_and_publication
+  PASS gd32_bridge_ota.test_meta_record_layout_bytes
+  PASS gd32_bridge_ota.test_divergence_second_begin_targets_non_running_slot
+  PASS gd32_bridge_ota.test_erase_range_never_intersects_running_slot
+  PASS gd32_bridge_ota.test_begin_with_no_metadata_targets_non_running_slot
+  PASS gd32_bridge_ota.test_get_state_active_reports_running_slot_not_metadata
+  PASS gd32_bridge_ota.test_rollback_still_uses_metadata_active_slot
+  PASS gd32_bridge_ota.test_rollback_rejects_crc_corrupted_fallback_unchanged
+  PASS gd32_bridge_ota.test_rollback_rejects_crc_valid_bad_vector_unchanged
+  PASS gd32_bridge_ota.test_rollback_rejects_invalid_metadata_active_slot
+  PASS gd32_bridge_ota.test_meta_commit_preserves_running_slot_record_on_rec0
+  PASS gd32_bridge_ota.test_meta_commit_preserves_running_slot_record_on_rec1
+  PASS gd32_bridge_ota.test_meta_commit_power_cut_leaves_running_slot_record_intact
+  PASS gd32_bridge_ota.test_meta_commit_tie_break_preserves_newest_both_running
+  PASS gd32_bridge_ota.test_meta_commit_tie_break_preserves_newest_neither_running
+  PASS gd32_bridge_ota.test_meta_commit_equal_counters_preserve_rec0
+  PASS gd32_bridge_ota.test_meta_commit_targets_the_only_invalid_page
+  PASS gd32_bridge_ota.test_meta_commit_targets_rec0_with_no_metadata
+  PASS gd32_bridge_ota.test_meta_commit_rollback_preserves_running_slot_record
+  PASS gd32_bridge_ota.test_meta_commit_erase_fail_preserves_both_records
+  PASS gd32_bridge_ota.test_oversize_begin_stays_error_after_erase_drains
+  PASS gd32_bridge_ota.test_zero_length_begin_stays_error_after_erase_drains
+  PASS gd32_bridge_ota.test_rollback_refused_while_a_session_is_in_flight
+  PASS gd32_bridge_ota.test_boot_init_gates_a_fresh_trial
+  PASS gd32_bridge_ota.test_boot_init_confirmed_image_gate_is_false
+  PASS gd32_bridge_ota.test_boot_init_heals_from_rejected_trial
+  PASS gd32_bridge_ota.test_boot_init_heals_with_both_pages_valid
+  PASS gd32_bridge_ota.test_confirm_tick_commits_and_reboots
+  PASS gd32_bridge_ota.test_confirm_tick_failed_commit_preserves_older_confirmed_record
+  PASS gd32_bridge_ota.test_confirm_tick_program_failure_keeps_trial_no_reset
+  PASS gd32_bridge_ota.test_busy_gate_blocks_all_opcodes_until_confirmed
+  PASS gd32_bridge_ota.test_commit_sets_trial_flag_no_pad_carry
+  PASS gd32_bridge_ota.test_rollback_sets_trial_flag_exactly
+  PASS gd32_bridge_ota.test_commit_no_marker_refused
+  PASS gd32_bridge_ota.test_commit_marker_confirm_capable_sets_trial
+  PASS gd32_bridge_ota.test_commit_marker_no_confirm_bit_refused
+  PASS gd32_bridge_ota.test_rollback_target_no_marker_confirms_no_trial
+  PASS gd32_bridge_ota.test_rollback_target_marker_confirm_capable_sets_trial
+  PASS gd32_bridge_ota.test_image_trial_capable_present_and_confirm_capable
+  PASS gd32_bridge_ota.test_image_trial_capable_absent
+  PASS gd32_bridge_ota.test_image_trial_capable_corrupt_magic
+  PASS gd32_bridge_ota.test_image_trial_capable_unknown_struct_version_rejected
+  PASS gd32_bridge_ota.test_image_trial_capable_before_min_offset_not_found
+  PASS gd32_bridge_ota.test_image_trial_capable_outside_scan_window_not_found
+  PASS gd32_bridge_ota.test_boot_select_strict_pass_picks_newest_when_both_pass
+  PASS gd32_bridge_ota.test_boot_select_skips_invalid_and_watchdog_rejected
+  PASS gd32_bridge_ota.test_boot_select_last_resort_boots_rejected_trial_when_nothing_else_valid
+  PASS gd32_bridge_ota.test_boot_select_returns_none_when_nothing_valid
+  PASS gd32_bridge_ota.test_boot_select_trial_candidate_wins_strictly_without_watchdog
+  PASS gd32_bridge_ota.test_boot_select_both_trial_rejected_picks_newest_last_resort
+  PASS gd32_bridge_ota.test_boot_select_newest_invalid_older_trial_rejected_picks_idx1
+  PASS gd32_bridge_ota.test_confirm_tick_targets_running_record_not_meta_current_newest
+  PASS gd32_bridge_ota.test_boot_init_last_resort_composition_gates_without_premature_heal
+72/72 cases passed
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"ota_slot_a" end time: Sep 29 13:52 UTC
+"ota_slot_a" time elapsed: 00:00:00
+----------------------------------------------------------
+
+2/23 Testing: ota_slot_b
+2/23 Test: ota_slot_b
+Command: "/home/caner/gd32-int/upd/bt/test_ota_slot_b"
+Directory: /home/caner/gd32-int/upd/bt
+"ota_slot_b" start time: Sep 29 13:52 UTC
+Output:
+----------------------------------------------------------
+  PASS gd32_bridge_ota.test_begin_then_normal_chunk_programs
+  PASS gd32_bridge_ota.test_write_chunk_program_timeout_reports_status_timeout
+  PASS gd32_bridge_ota.test_overlong_chunk_span_rejected_without_program
+  PASS gd32_bridge_ota.test_truncated_chunk_span_rejected_without_program
+  PASS gd32_bridge_ota.test_zero_chunk_length_rejected_without_program
+  PASS gd32_bridge_ota.test_wrapped_offset_rejected_without_program
+  PASS gd32_bridge_ota.test_offset_past_slot_rejected_without_program
+  PASS gd32_bridge_ota.test_exact_end_chunk_accepted
+  PASS gd32_bridge_ota.test_replay_is_idempotent
+  PASS gd32_bridge_ota.test_slot_base_checked_validates_slot
+  PASS gd32_bridge_ota.test_image_bootable_validates_vector_head
+  PASS gd32_bridge_ota.test_begin_arms_background_erase
+  PASS gd32_bridge_ota.test_get_state_surfaces_err_cause
+  PASS gd32_bridge_ota.test_begin_demotes_target_in_metadata
+  PASS gd32_bridge_ota.test_begin_demote_reports_busy_not_io_when_funnel_busy
+  PASS gd32_bridge_ota.test_erase_tick_does_not_resurrect_aborted_session
+  PASS gd32_bridge_ota.test_erase_tick_does_not_report_error_after_abort
+  PASS gd32_bridge_ota.test_erase_tick_does_not_advance_fresh_begin_cursor
+  PASS gd32_bridge_ota.test_erase_tick_does_not_resurrect_rejected_begin
+  PASS gd32_bridge_ota.test_erase_tick_locks_final_check_and_publication
+  PASS gd32_bridge_ota.test_meta_record_layout_bytes
+  PASS gd32_bridge_ota.test_divergence_second_begin_targets_non_running_slot
+  PASS gd32_bridge_ota.test_erase_range_never_intersects_running_slot
+  PASS gd32_bridge_ota.test_begin_with_no_metadata_targets_non_running_slot
+  PASS gd32_bridge_ota.test_get_state_active_reports_running_slot_not_metadata
+  PASS gd32_bridge_ota.test_rollback_still_uses_metadata_active_slot
+  PASS gd32_bridge_ota.test_rollback_rejects_crc_corrupted_fallback_unchanged
+  PASS gd32_bridge_ota.test_rollback_rejects_crc_valid_bad_vector_unchanged
+  PASS gd32_bridge_ota.test_rollback_rejects_invalid_metadata_active_slot
+  PASS gd32_bridge_ota.test_meta_commit_preserves_running_slot_record_on_rec0
+  PASS gd32_bridge_ota.test_meta_commit_preserves_running_slot_record_on_rec1
+  PASS gd32_bridge_ota.test_meta_commit_power_cut_leaves_running_slot_record_intact
+  PASS gd32_bridge_ota.test_meta_commit_tie_break_preserves_newest_both_running
+  PASS gd32_bridge_ota.test_meta_commit_tie_break_preserves_newest_neither_running
+  PASS gd32_bridge_ota.test_meta_commit_equal_counters_preserve_rec0
+  PASS gd32_bridge_ota.test_meta_commit_targets_the_only_invalid_page
+  PASS gd32_bridge_ota.test_meta_commit_targets_rec0_with_no_metadata
+  PASS gd32_bridge_ota.test_meta_commit_rollback_preserves_running_slot_record
+  PASS gd32_bridge_ota.test_meta_commit_erase_fail_preserves_both_records
+  PASS gd32_bridge_ota.test_oversize_begin_stays_error_after_erase_drains
+  PASS gd32_bridge_ota.test_zero_length_begin_stays_error_after_erase_drains
+  PASS gd32_bridge_ota.test_rollback_refused_while_a_session_is_in_flight
+  PASS gd32_bridge_ota.test_boot_init_gates_a_fresh_trial
+  PASS gd32_bridge_ota.test_boot_init_confirmed_image_gate_is_false
+  PASS gd32_bridge_ota.test_boot_init_heals_from_rejected_trial
+  PASS gd32_bridge_ota.test_boot_init_heals_with_both_pages_valid
+  PASS gd32_bridge_ota.test_confirm_tick_commits_and_reboots
+  PASS gd32_bridge_ota.test_confirm_tick_failed_commit_preserves_older_confirmed_record
+  PASS gd32_bridge_ota.test_confirm_tick_program_failure_keeps_trial_no_reset
+  PASS gd32_bridge_ota.test_busy_gate_blocks_all_opcodes_until_confirmed
+  PASS gd32_bridge_ota.test_commit_sets_trial_flag_no_pad_carry
+  PASS gd32_bridge_ota.test_rollback_sets_trial_flag_exactly
+  PASS gd32_bridge_ota.test_commit_no_marker_refused
+  PASS gd32_bridge_ota.test_commit_marker_confirm_capable_sets_trial
+  PASS gd32_bridge_ota.test_commit_marker_no_confirm_bit_refused
+  PASS gd32_bridge_ota.test_rollback_target_no_marker_confirms_no_trial
+  PASS gd32_bridge_ota.test_rollback_target_marker_confirm_capable_sets_trial
+  PASS gd32_bridge_ota.test_image_trial_capable_present_and_confirm_capable
+  PASS gd32_bridge_ota.test_image_trial_capable_absent
+  PASS gd32_bridge_ota.test_image_trial_capable_corrupt_magic
+  PASS gd32_bridge_ota.test_image_trial_capable_unknown_struct_version_rejected
+  PASS gd32_bridge_ota.test_image_trial_capable_before_min_offset_not_found
+  PASS gd32_bridge_ota.test_image_trial_capable_outside_scan_window_not_found
+  PASS gd32_bridge_ota.test_boot_select_strict_pass_picks_newest_when_both_pass
+  PASS gd32_bridge_ota.test_boot_select_skips_invalid_and_watchdog_rejected
+  PASS gd32_bridge_ota.test_boot_select_last_resort_boots_rejected_trial_when_nothing_else_valid
+  PASS gd32_bridge_ota.test_boot_select_returns_none_when_nothing_valid
+  PASS gd32_bridge_ota.test_boot_select_trial_candidate_wins_strictly_without_watchdog
+  PASS gd32_bridge_ota.test_boot_select_both_trial_rejected_picks_newest_last_resort
+  PASS gd32_bridge_ota.test_boot_select_newest_invalid_older_trial_rejected_picks_idx1
+  PASS gd32_bridge_ota.test_confirm_tick_targets_running_record_not_meta_current_newest
+  PASS gd32_bridge_ota.test_boot_init_last_resort_composition_gates_without_premature_heal
+72/72 cases passed
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"ota_slot_b" end time: Sep 29 13:52 UTC
+"ota_slot_b" time elapsed: 00:00:00
+----------------------------------------------------------
+
+3/23 Testing: crc32
+3/23 Test: crc32
+Command: "/home/caner/gd32-int/upd/bt/test_crc32"
+Directory: /home/caner/gd32-int/upd/bt
+"crc32" start time: Sep 29 13:52 UTC
+Output:
+----------------------------------------------------------
+  PASS crc32.test_check_value
+  PASS crc32.test_empty_input
+  PASS crc32.test_all_256_single_byte_inputs
+  PASS crc32.test_multi_byte_vectors
+  PASS crc32.test_streaming_seed_contract
+5/5 cases passed
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"crc32" end time: Sep 29 13:52 UTC
+"crc32" time elapsed: 00:00:00
+----------------------------------------------------------
+
+4/23 Testing: crc16
+4/23 Test: crc16
+Command: "/home/caner/gd32-int/upd/bt/test_crc16"
+Directory: /home/caner/gd32-int/upd/bt
+"crc16" start time: Sep 29 13:52 UTC
+Output:
+----------------------------------------------------------
+  PASS crc16.test_check_value
+  PASS crc16.test_empty_input
+  PASS crc16.test_all_256_single_byte_inputs
+  PASS crc16.test_multi_byte_vectors
+4/4 cases passed
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"crc16" end time: Sep 29 13:52 UTC
+"crc16" time elapsed: 00:00:00
+----------------------------------------------------------
+
+5/23 Testing: transport_spi
+5/23 Test: transport_spi
+Command: "/home/caner/gd32-int/upd/bt/test_transport_spi"
+Directory: /home/caner/gd32-int/upd/bt
+"transport_spi" start time: Sep 29 13:52 UTC
+Output:
+----------------------------------------------------------
+  PASS gd32_bridge_transport.test_ping_stages_reply
+  PASS gd32_bridge_transport.test_drain_rewinds_consumed_reply
+  PASS gd32_bridge_transport.test_drain_rearm_is_idempotent
+  PASS gd32_bridge_transport.test_empty_transaction_rewinds
+  PASS gd32_bridge_transport.test_new_request_replaces_staged_reply
+  PASS gd32_bridge_transport.test_mangled_request_stages_io_error
+  PASS gd32_bridge_transport.test_hardware_transport_error_stages_io_error
+  PASS gd32_bridge_transport.test_status_seq_stamp_contract
+  PASS gd32_bridge_transport.test_status_seq_wraps_mod_16
+9/9 cases passed
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"transport_spi" end time: Sep 29 13:52 UTC
+"transport_spi" time elapsed: 00:00:00
+----------------------------------------------------------
+
+6/23 Testing: fault_diag
+6/23 Test: fault_diag
+Command: "/home/caner/gd32-int/upd/bt/test_fault_diag"
+Directory: /home/caner/gd32-int/upd/bt
+"fault_diag" start time: Sep 29 13:52 UTC
+Output:
+----------------------------------------------------------
+  PASS gd32_bridge_fault_diag.test_cpu_magic_encodes_fault_type
+  PASS gd32_bridge_fault_diag.test_mmfar_recorded_only_when_mmarvalid_set
+  PASS gd32_bridge_fault_diag.test_bfar_recorded_only_when_bfarvalid_set
+  PASS gd32_bridge_fault_diag.test_cpu_status_registers_recorded_raw
+  PASS gd32_bridge_fault_diag.test_nmi_fmc_eccs_recorded_only_when_flashECCIF_set
+  PASS gd32_bridge_fault_diag.test_nmi_pc_lr_recorded
+6/6 cases passed
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"fault_diag" end time: Sep 29 13:52 UTC
+"fault_diag" time elapsed: 00:00:00
+----------------------------------------------------------
+
+7/23 Testing: i2c_event_priority
+7/23 Test: i2c_event_priority
+Command: "/home/caner/gd32-int/upd/bt/test_i2c_event_priority"
+Directory: /home/caner/gd32-int/upd/bt
+"i2c_event_priority" start time: Sep 29 13:52 UTC
+Output:
+----------------------------------------------------------
+  PASS gd32_bridge_i2c_event_priority.test_no_pending_event_selects_none
+  PASS gd32_bridge_i2c_event_priority.test_each_event_selects_itself
+  PASS gd32_bridge_i2c_event_priority.test_final_write_byte_precedes_repeated_start
+  PASS gd32_bridge_i2c_event_priority.test_stop_still_precedes_transmit
+4/4 cases passed
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"i2c_event_priority" end time: Sep 29 13:52 UTC
+"i2c_event_priority" time elapsed: 00:00:00
+----------------------------------------------------------
+
+8/23 Testing: timer_sync_iti
+8/23 Test: timer_sync_iti
+Command: "/home/caner/gd32-int/upd/bt/test_timer_sync_iti"
+Directory: /home/caner/gd32-int/upd/bt
+"timer_sync_iti" start time: Sep 29 13:52 UTC
+Output:
+----------------------------------------------------------
+  PASS timer_sync_iti.test_master_timer7_slave_timer0
+  PASS timer_sync_iti.test_master_timer0_slave_timer7
+  PASS timer_sync_iti.test_rejects_master_equals_slave
+  PASS timer_sync_iti.test_rejects_uninitialised_timer19
+  PASS timer_sync_iti.test_rejects_out_of_range_slave
+  PASS timer_sync_iti.test_rejects_out_of_range_master
+  PASS timer_sync_iti.test_rejects_out_of_range_both
+7/7 cases passed
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"timer_sync_iti" end time: Sep 29 13:52 UTC
+"timer_sync_iti" time elapsed: 00:00:00
+----------------------------------------------------------
+
+9/23 Testing: power_wake
+9/23 Test: power_wake
+Command: "/home/caner/gd32-int/upd/bt/test_power_wake"
+Directory: /home/caner/gd32-int/upd/bt
+"power_wake" start time: Sep 29 13:52 UTC
+Output:
+----------------------------------------------------------
+  PASS power_wake.test_accepts_empty_and_supported_bits
+  PASS power_wake.test_rejects_known_unsupported_bits
+  PASS power_wake.test_rejects_portable_comparator_and_brownout_bits
+  PASS power_wake.test_rejects_future_and_mixed_bits
+  PASS power_wake.test_deep_sleep_refused_without_hardware
+  PASS power_wake.test_standby_without_rtc_wake_is_refused
+  PASS power_wake.test_run_and_sleep_reject_nonzero_wake_after_ms
+7/7 cases passed
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"power_wake" end time: Sep 29 13:52 UTC
+"power_wake" time elapsed: 00:00:00
+----------------------------------------------------------
+
+10/23 Testing: timer_sync
+10/23 Test: timer_sync
+Command: "/home/caner/gd32-int/upd/bt/test_timer_sync"
+Directory: /home/caner/gd32-int/upd/bt
+"timer_sync" start time: Sep 29 13:52 UTC
+Output:
+----------------------------------------------------------
+  PASS timer_sync.test_pwm_sync_guard_covers_both_pwm_timers
+  PASS timer_sync.test_compact_ids_configure_timer0_to_timer7
+  PASS timer_sync.test_disable_writes_disabled_slave_mode
+  PASS timer_sync.test_disabling_one_route_preserves_the_other_master
+  PASS timer_sync.test_timer19_id_rejected_before_register_writes
+  PASS timer_sync.test_other_invalid_inputs_fail_before_register_writes
+6/6 cases passed
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"timer_sync" end time: Sep 29 13:52 UTC
+"timer_sync" time elapsed: 00:00:00
+----------------------------------------------------------
+
+11/23 Testing: pwm_preload_transaction
+11/23 Test: pwm_preload_transaction
+Command: "/home/caner/gd32-int/upd/bt/test_pwm_preload_transaction"
+Directory: /home/caner/gd32-int/upd/bt
+"pwm_preload_transaction" start time: Sep 29 13:52 UTC
+Output:
+----------------------------------------------------------
+  PASS pwm_preload_transaction.test_disables_updates_and_preserves_other_ctl0_changes
+  PASS pwm_preload_transaction.test_preserves_callers_existing_update_disable_policy
+  PASS pwm_preload_transaction.test_blocks_each_injected_update_until_pair_and_mirror_are_pending
+  PASS pwm_preload_transaction.test_model_would_detect_the_unguarded_torn_pair_mutation
+4/4 cases passed
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"pwm_preload_transaction" end time: Sep 29 13:52 UTC
+"pwm_preload_transaction" time elapsed: 00:00:00
+----------------------------------------------------------
+
+12/23 Testing: i2c_timeout
+12/23 Test: i2c_timeout
+Command: "/home/caner/gd32-int/upd/bt/test_i2c_timeout"
+Directory: /home/caner/gd32-int/upd/bt
+"i2c_timeout" start time: Sep 29 13:52 UTC
+Output:
+----------------------------------------------------------
+  PASS i2c_timeout.test_216mhz_apb1_rounds_up_to_smbus_minimum
+  PASS i2c_timeout.test_irc8m_deep_sleep_clock_is_rederived
+  PASS i2c_timeout.test_clocks_outside_the_25_to_35ms_window_are_rejected
+  PASS i2c_timeout.test_clock_too_fast_for_the_12bit_counter_is_rejected
+4/4 cases passed
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"i2c_timeout" end time: Sep 29 13:52 UTC
+"i2c_timeout" time elapsed: 00:00:00
+----------------------------------------------------------
+
+13/23 Testing: i2c_recovery
+13/23 Test: i2c_recovery
+Command: "/home/caner/gd32-int/upd/bt/test_i2c_recovery"
+Directory: /home/caner/gd32-int/upd/bt
+"i2c_recovery" start time: Sep 29 13:52 UTC
+Output:
+----------------------------------------------------------
+  PASS i2c_recovery.test_spin_limit_is_generously_above_the_documented_3_cycle_floor
+  PASS i2c_recovery.test_below_limit_does_not_escalate
+  PASS i2c_recovery.test_at_and_beyond_limit_escalates
+3/3 cases passed
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"i2c_recovery" end time: Sep 29 13:52 UTC
+"i2c_recovery" time elapsed: 00:00:00
+----------------------------------------------------------
+
+14/23 Testing: gpio_grouped
+14/23 Test: gpio_grouped
+Command: "/home/caner/gd32-int/upd/bt/test_gpio_grouped"
+Directory: /home/caner/gd32-int/upd/bt
+"gpio_grouped" start time: Sep 29 13:52 UTC
+Output:
+----------------------------------------------------------
+  PASS gpio_grouped.test_read_samples_each_touched_port_once
+  PASS gpio_grouped.test_write_groups_set_and_clear_by_port
+  PASS gpio_grouped.test_first_write_preloads_before_grouped_promotion
+  PASS gpio_grouped.test_mixed_port_preloads_only_new_pin
+  PASS gpio_grouped.test_ignored_high_bits_touch_nothing
+  PASS gpio_grouped.test_reg_on_bits_route_to_gpioe_14_15
+  PASS gpio_grouped.test_can_stby_bit_routes_to_gpiob_13
+  PASS gpio_grouped.test_null_read_output_is_rejected_without_access
+  PASS gpio_grouped.test_first_read_promotes_input_once
+  PASS gpio_grouped.test_read_does_not_demote_a_driven_output_pad
+10/10 cases passed
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"gpio_grouped" end time: Sep 29 13:52 UTC
+"gpio_grouped" time elapsed: 00:00:00
+----------------------------------------------------------
+
+15/23 Testing: tmu_q31_scale
+15/23 Test: tmu_q31_scale
+Command: "/home/caner/gd32-int/upd/bt/test_tmu_q31_scale"
+Directory: /home/caner/gd32-int/upd/bt
+"tmu_q31_scale" start time: Sep 29 13:52 UTC
+Output:
+----------------------------------------------------------
+  PASS tmu_q31_scale.test_sqrt_band0_low
+  PASS tmu_q31_scale.test_sqrt_refuses_at_and_below_manual_floor
+  PASS tmu_q31_scale.test_sqrt_accepts_just_above_manual_floor
+  PASS tmu_q31_scale.test_sqrt_refuses_zero_and_negative
+  PASS tmu_q31_scale.test_sqrt_band0_upper_boundary
+  PASS tmu_q31_scale.test_sqrt_band1_at_boundary
+  PASS tmu_q31_scale.test_sqrt_band1_near_one
+  PASS tmu_q31_scale.test_ln_representable_half
+  PASS tmu_q31_scale.test_ln_representable_near_one
+  PASS tmu_q31_scale.test_ln_refuses_at_e_inv_boundary
+  PASS tmu_q31_scale.test_ln_representable_just_above_boundary
+  PASS tmu_q31_scale.test_ln_refuses_below_e_inv
+  PASS tmu_q31_scale.test_ln_refuses_zero_and_negative
+  PASS tmu_q31_scale.test_sinh_representable_at_zero
+  PASS tmu_q31_scale.test_sinh_representable_half
+  PASS tmu_q31_scale.test_sinh_representable_negative_half
+  PASS tmu_q31_scale.test_sinh_refuses_at_asinh1_boundary
+  PASS tmu_q31_scale.test_sinh_representable_just_inside_boundary
+  PASS tmu_q31_scale.test_sinh_refuses_near_one
+19/19 cases passed
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"tmu_q31_scale" end time: Sep 29 13:52 UTC
+"tmu_q31_scale" time elapsed: 00:00:00
+----------------------------------------------------------
+
+16/23 Testing: pwm_ownership
+16/23 Test: pwm_ownership
+Command: "/home/caner/gd32-int/upd/bt/test_pwm_ownership"
+Directory: /home/caner/gd32-int/upd/bt
+"pwm_ownership" start time: Sep 29 13:52 UTC
+Output:
+----------------------------------------------------------
+  PASS pwm_ownership.test_own_claim_does_not_block_one_shot
+  PASS pwm_ownership.test_sibling_claim_blocks_one_shot
+  PASS pwm_ownership.test_timer_groups_reuse_four_channel_bit_positions
+3/3 cases passed
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"pwm_ownership" end time: Sep 29 13:52 UTC
+"pwm_ownership" time elapsed: 00:00:00
+----------------------------------------------------------
+
+17/23 Testing: pwm_gd32
+17/23 Test: pwm_gd32
+Command: "/home/caner/gd32-int/upd/bt/test_pwm_gd32"
+Directory: /home/caner/gd32-int/upd/bt
+"pwm_gd32" start time: Sep 29 13:52 UTC
+Output:
+----------------------------------------------------------
+  PASS pwm_gd32.test_edge_accepts_exact_period_limit
+  PASS pwm_gd32.test_edge_rejects_above_period_limit_without_writes
+  PASS pwm_gd32.test_edge_rejects_unrepresentable_full_duty_without_writes
+  PASS pwm_gd32.test_edge_accepts_full_duty_below_limit
+  PASS pwm_gd32.test_center_accepts_exact_period_limit
+  PASS pwm_gd32.test_center_rejects_above_period_limit_without_writes
+  PASS pwm_gd32.test_rejects_period_below_one_counter_cycle_without_writes
+  PASS pwm_gd32.test_duty_above_period_is_invalid_without_writes
+  PASS pwm_gd32.test_invalid_channel_is_rejected_without_writes
+9/9 cases passed
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"pwm_gd32" end time: Sep 29 13:52 UTC
+"pwm_gd32" time elapsed: 00:00:00
+----------------------------------------------------------
+
+18/23 Testing: adc_seq
+18/23 Test: adc_seq
+Command: "/home/caner/gd32-int/upd/bt/test_adc_seq"
+Directory: /home/caner/gd32-int/upd/bt
+"adc_seq" start time: Sep 29 13:52 UTC
+Output:
+----------------------------------------------------------
+  PASS gd32_adc_seq.test_read_recalibrates_after_enable
+  PASS gd32_adc_seq.test_stream_begin_recalibrates_after_enable
+  PASS gd32_adc_seq.test_stream_restart_reloads_dma_count
+  PASS gd32_adc_seq.test_stream_lifecycle_confirms_disable_and_releases_dmamux
+  PASS gd32_adc_seq.test_stream_begin_refuses_a_channel_that_does_not_disable
+  PASS gd32_adc_seq.test_boot_adc_reset_precedes_two_shared_clock_setups
+  PASS gd32_adc_seq.test_stream_end_restore_does_not_reset_or_reclock_adc
+  PASS gd32_adc_seq.test_stream_begin_clears_rovf_before_enable
+  PASS gd32_adc_seq.test_stream_read_reports_busy_on_rovf
+  PASS gd32_adc_seq.test_rovf_recovery_clears_dma_ftf
+  PASS gd32_adc_seq.test_fac_iir_decode_matches_an208
+  PASS gd32_adc_seq.test_fac_iir_decode_matches_vendor_iir_dma
+  PASS gd32_adc_seq.test_fac_rejects_coeff_beyond_ipr_range
+  PASS gd32_adc_seq.test_fac_pump_biases_input_and_rebiases_output
+  PASS gd32_adc_seq.test_fac_pump_biases_a_10bit_stream_by_its_own_full_scale
+  PASS gd32_adc_seq.test_fac_saturation_is_sticky
+  PASS gd32_adc_seq.test_read_recovers_coalesced_lap
+  PASS gd32_adc_seq.test_dma_error_is_sticky_and_preserves_simultaneous_lap
+  PASS gd32_adc_seq.test_fft_rebind_rejects_previous_sequence_until_new_frame
+  PASS gd32_adc_seq.test_fft_config_preemption_cannot_resurrect_ended_stream
+  PASS gd32_adc_seq.test_fac_config_preemption_cannot_resurrect_ended_stream
+  PASS gd32_adc_seq.test_fac_post_commit_preemption_cannot_drain_replacement
+  PASS gd32_adc_seq.test_fft_post_commit_preemption_cannot_drain_replacement
+  PASS gd32_adc_seq.test_fft_wait_preemption_cannot_publish_ended_session
+  PASS gd32_adc_seq.test_fft_publish_commit_preemption_cannot_expose_stale_frame
+25/25 cases passed
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"adc_seq" end time: Sep 29 13:52 UTC
+"adc_seq" time elapsed: 00:00:00
+----------------------------------------------------------
+
+19/23 Testing: fmc_ota_guard
+19/23 Test: fmc_ota_guard
+Command: "/home/caner/gd32-int/upd/bt/test_fmc_ota_guard"
+Directory: /home/caner/gd32-int/upd/bt
+"fmc_ota_guard" start time: Sep 29 13:52 UTC
+Output:
+----------------------------------------------------------
+  PASS gd32_bridge_fmc_ota_guard.test_bootloader_rejected
+  PASS gd32_bridge_fmc_ota_guard.test_running_slot_rejected
+  PASS gd32_bridge_fmc_ota_guard.test_legitimate_ranges_allowed
+3/3 cases passed
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"fmc_ota_guard" end time: Sep 29 13:52 UTC
+"fmc_ota_guard" time elapsed: 00:00:00
+----------------------------------------------------------
+
+20/23 Testing: transport_i2c
+20/23 Test: transport_i2c
+Command: "/home/caner/gd32-int/upd/bt/test_transport_i2c"
+Directory: /home/caner/gd32-int/upd/bt
+"transport_i2c" start time: Sep 29 13:52 UTC
+Output:
+----------------------------------------------------------
+  PASS gd32_bridge_transport_i2c.test_ping_stages_reply
+  PASS gd32_bridge_transport_i2c.test_write_end_dispatches_non_idempotent_command_once
+  PASS gd32_bridge_transport_i2c.test_max_length_reply_is_staged_intact
+  PASS gd32_bridge_transport_i2c.test_crc16_matches_canonical_self_test_vector
+  PASS gd32_bridge_transport_i2c.test_new_request_replaces_staged_reply
+  PASS gd32_bridge_transport_i2c.test_mangled_request_stages_no_pending
+  PASS gd32_bridge_transport_i2c.test_read_before_write_stages_no_pending
+  PASS gd32_bridge_transport_i2c.test_crc_excludes_leading_reg_byte
+  PASS gd32_bridge_transport_i2c.test_status_seq_never_stamps_i2c_reply
+  PASS gd32_bridge_transport_i2c.test_request_payload_pointer_is_pinned
+  PASS gd32_bridge_transport_i2c.test_read_past_reply_returns_idle_0xff
+  PASS gd32_bridge_transport_i2c.test_max_length_request_dispatches
+  PASS gd32_bridge_transport_i2c.test_oversized_write_truncates_and_rejects
+  PASS gd32_bridge_transport_i2c.test_bytes_past_capacity_are_dropped_not_overwritten
+  PASS gd32_bridge_transport_i2c.test_short_write_below_minimum_rejected
+  PASS gd32_bridge_transport_i2c.test_zero_byte_write_stages_no_pending
+  PASS gd32_bridge_transport_i2c.test_write_to_non_cmd_register_rejected
+  PASS gd32_bridge_transport_i2c.test_init_resets_state_independent_of_order
+18/18 cases passed
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"transport_i2c" end time: Sep 29 13:52 UTC
+"transport_i2c" time elapsed: 00:00:00
+----------------------------------------------------------
+
+21/23 Testing: protocol
+21/23 Test: protocol
+Command: "/home/caner/gd32-int/upd/bt/test_protocol"
+Directory: /home/caner/gd32-int/upd/bt
+"protocol" start time: Sep 29 13:52 UTC
+Output:
+----------------------------------------------------------
+  PASS protocol.test_fixed_opcode_ok_and_boundaries
+  PASS protocol.test_hal_error_mapping
+  PASS protocol.test_adc_read_variable_reply
+  PASS protocol.test_adc_stream_read_variable_reply
+  PASS protocol.test_adc_spectrum_read_variable_reply
+  PASS protocol.test_adc_dsp_stage_push_length_boundary
+  PASS protocol.test_local_value_validation
+  PASS protocol.test_gpio_write_then_read_roundtrip
+  PASS protocol.test_reset_reason_destructive_read
+  PASS protocol.test_se_reset_hal_contract_inval_direct
+  PASS protocol.test_pwm_period_shared_per_timer
+  PASS protocol.test_link_features_grant_then_disable
+  PASS protocol.test_link_features_are_per_transport
+  PASS protocol.test_link_features_rejects_unknown_link
+  PASS protocol.test_nested_dispatch_returns_busy_without_hal_mutation
+  PASS protocol.test_dispatch_guard_releases_after_direct_return_paths
+  PASS protocol.test_unknown_opcode_default
+  PASS protocol.test_reserved_0x36_tombstone
+  PASS protocol.test_ota_range_is_inert_without_partitioning
+19/19 cases passed
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"protocol" end time: Sep 29 13:52 UTC
+"protocol" time elapsed: 00:00:00
+----------------------------------------------------------
+
+22/23 Testing: adc_dsp
+22/23 Test: adc_dsp
+Command: "/home/caner/gd32-int/upd/bt/test_adc_dsp"
+Directory: /home/caner/gd32-int/upd/bt
+"adc_dsp" start time: Sep 29 13:52 UTC
+Output:
+----------------------------------------------------------
+  PASS gd32_bridge_adc_dsp.test_reject_two_stage_fir
+  PASS gd32_bridge_adc_dsp.test_reject_fir_then_iir
+  PASS gd32_bridge_adc_dsp.test_reject_iir_cascaded_sections
+  PASS gd32_bridge_adc_dsp.test_reject_fir_before_window_fft
+  PASS gd32_bridge_adc_dsp.test_accept_single_fir
+  PASS gd32_bridge_adc_dsp.test_accept_single_section_iir
+  PASS gd32_bridge_adc_dsp.test_accept_window_fft
+  PASS gd32_bridge_adc_dsp.test_accept_bare_fft
+  PASS gd32_bridge_adc_dsp.test_reject_second_fft_bind
+  PASS gd32_bridge_adc_dsp.test_fft_and_fir_independent_blocks
+  PASS gd32_bridge_adc_dsp.test_gap_in_stage_list_rejected
+  PASS gd32_bridge_adc_dsp.test_fft_not_terminal_rejected
+  PASS gd32_bridge_adc_dsp.test_window_without_fft_rejected
+  PASS gd32_bridge_adc_dsp.test_malformed_fir_blob_rejected
+  PASS gd32_bridge_adc_dsp.test_pool_exhaustion_returns_notimpl
+  PASS gd32_bridge_adc_dsp.test_reject_second_fir_bind
+  PASS gd32_bridge_adc_dsp.test_fir_then_fft_independent_blocks
+  PASS gd32_bridge_adc_dsp.test_incomplete_stage_bind_rejected
+  PASS gd32_bridge_adc_dsp.test_chunk_offset_past_total_size_rejected
+  PASS gd32_bridge_adc_dsp.test_multi_chunk_assembly_succeeds
+  PASS gd32_bridge_adc_dsp.test_repeated_chunk_cannot_forge_completion
+  PASS gd32_bridge_adc_dsp.test_out_of_order_chunks_and_replay_succeed
+  PASS gd32_bridge_adc_dsp.test_conflicting_overlap_rejects_atomically
+  PASS gd32_bridge_adc_dsp.test_changed_metadata_at_offset_zero_restarts_stage
+  PASS gd32_bridge_adc_dsp.test_full_same_metadata_payload_recovers_after_bind_rejection
+  PASS gd32_bridge_adc_dsp.test_chain_reopen_clears_entire_stage
+  PASS gd32_bridge_adc_dsp.test_reject_fir_before_bare_fft
+  PASS gd32_bridge_adc_dsp.test_p1_capable_rejects_overlong_fir_taps
+  PASS gd32_bridge_adc_dsp.test_p1_capable_rejects_malformed_fft_and_iir_payloads
+  PASS gd32_bridge_adc_dsp.test_p1_capable_still_accepts_max_tap_fir
+30/30 cases passed
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"adc_dsp" end time: Sep 29 13:52 UTC
+"adc_dsp" time elapsed: 00:00:00
+----------------------------------------------------------
+
+23/23 Testing: protocol_vectors
+23/23 Test: protocol_vectors
+Command: "/home/caner/gd32-int/upd/bt/test_protocol_vectors"
+Directory: /home/caner/gd32-int/upd/bt
+"protocol_vectors" start time: Sep 29 13:52 UTC
+Output:
+----------------------------------------------------------
+  PASS protocol_vectors.test_every_spi_request_vector_has_a_test
+  PASS protocol_vectors.test_spi_requests_match_committed_replies
+  PASS protocol_vectors.test_timer_sync_uses_compact_wire_ids
+  PASS protocol_vectors.test_get_build_id_request_accepted
+  PASS protocol_vectors.test_i2c_ping_matches_committed_vectors
+  PASS protocol_vectors.test_link_features_request_matches_committed_vector
+  PASS protocol_vectors.test_spi_stamp5_matches_committed_vector
+  PASS protocol_vectors.test_crc16_matches_committed_self_test_vector
+8/8 cases passed
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"protocol_vectors" end time: Sep 29 13:52 UTC
+"protocol_vectors" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Sep 29 13:52 UTC

@@ -49,7 +49,7 @@
 
 static uint8_t  g_flash[FL_SIZE];
 static uint32_t g_program_calls;
-static bool     g_program_fail; /* #74: models a PGERR-with-power-ON write
+static bool     g_program_fail;    /* #74: models a PGERR-with-power-ON write
                                   * failure -- ota_fmc_program() returns
                                   * false having written nothing.  A REAL
                                   * power cut is a different EVENT (no
@@ -62,7 +62,12 @@ static bool     g_program_fail; /* #74: models a PGERR-with-power-ON write
                                   * any ascending tear leaves the page
                                   * CRC-invalid regardless of which of the
                                   * two events stopped it. */
-static bool     g_erase_fail;   /* meta_commit's ota_fmc_erase_range()-fails
+static bool     g_program_timeout; /* gh#281: models a bounded ota_fmc_wait_ready()
+                                     * timeout (FMC_TOERR) distinct from
+                                     * g_program_fail's generic FMC error --
+                                     * must surface as STATUS_TIMEOUT, not
+                                     * STATUS_IO. */
+static bool     g_erase_fail;      /* meta_commit's ota_fmc_erase_range()-fails
                                 * early return (ota.c) had no seam before
                                 * this; mirrors g_program_fail but models
                                 * the erase failing with nothing on the
@@ -97,7 +102,7 @@ bool ota_fmc_supported(void)
 	return true;
 }
 
-bool ota_fmc_erase_range(uint32_t base, uint32_t len)
+ota_fmc_result_t ota_fmc_erase_range(uint32_t base, uint32_t len)
 {
 	zassert_equal(
 	    g_ota_mock_primask, 0u, "ota_erase_tick must not mask transport IRQs across FMC work");
@@ -123,22 +128,28 @@ bool ota_fmc_erase_range(uint32_t base, uint32_t len)
 	if (hook != NULL) {
 		hook();
 	}
-	return erased;
+	return erased ? OTA_FMC_RESULT_OK : OTA_FMC_RESULT_ERROR;
 }
 
-bool ota_fmc_program(uint32_t addr, const uint8_t *data, size_t len)
+ota_fmc_result_t ota_fmc_program(uint32_t addr, const uint8_t *data, size_t len)
 {
+	if (g_program_timeout) {
+		/* gh#281: models the bounded ota_fmc_wait_ready() timeout path
+		 * (FMC_TOERR) -- same untouched-target shape as g_program_fail,
+		 * distinct result so callers can tell them apart. */
+		return OTA_FMC_RESULT_TIMEOUT;
+	}
 	if (g_program_fail) {
 		/* Models the PGERR-with-power-ON write failure (see
 		 * g_program_fail above), not a real power cut: the target page
 		 * is already erased (invalid) and stays that way, without
 		 * copying the new record into it -- the same end state a real
 		 * cut would leave. */
-		return false;
+		return OTA_FMC_RESULT_ERROR;
 	}
 	memcpy(_host_ptr(addr), data, len);
 	g_program_calls++;
-	return true;
+	return OTA_FMC_RESULT_OK;
 }
 
 const void *ota_fmc_flash_ptr(uint32_t addr)
@@ -273,6 +284,7 @@ static void reset_model(void)
 	memset(g_flash, 0, sizeof(g_flash)); /* zeroed meta -> no valid record */
 	g_program_calls           = 0u;
 	g_program_fail            = false;
+	g_program_timeout         = false;
 	g_erase_fail              = false;
 	g_erase_after_hook        = NULL;
 	g_erase_calls             = 0u;
@@ -441,7 +453,9 @@ static void plant_trial_image(uint32_t base, bool with_marker, bool cap_bit)
 		buf[TEST_MARKER_OFFSET + 18u] = (uint8_t)(cap & 0xFFu);
 		buf[TEST_MARKER_OFFSET + 19u] = (uint8_t)(cap >> 8);
 	}
-	zassert_true(ota_fmc_program(base, buf, sizeof buf), "plant_trial_image: program failed");
+	zassert_equal(ota_fmc_program(base, buf, sizeof buf),
+	              OTA_FMC_RESULT_OK,
+	              "plant_trial_image: program failed");
 }
 
 /* #220: ROLLBACK now recomputes the fallback slot's CRC before flipping
@@ -507,6 +521,30 @@ ZTEST(gd32_bridge_ota, test_begin_then_normal_chunk_programs)
 	zassert_equal(g_program_calls, 1u, "ota_fmc_program must be called once");
 	zassert_equal(rlen, 4u);
 	zassert_equal(rd_u32(reply), 4u, "high-water = received bytes");
+}
+
+/* gh#281: a bounded FMC wait timeout (FMC_TOERR) must reach the host as
+ * STATUS_TIMEOUT, not the generic STATUS_IO every other FMC error uses --
+ * before this fix ota_fmc_program()'s bool return threw that distinction
+ * away, so a stuck FMC and a PGERR were indistinguishable on the wire. */
+ZTEST(gd32_bridge_ota, test_write_chunk_program_timeout_reports_status_timeout)
+{
+	reset_model();
+	begin_session(64u);
+	g_program_calls   = 0u;
+	g_program_timeout = true;
+
+	const uint8_t        data[4] = { 0xDE, 0xAD, 0xBE, 0xEF };
+	uint8_t              reply[8];
+	size_t               rlen = 0u;
+	gd32_bridge_status_t st   = write_chunk(0u, data, sizeof(data), reply, &rlen);
+	g_program_timeout         = false; /* hygiene: no before-hook clears this (#6) */
+
+	zassert_equal(
+	    st, STATUS_TIMEOUT, "a stuck-FMC program timeout must report STATUS_TIMEOUT, got %d", st);
+	zassert_equal(g_program_calls, 0u, "a failed program must not count as a completed write");
+	zassert_equal(
+	    ota_state_now(), 4u /* OTA_ST_ERROR */, "failed chunk write must fault the session");
 }
 
 /* ---- #145: embedded WRITE_CHUNK length must match dispatch span ----- */
@@ -720,6 +758,17 @@ ZTEST(gd32_bridge_ota, test_begin_arms_background_erase)
 		ota_erase_tick();
 	}
 	zassert_equal(ota_state_now(), 1u /* OTA_ST_READY */, "erase drain must reach READY");
+
+	/* gh#264: h_begin's erase_at must be the checked base of the
+	 * non-running slot -- not an uninitialised local left over from a
+	 * discarded ota_slot_base_checked() return.  g_erase_bases[0] is the
+	 * FIRST physical erase region h_begin armed, now drained. */
+	uint32_t expected_base = 0u;
+	zassert_true(ota_slot_base_checked(TEST_OTHER_SLOT, &expected_base));
+	zassert_true(g_erase_calls >= 1u, "BEGIN must have armed at least one erase region");
+	zassert_equal(g_erase_bases[0],
+	              expected_base,
+	              "BEGIN's erase must start at the non-running slot's checked base");
 
 	/* Now a chunk is accepted. */
 	zassert_equal(

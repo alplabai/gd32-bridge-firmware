@@ -1,0 +1,1 @@
+/usr/bin/cc -g CMakeFiles/test_i2c_timeout.dir/i2c_timeout/src/test_i2c_timeout.c.o "CMakeFiles/test_i2c_timeout.dir/home/caner/gd32-int/upd/hal/gd32/i2c_timeout.c.o" -o test_i2c_timeout  libztest_shim.a 

@@ -1,0 +1,1 @@
+/usr/bin/cc -g CMakeFiles/test_crc32.dir/crc32/src/test_crc32.c.o "CMakeFiles/test_crc32.dir/home/caner/gd32-int/upd/src/crc32.c.o" -o test_crc32  libztest_shim.a 

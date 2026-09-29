@@ -1,0 +1,1 @@
+/usr/bin/cc -g CMakeFiles/test_fault_diag.dir/fault_diag/src/test_fault_diag.c.o "CMakeFiles/test_fault_diag.dir/home/caner/gd32-int/upd/hal/gd32/fault_diag.c.o" -o test_fault_diag  libztest_shim.a 

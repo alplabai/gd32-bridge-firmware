@@ -303,16 +303,16 @@ static void fmc_funnel_release(void)
 	s_fmc_owned = false; /* single aligned store; no section needed */
 }
 
-bool ota_fmc_erase_range(uint32_t base, uint32_t len)
+ota_fmc_result_t ota_fmc_erase_range(uint32_t base, uint32_t len)
 {
 	/* Layout regions stay OTA_PAGE_SIZE-granular (2 KB -- a multiple of
      * the real page in both bank modes); the erase loop walks the REAL
      * page size so dual-bank (1 KB pages) erases every page. */
 	if ((base % OTA_PAGE_SIZE) != 0u || (len % OTA_PAGE_SIZE) != 0u) {
-		return false;
+		return OTA_FMC_RESULT_ERROR;
 	}
 	if (ota_fmc_range_forbidden(base, len)) {
-		return false; /* #79: bootloader / running-slot -- refused, not erased */
+		return OTA_FMC_RESULT_ERROR; /* #79: bootloader / running-slot -- refused, not erased */
 	}
 	/* One owner at a time (#147).  Refusing is the whole point: the
      * caller that loses must NOT proceed into the funnel.
@@ -322,21 +322,26 @@ bool ota_fmc_erase_range(uint32_t base, uint32_t len)
      * must never take the funnel, so it cannot make a concurrent, LEGAL
      * erase fail by holding ownership while it gets rejected anyway. */
 	if (!fmc_funnel_claim()) {
-		return false;
+		return OTA_FMC_RESULT_ERROR;
 	}
 	const uint32_t step =
 	    ((FMC_OBCTL & FMC_OBCTL_DBS) != 0u) ? OTA_FMC_PAGE_SIZE_DBANK : OTA_FMC_PAGE_SIZE_SBANK;
-	bool ok = true;
+	ota_fmc_result_t result = OTA_FMC_RESULT_OK;
 	fmc_unlock();
 	for (uint32_t a = base; a < base + len; a += step) {
-		if (erase_one_page(a) != FMC_READY) {
-			ok = false;
+		const fmc_state_enum st = erase_one_page(a);
+		if (st != FMC_READY) {
+			/* gh#281: FMC_TOERR is the ONLY state ota_fmc_wait_ready()
+			 * manufactures itself (its BUSY-forever timeout, not a
+			 * genuine FMC_STAT flag) -- report it distinctly so the
+			 * host can tell a stuck FMC from a real PGERR/WPERR/... */
+			result = (st == FMC_TOERR) ? OTA_FMC_RESULT_TIMEOUT : OTA_FMC_RESULT_ERROR;
 			break;
 		}
 	}
 	fmc_lock();
 	fmc_funnel_release();
-	return ok;
+	return result;
 }
 
 OTA_RAMFUNC static fmc_state_enum program_one_dword(uint32_t addr, uint64_t dw)
@@ -366,23 +371,23 @@ OTA_RAMFUNC static fmc_state_enum program_one_dword(uint32_t addr, uint64_t dw)
 	return st;
 }
 
-bool ota_fmc_program(uint32_t addr, const uint8_t *data, size_t len)
+ota_fmc_result_t ota_fmc_program(uint32_t addr, const uint8_t *data, size_t len)
 {
 	/* GD32G5 programs in 64-bit doublewords; `addr` must be 8-byte aligned
      * (the host paces chunk offsets on 8-byte boundaries). Pad a short tail
      * with 0xFF (erased state). */
 	if ((addr % 8u) != 0u) {
-		return false;
+		return OTA_FMC_RESULT_ERROR;
 	}
 	if (ota_fmc_range_forbidden(addr, (uint32_t)len)) {
-		return false; /* #79: bootloader / running-slot -- refused, not programmed */
+		return OTA_FMC_RESULT_ERROR; /* #79: bootloader / running-slot -- refused, not programmed */
 	}
 	/* Range guard first, then ownership -- same ordering argument as in
      * ota_fmc_erase_range above. */
 	if (!fmc_funnel_claim()) {
-		return false; /* #147 -- see fmc_funnel_claim */
+		return OTA_FMC_RESULT_ERROR; /* #147 -- see fmc_funnel_claim */
 	}
-	bool ok = true;
+	ota_fmc_result_t result = OTA_FMC_RESULT_OK;
 	fmc_unlock();
 	for (size_t i = 0u; i < len; i += 8u) {
 		uint8_t      buf[8];
@@ -392,14 +397,16 @@ bool ota_fmc_program(uint32_t addr, const uint8_t *data, size_t len)
 		}
 		uint64_t dw;
 		memcpy(&dw, buf, sizeof dw);
-		if (program_one_dword(addr + (uint32_t)i, dw) != FMC_READY) {
-			ok = false;
+		const fmc_state_enum st = program_one_dword(addr + (uint32_t)i, dw);
+		if (st != FMC_READY) {
+			/* gh#281: same FMC_TOERR distinction as ota_fmc_erase_range. */
+			result = (st == FMC_TOERR) ? OTA_FMC_RESULT_TIMEOUT : OTA_FMC_RESULT_ERROR;
 			break;
 		}
 	}
 	fmc_lock();
 	fmc_funnel_release();
-	return ok;
+	return result;
 }
 
 void ota_system_reset(void)
