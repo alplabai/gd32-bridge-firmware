@@ -24,9 +24,18 @@
  * Per-hook state, in the order the bodies landed (increasing risk):
  *
  *   1. RESET_REASON          -- DONE: RCU_RSTSCK decode + RSTFC clear.
- *   2. GPIO_READ / WRITE     -- DONE: 18-pad map (E1M IO8..IO35),
- *                               boot configures all as INPUT + PULL_UP,
- *                               write auto-promotes to OUTPUT push-pull.
+ *   2. GPIO_READ / WRITE     -- DONE: 20-pad map (18 E1M IO8..IO35 pads
+ *                               + 2 Murata REG_ON sideband bits), boot
+ *                               configures the 18 E1M pads as INPUT,
+ *                               high-Z (no pull) so the carrier's own
+ *                               pulls define the default -- see the
+ *                               boot-loop comment below -- write
+ *                               auto-promotes each to OUTPUT push-pull.
+ *                               Bits 18/19
+ *                               (BT_REG_ON/WL_REG_ON) instead boot
+ *                               OUTPUT LOW -- module power is host
+ *                               policy, this firmware never drives them
+ *                               high on its own.
  *   3. TRNG_READ             -- DONE: NIST SP800-90B mode init in
  *                               bridge_hw_init, DRDY-polled byte read
  *                               with bounded timeout.
@@ -44,10 +53,10 @@
  *                               non-defaults NOSUPPORT pending follow-up.
  *   8. ADC_READ              -- DONE: 8-pad map across ADC0..3, single-
  *                               shot polling, mV<->code at VREF=1800mV.
- *   9. ADC_CONFIGURE         -- PARTIAL: per-channel sample_cycles
- *                               cached + applied; oversample_ratio +
- *                               resolution_bits gated to defaults (1,
- *                               12) until a follow-up commit.
+ *   9. ADC_CONFIGURE         -- DONE: per-channel sample-cycle,
+ *                               oversample-ratio and 6/8/10/12-bit
+ *                               resolution settings cached + applied;
+ *                               14/16-bit effective modes are NOSUPPORT.
  *   10. ADC_STREAM_*         -- DONE (§C.23): DMA0/1-backed
  *                               continuous acquisition.  Two parallel
  *                               streams; each owns a 1024-sample
@@ -146,6 +155,7 @@
 #include <stdint.h>
 
 #include "bridge_hw.h"
+#include "bridge_board_config.h"
 
 /* The wrapper's PUBLIC include directories expose the GigaDevice device
  * header.  It supplies the CMSIS/core definitions and pulls this project's
@@ -175,6 +185,26 @@ bool     bridge_core_clock_matches = true;
 
 void bridge_hw_init(void)
 {
+	/* The priority numbers in bridge_board_config.h mean preemption levels
+	 * only under PRE2_SUB2. A Path-A bootloader handoff preserves AIRCR, and
+	 * the vendor helper otherwise retains a valid inherited grouping, so set
+	 * the bridge policy before configuring any NVIC line or, on Path-A,
+	 * unmasking IRQs. */
+	nvic_priority_group_set(NVIC_PRIGROUP_PRE2_SUB2);
+
+	/* SYSCFG hosts the TIMER quadrature-decoder mode fields
+     * (SYSCFG_TIMERxCFG0.TSCFGy) that qenc_channel_init() programs
+     * below, as well as the EXTI source mux that spi_cs_exti_init()
+     * programs later.  Its APB2 clock gate (RCU_APB2EN bit 14,
+     * SYSCFGEN) is off out of reset, and writes to a gated APB
+     * block do not stick, so this must run before ANY SYSCFG write
+     * -- in particular before the quadrature-encoder bring-up further
+     * down this function.  spi_cs_exti_init() keeps its own
+     * rcu_periph_clock_enable(RCU_SYSCFG) too (the call is
+     * idempotent); it must not become dependent on init ordering for
+     * its own SYSCFG writes. */
+	rcu_periph_clock_enable(RCU_SYSCFG);
+
 #if defined(BRIDGE_OTA_PARTITIONED) && defined(BRIDGE_APP_SLOT_BASE)
 	/* OTA Path-A: the app runs from a flash slot, not 0x08000000, so move
      * the vector table off the vendor SystemInit default before any NVIC
@@ -258,15 +288,59 @@ void bridge_hw_init(void)
 	rcu_periph_clock_enable(RCU_GPIOE);
 	rcu_periph_clock_enable(RCU_GPIOF);
 
-	/* Configure every entry in `gpio_pad_map` as INPUT + PULL_UP.
-     * Safe default per the GPIO direction policy: no driven
-     * contention with whatever the board might pull / drive on
-     * those pads.  bridge_hw_gpio_write() promotes individual
-     * pads to OUTPUT on demand. */
+	/* Configure every E1M entry in `gpio_pad_map` as INPUT, high-Z
+     * (no internal pull).  Bench-proven 2026-09-26 on E1M-V2M103 /
+     * E1M-X EVK: the carrier's SDIO mux (microSD vs M.2 Wi-Fi) is
+     * steered by two of these pads (IO27 SDIO_MUX_SEL, IO29
+     * SDIO_MUX_EN) and the carrier's own pulls already select
+     * microSD when the pads are undriven -- but the GD32's internal
+     * pull-UPs used to win the moment this firmware ran, so both
+     * pads read 1 and the mux disabled / flipped away from microSD
+     * (Linux: `mmc1: tuning execution failed: -5`, `card aaaa
+     * removed`).  Driving both pads LOW by hand restored SDR104 @
+     * 200 MHz with 3x1 GiB md5-identical transfers, confirming the
+     * carrier's pulls -- not the GD32's -- must own the default.
+     * High-Z also matches every pad's own POR state and the state
+     * every pad is already in from cold power-up until this loop
+     * runs, and whenever the GD32 sits unflashed or held in reset --
+     * so this is not a new state to reason about, only the one the
+     * firmware now stops overriding.  U-Boot probes microSD with no
+     * bridge driver loaded, so the pre-Linux path can only be fixed
+     * by changing this boot default, not a runtime host write.
+     * bridge_hw_gpio_write() still promotes individual pads to
+     * OUTPUT on demand.  Known cost: a pad the carrier leaves
+     * genuinely unconnected now floats (input leakage current)
+     * instead of resting on an internal pull; acceptable, and a
+     * per-pad pull opcode can restore an opt-in pull later if a
+     * specific carrier needs one.  The two REG_ON pads are skipped
+     * here and driven OUTPUT LOW below instead -- they break the
+     * high-Z default on purpose (see the pad-map comment in
+     * hal/gd32/gpio.c). */
 	for (size_t i = 0; i < GPIO_PAD_MAP_COUNT; ++i) {
-		gpio_mode_set(
-		    gpio_pad_map[i].periph, GPIO_MODE_INPUT, GPIO_PUPD_PULLUP, gpio_pad_map[i].pin);
+		if (i == GPIO_PAD_BT_REG_ON || i == GPIO_PAD_WL_REG_ON) continue;
+		gpio_mode_set(gpio_pad_map[i].periph, GPIO_MODE_INPUT, GPIO_PUPD_NONE, gpio_pad_map[i].pin);
 		gpio_is_output[i] = false;
+	}
+
+	/* Murata LBEE5HY2FY-922 Wi-Fi/BT REG_ON lines (bits 18/19): boot
+     * OUTPUT driven LOW = module OFF.  Power policy belongs to the
+     * HOST, not this firmware -- a host turns the module on by
+     * issuing CMD_GPIO_WRITE on these bits as part of its own
+     * WiFi/BT bring-up; the IO-MCU only proxies the line and must
+     * never assert it autonomously.  OUTPUT LOW (rather than left
+     * as the default INPUT high-Z) gives a defined OFF state
+     * instead of floating against the module's internal 50 k
+     * pull-downs, and a clean low->high edge once the host asserts.
+     * gpio_is_output[i] is set so the pad is not re-promoted (and
+     * does not glitch) on the host's first GPIO_WRITE, and reads
+     * report the driven level. */
+	for (size_t i = GPIO_PAD_BT_REG_ON; i <= GPIO_PAD_WL_REG_ON; ++i) {
+		gpio_bit_reset(gpio_pad_map[i].periph, gpio_pad_map[i].pin);
+		gpio_output_options_set(
+		    gpio_pad_map[i].periph, GPIO_OTYPE_PP, GPIO_OSPEED_12MHZ, gpio_pad_map[i].pin);
+		gpio_mode_set(
+		    gpio_pad_map[i].periph, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, gpio_pad_map[i].pin);
+		gpio_is_output[i] = true;
 	}
 
 	/* TRNG bring-up: configure + enable only.  The NIST pipeline's
@@ -386,8 +460,9 @@ void bridge_hw_init(void)
 	vref_ok = (vref_status_get() == SET);
 
 	/* ADC bring-up: configure 8 pads as analog, enable all four ADC
-     * peripheral clocks, run the per-peripheral init.  Calibration
-     * inside adc_periph_init now runs against a LIVE reference (it
+	 * peripheral clocks, reset every converter, set each shared clock
+	 * domain once, then run the per-converter init.  Calibration
+	 * inside adc_periph_boot_init now runs against a LIVE reference (it
      * previously self-calibrated against the undriven reference node,
      * baking in a bogus offset); the VREF bring-up above is the
      * prerequisite that makes that calibration meaningful. */
@@ -406,10 +481,12 @@ void bridge_hw_init(void)
      * path op re-times against (the read path's bounded EOC wait +
      * self-heal), so the failure surfaces loudly on first use instead
      * of wedging boot. */
-	(void)adc_periph_init(ADC0);
-	(void)adc_periph_init(ADC1);
-	(void)adc_periph_init(ADC2);
-	(void)adc_periph_init(ADC3);
+	adc_periph_boot_reset_all();
+	adc_shared_clock_init();
+	(void)adc_periph_boot_init(ADC0);
+	(void)adc_periph_boot_init(ADC1);
+	(void)adc_periph_boot_init(ADC2);
+	(void)adc_periph_boot_init(ADC3);
 	for (size_t i = 0; i < ADC_CHANNEL_MAP_COUNT; ++i) {
 		adc_sample_cycles_cache[i]    = ADC_DEFAULT_SAMPLE_CYCLES;
 		adc_resolution_bits_cache[i]  = ADC_RES_BITS_DEFAULT;
@@ -441,11 +518,17 @@ extern void bridge_hw_dsp_pump(void);
  * page-region per tick so BEGIN never blocks the SPI reply inline.  No-op
  * in the OTA-inert build. */
 extern void ota_erase_tick(void);
+/* OTA trial/confirm pump (bench fact 2026-09-26, E1M-V2M103): once the
+ * wire has noted a frame during an unconfirmed trial, commits the slot
+ * permanent and reboots.  No-op in the OTA-inert build, and a no-op on
+ * every tick outside an active trial. */
+extern void ota_confirm_tick(void);
 
 void bridge_hw_tick(void)
 {
 	bridge_hw_dsp_pump();
 	ota_erase_tick();
+	ota_confirm_tick();
 }
 
 /* ----------------------------------------------------------------- */
@@ -455,45 +538,78 @@ void bridge_hw_tick(void)
 
 uint8_t bridge_hw_reset_reason(void)
 {
-	/* Read RCU_RSTSCK (reset/clock control status register, GD32G5xx
-     * Reference Manual §6.6.13) and decode the sticky reset-cause
-     * flags in the high byte: PORRSTF (bit 27), BORRSTF (25),
-     * EPRSTF (26, NRST pin), SWRSTF (28), FWDGTRSTF (29),
-     * WWDGTRSTF (30), LPRSTF (31).
+	/* Decoded from the BOOTLOADER's stash (RTC_BKP8, backup-domain,
+     * survives NVIC_SystemReset -- reset-cause ownership rework, bench
+     * fact 2026-09-26), NOT a live RCU_RSTSCK read: src/boot/boot_main.c
+     * reads RCU_RSTSCK (reset/clock control status register, GD32G5xx
+     * Reference Manual §6.6.13) exactly ONCE per boot, stashes the raw
+     * value here, then clears RSTFC before jumping -- so by the time this
+     * application code runs, RCU_RSTSCK has already been reset to a clean
+     * slate for whatever NEXT reset follows.  A live read here would see
+     * only causes from AFTER the bootloader ran (normally none), not what
+     * actually preceded this boot.  See src/boot/boot_main.c's file
+     * header for the full rationale.
      *
-     * The hardware can latch multiple flags across nested resets, so
-     * we decode in coldest-first priority order: a power-on event
-     * dominates a brownout, which dominates an external-pin reset,
-     * which dominates a watchdog or software trigger.  Encoded byte
-     * matches the host's `gd32g553_reset_cause_t` in
-     * <alp/chips/gd32g553.h>:
+     * Sticky bits in the high byte: PORRSTF (bit 27), BORRSTF (25),
+     * EPRSTF (26, NRST pin), SWRSTF (28), FWDGTRSTF (29), WWDGTRSTF (30),
+     * LPRSTF (31) -- decoded in coldest-first priority order, WITH ONE
+     * DELIBERATE EXCEPTION: FWDGTRSTF/WWDGTRSTF is checked BEFORE EPRSTF.
+     * The GD32G5x3 can latch EPRSTF alongside an internally-generated
+     * watchdog reset (check the datasheet's reset-tree section for the
+     * exact condition on this part); if a caller wants the DOMINANT
+     * cause, a real watchdog event must win over a coincidentally-latched
+     * EPRSTF bit, not the other way around.  Power-on and brownout still
+     * take priority over everything -- those really are "colder" than a
+     * watchdog.  Encoded byte matches the host's `gd32g553_reset_cause_t`
+     * in <alp/chips/gd32g553.h>:
      *
      *   0 = UNKNOWN, 1 = POWER_ON, 2 = NRST_PIN, 3 = SOFT,
      *   4 = WDT, 5 = BROWNOUT, 6 = LOWPOWER.
      *
-     * RSTFC (bit 24) clears every cause flag in one write; the vendor
-     * helper `rcu_all_reset_flag_clear()` is functionally identical
-     * but we keep the access inline to avoid pulling rcu.c stages we
-     * don't otherwise need.  After the write the next reader sees
-     * UNKNOWN unless something resets the chip again. */
-	const uint32_t rstsck = RCU_RSTSCK;
-	uint8_t        cause  = 0u; /* UNKNOWN */
+     * Clear-on-read: the stash is zeroed after decoding (needs the same
+     * backup-domain write-unlock the bootloader uses), so the next reader
+     * sees UNKNOWN unless the bootloader stashes a fresh cause on a later
+     * boot.
+     *
+     * Fallback (C1, adversarial-verify finding): the stash is only ever
+     * written by THIS fix's bootloader.  A RTC_BKP8 == 0 read here means
+     * one of two things this function cannot tell apart -- and does not
+     * need to: (a) the full-flash, non-partitioned image (no bootloader
+     * runs at all, see CMakeLists.txt's BRIDGE_OTA_PARTITIONED option), or
+     * (b) an OLD (pre-this-fix) bootloader paired with this new app, which
+     * never stashed anything.  Reading RTC_BKP8 == 0 unconditionally as
+     * UNKNOWN would silently regress CMD_RESET_REASON to "always UNKNOWN"
+     * on both of those real configurations.  Fall back to a LIVE
+     * RCU_RSTSCK read instead, same priority order, and clear RSTFC here
+     * (this function becomes the sole owner of that clear on this path,
+     * same as it always was before the bootloader-stash rework existed). */
+	uint32_t   rstsck     = RTC_BKP8;
+	const bool from_stash = (rstsck != 0u);
+	if (!from_stash) {
+		rstsck = RCU_RSTSCK;
+	}
+	uint8_t cause = 0u; /* UNKNOWN */
 
 	if (rstsck & RCU_RSTSCK_PORRSTF) {
 		cause = 1u; /* POWER_ON */
 	} else if (rstsck & RCU_RSTSCK_BORRSTF) {
 		cause = 5u; /* BROWNOUT */
+	} else if (rstsck & (RCU_RSTSCK_FWDGTRSTF | RCU_RSTSCK_WWDGTRSTF)) {
+		cause = 4u; /* WDT */
 	} else if (rstsck & RCU_RSTSCK_EPRSTF) {
 		cause = 2u; /* NRST_PIN */
 	} else if (rstsck & RCU_RSTSCK_LPRSTF) {
 		cause = 6u; /* LOWPOWER */
-	} else if (rstsck & (RCU_RSTSCK_FWDGTRSTF | RCU_RSTSCK_WWDGTRSTF)) {
-		cause = 4u; /* WDT */
 	} else if (rstsck & RCU_RSTSCK_SWRSTF) {
 		cause = 3u; /* SOFT */
 	}
 
-	RCU_RSTSCK |= RCU_RSTSCK_RSTFC;
+	RCU_APB1EN |= RCU_APB1EN_PMUEN;
+	PMU_CTL0 |= PMU_CTL0_BKPWEN;
+	RTC_BKP8 = 0u; /* clear-on-read, whichever source answered */
+	if (!from_stash) {
+		RCU_RSTSCK |= RCU_RSTSCK_RSTFC;
+	}
 	return cause;
 }
 

@@ -106,13 +106,9 @@ int bridge_hw_gpio_write(uint32_t mask, uint32_t levels);
 /* --------------------------------------------------------------- */
 
 /* period_ns > 0 required (BRIDGE_HW_ERR_RANGE otherwise); duty_ns must not
- * exceed period_ns (BRIDGE_HW_ERR_INVAL).  period_ns beyond what the 16-bit
- * timer can hold is silently reduced to the hardware max (ARR always fits),
- * but a duty request that would not fit the 16-bit compare register at the
- * (possibly-reduced) period -- only reachable via 100 % duty at the
- * clamped-max edge-aligned period -- answers BRIDGE_HW_ERR_RANGE rather
- * than silently truncating; poll bridge_hw_pwm_get for what is actually
- * live. */
+ * exceed period_ns (BRIDGE_HW_ERR_INVAL).  A period or duty that does not fit
+ * the timer's 16-bit ARR/compare registers answers BRIDGE_HW_ERR_RANGE before
+ * any timer register is changed; requests are never silently clamped. */
 int bridge_hw_pwm_set(uint8_t channel, uint32_t period_ns, uint32_t duty_ns);
 
 /* Report what the channel's pad is ACTUALLY generating by reading the
@@ -142,11 +138,12 @@ int bridge_hw_adc_read(uint8_t channel, uint8_t samples, uint16_t *mv);
 
 /* v0.3: sticky ADC tuning.  oversample_ratio is one of
  * 1/2/4/8/16/32/64/128/256 (rounded down to nearest power-of-two
- * by the firmware).  sample_cycles is one of the eight datasheet
- * values (2/6/12/24/47/92/247/640 cycles, GD32G553 §16.4.6) -- the
- * firmware rounds down.  resolution is 6/8/10/12/14/16 bits (the
- * latter two require oversampling >= 4 / 16 respectively per the
- * datasheet's effective-resolution table). */
+ * by the firmware).  sample_cycles is a raw ADC-clock cycle count:
+ * zero selects the 240-cycle firmware default, while non-zero values
+ * are clamped to the vendor-supported 2..638 range.  resolution is
+ * 6/8/10/12 bits.  The 14- and 16-bit effective-resolution modes are
+ * not implemented and return BRIDGE_HW_ERR_NOTIMPL (wire STATUS_NOSUPPORT).
+ */
 int bridge_hw_adc_configure(uint8_t  channel,
                             uint16_t oversample_ratio,
                             uint16_t sample_cycles,
@@ -184,7 +181,9 @@ int bridge_hw_adc_stream_end(uint8_t stream_id);
  * from @p bin_offset; *seq_out is the frame counter (host detects a
  * mid-fetch roll), *total_bins_out the frame's bin count, *got_bins_out
  * how many were written.  BRIDGE_HW_ERR_NOTIMPL if the stream isn't
- * FFT-bound, BRIDGE_HW_ERR_IO before the first frame completes. */
+ * FFT-bound, BRIDGE_HW_ERR_BUSY before the current bound session's first
+ * frame completes, and BRIDGE_HW_ERR_IO when its acquisition DMA channel
+ * has faulted. */
 int bridge_hw_adc_spectrum_read(uint8_t   stream_id,
                                 uint16_t  bin_offset,
                                 uint8_t   max_bins,
@@ -240,10 +239,20 @@ int bridge_hw_tmu_compute(uint8_t   function,
 /* --------------------------------------------------------------- */
 
 /* Set the @p channel DAC output to @p value_mv (millivolts).  The
- * firmware rounds to its hardware-achievable resolution. */
+ * firmware rounds to its hardware-achievable resolution, AND clamps
+ * into the output buffer's achievable window -- 200 mV to (VREF_mV -
+ * 200 mV) on the GD32G5x3's buffered DAC channels (Datasheet Rev2.0
+ * p.136 Table 4-42) -- before programming the code, so a request
+ * outside that window is answered STATUS_OK but programs the nearest
+ * reachable edge, not the requested value.  bridge_hw_dac_get is the
+ * only way the host learns that happened (gd32-bridge-firmware#45). */
 int bridge_hw_dac_set(uint8_t channel, uint16_t value_mv);
 
-/* Read back the currently-programmed @p channel DAC output in mV. */
+/* Read back the currently-programmed @p channel DAC output in mV --
+ * the digital code the DAC is converting (User Manual Rev1.2 p.484
+ * DAC_OUTx_DO), not a measurement of the pad.  Reflects any clamp
+ * bridge_hw_dac_set applied, so this is how the host discovers that a
+ * requested value_mv landed outside the buffer's achievable window. */
 int bridge_hw_dac_get(uint8_t channel, uint16_t *value_mv);
 
 /* --------------------------------------------------------------- */
@@ -383,9 +392,11 @@ int bridge_hw_timer_sync(uint8_t master, uint8_t slave, uint8_t mode);
  * 1 = sleep, 2 = deep-sleep, 3 = standby.  @p wake_bitmap selects which
  * wake sources the firmware should arm (ALP_POWER_WAKE_* bits;
  * platform-specific).  @p wake_after_ms is a max wall-clock wait, or 0
- * for "no timer wake".  The GD32 prepares the V2N supervisor handshake
- * + signals the Renesas SoC to enter the matching mode, then re-runs
- * the bridge handshake on wakeup so the host can resume bridge calls. */
+ * for "no timer wake".  A bitmap containing any source this backend
+ * cannot arm returns BRIDGE_HW_ERR_NOTIMPL and does not enter the requested
+ * low-power mode.  The GD32 prepares the V2N supervisor handshake + signals
+ * the Renesas SoC to enter the matching mode, then re-runs the bridge
+ * handshake on wakeup so the host can resume bridge calls. */
 int bridge_hw_power_mode_set(uint8_t mode, uint32_t wake_bitmap, uint32_t wake_after_ms);
 
 /* --------------------------------------------------------------- */
