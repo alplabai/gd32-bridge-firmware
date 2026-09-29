@@ -184,6 +184,19 @@ ZTEST(gd32_bridge_transport, test_mangled_request_stages_io_error)
 	zassert_equal(buf[1], 0x05u, "STATUS_IO");
 }
 
+ZTEST(gd32_bridge_transport, test_hardware_transport_error_stages_io_error)
+{
+	uint8_t buf[80];
+
+	transport_spi_init();
+	spi_slave_transport_error();
+	const size_t n = hal_drain(buf, sizeof buf);
+
+	zassert_equal(n, 4u, "error reply is the empty envelope");
+	zassert_equal(buf[0], 0xA5u, "SOF");
+	zassert_equal(buf[1], 0x05u, "STATUS_IO");
+}
+
 /* ------------------------------------------------------------------ */
 /* v0.7 STATUS_SEQ -- the stale-reply kill (silicon-fingerprinted      */
 /* 2026-06-06: byte-exact replays on back-to-back identical frames).   */

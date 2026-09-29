@@ -15,6 +15,7 @@
 #include "gd32g5x3.h"
 
 #include "gd32_common.h"
+#include "bridge_critical.h"
 
 /* ----------------------------------------------------------------- */
 /* TRNG (NIST SP800-90B) state + bring-up.                            */
@@ -62,14 +63,16 @@ bool trng_start(void)
 	if (to == 0u) return false;
 
 	rcu_trng_clock_config(RCU_TRNG_CKPLLQ_DIV2);
-	rcu_periph_clock_enable(RCU_TRNG);
-
-	/* Self-tests on the analog noise source.  trng_clockerror_detection
-     * arms the CECS flag so we'd see a clock outage during runtime. */
-	trng_clockerror_detection_enable();
+	bridge_rcu_periph_clock_enable(RCU_TRNG);
 
 	trng_deinit();
+	/* GD32G553 User Manual Rev1.2 §12.5.1: TRNG_CTL resets to
+	 * 0x03000410, so CED (bit 5) is clear after trng_deinit()'s RCU
+	 * peripheral reset.  Configure it only after that reset, while
+	 * CONDRST opens the writable control-field window; otherwise the
+	 * clock-error half of trng_faulted() is permanently unarmed (#143). */
 	trng_conditioning_reset_enable();
+	trng_clockerror_detection_enable();
 	trng_mode_config(TRNG_MODSEL_NIST);
 	trng_nist_seed_config(TRNG_NIST_SEED_ANALOG);
 	trng_conditioning_input_bitwidth(TRNG_INMOD_440BIT);

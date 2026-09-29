@@ -34,8 +34,10 @@ typedef struct {
 	uint32_t    arg;    /* a secondary argument (e.g. a flag mask) */
 } mock_seq_evt_t;
 
-extern mock_seq_evt_t mock_seq[MOCK_SEQ_MAX];
-extern int            mock_seq_n;
+extern mock_seq_evt_t    mock_seq[MOCK_SEQ_MAX];
+extern int               mock_seq_n;
+extern volatile uint32_t mock_primask;
+extern uint32_t          mock_rcu_lock_violations;
 
 void mock_seq_reset(void);
 void mock_seq_log(const char *name, uint32_t periph, uint32_t arg);
@@ -181,8 +183,19 @@ typedef enum { DMA_CH0 = 0 } dma_channel_enum;
 #define DMA_REQUEST_ADC2            2u
 #define DMA_REQUEST_ADC3            3u
 #define DMA_FLAG_FTF                ((uint32_t)(1u << 0))
+#define DMA_FLAG_ERR                ((uint32_t)(1u << 1))
 #define DMA_INT_FTF                 ((uint32_t)(1u << 0))
+#define DMA_INT_ERR                 ((uint32_t)(1u << 1))
 #define DMA_INT_FLAG_FTF            ((uint32_t)(1u << 0))
+#define DMA_INT_FLAG_ERR            ((uint32_t)(1u << 1))
+#define DMA_CHXCTL_CHEN             ((uint32_t)(1u << 0))
+
+extern uint32_t *mock_dma_chctl_ref(uint32_t dma_periph, dma_channel_enum channelx);
+#define DMA_CHCTL(dma_periph, channelx) (*mock_dma_chctl_ref((dma_periph), (channelx)))
+
+extern uint32_t *mock_dmamux_chcfg_ref(uint32_t channel);
+#define DMAMUX_RM_CHXCFG(channel) (*mock_dmamux_chcfg_ref(channel))
+#define DMAMUX_RM_CHXCFG_MUXID    ((uint32_t)0x7fu)
 
 typedef struct {
 	uint32_t periph_addr;
@@ -215,7 +228,19 @@ void dma_interrupt_flag_clear(uint32_t dma_periph, dma_channel_enum channelx, ui
 /* Test-only hook: set the value dma_transfer_number_get returns (the
  * "remaining" countdown), so the write-index math in adc_stream_write_
  * index resolves to a safe, in-range value without a real DMA. */
-void mock_dma_set_remaining(uint32_t dma_periph, dma_channel_enum channelx, uint32_t remaining);
+void     mock_dma_set_remaining(uint32_t dma_periph, dma_channel_enum channelx, uint32_t remaining);
+void     mock_dma_reset(void);
+void     mock_dma_set_disable_hold(uint32_t dma_periph, dma_channel_enum channelx, bool hold);
+uint32_t mock_dmamux_request_get(uint32_t channel);
+void     mock_dma_set_interrupt_flag(uint32_t         dma_periph,
+                                     dma_channel_enum channelx,
+                                     uint32_t         flag,
+                                     FlagStatus       state);
+
+/* Strong ISR definitions supplied by the production adc_stream.c under
+ * test, not a vendor-header interface. */
+void DMA0_Channel0_IRQHandler(void);
+void DMA1_Channel0_IRQHandler(void);
 /* One-shot callback from dma_transfer_number_get(), after the old count is
  * snapshotted but before it is returned. Models an ISR pre-empting the DSP
  * pump after owner commit and before its first data-plane mutation. */
@@ -233,7 +258,8 @@ void mock_dma_set_transfer_get_hook(mock_hook_t hook);
 #define RCU_TIMER6  5u
 #define RCU_FAC     6u
 #define RCU_FFT     7u
-void rcu_periph_clock_enable(uint32_t periph_clk);
+typedef uint32_t rcu_periph_enum;
+void             rcu_periph_clock_enable(uint32_t periph_clk);
 
 /* ------------------------------------------------------------------ */
 /* TRIGSEL -- routing only, no register semantics needed by the tests. */
@@ -400,7 +426,8 @@ void mock_fft_set_poll_hook(mock_hook_t hook);
  * single MRS / CPSID i / MSR instructions; the vendor header gets them
  * from core_cm33.h, which this mock does not model.
  *
- * Modelled as a no-op mask that reads "interrupts were enabled". A one-shot
+ * Models the nesting-safe PRIMASK protocol so runtime RCU clock writes can
+ * prove they happen under the shared critical-section primitive. A one-shot
  * hook on __get_PRIMASK() lets lifecycle tests inject an ISR immediately
  * before a chosen critical section; callbacks are never fired after
  * __disable_irq(), where an interrupt would be impossible on silicon. */
@@ -411,11 +438,12 @@ static inline uint32_t __get_PRIMASK(void)
 
 static inline void __disable_irq(void)
 {
+	mock_primask = 1u;
 }
 
 static inline void __set_PRIMASK(uint32_t primask)
 {
-	(void)primask;
+	mock_primask = primask;
 }
 
 #endif /* GD32_BRIDGE_MOCK_GD32G5X3_H */
