@@ -382,6 +382,20 @@ static void plant_trial_image(uint32_t base, bool with_marker, bool cap_bit)
 	zassert_true(ota_fmc_program(base, buf, sizeof buf), "plant_trial_image: program failed");
 }
 
+/* #220: ROLLBACK now recomputes the fallback slot's CRC before flipping
+ * active_slot, so a test that plants a fallback image must also make the
+ * record's img_crc32[slot] describe it.  Re-seals the record in place. */
+static void seal_meta_img_crc(uint32_t addr, uint8_t slot)
+{
+	ota_meta_record_t rec;
+	uint32_t          base = 0u;
+	zassert_true(ota_slot_base_checked(slot, &base));
+	memcpy(&rec, _host_ptr(addr), sizeof(rec));
+	rec.img_crc32[slot] = ota_crc32(0u, _host_ptr(base), rec.img_len[slot]);
+	rec.rec_crc32 = ota_crc32(0u, (const uint8_t *)&rec, offsetof(ota_meta_record_t, rec_crc32));
+	memcpy(_host_ptr(addr), &rec, sizeof(rec));
+}
+
 /* Mirrors ota.c's meta_current()/meta_pick_newest() (highest-counter valid
  * record, REC0 wins a tie) without calling into it -- both are static,
  * file-scope helpers this suite cannot link against directly.  Used by the
@@ -1950,6 +1964,7 @@ ZTEST(gd32_bridge_ota, test_rollback_sets_trial_flag_exactly)
 	uint32_t other_base;
 	zassert_true(ota_slot_base_checked(TEST_OTHER_SLOT, &other_base));
 	plant_trial_image(other_base, true /* with_marker */, true /* cap_bit */);
+	seal_meta_img_crc(OTA_META_REC0, TEST_OTHER_SLOT);
 
 	uint8_t reply[8];
 	size_t  rlen = 0u;
@@ -2097,6 +2112,7 @@ ZTEST(gd32_bridge_ota, test_rollback_target_no_marker_confirms_no_trial)
 	uint32_t other_base;
 	zassert_true(ota_slot_base_checked(TEST_OTHER_SLOT, &other_base));
 	plant_trial_image(other_base, false /* with_marker */, false);
+	seal_meta_img_crc(OTA_META_REC0, TEST_OTHER_SLOT);
 
 	uint8_t reply[8];
 	size_t  rlen = 0u;
@@ -2119,6 +2135,7 @@ ZTEST(gd32_bridge_ota, test_rollback_target_marker_confirm_capable_sets_trial)
 	uint32_t other_base;
 	zassert_true(ota_slot_base_checked(TEST_OTHER_SLOT, &other_base));
 	plant_trial_image(other_base, true /* with_marker */, true /* cap_bit */);
+	seal_meta_img_crc(OTA_META_REC0, TEST_OTHER_SLOT);
 
 	uint8_t reply[8];
 	size_t  rlen = 0u;
