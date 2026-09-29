@@ -5,16 +5,17 @@
  * The firmware's ONE critical-section primitive.
  *
  * Why this file exists (#19 and its children #133/#134/#147): this is a
- * bare-metal application in which protocol_dispatch() runs
- * synchronously inside BOTH transport ISRs --
+ * bare-metal application in which
+ * protocol_dispatch() runs synchronously inside BOTH transport ISRs --
  * BRIDGE_SPI_CS_EXTI_HANDLER at BRIDGE_CS_IRQ_PRIO (1) and
  * BRIDGE_I2C_EV_HANDLER at BRIDGE_I2C_IRQ_PRIO (2), see
  * hal/bridge_board_config.h.  Group priority 1 pre-empts group priority
- * 2, so any handler reached from I2C can be suspended mid-sequence and
- * resumed after the SPI side has rewritten the same peripheral.  This is
- * the reusable save/restore primitive for short shared-state claims.  Raw
- * interrupt masking also exists for separate purposes in the bootloader
- * handoff, FMC busy windows and the terminal fault path.
+ * 2.  protocol_dispatch() now refuses a nested transport request with
+ * STATUS_BUSY (#19), but short critical sections are still required for
+ * state shared with peripheral ISRs, base-level pumps, or HAL entry points
+ * outside the dispatcher. This is the reusable save/restore primitive for
+ * those claims. Raw interrupt masking also exists for separate purposes in
+ * the bootloader handoff, FMC busy windows and the terminal fault path.
  *
  * Why PRIMASK and not BASEPRI: BASEPRI is the finer instrument, but the
  * short shared-state claims this helper protects need to exclude the
