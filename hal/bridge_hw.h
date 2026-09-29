@@ -88,9 +88,11 @@ uint8_t bridge_hw_reset_reason(void);
  * transport error. */
 int bridge_hw_gpio_read(uint32_t mask, uint32_t *levels);
 
-/* Atomically set/clear the pad outputs selected by @p mask to the
- * corresponding bit in @p levels.  IO24/IO25 (GD32 PC14/PC15) share a
- * backup-domain power switch with SE_RST (PC13, see
+/* Set/clear the pad outputs selected by @p mask to the corresponding
+ * bit in @p levels.  Pins on the same physical GPIO port change in one
+ * atomic GPIOx_BOP write; requests spanning ports commit one port at a
+ * time.  IO24/IO25 (GD32 PC14/PC15) share a backup-domain power switch
+ * with SE_RST (PC13, see
  * bridge_hw_se_reset()) budgeted at 3 mA / 2 MHz / 30 pF (GD32G553xx
  * Datasheet Rev2.0 p.130 Table 4-29 footnote 2; UM Rev1.2 p.133
  * §3.3.1).  Nothing on this line enforces that budget -- the HOST
@@ -104,13 +106,9 @@ int bridge_hw_gpio_write(uint32_t mask, uint32_t levels);
 /* --------------------------------------------------------------- */
 
 /* period_ns > 0 required (BRIDGE_HW_ERR_RANGE otherwise); duty_ns must not
- * exceed period_ns (BRIDGE_HW_ERR_INVAL).  period_ns beyond what the 16-bit
- * timer can hold is silently reduced to the hardware max (ARR always fits),
- * but a duty request that would not fit the 16-bit compare register at the
- * (possibly-reduced) period -- only reachable via 100 % duty at the
- * clamped-max edge-aligned period -- answers BRIDGE_HW_ERR_RANGE rather
- * than silently truncating; poll bridge_hw_pwm_get for what is actually
- * live. */
+ * exceed period_ns (BRIDGE_HW_ERR_INVAL).  A period or duty that does not fit
+ * the timer's 16-bit ARR/compare registers answers BRIDGE_HW_ERR_RANGE before
+ * any timer register is changed; requests are never silently clamped. */
 int bridge_hw_pwm_set(uint8_t channel, uint32_t period_ns, uint32_t duty_ns);
 
 /* Report what the channel's pad is ACTUALLY generating by reading the
@@ -140,11 +138,12 @@ int bridge_hw_adc_read(uint8_t channel, uint8_t samples, uint16_t *mv);
 
 /* v0.3: sticky ADC tuning.  oversample_ratio is one of
  * 1/2/4/8/16/32/64/128/256 (rounded down to nearest power-of-two
- * by the firmware).  sample_cycles is one of the eight datasheet
- * values (2/6/12/24/47/92/247/640 cycles, GD32G553 §16.4.6) -- the
- * firmware rounds down.  resolution is 6/8/10/12/14/16 bits (the
- * latter two require oversampling >= 4 / 16 respectively per the
- * datasheet's effective-resolution table). */
+ * by the firmware).  sample_cycles is a raw ADC-clock cycle count:
+ * zero selects the 240-cycle firmware default, while non-zero values
+ * are clamped to the vendor-supported 2..638 range.  resolution is
+ * 6/8/10/12 bits.  The 14- and 16-bit effective-resolution modes are
+ * not implemented and return BRIDGE_HW_ERR_NOTIMPL (wire STATUS_NOSUPPORT).
+ */
 int bridge_hw_adc_configure(uint8_t  channel,
                             uint16_t oversample_ratio,
                             uint16_t sample_cycles,
@@ -182,7 +181,8 @@ int bridge_hw_adc_stream_end(uint8_t stream_id);
  * from @p bin_offset; *seq_out is the frame counter (host detects a
  * mid-fetch roll), *total_bins_out the frame's bin count, *got_bins_out
  * how many were written.  BRIDGE_HW_ERR_NOTIMPL if the stream isn't
- * FFT-bound, BRIDGE_HW_ERR_IO before the first frame completes. */
+ * FFT-bound, BRIDGE_HW_ERR_IO before the current bound session's first
+ * frame completes. */
 int bridge_hw_adc_spectrum_read(uint8_t   stream_id,
                                 uint16_t  bin_offset,
                                 uint8_t   max_bins,
@@ -217,14 +217,14 @@ int bridge_hw_trng_read(uint8_t *dest, size_t len);
  * inputs outside the function's domain (e.g. sqrt(negative) in Q31)
  * and BRIDGE_HW_ERR_IO if the TMU flags a hardware fault.
  *
- * Q31 (format 0) is narrower than the IEEE-754 form for three modes,
+ * Q31 (format 0) is narrower than the IEEE-754 form for four modes,
  * because it is full-scale +-1.0 with no exponent/factor field on the
- * wire (alp-sdk docs/gd32-bridge-protocol.md SS3.12): BRIDGE_TMU_FN_SQRT is
- * unaffected (always representable), but BRIDGE_TMU_FN_SINH and
- * BRIDGE_TMU_FN_LOG (ln) also return BRIDGE_HW_ERR_RANGE in Q31 when
- * the operand's real result would not fit in signed Q31 -- |x| >=
- * asinh(1) (~0.8814) for sinh, x <= e^-1 (~0.3679) for ln.  Both are
- * unaffected in F32.  BRIDGE_TMU_FN_COSH returns BRIDGE_HW_ERR_NOTIMPL
+ * wire (alp-sdk docs/gd32-bridge-protocol.md SS3.12).  SQRT returns
+ * BRIDGE_HW_ERR_RANGE outside the manual's documented 0.027 < x < 1
+ * Q31 interval.  SINH and LOG (ln) return BRIDGE_HW_ERR_RANGE when the
+ * operand's real result would not fit in signed Q31 -- |x| >= asinh(1)
+ * (~0.8814) for sinh, x <= e^-1 (~0.3679) for ln.  These restrictions
+ * do not affect F32.  BRIDGE_TMU_FN_COSH returns BRIDGE_HW_ERR_NOTIMPL
  * in Q31 unconditionally: cosh(x) >= 1 for every x, so no Q31 operand
  * ever produces a representable result (F32 cosh is unaffected). */
 int bridge_hw_tmu_compute(uint8_t   function,
@@ -238,10 +238,20 @@ int bridge_hw_tmu_compute(uint8_t   function,
 /* --------------------------------------------------------------- */
 
 /* Set the @p channel DAC output to @p value_mv (millivolts).  The
- * firmware rounds to its hardware-achievable resolution. */
+ * firmware rounds to its hardware-achievable resolution, AND clamps
+ * into the output buffer's achievable window -- 200 mV to (VREF_mV -
+ * 200 mV) on the GD32G5x3's buffered DAC channels (Datasheet Rev2.0
+ * p.136 Table 4-42) -- before programming the code, so a request
+ * outside that window is answered STATUS_OK but programs the nearest
+ * reachable edge, not the requested value.  bridge_hw_dac_get is the
+ * only way the host learns that happened (gd32-bridge-firmware#45). */
 int bridge_hw_dac_set(uint8_t channel, uint16_t value_mv);
 
-/* Read back the currently-programmed @p channel DAC output in mV. */
+/* Read back the currently-programmed @p channel DAC output in mV --
+ * the digital code the DAC is converting (User Manual Rev1.2 p.484
+ * DAC_OUTx_DO), not a measurement of the pad.  Reflects any clamp
+ * bridge_hw_dac_set applied, so this is how the host discovers that a
+ * requested value_mv landed outside the buffer's achievable window. */
 int bridge_hw_dac_get(uint8_t channel, uint16_t *value_mv);
 
 /* --------------------------------------------------------------- */
@@ -352,22 +362,23 @@ int bridge_hw_pwm_capture_end(uint8_t channel);
  * rather than silently firing a shorter pulse than commanded. */
 int bridge_hw_pwm_single_pulse(uint8_t channel, uint32_t pulse_ns);
 
-/* Configure master-slave timer sync.  @p master and @p slave name two
- * of TIMER0 / TIMER7 / TIMER19 by integer id; @p mode selects one of
+/* Configure master-slave timer sync.  @p master and @p slave name TIMER0
+ * (wire id 0) or TIMER7 (wire id 1); TIMER19 is not initialised by this
+ * firmware, so its former id 2 returns BRIDGE_HW_ERR_RANGE (#142).
+ * @p mode selects one of
  * several SYSCFG_TIMERxCFG0/1 TSCFGn slave-mode fields (GD32G553 User
  * Manual Rev1.2 -- TIMERx_SMCFG has no SMC/TRGS field on this part;
  * bits 6:4 and 2:0 are Reserved, p.634/p.636):
- *   0 = disabled           no register write
+ *   0 = disabled           unlink the slave; the selected route remains configured
  *   1 = reset              TSCFG3, SYSCFG_TIMERxCFG0[20:16], §1.7.21 p.78
  *   2 = gated              TSCFG4, SYSCFG_TIMERxCFG0[25:21], §1.7.21 p.78
  *   3 = trigger            TSCFG5, SYSCFG_TIMERxCFG0[30:26], §1.7.21 p.77
  *   4 = external-clock     TSCFG6, SYSCFG_TIMERxCFG1[4:0],   §1.7.22 p.82
  *   5 = encoder-mode-1     TSCFG1, SYSCFG_TIMERxCFG0[9:5],   §1.7.21 p.79
- * Used to synchronise multi-channel PWM outputs across the three
+ * Used to synchronise multi-channel PWM outputs across the two initialised
  * advanced-timer groups.  The internal-
  * trigger route used for each (master, slave) pair is per GD32G553
- * User Manual Rev1.2 p.570 (TIMER0/TIMER7/TIMER19 are fully cross-
- * connected today); a pair the SYSCFG router cannot connect returns
+ * User Manual Rev1.2 p.570; a pair the SYSCFG router cannot connect returns
  * BRIDGE_HW_ERR_INVAL rather than wiring the slave to an unrelated
  * timer. */
 int bridge_hw_timer_sync(uint8_t master, uint8_t slave, uint8_t mode);
