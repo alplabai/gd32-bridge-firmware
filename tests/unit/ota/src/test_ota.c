@@ -76,6 +76,11 @@ static bool     g_erase_fail;   /* meta_commit's ota_fmc_erase_range()-fails
                                 * already pins.  The target is never the
                                 * higher-ranked page, so the rank rule
                                 * covers all three. */
+static void (*g_erase_after_hook)(void);
+static uint32_t   g_erase_calls;
+static uint32_t   g_erase_bases[2];
+volatile uint32_t g_ota_mock_primask;
+static bool       g_expect_final_erase_lock;
 
 static uint8_t *_host_ptr(uint32_t addr)
 {
@@ -94,17 +99,31 @@ bool ota_fmc_supported(void)
 
 bool ota_fmc_erase_range(uint32_t base, uint32_t len)
 {
-	if (g_erase_fail) {
+	zassert_equal(
+	    g_ota_mock_primask, 0u, "ota_erase_tick must not mask transport IRQs across FMC work");
+	const bool erased = !g_erase_fail;
+	if (!erased) {
 		/* Models the erase failing with the target untouched (e.g. a
 		 * latched FMC error the caller cannot clear), matching
 		 * hal/fmc_ota.c's erase_one_page() aborting before
 		 * FMC_CTL_START on the first non-FMC_READY wait.  The shapes
 		 * that tear the target instead are covered by the power-cut
 		 * case -- see g_erase_fail's declaration. */
-		return false;
+	} else {
+		memset(_host_ptr(base), 0xFF, len);
 	}
-	memset(_host_ptr(base), 0xFF, len);
-	return true;
+	if (g_erase_calls < 2u) {
+		g_erase_bases[g_erase_calls] = base;
+	}
+	g_erase_calls++;
+	/* The FMC operation completed, but ota_erase_tick() has not published
+	 * its cursor/state writeback. Run one injected transport ISR here. */
+	void (*hook)(void) = g_erase_after_hook;
+	g_erase_after_hook = NULL;
+	if (hook != NULL) {
+		hook();
+	}
+	return erased;
 }
 
 bool ota_fmc_program(uint32_t addr, const uint8_t *data, size_t len)
@@ -144,6 +163,16 @@ void ota_fault_loop_clear(void)
 	g_fault_loop_clear_calls++;
 }
 
+void ota_test_after_erase_lock(void)
+{
+	if (g_expect_final_erase_lock) {
+		zassert_equal(g_ota_mock_primask,
+		              1u,
+		              "final erase state check and publication must run under PRIMASK");
+		g_expect_final_erase_lock = false;
+	}
+}
+
 /* ---- helpers -------------------------------------------------------- */
 
 static void wr_u32(uint8_t *p, uint32_t v)
@@ -159,8 +188,8 @@ static uint32_t rd_u32(const uint8_t *p)
 	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
-/* Open a fresh OTA session; leaves the state machine READY. */
-static void begin_session(uint32_t img_len)
+/* Open a fresh OTA session and leave its background erase armed. */
+static void begin_pending(uint32_t img_len)
 {
 	uint8_t req[8];
 	wr_u32(&req[0], img_len);
@@ -169,6 +198,12 @@ static void begin_session(uint32_t img_len)
 	size_t  rlen = 0u;
 	zassert_equal(ota_dispatch(CMD_OTA_BEGIN, req, sizeof(req), reply, sizeof(reply), &rlen),
 	              STATUS_OK);
+}
+
+/* Open a fresh OTA session; leaves the state machine READY. */
+static void begin_session(uint32_t img_len)
+{
+	begin_pending(img_len);
 	/* BEGIN now arms a BACKGROUND erase and acks immediately (#770): the
 	 * slot is not erased inline, so pump ota_erase_tick() the way the main
 	 * loop would until the erase drains and the state reaches READY. */
@@ -184,6 +219,28 @@ static uint8_t ota_state_now(void)
 	zassert_equal(ota_dispatch(CMD_OTA_GET_STATE, NULL, 0u, reply, sizeof(reply), &rlen),
 	              STATUS_OK);
 	return reply[0]; /* state:u8 */
+}
+
+static void abort_from_erase_hook(void)
+{
+	uint8_t reply[8];
+	size_t  rlen = 0u;
+	zassert_equal(ota_dispatch(CMD_OTA_ABORT, NULL, 0u, reply, sizeof(reply), &rlen), STATUS_OK);
+}
+
+static void begin_from_erase_hook(void)
+{
+	begin_pending(128u);
+	zassert_equal(ota_state_now(), 2u /* OTA_ST_BUSY */, "fresh BEGIN must remain armed");
+}
+
+static void rejected_begin_from_erase_hook(void)
+{
+	uint8_t req[8] = { 0 };
+	uint8_t reply[8];
+	size_t  rlen = 0u;
+	zassert_equal(ota_dispatch(CMD_OTA_BEGIN, req, sizeof(req), reply, sizeof(reply), &rlen),
+	              STATUS_OUT_OF_RANGE);
 }
 
 /* Keep dlen and span_len independent: malformed-frame tests need to
@@ -214,11 +271,16 @@ write_chunk(uint32_t off, const uint8_t *data, uint8_t dlen, uint8_t *reply, siz
 static void reset_model(void)
 {
 	memset(g_flash, 0, sizeof(g_flash)); /* zeroed meta -> no valid record */
-	g_program_calls          = 0u;
-	g_program_fail           = false;
-	g_erase_fail             = false;
-	g_reset_calls            = 0u;
-	g_fault_loop_clear_calls = 0u;
+	g_program_calls           = 0u;
+	g_program_fail            = false;
+	g_erase_fail              = false;
+	g_erase_after_hook        = NULL;
+	g_erase_calls             = 0u;
+	g_ota_mock_primask        = 0u;
+	g_expect_final_erase_lock = false;
+	g_reset_calls             = 0u;
+	g_fault_loop_clear_calls  = 0u;
+	memset(g_erase_bases, 0, sizeof(g_erase_bases));
 
 	/* Reset src/ota.c's OWN state machine too, not just the flash model.
 	 * Its statics (s_state, s_erasing, s_img_len, ...) are file-scope with
@@ -264,6 +326,30 @@ static void write_meta_record(uint32_t       addr,
 	memcpy(_host_ptr(addr), &rec, sizeof(rec));
 }
 
+/* Like write_meta_record(), but lets a rollback test plant descriptors that
+ * match a real image rather than merely exercising metadata-page selection. */
+static void write_meta_record_with_crc(uint32_t       addr,
+                                       uint32_t       counter,
+                                       uint8_t        active_slot,
+                                       uint8_t        slot_valid,
+                                       const uint32_t img_len[2],
+                                       const uint32_t img_crc32[2])
+{
+	ota_meta_record_t rec;
+	memset(&rec, 0, sizeof(rec));
+	rec.magic          = OTA_META_MAGIC;
+	rec.struct_version = OTA_META_STRUCT_VER;
+	rec.counter        = counter;
+	rec.active_slot    = active_slot;
+	rec.slot_valid     = slot_valid;
+	rec.img_len[0]     = img_len[0];
+	rec.img_len[1]     = img_len[1];
+	rec.img_crc32[0]   = img_crc32[0];
+	rec.img_crc32[1]   = img_crc32[1];
+	rec.rec_crc32 = ota_crc32(0u, (const uint8_t *)&rec, offsetof(ota_meta_record_t, rec_crc32));
+	memcpy(_host_ptr(addr), &rec, sizeof(rec));
+}
+
 /* Trial/confirm variant of write_meta_record() (bench fact 2026-09-26):
  * every other byte is planted 0xFF garbage before the named fields are
  * set, so a test asserting "flags is exactly X after some op" proves the
@@ -288,6 +374,19 @@ static void write_meta_record_flags(uint32_t       addr,
 	rec.img_len[1]     = img_len[1];
 	rec.rec_crc32 = ota_crc32(0u, (const uint8_t *)&rec, offsetof(ota_meta_record_t, rec_crc32));
 	memcpy(_host_ptr(addr), &rec, sizeof(rec));
+}
+
+/* Write the smallest plausible Cortex-M image to one slot and return its
+ * metadata descriptor. This models a previously committed fallback image. */
+static uint32_t plant_bootable_image(uint8_t slot, uint32_t *len_out)
+{
+	uint32_t base = 0u;
+	zassert_true(ota_slot_base_checked(slot, &base));
+	uint8_t *img = _host_ptr(base);
+	wr_u32(&img[0], 0x20010000u);
+	wr_u32(&img[4], base | 1u);
+	*len_out = OTA_IMG_MIN_LEN;
+	return ota_crc32(0u, img, *len_out);
 }
 
 /* Read a metadata page directly out of the flash model (#74 tests below):
@@ -343,6 +442,20 @@ static void plant_trial_image(uint32_t base, bool with_marker, bool cap_bit)
 		buf[TEST_MARKER_OFFSET + 19u] = (uint8_t)(cap >> 8);
 	}
 	zassert_true(ota_fmc_program(base, buf, sizeof buf), "plant_trial_image: program failed");
+}
+
+/* #220: ROLLBACK now recomputes the fallback slot's CRC before flipping
+ * active_slot, so a test that plants a fallback image must also make the
+ * record's img_crc32[slot] describe it.  Re-seals the record in place. */
+static void seal_meta_img_crc(uint32_t addr, uint8_t slot)
+{
+	ota_meta_record_t rec;
+	uint32_t          base = 0u;
+	zassert_true(ota_slot_base_checked(slot, &base));
+	memcpy(&rec, _host_ptr(addr), sizeof(rec));
+	rec.img_crc32[slot] = ota_crc32(0u, _host_ptr(base), rec.img_len[slot]);
+	rec.rec_crc32 = ota_crc32(0u, (const uint8_t *)&rec, offsetof(ota_meta_record_t, rec_crc32));
+	memcpy(_host_ptr(addr), &rec, sizeof(rec));
 }
 
 /* Mirrors ota.c's meta_current()/meta_pick_newest() (highest-counter valid
@@ -656,6 +769,82 @@ ZTEST(gd32_bridge_ota, test_begin_demotes_target_in_metadata)
 	              "the running slot's descriptors must carry through untouched");
 }
 
+/* #9: inject a transport command after the FMC seam returns but before the
+ * base-level pump commits its cursor/state writeback. */
+ZTEST(gd32_bridge_ota, test_erase_tick_does_not_resurrect_aborted_session)
+{
+	reset_model();
+	begin_pending(64u);
+	const unsigned regions = OTA_SLOT_SIZE / OTA_PAGE_SIZE;
+	for (unsigned i = 0u; i + 1u < regions; ++i) {
+		ota_erase_tick();
+	}
+
+	g_erase_after_hook = abort_from_erase_hook;
+	ota_erase_tick();
+	zassert_equal(ota_state_now(), 0u /* OTA_ST_IDLE */, "ABORT must not become READY");
+	const uint32_t calls_after_abort = g_erase_calls;
+	ota_erase_tick();
+	zassert_equal(g_erase_calls, calls_after_abort, "ABORT must disarm the pump");
+
+	const uint8_t data[8] = { 0 };
+	uint8_t       reply[8];
+	size_t        rlen = 0u;
+	zassert_equal(write_chunk(0u, data, sizeof(data), reply, &rlen),
+	              STATUS_NOT_READY,
+	              "write after ABORT must stay rejected");
+}
+
+ZTEST(gd32_bridge_ota, test_erase_tick_does_not_report_error_after_abort)
+{
+	reset_model();
+	begin_pending(64u);
+	g_erase_fail       = true;
+	g_erase_after_hook = abort_from_erase_hook;
+	ota_erase_tick();
+	zassert_equal(ota_state_now(), 0u /* OTA_ST_IDLE */, "ABORT must beat stale FMC failure");
+}
+
+ZTEST(gd32_bridge_ota, test_erase_tick_does_not_advance_fresh_begin_cursor)
+{
+	reset_model();
+	begin_pending(64u);
+	uint32_t inactive_base = 0u;
+	zassert_true(ota_slot_base_checked(TEST_OTHER_SLOT, &inactive_base));
+
+	g_erase_after_hook = begin_from_erase_hook;
+	ota_erase_tick();
+	zassert_equal(ota_state_now(), 2u /* OTA_ST_BUSY */, "fresh BEGIN must remain BUSY");
+	ota_erase_tick();
+	zassert_equal(g_erase_calls, 2u, "two physical erase calls expected");
+	zassert_equal(g_erase_bases[0], inactive_base, "old sweep starts at slot base");
+	zassert_equal(
+	    g_erase_bases[1], inactive_base, "fresh sweep must re-erase its first region, not skip it");
+}
+
+ZTEST(gd32_bridge_ota, test_erase_tick_does_not_resurrect_rejected_begin)
+{
+	reset_model();
+	begin_pending(64u);
+	const unsigned regions = OTA_SLOT_SIZE / OTA_PAGE_SIZE;
+	for (unsigned i = 0u; i + 1u < regions; ++i) {
+		ota_erase_tick();
+	}
+
+	g_erase_after_hook = rejected_begin_from_erase_hook;
+	ota_erase_tick();
+	zassert_equal(ota_state_now(), 4u /* OTA_ST_ERROR */, "rejected BEGIN must not become READY");
+}
+
+ZTEST(gd32_bridge_ota, test_erase_tick_locks_final_check_and_publication)
+{
+	reset_model();
+	begin_pending(64u);
+	g_expect_final_erase_lock = true;
+	ota_erase_tick();
+	zassert_false(g_expect_final_erase_lock, "final publication hook must run");
+}
+
 /* ---- #733: on-flash layout / byte-representation guard --------------- */
 
 /* The bootloader byte-copies a flash record and CRCs the raw bytes, so
@@ -699,13 +888,10 @@ ZTEST(gd32_bridge_ota, test_meta_record_layout_bytes)
  * divergence; GET_STATE must report the build-derived running slot;
  * ROLLBACK must keep using metadata -------------------------------- */
 
-/* The five-step brick sequence from the issue, reproduced end-to-end:
- * BEGIN -> abort mid-erase -> ROLLBACK -> the bootloader's newest-first
- * fallback (#754, modelled by the metadata state ROLLBACK leaves behind,
- * NOT by re-running boot_main.c -- that file is out of scope) -> BEGIN
- * again.  Before the fix, the second BEGIN inverted metadata's
- * (divergent) active_slot and armed the erase against TEST_RUNNING_SLOT
- * -- the live image, vector table first. */
+/* An interrupted BEGIN leaves the non-running slot descriptor stale. #220
+ * must refuse a ROLLBACK to that damaged image rather than manufacture the
+ * divergent metadata state that the bootloader would immediately reject.
+ * The subsequent BEGIN still targets the build-derived non-running slot. */
 ZTEST(gd32_bridge_ota, test_divergence_second_begin_targets_non_running_slot)
 {
 	reset_model();
@@ -899,8 +1085,11 @@ ZTEST(gd32_bridge_ota, test_rollback_still_uses_metadata_active_slot)
 	 * OTA_RUNNING_SLOT it would flip to TEST_OTHER_SLOT here (the SAME
 	 * slot, a no-op / wrong target); reading metadata correctly flips to
 	 * TEST_RUNNING_SLOT (metadata's "other" slot). */
-	const uint32_t len[2] = { 4096u, 4096u };
-	write_meta_record(OTA_META_REC0, 1u, TEST_OTHER_SLOT, 0x03u, len);
+	uint32_t len[2]        = { 0u, 0u };
+	uint32_t crc[2]        = { 0u, 0u };
+	crc[TEST_RUNNING_SLOT] = plant_bootable_image(TEST_RUNNING_SLOT, &len[TEST_RUNNING_SLOT]);
+	write_meta_record_with_crc(
+	    OTA_META_REC0, 1u, TEST_OTHER_SLOT, (uint8_t)(1u << TEST_RUNNING_SLOT), len, crc);
 
 	uint8_t reply[8] = { 0 };
 	size_t  rlen     = 0u;
@@ -918,6 +1107,106 @@ ZTEST(gd32_bridge_ota, test_rollback_still_uses_metadata_active_slot)
 	zassert_equal(rec1.active_slot,
 	              TEST_RUNNING_SLOT,
 	              "ROLLBACK must flip metadata's active_slot, not OTA_RUNNING_SLOT's");
+	zassert_equal(g_reset_calls, 1u, "a CRC-valid, bootable fallback must reset");
+}
+
+/* #220: rollback must apply the same integrity gates as boot before it
+ * commits metadata. Both failure cases below snapshot whole metadata pages:
+ * the safety property is not merely the error status, but that a rejected
+ * fallback cannot change the next boot decision or reset the live bridge. */
+ZTEST(gd32_bridge_ota, test_rollback_rejects_crc_corrupted_fallback_unchanged)
+{
+	reset_model();
+
+	uint32_t len[2]      = { 0u, 0u };
+	uint32_t crc[2]      = { 0u, 0u };
+	crc[TEST_OTHER_SLOT] = plant_bootable_image(TEST_OTHER_SLOT, &len[TEST_OTHER_SLOT]);
+	write_meta_record_with_crc(
+	    OTA_META_REC0, 7u, TEST_RUNNING_SLOT, (uint8_t)(1u << TEST_OTHER_SLOT), len, crc);
+
+	uint32_t other_base = 0u;
+	zassert_true(ota_slot_base_checked(TEST_OTHER_SLOT, &other_base));
+	_host_ptr(other_base)[7] ^= 0x80u; /* descriptor CRC is now stale */
+	uint8_t rec0_before[OTA_PAGE_SIZE];
+	uint8_t rec1_before[OTA_PAGE_SIZE];
+	memcpy(rec0_before, _host_ptr(OTA_META_REC0), sizeof(rec0_before));
+	memcpy(rec1_before, _host_ptr(OTA_META_REC1), sizeof(rec1_before));
+
+	uint8_t reply[8];
+	size_t  rlen = 0u;
+	zassert_equal(ota_dispatch(CMD_OTA_ROLLBACK, NULL, 0u, reply, sizeof(reply), &rlen),
+	              STATUS_INVAL);
+	zassert_mem_equal(rec0_before, _host_ptr(OTA_META_REC0), sizeof(rec0_before));
+	zassert_mem_equal(rec1_before, _host_ptr(OTA_META_REC1), sizeof(rec1_before));
+	zassert_equal(g_reset_calls, 0u, "corrupt fallback must not reset");
+}
+
+ZTEST(gd32_bridge_ota, test_rollback_rejects_crc_valid_bad_vector_unchanged)
+{
+	reset_model();
+
+	uint32_t other_base = 0u;
+	zassert_true(ota_slot_base_checked(TEST_OTHER_SLOT, &other_base));
+	/* reset_model() left the fallback all zeroes: its CRC is accurate, but
+	 * its MSP/reset head is not a plausible image. */
+	const uint32_t len[2] = { [TEST_OTHER_SLOT] = OTA_IMG_MIN_LEN };
+	const uint32_t crc[2] = {
+		[TEST_OTHER_SLOT] =
+		    ota_crc32(0u, (const uint8_t *)ota_fmc_flash_ptr(other_base), OTA_IMG_MIN_LEN)
+	};
+	write_meta_record_with_crc(
+	    OTA_META_REC0, 7u, TEST_RUNNING_SLOT, (uint8_t)(1u << TEST_OTHER_SLOT), len, crc);
+	uint8_t rec0_before[OTA_PAGE_SIZE];
+	uint8_t rec1_before[OTA_PAGE_SIZE];
+	memcpy(rec0_before, _host_ptr(OTA_META_REC0), sizeof(rec0_before));
+	memcpy(rec1_before, _host_ptr(OTA_META_REC1), sizeof(rec1_before));
+
+	uint8_t reply[8];
+	size_t  rlen = 0u;
+	zassert_equal(ota_dispatch(CMD_OTA_ROLLBACK, NULL, 0u, reply, sizeof(reply), &rlen),
+	              STATUS_INVAL);
+	zassert_mem_equal(rec0_before, _host_ptr(OTA_META_REC0), sizeof(rec0_before));
+	zassert_mem_equal(rec1_before, _host_ptr(OTA_META_REC1), sizeof(rec1_before));
+	zassert_equal(g_reset_calls, 0u, "vector-invalid fallback must not reset");
+}
+
+/* #221: meta_read() establishes only a CRC-valid byte record; it does not
+ * validate active_slot's enum. Make slot A itself bootable so the test fails
+ * if this guard is removed even when rollback's fallback-image validation is
+ * also present. */
+ZTEST(gd32_bridge_ota, test_rollback_rejects_invalid_metadata_active_slot)
+{
+	reset_model();
+
+	uint32_t slot_a_base = 0u;
+	zassert_true(ota_slot_base_checked(OTA_SLOT_A, &slot_a_base));
+	uint8_t *slot_a = _host_ptr(slot_a_base);
+	wr_u32(&slot_a[0], 0x20010000u);
+	wr_u32(&slot_a[4], slot_a_base | 1u);
+
+	ota_meta_record_t rec;
+	memset(&rec, 0, sizeof(rec));
+	rec.magic                 = OTA_META_MAGIC;
+	rec.struct_version        = OTA_META_STRUCT_VER;
+	rec.counter               = 3u;
+	rec.active_slot           = 2u; /* not OTA_SLOT_A/B, but CRC-valid */
+	rec.slot_valid            = (uint8_t)(1u << OTA_SLOT_A);
+	rec.img_len[OTA_SLOT_A]   = OTA_IMG_MIN_LEN;
+	rec.img_crc32[OTA_SLOT_A] = ota_crc32(0u, slot_a, OTA_IMG_MIN_LEN);
+	rec.rec_crc32 = ota_crc32(0u, (const uint8_t *)&rec, offsetof(ota_meta_record_t, rec_crc32));
+	memcpy(_host_ptr(OTA_META_REC0), &rec, sizeof(rec));
+
+	uint8_t rec0_before[OTA_PAGE_SIZE];
+	uint8_t rec1_before[OTA_PAGE_SIZE];
+	memcpy(rec0_before, _host_ptr(OTA_META_REC0), sizeof(rec0_before));
+	memcpy(rec1_before, _host_ptr(OTA_META_REC1), sizeof(rec1_before));
+	uint8_t reply[8];
+	size_t  rlen = 0u;
+	zassert_equal(ota_dispatch(CMD_OTA_ROLLBACK, NULL, 0u, reply, sizeof(reply), &rlen),
+	              STATUS_INVAL);
+	zassert_mem_equal(rec0_before, _host_ptr(OTA_META_REC0), sizeof(rec0_before));
+	zassert_mem_equal(rec1_before, _host_ptr(OTA_META_REC1), sizeof(rec1_before));
+	zassert_equal(g_reset_calls, 0u, "invalid active_slot must not reset");
 }
 
 /* ---- #74: meta_commit must preserve the record that BOOTS THE PART, not
@@ -1290,12 +1579,14 @@ ZTEST(gd32_bridge_ota, test_meta_commit_rollback_preserves_running_slot_record)
 	/* Same distinguishable-descriptor rationale as
 	 * test_meta_commit_preserves_running_slot_record_on_rec0 (review #1). */
 	uint32_t rec0_len[2];
-	rec0_len[TEST_RUNNING_SLOT] = 0x1000u;
-	rec0_len[TEST_OTHER_SLOT]   = 0x2000u;
+	uint32_t rec0_crc[2] = { 0u, 0u };
+	rec0_crc[TEST_RUNNING_SLOT] =
+	    plant_bootable_image(TEST_RUNNING_SLOT, &rec0_len[TEST_RUNNING_SLOT]);
+	rec0_len[TEST_OTHER_SLOT] = 0x2000u;
 	uint32_t rec1_len[2];
 	rec1_len[TEST_RUNNING_SLOT] = 0x3000u;
 	rec1_len[TEST_OTHER_SLOT]   = 0x4000u;
-	write_meta_record(OTA_META_REC0, 9u, TEST_OTHER_SLOT, 0x03u, rec0_len);
+	write_meta_record_with_crc(OTA_META_REC0, 9u, TEST_OTHER_SLOT, 0x03u, rec0_len, rec0_crc);
 	write_meta_record(OTA_META_REC1, 8u, TEST_RUNNING_SLOT, 0x01u, rec1_len);
 
 	uint8_t reply[8];
@@ -1323,7 +1614,7 @@ ZTEST(gd32_bridge_ota, test_meta_commit_rollback_preserves_running_slot_record)
 	 * condition, this time via h_rollback's call path instead of
 	 * h_commit's. */
 	zassert_equal(rec0.img_len[TEST_RUNNING_SLOT],
-	              0x1000u,
+	              OTA_IMG_MIN_LEN,
 	              "committed record's img_len[TEST_RUNNING_SLOT] must carry from REC0 (the "
 	              "newest), not REC1 (the survivor)");
 	zassert_equal(rec0.slot_valid,
@@ -1376,12 +1667,10 @@ ZTEST(gd32_bridge_ota, test_meta_commit_erase_fail_preserves_both_records)
  *
  * h_begin used to assign s_img_len / s_expected_crc / s_fw_version from
  * the wire and range-check afterwards, so a rejected BEGIN left the bad
- * length live.  The reject sets OTA_ST_ERROR -- but a background erase
- * armed by an EARLIER, valid BEGIN is still draining, and ota_erase_tick's
- * completion writeback overwrites that ERROR with OTA_ST_READY (#9's
- * mechanism).  h_verify's only guard is `s_state != OTA_ST_READY`, so it
- * then handed the rejected length to ota_crc32, which has no bound of its
- * own, and walked past the end of the slot.
+ * length live. A prior erase could then turn its ERROR into READY (#9),
+ * making h_verify hand that unvalidated length to ota_crc32. The #131
+ * local-validation rule and #9's epoch-protected error publication close
+ * those two parts together.
  *
  * The bad length here is OTA_SLOT_SIZE + 1 rather than the 0xFFFFFFFF or
  * 0x00040000 of the report.  It is the smallest value h_begin rejects, so
@@ -1389,7 +1678,7 @@ ZTEST(gd32_bridge_ota, test_meta_commit_erase_fail_preserves_both_records)
  * to one byte past g_flash[] -- a host harness reading 20 KB or 4 GB past
  * a .bss array to prove a point is not a test, it is a crash.
  * ===================================================================== */
-ZTEST(gd32_bridge_ota, test_rejected_begin_does_not_overwrite_session_length)
+ZTEST(gd32_bridge_ota, test_oversize_begin_stays_error_after_erase_drains)
 {
 	reset_model();
 
@@ -1424,38 +1713,23 @@ ZTEST(gd32_bridge_ota, test_rejected_begin_does_not_overwrite_session_length)
 	              STATUS_OUT_OF_RANGE,
 	              "an out-of-range BEGIN must be refused");
 
-	/* 4. The armed erase drains and writes OTA_ST_READY over the ERROR the
-	 *    reject just set.  This writeback is #9's mechanism and is NOT
-	 *    fixed here -- it is the vehicle that makes the stale length
-	 *    reachable, which is why it is reproduced rather than avoided. */
+	/* 4. The physical erase still drains, but its late completion must not
+	 *    overwrite the rejected BEGIN's host-visible ERROR (#9). */
 	for (unsigned i = 0u; i < (OTA_SLOT_SIZE / OTA_PAGE_SIZE) + 4u; ++i) {
 		ota_erase_tick();
 	}
+	zassert_equal(ota_state_now(), 4u /* OTA_ST_ERROR */, "rejected BEGIN must remain ERROR");
 
 	uint8_t wr[8];
 	size_t  wrl = 0u;
 	zassert_equal(write_chunk(0u, img, (uint8_t)img_len, wr, &wrl),
-	              STATUS_OK,
-	              "the erase writeback leaves the session writable");
-
-	/* 5. VERIFY must walk the FIRST BEGIN's 8 bytes, not the rejected
-	 *    length.  Before the fix this returns the CRC of OTA_SLOT_SIZE + 1
-	 *    bytes -- one past the end of the slot -- and does not match. */
-	rlen = 0u;
-	zassert_equal(ota_dispatch(CMD_OTA_VERIFY, NULL, 0u, reply, sizeof(reply), &rlen),
-	              STATUS_OK,
-	              "VERIFY dispatches");
-	zassert_equal(rd_u32(&reply[0]),
-	              good_crc,
-	              "the rejected BEGIN's length must not have replaced the session's");
-	zassert_equal(reply[4], 1u, "the image must still verify against the first BEGIN's CRC");
+	              STATUS_NOT_READY,
+	              "a rejected BEGIN must not leave the old session writable");
 }
 
-/* The rejected BEGIN must not have replaced the expected CRC either --
- * a separate field, a separate assignment, and a mismatch there would
- * fail the session in the opposite direction (a good image reported
- * unverified) rather than overreading. */
-ZTEST(gd32_bridge_ota, test_rejected_begin_does_not_overwrite_expected_crc)
+/* Zero length takes the same rejection path as an oversize image, but
+ * verifies the lower bound independently. */
+ZTEST(gd32_bridge_ota, test_zero_length_begin_stays_error_after_erase_drains)
 {
 	reset_model();
 
@@ -1486,14 +1760,12 @@ ZTEST(gd32_bridge_ota, test_rejected_begin_does_not_overwrite_expected_crc)
 	for (unsigned i = 0u; i < (OTA_SLOT_SIZE / OTA_PAGE_SIZE) + 4u; ++i) {
 		ota_erase_tick();
 	}
+	zassert_equal(ota_state_now(), 4u /* OTA_ST_ERROR */, "zero-length BEGIN must remain ERROR");
 	uint8_t wr[8];
 	size_t  wrl = 0u;
-	zassert_equal(write_chunk(0u, img, (uint8_t)img_len, wr, &wrl), STATUS_OK);
-
-	rlen = 0u;
-	zassert_equal(ota_dispatch(CMD_OTA_VERIFY, NULL, 0u, reply, sizeof(reply), &rlen), STATUS_OK);
-	zassert_equal(
-	    reply[4], 1u, "the rejected BEGIN's 0xDEADBEEF must not have replaced the expected CRC");
+	zassert_equal(write_chunk(0u, img, (uint8_t)img_len, wr, &wrl),
+	              STATUS_NOT_READY,
+	              "old session must not revive");
 }
 
 /* ===================================================================== *
@@ -1515,9 +1787,12 @@ ZTEST(gd32_bridge_ota, test_rollback_refused_while_a_session_is_in_flight)
 	reset_model();
 
 	/* A valid fallback slot so the only thing that can refuse ROLLBACK
-	 * below is the new state guard, not the metadata checks. */
-	const uint32_t len[2] = { 4096u, 4096u };
-	write_meta_record(OTA_META_REC0, 1u, TEST_OTHER_SLOT, 0x03u, len);
+	 * below is the state guard, not the #220 integrity checks. */
+	uint32_t len[2]        = { 0u, 0u };
+	uint32_t crc[2]        = { 0u, 0u };
+	crc[TEST_RUNNING_SLOT] = plant_bootable_image(TEST_RUNNING_SLOT, &len[TEST_RUNNING_SLOT]);
+	write_meta_record_with_crc(
+	    OTA_META_REC0, 1u, TEST_OTHER_SLOT, (uint8_t)(1u << TEST_RUNNING_SLOT), len, crc);
 
 	uint8_t req[8];
 	uint8_t reply[8] = { 0 };
@@ -1925,6 +2200,7 @@ ZTEST(gd32_bridge_ota, test_rollback_sets_trial_flag_exactly)
 	uint32_t other_base;
 	zassert_true(ota_slot_base_checked(TEST_OTHER_SLOT, &other_base));
 	plant_trial_image(other_base, true /* with_marker */, true /* cap_bit */);
+	seal_meta_img_crc(OTA_META_REC0, TEST_OTHER_SLOT);
 
 	uint8_t reply[8];
 	size_t  rlen = 0u;
@@ -2075,6 +2351,7 @@ ZTEST(gd32_bridge_ota, test_rollback_target_no_marker_confirms_no_trial)
 	uint32_t other_base;
 	zassert_true(ota_slot_base_checked(TEST_OTHER_SLOT, &other_base));
 	plant_trial_image(other_base, false /* with_marker */, false);
+	seal_meta_img_crc(OTA_META_REC0, TEST_OTHER_SLOT);
 
 	uint8_t reply[8];
 	size_t  rlen = 0u;
@@ -2097,6 +2374,7 @@ ZTEST(gd32_bridge_ota, test_rollback_target_marker_confirm_capable_sets_trial)
 	uint32_t other_base;
 	zassert_true(ota_slot_base_checked(TEST_OTHER_SLOT, &other_base));
 	plant_trial_image(other_base, true /* with_marker */, true /* cap_bit */);
+	seal_meta_img_crc(OTA_META_REC0, TEST_OTHER_SLOT);
 
 	uint8_t reply[8];
 	size_t  rlen = 0u;
