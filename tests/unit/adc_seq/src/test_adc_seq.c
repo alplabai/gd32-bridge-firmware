@@ -497,6 +497,68 @@ ZTEST(gd32_adc_seq, test_fac_pump_biases_input_and_rebiases_output)
 	bridge_hw_adc_stream_end(0u);
 }
 
+/* gh#18 A22: DMA count 0 (mid circular reload) must not become write
+ * index 1024 -- read_idx would then index ring[1024] (== read_idx). */
+ZTEST(gd32_adc_seq, test_overrun_resync_with_zero_dma_count_keeps_read_idx_in_ring)
+{
+	adc_seq_reset();
+	fac_latch_release();
+	zassert_equal(
+	    bridge_hw_adc_stream_begin(0u, BRIDGE_ADC_CH0, 1000u), BRIDGE_HW_OK, "stream_begin");
+	adc_streams[0].lap_count = 2u; /* writer lapped the reader */
+	mock_dma_set_remaining(DMA0, DMA_CH0, 0u);
+
+	uint8_t  got = 0xFFu;
+	uint16_t mv[4];
+	zassert_equal(bridge_hw_adc_stream_read(0u, 4u, &got, mv), BRIDGE_HW_ERR_BUSY, "overrun");
+	zassert_true(adc_streams[0].read_idx < BRIDGE_ADC_STREAM_RING_SAMPLES,
+	             "read_idx must stay inside the ring");
+	bridge_hw_adc_stream_end(0u);
+}
+
+/* gh#18 A23: a saturated FAC input must leave the sample in the ring. */
+ZTEST(gd32_adc_seq, test_fac_pump_does_not_consume_a_sample_when_x0_buffer_full)
+{
+	adc_seq_reset();
+	fac_latch_release();
+	zassert_equal(
+	    bridge_hw_adc_stream_begin(0u, BRIDGE_ADC_CH0, 1000u), BRIDGE_HW_OK, "stream_begin");
+	bind_f32_iir(0.25f, 0.5f, 0.25f, -1.561018075800718f, 0.641351538057563f);
+	adc_streams[0].ring[0] = 2560u;
+	mock_dma_set_remaining(DMA0, DMA_CH0, BRIDGE_ADC_STREAM_RING_SAMPLES - 1u);
+
+	mock_fac_flags  = FAC_FLAG_X0BFF;
+	uint32_t before = adc_streams[0].pump_raw_read;
+	bridge_hw_dsp_pump();
+	zassert_equal(adc_streams[0].pump_raw_read, before, "sample must stay unconsumed");
+	zassert_equal(adc_streams[0].proc_write, 0u, "nothing produced");
+
+	mock_fac_flags = 0u;
+	bridge_hw_dsp_pump();
+	zassert_equal(adc_streams[0].pump_raw_read, before + 1u, "sample consumed once FAC drains");
+	zassert_equal(adc_streams[0].proc_write, 1u, "and filtered");
+	bridge_hw_adc_stream_end(0u);
+}
+
+/* gh#18 B9: the pump falling a full ring behind must surface as BUSY. */
+ZTEST(gd32_adc_seq, test_fac_pump_full_ring_resync_answers_busy_once)
+{
+	adc_seq_reset();
+	fac_latch_release();
+	zassert_equal(
+	    bridge_hw_adc_stream_begin(0u, BRIDGE_ADC_CH0, 1000u), BRIDGE_HW_OK, "stream_begin");
+	bind_f32_iir(0.25f, 0.5f, 0.25f, -1.561018075800718f, 0.641351538057563f);
+	adc_streams[0].lap_count = 1u; /* one full lap = ring-size backlog */
+	mock_dma_set_remaining(DMA0, DMA_CH0, BRIDGE_ADC_STREAM_RING_SAMPLES);
+	bridge_hw_dsp_pump();
+
+	uint8_t  got = 0xFFu;
+	uint16_t mv[4];
+	zassert_equal(bridge_hw_adc_stream_read(0u, 4u, &got, mv), BRIDGE_HW_ERR_BUSY, "gap -> BUSY");
+	zassert_equal(bridge_hw_adc_stream_read(0u, 4u, &got, mv), BRIDGE_HW_OK, "BUSY is one-shot");
+	bridge_hw_adc_stream_end(0u);
+}
+
 ZTEST(gd32_adc_seq, test_fac_pump_biases_a_10bit_stream_by_its_own_full_scale)
 {
 	/* gh#253: hal/gd32/adc_stream.c hardcoded the FAC pump's input

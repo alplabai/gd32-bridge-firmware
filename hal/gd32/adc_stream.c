@@ -115,7 +115,10 @@ static uint16_t adc_stream_write_index(const adc_stream_state_t *s)
 {
 	const uint32_t remaining =
 	    dma_transfer_number_get(s->dma_periph, (dma_channel_enum)s->dma_channel);
-	if (remaining > BRIDGE_ADC_STREAM_RING_SAMPLES) return 0u;
+	/* remaining == 0 (mid circular reload) is write index 0, never 1024: a
+	 * 1024 stored into read_idx would index ring[1024], which aliases the
+	 * read_idx member itself (gh#18 A22). */
+	if (remaining == 0u || remaining > BRIDGE_ADC_STREAM_RING_SAMPLES) return 0u;
 	return (uint16_t)(BRIDGE_ADC_STREAM_RING_SAMPLES - remaining);
 }
 
@@ -332,6 +335,23 @@ int bridge_hw_adc_stream_begin(uint8_t stream_id, uint8_t channel, uint32_t samp
 		return BRIDGE_HW_ERR_IO;
 	}
 
+	/* Reader-visible session fields are initialised BEFORE the DMA and
+	 * pacing timer arm and before in_use publishes: protocol_dispatch runs
+	 * in the transport ISRs and may preempt this call (gh#18 A21). */
+	s->channel = channel;
+	/* Snapshot the full-scale for the mv math so a mid-stream
+	 * bridge_hw_adc_configure (which only rewrites the cache) can't
+	 * change the divisor under a running stream -- the converter keeps
+	 * the format this begin applied until stream_end. */
+	s->full_scale   = adc_full_scale_for_bits(adc_resolution_bits_cache[channel]);
+	s->read_idx     = 0u;
+	s->total_read   = 0u; /* lap_count zeroed above, pre-arm */
+	s->dsp_chain_id = 0u;
+	s->dsp_bound    = false;
+	s->proc_gap     = false;
+	s->dsp_cfg_bad  = false; /* gh#35 sticky flags: clean slate per session */
+	s->dsp_sat      = false;
+
 	/* Arm the lap counter BEFORE the channel starts: clear any stale
 	 * full-transfer flag from a prior session on this controller, then
 	 * enable the FTF interrupt + its NVIC line so EVERY ring reload is
@@ -382,19 +402,9 @@ int bridge_hw_adc_stream_begin(uint8_t stream_id, uint8_t channel, uint32_t samp
 	timer_master_output0_trigger_source_select(s->pace_timer, TIMER_TRI_OUT0_SRC_UPDATE);
 	timer_enable(s->pace_timer);
 
-	s->in_use  = true;
-	s->channel = channel;
-	/* Snapshot the full-scale for the mv math so a mid-stream
-	 * bridge_hw_adc_configure (which only rewrites the cache) can't
-	 * change the divisor under a running stream -- the converter keeps
-	 * the format this begin applied until stream_end. */
-	s->full_scale   = adc_full_scale_for_bits(adc_resolution_bits_cache[channel]);
-	s->read_idx     = 0u;
-	s->total_read   = 0u; /* lap_count zeroed above, pre-arm */
-	s->dsp_chain_id = 0u;
-	s->dsp_bound    = false;
-	s->dsp_cfg_bad  = false; /* gh#35 sticky flags: clean slate per session */
-	s->dsp_sat      = false;
+	/* Publish last: every reader-visible field was set before the DMA
+	 * and pacing timer were armed (gh#18 A21). */
+	s->in_use = true;
 	/* Reconfigure done and in_use published: hand the converter's
      * short-term claim back (#133).  From here the in_use scan in
      * bridge_hw_adc_read is what keeps single-shot reads off this
@@ -494,7 +504,7 @@ int bridge_hw_adc_stream_read(uint8_t   stream_id,
 		 * sample a clean baseline rather than a regression. */
 		s->rd_pos.valid   = false;
 		s->pump_pos.valid = false;
-		s->read_idx       = w;
+		s->read_idx       = (uint16_t)(w % BRIDGE_ADC_STREAM_RING_SAMPLES);
 		s->total_read     = s->lap_count * BRIDGE_ADC_STREAM_RING_SAMPLES + (uint32_t)w;
 		s->pump_raw_read  = s->total_read;
 		/* Same wire contract as the ring-overrun branch below
@@ -524,6 +534,11 @@ int bridge_hw_adc_stream_read(uint8_t   stream_id,
 		if (s->dsp_cfg_bad) return BRIDGE_HW_ERR_RANGE;
 		if (s->dsp_sat) return BRIDGE_HW_ERR_IO;
 
+		if (s->proc_gap) {
+			s->proc_gap  = false;
+			s->proc_read = s->proc_write;
+			return BRIDGE_HW_ERR_BUSY; /* pump resynced past a full ring */
+		}
 		const uint32_t pw       = s->proc_write;
 		const int32_t  pbacklog = (int32_t)(pw - s->proc_read);
 		if (pbacklog <= 0) return BRIDGE_HW_OK; /* pump hasn't produced yet */
@@ -578,7 +593,7 @@ int bridge_hw_adc_stream_read(uint8_t   stream_id,
 	     * fresh, gap-free samples; answer BUSY so the host learns
 	     * samples were lost (alp-sdk docs/gd32-bridge-protocol.md §3.10: ring
 	     * overrun -> STATUS_BUSY, "poll faster"). */
-		s->read_idx   = w;
+		s->read_idx   = (uint16_t)(w % BRIDGE_ADC_STREAM_RING_SAMPLES);
 		s->total_read = total_written;
 		return BRIDGE_HW_ERR_BUSY;
 	}
@@ -1156,11 +1171,12 @@ static void adc_dsp_pump_stream(uint8_t sid)
 	if (avail <= 0) return;
 	if ((uint32_t)avail >= BRIDGE_ADC_STREAM_RING_SAMPLES) {
 		/* The pump fell a full ring behind the DMA -- drop the corrupt
-		 * backlog and resync so the next batch is gap-free (the host
-		 * sees this as a proc-ring gap, same as a raw overrun). */
+		 * backlog and resync so the next batch is gap-free (proc_gap makes
+		 * stream_read answer BUSY, same as a raw overrun). */
 		const uint32_t irq_state = bridge_irq_lock();
 		if (adc_dsp_owner_live_locked(&adc_dsp_fac_owner, (int8_t)sid, s, false)) {
 			s->pump_raw_read = total_written;
+			s->proc_gap      = true; /* stream_read answers BUSY once (gh#18 B9) */
 		}
 		bridge_irq_unlock(irq_state);
 		return;
@@ -1200,6 +1216,12 @@ static void adc_dsp_pump_stream(uint8_t sid)
 			bridge_irq_unlock(irq_state);
 			return;
 		}
+		/* FAC input saturated: leave the sample in the ring for the next
+		 * tick instead of consuming it un-filtered (gh#18 A23). */
+		if (fac_flag_get(FAC_FLAG_X0BFF) == SET) {
+			bridge_irq_unlock(irq_state);
+			break;
+		}
 		const uint16_t ridx = (uint16_t)(s->pump_raw_read % BRIDGE_ADC_STREAM_RING_SAMPLES);
 		const uint16_t code = (uint16_t)(s->ring[ridx] & 0x0FFFu); /* 12-bit raw ring word */
 		s->pump_raw_read++;
@@ -1217,10 +1239,6 @@ static void adc_dsp_pump_stream(uint8_t sid)
 		 * mid-scale-centred swing back onto the unipolar code plane
 		 * WITHOUT discarding the negative half. */
 		const int16_t x = (int16_t)(((int32_t)code - mid) << shift);
-		if (fac_flag_get(FAC_FLAG_X0BFF) == SET) {
-			bridge_irq_unlock(irq_state);
-			break; /* FAC input saturated */
-		}
 		fac_fixed_data_write(x);
 
 		if (fac_flag_get(FAC_FLAG_YBEF) == RESET) {

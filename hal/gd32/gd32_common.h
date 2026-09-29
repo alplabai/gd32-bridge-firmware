@@ -159,6 +159,7 @@ typedef struct {
 	uint16_t          proc_ring[BRIDGE_ADC_STREAM_RING_SAMPLES];
 	volatile uint32_t proc_write;    /* pump-produced sample count      */
 	uint32_t          proc_read;     /* stream_read-consumed count      */
+	volatile bool     proc_gap;      /* pump resynced a full ring; BUSY once */
 	uint32_t          pump_raw_read; /* pump's raw-ring consumer count  */
 	uint8_t           dsp_terminal;  /* terminal stage kind (0 FIR/1 IIR/3 FFT) */
 	/* gh#35 sticky per-stream fault flags, set by the base-level pump,
