@@ -359,9 +359,13 @@ void bridge_power_tick(void)
 
 	/* 4. A WFI with an enabled interrupt already pending in the NVIC
 	 *    is architecturally a no-op, so the pending set must be clear
-	 *    too (gh#63 step 4). */
+	 *    too (gh#63 step 4).  All three transport vectors this bridge
+	 *    unmasks -- CS-EXTI, I2C0-EV, I2C0-ER -- gate entry: checking
+	 *    only CS-EXTI + I2C0-EV silently dropped the request whenever
+	 *    an I2C0 bus-error interrupt was pending (#262). */
 	if (NVIC_GetPendingIRQ(BRIDGE_SPI_CS_EXTI_IRQN) != 0u) return;
 	if (NVIC_GetPendingIRQ(BRIDGE_I2C_EV_IRQN) != 0u) return;
+	if (NVIC_GetPendingIRQ(BRIDGE_I2C_ER_IRQN) != 0u) return;
 
 	/* 5. Only now enter. */
 	const uint8_t mode = s_lp_pending_mode;
