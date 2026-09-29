@@ -45,6 +45,10 @@ typedef struct {
 	uint32_t gpio_y_port;
 	uint32_t gpio_y_pin;
 	uint32_t gpio_af;
+	bool     wide; /* true: 32-bit counter (TIMER1, TIMER4).
+	                * false: 16-bit counter (TIMER2, TIMER3) --
+	                * bridge_hw_qenc_read() must sign-extend from
+	                * int16_t instead of casting the raw uint32_t. */
 } gd32_qenc_t;
 
 /* PWM channel map element (table lives in pwm.c). */
@@ -138,11 +142,26 @@ typedef struct {
 /* _Static_assert that the sizeof-derived size matches these).        */
 /* ----------------------------------------------------------------- */
 
-#define GPIO_PAD_MAP_COUNT    18u /* _Static_assert against sizeof in gpio.c       */
+#define GPIO_PAD_MAP_COUNT    20u /* _Static_assert against sizeof in gpio.c       */
 #define ADC_CHANNEL_MAP_COUNT 8u  /* _Static_assert against sizeof in adc.c        */
 #define QENC_CHANNEL_COUNT    4u  /* _Static_assert against sizeof in qenc.c       */
 #define PWM_CHANNEL_COUNT     8u  /* _Static_assert against sizeof in pwm.c        */
 #define DAC_CHANNEL_COUNT     2u  /* _Static_assert against sizeof in dac.c        */
+
+/* Bits 18/19 of the GPIO mask are sideband, not E1M pads: the Murata
+ * LBEE5HY2FY-922 Wi-Fi/BT module's power enables (module has internal
+ * 50 k pull-downs on both).  Named here, not just indexed, because
+ * hal/gd32/init.c drives them differently from the rest of
+ * `gpio_pad_map` (OUTPUT LOW at boot, not INPUT high-Z -- see the
+ * boot loop in init.c and the pad-map comment in gpio.c).  REG_ON
+ * power policy is the HOST's, not this firmware's: the GD32 only
+ * proxies the line; it never drives it high on its own. */
+#define GPIO_PAD_BT_REG_ON 18u
+#define GPIO_PAD_WL_REG_ON 19u
+_Static_assert(GPIO_PAD_WL_REG_ON == GPIO_PAD_BT_REG_ON + 1 &&
+                   GPIO_PAD_WL_REG_ON < GPIO_PAD_MAP_COUNT,
+               "GPIO_PAD_BT_REG_ON/GPIO_PAD_WL_REG_ON must stay adjacent and in-range -- "
+               "init.c's boot loop walks BT_REG_ON..WL_REG_ON inclusive");
 
 /* ----------------------------------------------------------------- */
 /* Shared analog + timer constants.                                   */
@@ -165,12 +184,11 @@ typedef struct {
 #define ADC_RES_BITS_DEFAULT     12u
 #define ADC_OVERSAMPLE_RATIO_MAX 256u /* power-of-two ratios 1..256 */
 
-/* Default sample time used for single-shot reads.  240 cycles is
- * the most conservative setting in the vendor's range -- gives the
- * external source plenty of settling time for a high-impedance
- * input divider, at the cost of slower conversion (~1 us per
- * sample at ADC_CLK_SYNC_HCLK_DIV6 with HCLK=216 MHz: 240 ADCCK
- * sample + 12.5 ADCCK conversion ~= 7.0 us). */
+/* Default sample time used for single-shot reads.  240 cycles gives
+ * an external source plenty of settling time for a high-impedance
+ * input divider, at the cost of slower conversion: at
+ * ADC_CLK_SYNC_HCLK_DIV6 with HCLK=216 MHz, 240 ADCCK sample cycles
+ * plus 12.5 ADCCK conversion cycles take about 7.0 us. */
 #define ADC_DEFAULT_SAMPLE_CYCLES 240u
 
 /* Handler-residency budget for one CMD_ADC_READ (#135).
@@ -255,11 +273,10 @@ typedef struct {
  * 216MHz").  NOTE 2026-06-04: this was wrongly coded as 240 MHz
  * through v0.2.3 -- every PWM period was ~11 % long (a commanded
  * 1 kHz physically ran ~900 Hz).  1 ns LSB resolution would need a
- * faster counter; we instead round period_ns + duty_ns to the
- * nearest 1 us cycle by fixing the prescaler at (216 - 1) so the
- * counter ticks at exactly 1 MHz.  ARR is then `period_us - 1`,
- * fitting in 16 bits for periods up to ~65 ms which covers every
- * realistic control PWM frequency (>=15 Hz). */
+ * faster counter; we instead round period_ns + duty_ns down to a
+ * 1 us cycle by fixing the prescaler at (216 - 1) so the
+ * counter ticks at exactly 1 MHz.  ARR fits edge-aligned periods up
+ * to 65.536 ms and center-aligned periods up to 131.070 ms. */
 #define PWM_TIMER_CLK_HZ    216000000u
 #define PWM_TIMER_PRESCALER (216u - 1u) /* 216 MHz -> 1 MHz tick    */
 #define PWM_TIMER_TICK_NS   1000u       /* 1 us per timer tick      */
