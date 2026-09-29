@@ -110,9 +110,10 @@ foreach(_slot A B)
         ${FW}/src/bootloader/bootloader.c
         ${FW}/hal/bridge_hw_stub.c
     )
-    target_include_directories(${_tgt} PRIVATE ${FW}/src ${FW}/hal)
+    target_include_directories(${_tgt} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/ota ${FW}/src ${FW}/hal)
     target_compile_definitions(${_tgt} PRIVATE
-        BRIDGE_OTA_PARTITIONED BRIDGE_APP_SLOT_BASE=${_OTA_SLOT_${_slot}_BASE})
+        BRIDGE_OTA_PARTITIONED BRIDGE_OTA_TEST_HOOKS GD32G553
+        BRIDGE_APP_SLOT_BASE=${_OTA_SLOT_${_slot}_BASE})
     target_compile_options(${_tgt} PRIVATE ${TEST_FLAGS})
     target_link_libraries(${_tgt} PRIVATE ztest_shim)
     add_test(NAME ota_slot_${_slot_lc} COMMAND ${_tgt})
