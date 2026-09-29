@@ -34,6 +34,14 @@ needs the factory metadata record from
 [`../../tools/gen_ota_metadata.py`](../../tools/gen_ota_metadata.py) at
 `0x08008000`.
 
+The bootloader links the same five core-fault handlers as the application
+images. NMI, HardFault, MemManage, BusFault, and UsageFault record their
+diagnostics in `RTC_BKP0..6`, count consecutive fault resets in `RTC_BKP7`,
+and halt after the bounded retry limit instead of falling into the vendor
+startup's silent `Default_Handler` loop. The bootloader never clears that
+counter; a successful application SPI + I2C bring-up clears only `RTC_BKP7`
+and preserves the diagnostic record.
+
 `OTA_COMMIT` and `OTA_ROLLBACK` both reset the MCU (`ota_system_reset()`,
 `src/ota.c`) **before** the reply is staged — the reply's `STATUS_OK` is
 never observed on the wire; the host must treat an all-`0x00` drain
