@@ -51,7 +51,8 @@
 /* (hal/gd32/adc.c: PD9, PB12, PE13, PE11, PC4, PA5, PA2, PA3, analog */
 /* mode), pwm_channels[] (hal/gd32/pwm.c: PA11, PB1, PB14, PC5, PC10, */
 /* PC11, PC12, PD0, AF mode), qenc_map[] (hal/gd32/qenc.c: PA0, PB3,  */
-/* PC6, PC7, PB6, PB7, PB2, PA1, AF mode).  None overlap today.  All   */
+/* PC6, PC7, PB6, PB7, PB2, PA1, AF mode).  None overlap today (bits  */
+/* 18/19 below, PE14/PE15, and bit 20, PB13, checked too).  All       */
 /* five tables ARE visible together at compile time -- gd32_common.h  */
 /* externs each one and init.c includes it -- so TU visibility is not */
 /* why a C _Static_assert can't do this cross-check.  The real reason */
@@ -93,18 +94,44 @@ const gd32_gpio_pad_t gpio_pad_map[] = {
 	{ GPIOD, GPIO_PIN_2 },  /* bit 15 = E1M IO32 */
 	{ GPIOD, GPIO_PIN_8 },  /* bit 16 = E1M IO34 */
 	{ GPIOD, GPIO_PIN_1 },  /* bit 17 = E1M IO35 */
+	/* Murata LBEE5HY2FY-922 sideband (NOT E1M pads -- module power
+	 * enables; module has internal 50 k pull-downs on both).  Boot-time
+	 * these two are driven OUTPUT LOW instead of the INPUT high-Z
+	 * rule below -- see the GPIO_PAD_BT_REG_ON / GPIO_PAD_WL_REG_ON
+	 * boot loop in hal/gd32/init.c.  Power policy is the HOST's: the
+	 * GD32 must not autonomously drive either line high, only proxy a
+	 * host CMD_GPIO_WRITE. */
+	{ GPIOE, GPIO_PIN_14 }, /* bit 18 = BT_REG_ON */
+	{ GPIOE, GPIO_PIN_15 }, /* bit 19 = WL_REG_ON */
+	/* Sideband (NOT an E1M pad): shared STB net for the two on-module
+	 * TCAN1044 CAN-FD transceivers (U15/U16, alp-sdk
+	 * metadata/e1m_modules/v2n/gd32-io-mcu-map.csv:38).  STB HIGH =
+	 * standby (both transceivers off the bus); STB LOW = normal.  Boot
+	 * OUTPUT driven HIGH (standby) below instead of the default
+	 * INPUT high-Z rule -- transceiver power-up state is HOST policy,
+	 * same posture as GPIO_PAD_BT_REG_ON/WL_REG_ON: this firmware never
+	 * takes the bus live on its own, only proxies a host
+	 * CMD_GPIO_WRITE. */
+	{ GPIOB, GPIO_PIN_13 }, /* bit 20 = CAN_STBY */
 };
 _Static_assert(sizeof(gpio_pad_map) / sizeof(gpio_pad_map[0]) == GPIO_PAD_MAP_COUNT,
                "gpio_pad_map size must match GPIO_PAD_MAP_COUNT");
 
-/* Per-pad direction tracking.  Boot configures every pad as INPUT +
- * PULL_UP; bridge_hw_gpio_write() flips an entry to OUTPUT push-pull
- * on first call (sticky until the next chip reset).  Avoids the
- * need for a separate `CMD_GPIO_CONFIGURE` opcode.  Used ONLY by
+/* Per-pad direction tracking.  Boot parks every pad at its ANALOG reset
+ * state (gh#66 -- no boot-time pull-up current) -- except
+ * GPIO_PAD_BT_REG_ON / GPIO_PAD_WL_REG_ON (bits 18/19) and
+ * GPIO_PAD_CAN_STBY (bit 20), which boot OUTPUT driven instead (see
+ * init.c and the pad-map comment above); bridge_hw_gpio_write() flips
+ * an entry to OUTPUT push-pull on first call (sticky until the next
+ * chip reset), and bridge_hw_gpio_read() promotes a pad to INPUT +
+ * PULLUP on the first read that names it.  Avoids the need for a
+ * separate `CMD_GPIO_CONFIGURE` opcode.  gpio_is_output is used ONLY by
  * bridge_hw_gpio_write() to decide whether a pad still needs
  * promoting -- bridge_hw_gpio_read() below always reads the measured
- * pad level regardless of this flag (gh#62). */
+ * pad level regardless of this flag (gh#62); gpio_input_promoted is
+ * the read side's own mirror of the same promotion state. */
 bool gpio_is_output[GPIO_PAD_MAP_COUNT];
+bool gpio_input_promoted[GPIO_PAD_MAP_COUNT];
 
 #define GPIO_MAPPED_PORT_COUNT 6u
 
@@ -126,10 +153,37 @@ int bridge_hw_gpio_read(uint32_t mask, uint32_t *levels)
 	*levels                                       = 0u;
 	uint16_t port_inputs[GPIO_MAPPED_PORT_COUNT]  = { 0u };
 	bool     port_sampled[GPIO_MAPPED_PORT_COUNT] = { false };
+	bool     promoted_any                         = false;
+
+	/* Lazy INPUT promotion (gh#66): boot parks the pad map at its
+	 * analog reset state, so the first read that names a pad brings it
+	 * to INPUT + PULLUP here -- mirroring the write path's OUTPUT
+	 * promotion below.  The pull-up then has to charge the pad's
+	 * capacitance before the level is meaningful: 40 kΩ (Datasheet
+	 * Rev2.0 p.128 Table 4-28) against a pad-plus-trace C settles in
+	 * well under a microsecond for any realistic load, so a ~5 us
+	 * settle spin after ANY promotion is orders of margin -- and is
+	 * the only way the FIRST read after promotion can be trusted
+	 * (the issue's own caveat).  5 us in the CS-EXTI handler at prio
+	 * 1 is budgeted: single-digit-us dispatch sits inside the
+	 * master's 60 us inter-transaction gap. */
+	for (size_t i = 0; i < GPIO_PAD_MAP_COUNT; ++i) {
+		if ((mask & ((uint32_t)1u << i)) == 0u) continue;
+		if (gpio_input_promoted[i]) continue;
+		gpio_input_promoted[i] = true;
+		gpio_mode_set(
+		    gpio_pad_map[i].periph, GPIO_MODE_INPUT, GPIO_PUPD_PULLUP, gpio_pad_map[i].pin);
+		promoted_any = true;
+	}
+	if (promoted_any) {
+		for (volatile uint32_t settle = 0u; settle < 400u; ++settle) {
+			/* ~5 us at 216 MHz, ~5 cycles per volatile iteration */
+		}
+	}
 
 	/* Bits above `GPIO_PAD_MAP_COUNT` are silently ignored -- the
-     * host header documents the mapping as opaque, so out-of-range
-     * bits are treated as "no pad selected" rather than an error. */
+	 * host header documents the mapping as opaque, so out-of-range
+	 * bits are treated as "no pad selected" rather than an error. */
 	for (size_t i = 0; i < GPIO_PAD_MAP_COUNT; ++i) {
 		if ((mask & ((uint32_t)1u << i)) == 0u) continue;
 		const size_t port = gpio_mapped_port_index(gpio_pad_map[i].periph);

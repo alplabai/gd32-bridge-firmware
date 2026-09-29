@@ -153,6 +153,64 @@ ADC and encoder maps in `hal/gd32/adc.c` (`adc_channels_map[]`) and
 Host code reaches a channel by its logical id; the firmware
 translates internally.
 
+`gpio_pad_map[]` is 21 entries: 18 E1M IO pads (bits 0-17) plus three
+sideband bits (18, 19, 20) that are not E1M pads at all -- `BT_REG_ON`
+(GD32 `PE14`) and `WL_REG_ON` (GD32 `PE15`), the Murata
+LBEE5HY2FY-922 Wi-Fi/BT module's power enables, and `CAN_STBY` (GD32
+`PB13`), the shared standby line for the two on-module TCAN1044
+CAN-FD transceivers (U15/U16). Unlike the E1M pads,
+which boot INPUT, high-Z (no internal pull -- the carrier's own
+pulls define the default; see the boot-loop comment in
+[`hal/gd32/init.c`](hal/gd32/init.c)), these two boot **OUTPUT driven
+LOW** (module off); the module has internal 50 k pull-downs on both,
+so an input pad would leave the module's power state indeterminate.
+Module power is host policy, not a firmware default: a host powers
+the module by writing bits 18/19 high via `CMD_GPIO_WRITE`. `CAN_STBY`
+instead boots **OUTPUT driven HIGH** (both transceivers held in
+standby -- STB HIGH = standby, STB LOW = normal); a host takes the CAN
+bus live by writing bit 20 low via `CMD_GPIO_WRITE`. This table
+(source of truth: `gpio_pad_map[]` in
+[`hal/gd32/gpio.c`](hal/gd32/gpio.c)) is the owner of the bit layout --
+`docs/gd32-bridge-protocol.md` (alp-sdk) links back here instead of
+repeating it:
+
+| Bit | GD32 pad | Signal      |
+|----:|----------|-------------|
+|   0 | PB10     | E1M IO8     |
+|   1 | PA7      | E1M IO9     |
+|   2 | PA12     | E1M IO10    |
+|   3 | PB0      | E1M IO11    |
+|   4 | PC1      | E1M IO12    |
+|   5 | PF1      | E1M IO13    |
+|   6 | PB5      | E1M IO14    |
+|   7 | PC0      | E1M IO16    |
+|   8 | PC14     | E1M IO24    |
+|   9 | PC15     | E1M IO25    |
+|  10 | PB11     | E1M IO27    |
+|  11 | PC2      | E1M IO28    |
+|  12 | PD11     | E1M IO29    |
+|  13 | PD10     | E1M IO30    |
+|  14 | PE12     | E1M IO31    |
+|  15 | PD2      | E1M IO32    |
+|  16 | PD8      | E1M IO34    |
+|  17 | PD1      | E1M IO35    |
+|  18 | PE14     | BT_REG_ON   |
+|  19 | PE15     | WL_REG_ON   |
+|  20 | PB13     | CAN_STBY    |
+
+Any GD32 reset (WDT, fault, OTA A/B swap, SE reset) drops both REG_ON
+lines low and drives CAN_STBY high again -- the boot-time defaults in
+[`hal/gd32/init.c`](hal/gd32/init.c) apply on every reset, not just
+cold power-on, so the Wi-Fi/BT module gets power-cycled and the CAN
+bus goes back to standby along with it. The host must re-assert bits
+18/19/20 after any GD32 reset; `CMD_RESET_REASON` is how a host
+detects one happened. Firmware v0.10 and earlier silently ignore
+writes to bits 18/19 and still return `STATUS_OK` (bits did not exist
+yet); firmware v0.12 and earlier do the same for bit 20. A host
+relying on bits 18/19 must require `PROTOCOL_VERSION_MINOR >= 11`,
+and on bit 20 must require `PROTOCOL_VERSION_MINOR >= 13` (both via
+`GET_VERSION`), before trusting that the write actually took effect.
+
 ## Cross-link
 
 * Protocol wire spec: [`docs/gd32-bridge-protocol.md` (alp-sdk)](https://github.com/alplabai/alp-sdk/blob/main/docs/gd32-bridge-protocol.md).
