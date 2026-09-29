@@ -5,16 +5,17 @@
  * The firmware's ONE critical-section primitive.
  *
  * Why this file exists (#19 and its children #133/#134/#147): this is a
- * bare-metal application in which protocol_dispatch() runs
- * synchronously inside BOTH transport ISRs --
+ * bare-metal application in which
+ * protocol_dispatch() runs synchronously inside BOTH transport ISRs --
  * BRIDGE_SPI_CS_EXTI_HANDLER at BRIDGE_CS_IRQ_PRIO (1) and
  * BRIDGE_I2C_EV_HANDLER at BRIDGE_I2C_IRQ_PRIO (2), see
  * hal/bridge_board_config.h.  Group priority 1 pre-empts group priority
- * 2, so any handler reached from I2C can be suspended mid-sequence and
- * resumed after the SPI side has rewritten the same peripheral.  This is
- * the reusable save/restore primitive for short shared-state claims.  Raw
- * interrupt masking also exists for separate purposes in the bootloader
- * handoff, FMC busy windows and the terminal fault path.
+ * 2.  protocol_dispatch() now refuses a nested transport request with
+ * STATUS_BUSY (#19), but short critical sections are still required for
+ * state shared with peripheral ISRs, base-level pumps, or HAL entry points
+ * outside the dispatcher. This is the reusable save/restore primitive for
+ * those claims. Raw interrupt masking also exists for separate purposes in
+ * the bootloader handoff, FMC busy windows and the terminal fault path.
  *
  * Why PRIMASK and not BASEPRI: BASEPRI is the finer instrument, but the
  * short shared-state claims this helper protects need to exclude the
@@ -74,5 +75,17 @@ static inline void bridge_irq_unlock(uint32_t primask)
 {
 	__set_PRIMASK(primask);
 }
+
+/* The vendor's rcu_periph_clock_enable() is a register read-modify-write.
+ * Runtime callers can be pre-empted by the other transport ISR, so protect
+ * that one RMW without making peripheral initialisation itself atomic.
+ * A macro rather than an inline function so this header still parses in
+ * host tests whose device-header mock does not model the RCU. */
+#define bridge_rcu_periph_clock_enable(periph) \
+	do { \
+		const uint32_t rcu_primask_ = bridge_irq_lock(); \
+		rcu_periph_clock_enable(periph); \
+		bridge_irq_unlock(rcu_primask_); \
+	} while (0)
 
 #endif /* GD32_BRIDGE_HAL_GD32_BRIDGE_CRITICAL_H */

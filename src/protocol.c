@@ -26,11 +26,13 @@
  * they need no peripheral I/O.
  */
 
+#include <stdatomic.h>
 #include <string.h>
 
 #include "protocol.h"
 #include "../hal/bridge_hw.h"
 #include "bootloader/bootloader.h"
+#include "ota.h"
 
 /* --------------------------------------------------------------- */
 /* CRC-16 / CCITT-FALSE -- shared with transports.                   */
@@ -635,7 +637,7 @@ static gd32_bridge_status_t handle_adc_spectrum_read(const uint8_t *req,
 	const int rv =
 	    bridge_hw_adc_spectrum_read(stream_id, bin_offset, max_bins, &seq, &total, &got, bins);
 	if (rv == BRIDGE_HW_ERR_NOTIMPL) return STATUS_NOSUPPORT; /* not FFT-bound */
-	if (rv == BRIDGE_HW_ERR_IO) return STATUS_BUSY;           /* no frame yet -> poll */
+	if (rv == BRIDGE_HW_ERR_BUSY) return STATUS_BUSY;         /* no frame yet -> poll */
 	if (rv < 0) return STATUS_IO;
 	if (got > max_bins) return STATUS_IO; /* HAL contract violation */
 
@@ -747,6 +749,7 @@ static gd32_bridge_status_t status_from_hw(int rv)
 	if (rv == BRIDGE_HW_ERR_RANGE) return STATUS_OUT_OF_RANGE;
 	if (rv == BRIDGE_HW_ERR_NOTIMPL) return STATUS_NOSUPPORT;
 	if (rv == BRIDGE_HW_ERR_BUSY) return STATUS_BUSY;
+	if (rv == BRIDGE_HW_ERR_NOT_READY) return STATUS_NOT_READY;
 	return STATUS_IO;
 }
 
@@ -1009,17 +1012,34 @@ static gd32_bridge_status_t handle_link_features(gd32_bridge_link_t link,
 
 typedef gd32_bridge_status_t (*cmd_handler_t)(const uint8_t *, size_t, uint8_t *, size_t, size_t *);
 
+/* Both transport ISRs dispatch synchronously, and SPI's CS EXTI can
+ * pre-empt the I2C event handler.  A lock-free atomic flag makes the
+ * higher-priority nested request fail fast with STATUS_BUSY before it
+ * reaches shared protocol or HAL state (#19). */
+static atomic_flag dispatch_in_flight = ATOMIC_FLAG_INIT;
+
 /* Two-tier dispatch: a sparse switch on opcode keeps the table size
  * small (vs a dense 256-entry array) without losing the "one handler
  * table" property. */
-gd32_bridge_status_t protocol_dispatch(gd32_bridge_link_t link,
-                                       uint8_t            cmd,
-                                       const uint8_t     *req_payload,
-                                       size_t             req_payload_len,
-                                       uint8_t           *reply_payload,
-                                       size_t             reply_payload_cap,
-                                       size_t            *reply_payload_len)
+static gd32_bridge_status_t protocol_dispatch_inner(gd32_bridge_link_t link,
+                                                    uint8_t            cmd,
+                                                    const uint8_t     *req_payload,
+                                                    size_t             req_payload_len,
+                                                    uint8_t           *reply_payload,
+                                                    size_t             reply_payload_cap,
+                                                    size_t            *reply_payload_len)
 {
+	/* Trial/confirm gate (bench fact 2026-09-26, E1M-V2M103): a
+	 * not-yet-confirmed OTA trial must never let the host believe a
+	 * session is stable -- it can still revert on the armed watchdog.
+	 * Note the frame (the confirm signal the base-level tick is
+	 * waiting for) and answer BUSY with an empty payload for EVERY
+	 * opcode, on EITHER link, ahead of the normal dispatch. */
+	if (ota_trial_unconfirmed()) {
+		ota_note_frame();
+		*reply_payload_len = 0u;
+		return STATUS_BUSY;
+	}
 	cmd_handler_t h = NULL;
 	switch (cmd) {
 	case CMD_PING:
@@ -1155,4 +1175,28 @@ gd32_bridge_status_t protocol_dispatch(gd32_bridge_link_t link,
 		return STATUS_NOSUPPORT;
 	}
 	return h(req_payload, req_payload_len, reply_payload, reply_payload_cap, reply_payload_len);
+}
+
+gd32_bridge_status_t protocol_dispatch(gd32_bridge_link_t link,
+                                       uint8_t            cmd,
+                                       const uint8_t     *req_payload,
+                                       size_t             req_payload_len,
+                                       uint8_t           *reply_payload,
+                                       size_t             reply_payload_cap,
+                                       size_t            *reply_payload_len)
+{
+	if (atomic_flag_test_and_set_explicit(&dispatch_in_flight, memory_order_acquire)) {
+		*reply_payload_len = 0u;
+		return STATUS_BUSY;
+	}
+
+	const gd32_bridge_status_t status = protocol_dispatch_inner(link,
+	                                                            cmd,
+	                                                            req_payload,
+	                                                            req_payload_len,
+	                                                            reply_payload,
+	                                                            reply_payload_cap,
+	                                                            reply_payload_len);
+	atomic_flag_clear_explicit(&dispatch_in_flight, memory_order_release);
+	return status;
 }

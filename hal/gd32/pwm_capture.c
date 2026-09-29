@@ -35,7 +35,7 @@
  * has to be reworked by the maintainer in a hardware-bring-up commit
  * before READ delivers real edges.  Until then the firmware
  * structure (config + polled drain + correct unit conversion) is
- * exercised end-to-end and READ surfaces BRIDGE_HW_ERR_NOTIMPL
+ * exercised end-to-end and READ surfaces BRIDGE_HW_ERR_NOT_READY
  * ("ring empty") as documented. */
 typedef struct {
 	uint32_t last_tick;         /* most-recent CCxVAL                  */
@@ -287,6 +287,7 @@ int bridge_hw_pwm_capture_begin(uint8_t channel, uint8_t edge)
 
 	const gd32_pwm_ch_t *ch   = &pwm_channels[channel];
 	const uint16_t       unit = pwm_capture_unit(ch);
+	pwm_channel_claim(channel);
 
 	/* Stop the pad driving: the complementary output (CHxNEN) is what
      * feeds the MCH pad in COMPLEMENTARY mode.  The classic CHx output
@@ -353,7 +354,7 @@ int bridge_hw_pwm_capture_read(uint8_t channel, uint32_t *period_ns, uint32_t *p
      * last poll.  The drain updates `have_period` / `have_pulse`
      * when enough edges have arrived to compose a full tuple. */
 	pwm_capture_drain(channel);
-	if (!s->have_period) return BRIDGE_HW_ERR_NOTIMPL; /* ring empty */
+	if (!s->have_period) return BRIDGE_HW_ERR_NOT_READY; /* ring empty */
 
 	/* Convert ticks back to nanoseconds.  The PWM timers run at the
      * 1 us tick configured by pwm_timer_init (prescaler 216-1 against
@@ -406,6 +407,7 @@ int bridge_hw_pwm_capture_end(uint8_t channel)
 	gpio_output_options_set(ch->gpio_port, GPIO_OTYPE_PP, GPIO_OSPEED_12MHZ, ch->gpio_pin);
 	gpio_af_set(ch->gpio_port, ch->gpio_af, ch->gpio_pin);
 	pwm_channel_init(ch);
+	pwm_channel_release(channel);
 
 	pwm_capture[channel].in_capture = false;
 	return BRIDGE_HW_OK;

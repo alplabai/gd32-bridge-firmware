@@ -67,20 +67,17 @@
 	(FMC_STAT_WPERR | FMC_STAT_PGERR | FMC_STAT_PGSERR | FMC_STAT_PGAERR | FMC_STAT_RPERR | \
 	 FMC_STAT_PGMERR | FMC_STAT_OBERR)
 
-/* Masked-window poll budgets (blocker fix on top of #5).  FMC_TIMEOUT_COUNT
- * (vendor gd32g5x3_fmc.h) is 0xFFFFFFFF -- a raw decrement count, not a time
- * bound.  Fine when the poll runs with interrupts enabled (any other caller
- * of ota_fmc_wait_ready in this file): a stuck FMC just leaves the ISRs
- * still servicing SPI/I2C.  Deadly inside the two PRIMASK-masked windows
- * added for #5 (erase_one_page's START..BUSY span, program_one_dword's
- * PG..BUSY span): a genuine flash-controller fault would spin the full
- * ~4.295e9 iterations with every interrupt off, on the order of minutes at
- * 216 MHz, with no watchdog anywhere in the tree (#54) to recover it.
+/* FMC poll budgets (blocker fix on top of #5).  FMC_TIMEOUT_COUNT (vendor
+ * gd32g5x3_fmc.h) is 0xFFFFFFFF -- a raw decrement count, not a time bound.
+ * A stuck FMC must not hold the synchronous OTA transport handler for
+ * minutes, even during a preflight wait with interrupts still enabled.  The
+ * two PRIMASK-masked windows added for #5 (erase_one_page's START..BUSY span,
+ * program_one_dword's PG..BUSY span) make the unbounded case worse by also
+ * blocking every interrupt, with no watchdog anywhere in the tree (#54) to
+ * recover it.
  *
- * These two constants replace FMC_TIMEOUT_COUNT at ONLY the masked call
- * sites (erase_one_page's second wait, program_one_dword's second wait);
- * the pre-mask waits stay on FMC_TIMEOUT_COUNT because interrupts are still
- * live there.
+ * These two constants bound all four ota_fmc_wait_ready() calls: preflight
+ * and active-operation waits for both page erase and doubleword program.
  *
  * Derivation (no -O level is pinned in CMakeLists.txt -- #26 -- so this has
  * to hold at both ends of the range actually built; verified against
@@ -187,7 +184,7 @@ OTA_RAMFUNC static fmc_state_enum erase_one_page(uint32_t addr)
      * session's first erase). */
 	FMC_STAT = OTA_FMC_STAT_ERR_MASK;
 
-	fmc_state_enum st = ota_fmc_wait_ready(FMC_TIMEOUT_COUNT);
+	fmc_state_enum st = ota_fmc_wait_ready(OTA_FMC_ERASE_TIMEOUT_ITERS);
 	if (st != FMC_READY) {
 		return st;
 	}
@@ -218,12 +215,12 @@ OTA_RAMFUNC static fmc_state_enum erase_one_page(uint32_t addr)
      * DMA content is already staged.  I2C is hardware-stretched instead
      * (i2c_stretch_scl_low_enable(), transport_hw_gd32.c) so it degrades
      * to added latency rather than corrupt content, up to the master's
-     * own bus-timeout budget.  Not fixable here; #19 owns it.
+     * own bus-timeout budget.  The nested-dispatch guard in #19 does
+     * not fix this interrupt blackout; #57 tracks its length and
+     * mitigation.
      *
-     * OTA_FMC_ERASE_TIMEOUT_ITERS (not FMC_TIMEOUT_COUNT) bounds this
-     * wait -- see the derivation comment above OTA_FMC_ERASE_TIMEOUT_ITERS.
-     * FMC_TIMEOUT_COUNT is fine on every OTHER ota_fmc_wait_ready() call in
-     * this file: those run with interrupts still enabled. */
+	 * OTA_FMC_ERASE_TIMEOUT_ITERS bounds this wait -- see the derivation
+	 * comment above.  The preflight wait uses the same bound. */
 	/* RAW CMSIS intrinsics here, deliberately NOT bridge_irq_lock() /
      * bridge_irq_unlock() from hal/gd32/bridge_critical.h, even though
      * they do exactly this.  Those are `static inline`, and this build
@@ -346,14 +343,14 @@ OTA_RAMFUNC static fmc_state_enum program_one_dword(uint32_t addr, uint64_t dw)
 {
 	FMC_STAT = OTA_FMC_STAT_ERR_MASK; /* stale errors are not busy */
 
-	fmc_state_enum st = ota_fmc_wait_ready(FMC_TIMEOUT_COUNT);
+	fmc_state_enum st = ota_fmc_wait_ready(OTA_FMC_PROGRAM_TIMEOUT_ITERS);
 	if (st != FMC_READY) {
 		return st;
 	}
 	/* #5: same masked busy window as erase_one_page, PG set -> BUSY
      * clear.  Both sites move in lockstep -- see the comment there,
-     * including the transport-blackout note (#19) and why this uses
-     * OTA_FMC_PROGRAM_TIMEOUT_ITERS rather than FMC_TIMEOUT_COUNT. */
+	 * including the transport-blackout note (#19).  The preflight wait uses
+	 * the same OTA_FMC_PROGRAM_TIMEOUT_ITERS bound. */
 	/* Raw intrinsics, not bridge_irq_lock() -- same RAMFUNC-must-not-call-
      * flash argument as in erase_one_page. */
 	const uint32_t pm = __get_PRIMASK();
@@ -407,5 +404,29 @@ bool ota_fmc_program(uint32_t addr, const uint8_t *data, size_t len)
 
 void ota_system_reset(void)
 {
+	/* RCU_RSTSCK.RSTFC is no longer cleared here (bench fact 2026-09-26,
+	 * reset-cause ownership rework): src/boot/boot_main.c now reads
+	 * RCU_RSTSCK exactly ONCE per boot, stashes the raw value in
+	 * RTC_BKP8, and clears RSTFC itself, unconditionally, on EVERY boot
+	 * -- not just the ones this function triggers.  A write here would be
+	 * redundant (the very next boot re-clears it regardless) and would
+	 * also erase the cause bits before the bootloader ever gets to stash
+	 * them, if this function is ever reached on a path that ISN'T
+	 * followed by a reset (it isn't, today, but nothing here should
+	 * depend on that). See src/boot/boot_main.c's file header and
+	 * hal/gd32/init.c's bridge_hw_reset_reason() for the read side. */
 	NVIC_SystemReset();
+}
+
+void ota_fault_loop_clear(void)
+{
+	/* Same backup-domain unlock as hal/gd32/fault_handlers.c's
+	 * fault_backup_unlock() (RCU_APB1EN_PMUEN clocks the PMU;
+	 * PMU_CTL0_BKPWEN then gates writes to the RTC_BKPx block, UM
+	 * p.145); duplicated rather than shared for the same reason
+	 * backup_domain_unlock() in src/boot/boot_main.c is -- separate
+	 * images, two idempotent register writes, not worth a shared header. */
+	RCU_APB1EN |= RCU_APB1EN_PMUEN;
+	PMU_CTL0 |= PMU_CTL0_BKPWEN;
+	RTC_BKP7 = 0u;
 }
