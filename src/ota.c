@@ -971,28 +971,36 @@ static gd32_bridge_status_t h_rollback(void)
 	    cur.img_len[other] > OTA_SLOT_SIZE) {
 		return STATUS_INVAL; /* no valid fallback slot */
 	}
-	/* Flip active to `other` WITHOUT touching the per-slot descriptors
-     * (update_entry=false): the bootloader validates the rolled-to slot
-     * against the len/CRC recorded when that slot was last committed.
-     * Downgrade guard (bench fact 2026-09-26 follow-up): TRIAL iff the
-     * TARGET slot's OWN flash bytes carry the confirm-capable trial
-     * marker -- same ota_image_trial_capable() COMMIT uses, read from
-     * `other`'s own base rather than the declared cur.fw_version[other]
-     * (see h_commit's comment for why the declared version is no longer
-     * trusted for this decision). Unlike COMMIT, which now REFUSES a
-     * markerless image outright (policy closed on PR #246, see h_commit
-     * above), ROLLBACK still commits a markerless target CONFIRMED: that
-     * slot's metadata record already proves it booted successfully on
-     * this unit before, so it is not a fresh, unproven image the FWDGT
-     * needs to guard here. */
-	uint32_t other_base = 0u;
+	/* A metadata valid-bit records what was true when that image was
+	 * committed, not a guarantee that its flash is still intact.  The
+	 * bootloader rechecks both of these properties on the next reset; do
+	 * the same BEFORE changing active_slot, or a host-commanded rollback
+	 * can select a damaged image and strand the part in boot recovery. */
+	uint32_t other_base;
 	if (!ota_slot_base_checked(other, &other_base)) {
-		return STATUS_INVAL; /* unreachable: `other` is always A/B */
+		return STATUS_INVAL; /* defensive: `other` is derived from an A/B value */
 	}
+	const uint8_t *other_img = (const uint8_t *)ota_fmc_flash_ptr(other_base);
+	if (ota_crc32(0u, other_img, cur.img_len[other]) != cur.img_crc32[other] ||
+	    !ota_image_bootable(other_base, other_img, cur.img_len[other])) {
+		return STATUS_INVAL;
+	}
+	/* Flip active to `other` WITHOUT touching the per-slot descriptors
+	 * (update_entry=false): the descriptor was just revalidated above and
+	 * remains the bootloader's source of truth after reset.
+	 * Downgrade guard (bench fact 2026-09-26 follow-up): TRIAL iff the
+	 * TARGET slot's OWN flash bytes carry the confirm-capable trial
+	 * marker -- same ota_image_trial_capable() COMMIT uses, read from
+	 * `other`'s own base rather than the declared cur.fw_version[other]
+	 * (see h_commit's comment for why the declared version is no longer
+	 * trusted for this decision). Unlike COMMIT, which now REFUSES a
+	 * markerless image outright (policy closed on PR #246, see h_commit
+	 * above), ROLLBACK still commits a markerless target CONFIRMED: that
+	 * slot's metadata record already proves it booted successfully on
+	 * this unit before, so it is not a fresh, unproven image the FWDGT
+	 * needs to guard here. */
 	const uint8_t rollback_flags =
-	    ota_image_trial_capable((const uint8_t *)ota_fmc_flash_ptr(other_base), cur.img_len[other])
-	        ? OTA_META_FLAG_TRIAL
-	        : 0u;
+	    ota_image_trial_capable(other_img, cur.img_len[other]) ? OTA_META_FLAG_TRIAL : 0u;
 	if (!meta_commit(other, false, 0u, 0u, 0u, rollback_flags, 0u, 0xFFu)) {
 		return STATUS_IO;
 	}
