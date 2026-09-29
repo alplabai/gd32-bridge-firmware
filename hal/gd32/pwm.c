@@ -18,6 +18,7 @@
 #include "gd32_common.h"
 #include "pwm_internal.h"
 #include "pwm_ownership.h"
+#include "pwm_preload_transaction.h"
 
 /* ----------------------------------------------------------------- */
 /* PWM channels (TIMER0 + TIMER7).                                    */
@@ -219,6 +220,24 @@ void pwm_channel_release(uint8_t channel)
 	bridge_irq_unlock(sect);
 }
 
+typedef struct {
+	const gd32_pwm_ch_t *ch;
+	uint32_t             arr;
+	uint32_t             compare;
+} pwm_preload_load_t;
+
+/* This is the entire callback passed to pwm_preload_transaction(): keeping
+ * the CAR/CHxCV preload writes and their software-mirror publication in one
+ * callback makes it impossible for a future edit to accidentally put one
+ * outside the UPDIS boundary (#177). */
+static void pwm_preload_load(void *context)
+{
+	const pwm_preload_load_t *load = context;
+	timer_autoreload_value_config(load->ch->periph, load->arr);
+	timer_channel_output_pulse_value_config(load->ch->periph, load->ch->channel, load->compare);
+	pwm_car_shadow_defer(load->ch->periph, load->arr);
+}
+
 bool pwm_channel_center_aligned(uint8_t channel)
 {
 	const gd32_pwm_ch_t *ch = &pwm_channels[channel];
@@ -293,11 +312,18 @@ int pwm_apply_counter_values(uint8_t channel, uint32_t arr, uint32_t compare)
 	 * review round 2), so this call hands the outcome over explicitly
 	 * via pwm_car_shadow_defer/_commit below rather than leaving
 	 * pwm_capture.c to reconstruct it after the fact. */
-	timer_autoreload_value_config(ch->periph, arr);
-	timer_channel_output_pulse_value_config(ch->periph, ch->channel, compare);
 	if (was_running) {
-		pwm_car_shadow_defer(ch->periph, arr);
+		/* A natural update is asynchronous to this ISR, so masking only
+		 * transport interrupts cannot make these shadow writes coherent.
+		 * The bounded transaction adds CTL0.UPDIS until both preloads and
+		 * the capture-side pending-CAR handoff are complete; it then puts
+		 * UPDIS back exactly as this caller found it.  No UPG is generated
+		 * and CNT is never reset on this normal running path (#177). */
+		pwm_preload_load_t load = { .ch = ch, .arr = arr, .compare = compare };
+		pwm_preload_transaction(ch->periph, pwm_preload_load, &load);
 	} else {
+		timer_autoreload_value_config(ch->periph, arr);
+		timer_channel_output_pulse_value_config(ch->periph, ch->channel, compare);
 		/* #89: on a sync-master timer this also fires TRGO0, glitching a slave synced off it. */
 		timer_event_software_generate(ch->periph, TIMER_EVENT_SRC_UPG);
 		pwm_car_shadow_commit(ch->periph, arr);
