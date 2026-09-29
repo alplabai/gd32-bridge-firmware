@@ -5,8 +5,8 @@
  * gd32-bridge firmware: board/silicon configuration for the transport
  * peripherals on the E1M-X V2N module's GD32G553MEY7TR supervisor.
  *
- * This header is included ONLY by the gd32 HAL backend
- * (hal/transport_hw_gd32.c); it references GigaDevice register macros.
+ * This header is included by the GD32 HAL backend; it references GigaDevice
+ * register macros.
  *
  * SOURCE OF TRUTH for the pin map (alp-sdk):
  *   alp-sdk metadata/e1m_modules/v2n/gd32-io-mcu-map.tsv
@@ -104,15 +104,26 @@
  * needs no static value here.  Slave timing only needs setup/hold +
  * prescaler; the 400 kHz bus rate is the master's SCLH/SCLL, not ours. */
 
-/* NVIC priorities (preemption, sub).  CS EXTI framing at
- * BRIDGE_CS_IRQ_PRIO, I2C EV/ER at BRIDGE_I2C_IRQ_PRIO, ADC-stream DMA
- * lap FTF at prio 3 (hal/gd32/adc_stream.c:27-28).  Periodic
+/* NVIC priorities (preemption, sub). bridge_hw_init() selects PRE2_SUB2,
+ * which provides two preemption bits and two subpriority bits. CS EXTI framing
+ * is at BRIDGE_CS_IRQ_PRIO, I2C EV/ER at BRIDGE_I2C_IRQ_PRIO, and ADC-stream
+ * DMA lap FTF at BRIDGE_ADC_STREAM_LAP_IRQ_PRIO. Periodic
  * housekeeping runs at base level from the main WFI loop, not SysTick
  * -- there is no SysTick handler in this firmware. */
-#define BRIDGE_CS_IRQ_PRIO     1u
-#define BRIDGE_CS_IRQ_SUBPRIO  1u
-#define BRIDGE_I2C_IRQ_PRIO    2u
-#define BRIDGE_I2C_IRQ_SUBPRIO 0u
+#define BRIDGE_CS_IRQ_PRIO             1u
+#define BRIDGE_CS_IRQ_SUBPRIO          1u
+#define BRIDGE_I2C_IRQ_PRIO            2u
+#define BRIDGE_I2C_IRQ_SUBPRIO         0u
+#define BRIDGE_ADC_STREAM_LAP_IRQ_PRIO 3u
+
+_Static_assert(BRIDGE_CS_IRQ_PRIO < 4u, "PRE2_SUB2 has two preemption bits");
+_Static_assert(BRIDGE_I2C_IRQ_PRIO < 4u, "PRE2_SUB2 has two preemption bits");
+_Static_assert(BRIDGE_ADC_STREAM_LAP_IRQ_PRIO < 4u, "PRE2_SUB2 has two preemption bits");
+_Static_assert(BRIDGE_CS_IRQ_SUBPRIO < 4u, "PRE2_SUB2 has two subpriority bits");
+_Static_assert(BRIDGE_I2C_IRQ_SUBPRIO < 4u, "PRE2_SUB2 has two subpriority bits");
+_Static_assert(BRIDGE_CS_IRQ_PRIO < BRIDGE_I2C_IRQ_PRIO, "CS EXTI must preempt I2C");
+_Static_assert(BRIDGE_I2C_IRQ_PRIO < BRIDGE_ADC_STREAM_LAP_IRQ_PRIO,
+               "I2C must preempt ADC DMA lap handling");
 
 /* =================================================================== */
 /* RTC / wakeup-timer clock source -- LXTAL is not available on this   */

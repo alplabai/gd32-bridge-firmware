@@ -82,15 +82,11 @@ set(TEST_FLAGS -std=c11 -Wall -Wextra -Werror)
 #
 # The two bases below are PARSED out of src/ota_layout.h -- the same
 # header ota.c includes -- rather than hand-copied, so this copy cannot
-# drift silently against it.  Two other independent copies of the same
-# numbers remain and are NOT derived here: the top-level CMakeLists.txt's
-# gd32-bridge-slot-a / gd32-bridge-slot-b BRIDGE_APP_SLOT_BASE compile
-# defines (:197,202) and APP_SLOT_BASE linker-script sets (:187,190) --
-# out of scope for this fix, and that file is explicitly not to be edited
-# here -- and OTA_SLOT_SIZE's separate copy in tools/gen_ota_metadata.py:34.
-# A mismatch in either of those still fails loudly: ota.c's own #error
-# chain rejects any BRIDGE_APP_SLOT_BASE that doesn't equal
-# OTA_SLOT_A_BASE/OTA_SLOT_B_BASE from the header.
+# drift silently against it.  The top-level CMakeLists.txt now parses the
+# same definitions, and its app_slot_base.S witness makes the linker verify
+# the compiled macro against the generated FLASH origin (#78).
+# OTA_SLOT_SIZE's separate copy in tools/gen_ota_metadata.py remains outside
+# this host-test setup.
 set(_OTA_LAYOUT_H ${FW}/src/ota_layout.h)
 file(STRINGS ${_OTA_LAYOUT_H} _OTA_SLOT_A_BASE_LINE
      REGEX "^#define[ \t]+OTA_SLOT_A_BASE[ \t]+0x[0-9A-Fa-f]+u")
@@ -114,9 +110,10 @@ foreach(_slot A B)
         ${FW}/src/bootloader/bootloader.c
         ${FW}/hal/bridge_hw_stub.c
     )
-    target_include_directories(${_tgt} PRIVATE ${FW}/src ${FW}/hal)
+    target_include_directories(${_tgt} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/ota ${FW}/src ${FW}/hal)
     target_compile_definitions(${_tgt} PRIVATE
-        BRIDGE_OTA_PARTITIONED BRIDGE_APP_SLOT_BASE=${_OTA_SLOT_${_slot}_BASE})
+        BRIDGE_OTA_PARTITIONED BRIDGE_OTA_TEST_HOOKS GD32G553
+        BRIDGE_APP_SLOT_BASE=${_OTA_SLOT_${_slot}_BASE})
     target_compile_options(${_tgt} PRIVATE ${TEST_FLAGS})
     target_link_libraries(${_tgt} PRIVATE ztest_shim)
     add_test(NAME ota_slot_${_slot_lc} COMMAND ${_tgt})
@@ -175,6 +172,20 @@ target_compile_options(test_fault_diag PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_fault_diag PRIVATE ztest_shim)
 add_test(NAME fault_diag COMMAND test_fault_diag)
 
+# --- i2c_event_priority: simultaneous I2C0 EV-flag ordering (#136) --------
+#
+# RBNE and ADDSEND clear independently in hardware.  This pure selector pins
+# the required final-byte-before-repeated-start precedence without attempting
+# to host-model the complete vendor I2C register block.
+add_executable(test_i2c_event_priority
+    i2c_event_priority/src/test_i2c_event_priority.c
+    ${FW}/hal/gd32/i2c_event_priority.c
+)
+target_include_directories(test_i2c_event_priority PRIVATE ${FW}/hal/gd32)
+target_compile_options(test_i2c_event_priority PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_i2c_event_priority PRIVATE ztest_shim)
+add_test(NAME i2c_event_priority COMMAND test_i2c_event_priority)
+
 # --- timer_sync_iti: (slave, master) -> SYSCFG ITIx router code (gh#42) ----
 #
 # The lookup table has no vendor-register dependency, so it lives in its own
@@ -189,16 +200,41 @@ target_compile_options(test_timer_sync_iti PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_timer_sync_iti PRIVATE ztest_shim)
 add_test(NAME timer_sync_iti COMMAND test_timer_sync_iti)
 
-# --- timer_sync: production HAL id validation + register-call sequence -----
+# --- power_wake: fail-closed wake-bitmap validation (gh#107) --------------
 #
-# Links the REAL hal/gd32/timer_sync.c against a minimal vendor-API mock.
-# This pins #142's fail-closed TIMER19 rejection at the responsible layer:
-# id 2 must return RANGE before any timer/SYSCFG call.  It also prevents the
-# canonical compact wire ids from drifting back to peripheral numbers (#194).
+# Link the real power.c against the smallest possible PMU/RTC mock.  The mock
+# counts every vendor/transport call, so the suite proves unsupported bits
+# return before any hardware side effect -- and fails if production stops
+# calling the vendor-independent predicate in power_wake.h.
+add_executable(test_power_wake
+    power_wake/src/test_power_wake.c
+    power_wake/mock/mock_power.c
+    ${FW}/hal/gd32/power.c
+)
+target_include_directories(test_power_wake PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/power_wake/mock
+    ${FW}/hal/gd32
+    ${FW}/hal
+    ${FW}/src
+)
+target_compile_options(test_power_wake PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_power_wake PRIVATE ztest_shim)
+add_test(NAME power_wake COMMAND test_power_wake)
+
+# --- timer_sync: production timer-sync/PWM guard + register-call sequence ---
+#
+# Links the REAL hal/gd32/timer_sync.c and pwm.c against a minimal vendor-API
+# mock. This pins #142's fail-closed TIMER19 rejection and #89's no-forced-UPG
+# guard at the responsible layers. It also prevents the canonical compact wire
+# ids from drifting back to peripheral numbers (#194).
 add_executable(test_timer_sync
     timer_sync/src/test_timer_sync.c
+    ${FW}/hal/gd32/pwm.c
+    ${FW}/hal/gd32/pwm_set.c
+    ${FW}/hal/gd32/pwm_preload_transaction.c
     ${FW}/hal/gd32/timer_sync.c
     ${FW}/hal/gd32/timer_sync_iti.c
+    ${FW}/hal/gd32/timer_sync_master.c
 )
 target_include_directories(test_timer_sync PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/timer_sync/mock
@@ -208,6 +244,24 @@ target_include_directories(test_timer_sync PRIVATE
 target_compile_options(test_timer_sync PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_timer_sync PRIVATE ztest_shim)
 add_test(NAME timer_sync COMMAND test_timer_sync)
+
+# --- pwm_preload_transaction: coherent PWM shadow update boundary (#177) --
+#
+# Links the real update-inhibit transaction against a tiny register/CMSIS
+# mock.  The callback models the CAR + CHxCV + mirror sequence and proves it
+# sees UPDIS with interrupts masked; the test also pins the crucial rule that
+# restoring UPDIS does not resurrect stale CTL0 control bits.
+add_executable(test_pwm_preload_transaction
+    pwm_preload_transaction/src/test_pwm_preload_transaction.c
+    ${FW}/hal/gd32/pwm_preload_transaction.c
+)
+target_include_directories(test_pwm_preload_transaction PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/pwm_preload_transaction/mock
+    ${FW}/hal/gd32
+)
+target_compile_options(test_pwm_preload_transaction PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_pwm_preload_transaction PRIVATE ztest_shim)
+add_test(NAME pwm_preload_transaction COMMAND test_pwm_preload_transaction)
 
 # --- gpio_grouped: production GPIO port grouping + promotion order (#198) --
 #
@@ -241,6 +295,13 @@ target_include_directories(test_tmu_q31_scale PRIVATE ${FW}/hal/gd32)
 target_compile_options(test_tmu_q31_scale PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_tmu_q31_scale PRIVATE ztest_shim)
 add_test(NAME tmu_q31_scale COMMAND test_tmu_q31_scale)
+
+# --- pwm_ownership: timer-wide one-shot sibling guard (issue #87) ---------
+add_executable(test_pwm_ownership pwm_ownership/src/test_pwm_ownership.c)
+target_include_directories(test_pwm_ownership PRIVATE ${FW}/hal/gd32)
+target_compile_options(test_pwm_ownership PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_pwm_ownership PRIVATE ztest_shim)
+add_test(NAME pwm_ownership COMMAND test_pwm_ownership)
 
 # --- pwm_gd32: real PWM validation + register-apply seam (#168) -----------
 add_executable(test_pwm_gd32

@@ -50,6 +50,9 @@ void bridge_hw_dsp_pump(void);
  * bridge channel 0, the periph every "channel 0" test below drives. */
 #define BRIDGE_ADC_CH0        0u
 #define BRIDGE_ADC_CH0_PERIPH ADC3
+#define BRIDGE_ADC_CH2        2u
+#define BRIDGE_ADC_CH4        4u
+#define BRIDGE_ADC_CH2_PERIPH ADC2
 
 static void adc_seq_reset(void)
 {
@@ -61,6 +64,7 @@ static void adc_seq_reset(void)
 		adc_dsp_fft_release(s);
 	}
 	mock_seq_reset();
+	mock_dma_reset();
 	memset(mock_adc_ctl1, 0, sizeof mock_adc_ctl1);
 	memset(adc_dsp_chains, 0, sizeof adc_dsp_chains);
 	for (uint8_t s = 0u; s < BRIDGE_ADC_STREAM_COUNT; ++s) {
@@ -134,6 +138,91 @@ ZTEST(gd32_adc_seq, test_stream_restart_reloads_dma_count)
 	zassert_equal(dma_transfer_number_get(DMA0, DMA_CH0),
 	              BRIDGE_ADC_STREAM_RING_SAMPLES,
 	              "dma_init must reload the full count, not retain stale remainder (#183)");
+}
+
+/* #52 -- a new stream is configured only after CHEN reads clear, and ending
+ * it releases the DMAMUX request selection before the converter is offered
+ * to another stream. */
+ZTEST(gd32_adc_seq, test_stream_lifecycle_confirms_disable_and_releases_dmamux)
+{
+	adc_seq_reset();
+
+	int rc = bridge_hw_adc_stream_begin(0u, BRIDGE_ADC_CH0, 1000u);
+	zassert_equal(rc, BRIDGE_HW_OK, "stream begins against the mock");
+	zassert_equal(mock_dmamux_request_get(0u),
+	              DMA_REQUEST_ADC3,
+	              "DMA0 channel 0 selects ADC3 while the stream is live");
+	zassert_true(mock_seq_find_from("DMA_CHCTL_READ", DMA0, 0) >= 0,
+	             "begin must observe CHEN clear before configuring DMA");
+
+	rc = bridge_hw_adc_stream_end(0u);
+	zassert_equal(rc, BRIDGE_HW_OK, "stream ends against the mock");
+	zassert_equal(mock_dmamux_request_get(0u),
+	              0u,
+	              "end must return the DMAMUX channel to its no-request state");
+}
+
+ZTEST(gd32_adc_seq, test_stream_begin_refuses_a_channel_that_does_not_disable)
+{
+	adc_seq_reset();
+	mock_dma_set_disable_hold(DMA0, DMA_CH0, true);
+
+	int rc = bridge_hw_adc_stream_begin(0u, BRIDGE_ADC_CH0, 1000u);
+	zassert_equal(
+	    rc, BRIDGE_HW_ERR_IO, "begin must not configure count/address while CHEN remains set");
+	zassert_equal(mock_seq_find_from("dma_deinit", DMA0, 0),
+	              -1,
+	              "no SPL register rewrite is permitted before CHEN reads clear");
+}
+
+/* #137 -- ADC0/1/2 share ADC_SYNCCTL.  Boot resets every converter before
+ * setting the two shared clock domains once; request paths never get to
+ * perform either global operation. */
+ZTEST(gd32_adc_seq, test_boot_adc_reset_precedes_two_shared_clock_setups)
+{
+	adc_seq_reset();
+
+	adc_periph_boot_reset_all();
+	adc_shared_clock_init();
+	(void)adc_periph_boot_init(ADC0);
+	(void)adc_periph_boot_init(ADC1);
+	(void)adc_periph_boot_init(ADC2);
+	(void)adc_periph_boot_init(ADC3);
+
+	int clock0_i = mock_seq_find_from("adc_clock_config", ADC0, 0);
+	int clock3_i = mock_seq_find_from("adc_clock_config", ADC3, 0);
+	zassert_true(clock0_i >= 0 && clock3_i >= 0, "both shared ADC clock domains are configured");
+
+	int clock_count = 0;
+	for (int i = 0; i < mock_seq_n; ++i) {
+		if (strcmp(mock_seq[i].name, "adc_clock_config") == 0) ++clock_count;
+		if (strcmp(mock_seq[i].name, "adc_deinit") == 0) {
+			zassert_true(i < clock0_i && i < clock3_i,
+			             "all ADC resets precede both shared-clock writes");
+		}
+	}
+	zassert_equal(clock_count, 2, "only ADC0 and ADC3 may configure shared clock domains");
+}
+
+ZTEST(gd32_adc_seq, test_stream_end_restore_does_not_reset_or_reclock_adc)
+{
+	adc_seq_reset();
+	int rc = bridge_hw_adc_stream_begin(0u, BRIDGE_ADC_CH2, 1000u);
+	zassert_equal(rc, BRIDGE_HW_OK, "ADC2 stream begins against the mock");
+	rc = bridge_hw_adc_stream_begin(1u, BRIDGE_ADC_CH4, 1000u);
+	zassert_equal(rc, BRIDGE_HW_OK, "ADC1 sibling stream begins against the mock");
+
+	mock_seq_reset();
+	rc = bridge_hw_adc_stream_end(0u);
+	zassert_equal(rc, BRIDGE_HW_OK, "stream ends against the mock");
+	zassert_true(mock_seq_find_from("adc_disable", BRIDGE_ADC_CH2_PERIPH, 0) >= 0,
+	             "restore enters an ADCON-off configuration window");
+	zassert_equal(mock_seq_find_from("adc_deinit", BRIDGE_ADC_CH2_PERIPH, 0),
+	              -1,
+	              "stream end must not reset an ADC while a sibling may stream");
+	zassert_equal(mock_seq_find_from("adc_clock_config", BRIDGE_ADC_CH2_PERIPH, 0),
+	              -1,
+	              "stream end must not rewrite a shared ADC clock domain");
 }
 
 /* ---------------------------------------------------------------------
@@ -224,10 +313,49 @@ ZTEST(gd32_adc_seq, test_rovf_recovery_clears_dma_ftf)
 	             "returns and corrupts the freshly-resynced lap_count");
 }
 
+/* #51 -- an AHB DMA transfer error cannot be reported as an apparently
+ * healthy empty stream.  ERRIF and a simultaneous FTF are cleared through
+ * their dedicated bits so exact lap accounting remains intact. */
+ZTEST(gd32_adc_seq, test_dma_error_is_sticky_and_preserves_simultaneous_lap)
+{
+	adc_seq_reset();
+	int rc = bridge_hw_adc_stream_begin(0u, BRIDGE_ADC_CH0, 1000u);
+	zassert_equal(rc, BRIDGE_HW_OK, "stream begins against the mock");
+	int enable_i = mock_seq_find_from("dma_interrupt_enable", DMA0, 0);
+	zassert_true(enable_i >= 0, "stream begins with DMA interrupts armed");
+	zassert_equal(mock_seq[enable_i].arg,
+	              DMA_INT_FTF | DMA_INT_ERR,
+	              "both full-transfer and transfer-error interrupts are armed");
+
+	mock_dma_set_interrupt_flag(DMA0, DMA_CH0, DMA_INT_FLAG_FTF | DMA_INT_FLAG_ERR, SET);
+	DMA0_Channel0_IRQHandler();
+	zassert_equal(adc_streams[0].lap_count, 1u, "simultaneous FTF remains counted");
+	zassert_equal(adc_streams[0].dma_error_count, 1u, "ERRIF is retained as stream state");
+
+	uint8_t  got = 0xFFu;
+	uint16_t mv[1];
+	rc = bridge_hw_adc_stream_read(0u, 1u, &got, mv);
+	zassert_equal(rc, BRIDGE_HW_ERR_IO, "transfer error reaches the host as IO");
+	zassert_equal(got, 0u, "no stale ring samples escape after DMA error");
+
+	rc = bridge_hw_adc_stream_end(0u);
+	zassert_equal(rc, BRIDGE_HW_OK, "END clears the faulted session");
+	rc = bridge_hw_adc_stream_begin(0u, BRIDGE_ADC_CH0, 1000u);
+	zassert_equal(rc, BRIDGE_HW_OK, "BEGIN starts a clean replacement session");
+	zassert_equal(adc_streams[0].dma_error_count, 0u, "new session clears the sticky DMA error");
+
+	/* CS EXTI outranks the DMA IRQ: it must consume a just-raised ERRIF
+	 * itself rather than waiting for the lower-priority vector to run. */
+	mock_dma_set_interrupt_flag(DMA0, DMA_CH0, DMA_INT_FLAG_ERR, SET);
+	rc = bridge_hw_adc_stream_read(0u, 1u, &got, mv);
+	zassert_equal(
+	    rc, BRIDGE_HW_ERR_IO, "direct ERRIF check is host-visible without waiting for IRQ");
+}
+
 /* ---------------------------------------------------------------------
  * #140 -- ending and rebinding an FFT stream starts a new publication
  * session. Until that session fills and publishes its own FFT window,
- * spectrum_read must answer IO/BUSY instead of reporting the prior sequence
+ * spectrum_read must answer BUSY instead of reporting the prior sequence
  * as a successful empty frame.
  * --------------------------------------------------------------------- */
 
@@ -348,7 +476,7 @@ ZTEST(gd32_adc_seq, test_fft_rebind_rejects_previous_sequence_until_new_frame)
 	got   = 0xFFu;
 	bin   = -1.0f;
 	zassert_equal(bridge_hw_adc_spectrum_read(0u, 0u, 1u, &seq, &total, &got, &bin),
-	              BRIDGE_HW_ERR_IO,
+	              BRIDGE_HW_ERR_BUSY,
 	              "freshly rebound FFT session has no frame yet");
 	zassert_equal(got, 0u, "no bins are reported before this session publishes");
 
@@ -401,7 +529,7 @@ ZTEST(gd32_adc_seq, test_fft_config_preemption_cannot_resurrect_ended_stream)
 	uint8_t  got   = 0u;
 	float    bin   = -1.0f;
 	zassert_equal(bridge_hw_adc_spectrum_read(0u, 0u, 1u, &seq, &total, &got, &bin),
-	              BRIDGE_HW_ERR_IO,
+	              BRIDGE_HW_ERR_BUSY,
 	              "replacement session has no frame before its own samples");
 	zassert_equal(got, 0u, "replacement session reports no bins before publication");
 	zassert_equal(bridge_hw_adc_stream_end(0u), BRIDGE_HW_OK, "replacement stream ends cleanly");
@@ -552,7 +680,7 @@ ZTEST(gd32_adc_seq, test_fft_wait_preemption_cannot_publish_ended_session)
 	uint8_t  got   = 0xFFu;
 	float    bin   = -1.0f;
 	zassert_equal(bridge_hw_adc_spectrum_read(0u, 0u, 1u, &seq, &total, &got, &bin),
-	              BRIDGE_HW_ERR_IO,
+	              BRIDGE_HW_ERR_BUSY,
 	              "ended session's completed hardware result remains unpublished");
 	zassert_equal(got, 0u, "no stale bins are exposed");
 
@@ -597,7 +725,7 @@ ZTEST(gd32_adc_seq, test_fft_publish_commit_preemption_cannot_expose_stale_frame
 	uint8_t  got   = 0xFFu;
 	float    bin   = -1.0f;
 	zassert_equal(bridge_hw_adc_spectrum_read(0u, 0u, 1u, &seq, &total, &got, &bin),
-	              BRIDGE_HW_ERR_IO,
+	              BRIDGE_HW_ERR_BUSY,
 	              "revoked publisher cannot expose its frame through the replacement owner");
 	zassert_equal(got, 0u, "no stale bins are exposed after publish revocation");
 	zassert_equal(
