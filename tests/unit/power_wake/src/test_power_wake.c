@@ -25,13 +25,13 @@ ZTEST(power_wake, test_accepts_empty_and_supported_bits)
 	 * production validation gate. */
 	zassert_equal(bridge_hw_power_mode_set(0u, 0u, 0u), BRIDGE_HW_OK);
 	zassert_equal(bridge_hw_power_mode_set(0u, POWER_WAKE_RTC, 0u), BRIDGE_HW_OK);
-	zassert_equal(bridge_hw_power_mode_set(0u, POWER_WAKE_GPIO, 0u), BRIDGE_HW_OK);
 	zassert_equal(bridge_hw_power_mode_set(0u, POWER_WAKE_TIMER, 0u), BRIDGE_HW_OK);
 	zassert_equal(bridge_hw_power_mode_set(0u, POWER_WAKE_MASK_SUPPORTED, 0u), BRIDGE_HW_OK);
 }
 
 ZTEST(power_wake, test_rejects_known_unsupported_bits)
 {
+	expect_rejected_without_hardware(POWER_WAKE_GPIO);
 	expect_rejected_without_hardware(POWER_WAKE_UART_RX);
 	expect_rejected_without_hardware(POWER_WAKE_USB);
 	expect_rejected_without_hardware(POWER_WAKE_ETH_LINK);

@@ -66,12 +66,6 @@ void rtc_wakeup_enable(void)
 	++mock_power_hw_calls;
 }
 
-void pmu_wakeup_pin_enable(uint32_t pin)
-{
-	(void)pin;
-	++mock_power_hw_calls;
-}
-
 void i2c_disable(uint32_t periph)
 {
 	(void)periph;

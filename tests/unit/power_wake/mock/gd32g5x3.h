@@ -18,11 +18,6 @@ typedef enum { ERROR = 0, SUCCESS = !ERROR } ErrStatus;
 #define RCU_RTCSRC_IRC32K  4u
 #define RCU_RTC            5u
 #define WAKEUP_RTCCK_DIV16 6u
-#define PMU_WAKEUP_PIN0    10u
-#define PMU_WAKEUP_PIN1    11u
-#define PMU_WAKEUP_PIN2    12u
-#define PMU_WAKEUP_PIN3    13u
-#define PMU_WAKEUP_PIN4    14u
 #define I2C0               20u
 #define PMU_LDO_LOWPOWER   30u
 #define WFI_CMD            31u
@@ -40,7 +35,6 @@ ErrStatus  rtc_wakeup_disable(void);
 ErrStatus  rtc_wakeup_clock_set(uint32_t source);
 ErrStatus  rtc_wakeup_timer_set(uint16_t count);
 void       rtc_wakeup_enable(void);
-void       pmu_wakeup_pin_enable(uint32_t pin);
 void       i2c_disable(uint32_t periph);
 void       pmu_to_deepsleepmode(uint32_t ldo, uint32_t command);
 void       pmu_to_standbymode(void);

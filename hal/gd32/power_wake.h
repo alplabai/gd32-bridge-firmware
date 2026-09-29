@@ -19,11 +19,12 @@
 #define POWER_WAKE_USB      0x00000010u
 #define POWER_WAKE_ETH_LINK 0x00000020u
 
-/* This GD32 backend can arm only RTC/timed and fixed-PMU-pad wakeups.
- * Reject every other bit, including future bits unknown to this firmware,
- * so a low-power request never reports success without arming the wake
- * source the host requested (#107). */
-#define POWER_WAKE_MASK_SUPPORTED (POWER_WAKE_RTC | POWER_WAKE_GPIO | POWER_WAKE_TIMER)
+/* This GD32 backend can arm only RTC/timed wakeups.  GPIO is rejected
+ * because this SoM has no usable PMU wake pad (#20).  Reject every other
+ * bit, including future bits unknown to this firmware, so a low-power
+ * request never reports success without arming the wake source the host
+ * requested (#107). */
+#define POWER_WAKE_MASK_SUPPORTED (POWER_WAKE_RTC | POWER_WAKE_TIMER)
 
 static inline bool power_wake_bitmap_supported(uint32_t wake_bitmap)
 {
