@@ -1021,13 +1021,21 @@ void BRIDGE_I2C_ER_HANDLER(void)
  * bare tick samples could both land on data bits and tear down a
  * healthy transfer (continuous back-to-back I2C traffic, e.g. an OTA
  * streamed over this bus, would eventually hit that pair by chance).
- * Instead each tick takes a BURST of samples ~1 ms apart: at 400 kHz a
- * single SDA-low-while-not-addressed period lasts at most one bit
- * (2.5 us) or a clock-stretch (which holds SCL low, not SDA), so
- * BRIDGE_I2C_STUCK_SAMPLES consecutive low readings spanning ~3 ms is
- * ~1200 bit times -- unreachable in correct traffic.  Only then does
- * the tick count as a "low candidate", and only TWO consecutive
- * candidate ticks act (the issue's confirmation rule).
+ * Instead each tick takes a BURST of samples ~1 ms apart, and a sample
+ * only counts as stuck when SDA is low WHILE SCL IS HIGH.  SDA low on
+ * its own is legal for as long as the master likes: a master that
+ * pauses between bytes holds SCL low, and after it ACKs a byte (or
+ * while this slave shifts a 0 bit) SDA is low too.  A Linux RIIC master
+ * early in a cold boot pauses for milliseconds, and the earlier
+ * SDA-only test fired mid-read, reset the slave and tore the reply
+ * (kernel probe -EBADMSG, reply "00 00 0e 00 ff ff", #295).  The
+ * erratum wedge is the other case: SCL released high, SDA held low, so
+ * no master can issue a START.  BRIDGE_I2C_STUCK_SAMPLES consecutive
+ * SDA-low/SCL-high readings spanning ~3 ms is ~1200 bit times --
+ * unreachable in correct traffic (SDA only changes while SCL is low,
+ * apart from START/STOP).  Only then does the tick count as a "low
+ * candidate", and only TWO consecutive candidate ticks act (the
+ * issue's confirmation rule).
  *
  * AF-mode pads still report the live line state (UM Rev1.2 p.270
  * s7.3.8: "A read access to the port input status register gets the
@@ -1047,10 +1055,14 @@ static uint8_t i2c_sda_low_ticks;
 
 void bridge_transport_i2c_stuck_poll(void)
 {
-	/* Burst sample: SDA low across the whole burst is the candidate. */
+	/* Burst sample: SDA low with SCL high across the whole burst is the
+	 * candidate. */
 	bool all_low = true;
 	for (uint32_t k = 0u; k < BRIDGE_I2C_STUCK_SAMPLES; ++k) {
-		if (RESET != gpio_input_bit_get(BRIDGE_I2C_SDA_PORT, BRIDGE_I2C_SDA_PIN)) {
+		if (RESET != gpio_input_bit_get(BRIDGE_I2C_SDA_PORT, BRIDGE_I2C_SDA_PIN) ||
+		    RESET == gpio_input_bit_get(BRIDGE_I2C_SCL_PORT, BRIDGE_I2C_SCL_PIN)) {
+			/* SDA high, or SCL held low by a master mid-transfer: not
+			 * the erratum wedge (see the banner). */
 			all_low = false;
 			break;
 		}
