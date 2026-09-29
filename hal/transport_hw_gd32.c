@@ -433,7 +433,7 @@ void BRIDGE_SPI_CS_EXTI_HANDLER(void)
 				rcu_periph_reset_disable(RCU_SPI1RST);
 				bridge_spi_periph_config();
 				spi_slave_cs_low();
-				return;
+				goto clear_group;
 			}
 
 			const bool rx_overrun = (SPI_STAT(BRIDGE_SPI_PERIPH) & SPI_STAT_RXORERR) != 0u;
@@ -465,7 +465,7 @@ void BRIDGE_SPI_CS_EXTI_HANDLER(void)
 				}
 				spi_dma_arm_rx();
 				spi_dma_arm_tx(reply_len);
-				return;
+				goto clear_group;
 			}
 
 			__DSB();
@@ -507,6 +507,7 @@ void BRIDGE_SPI_CS_EXTI_HANDLER(void)
 		}
 	}
 
+clear_group:
 	/* Group clear LAST, with the entry snapshot (gh#66): every line
 	 * this vector owns that was pending at entry is cleared here.
 	 * rc_w1 pending bits have no read/clear race protection: an edge
@@ -516,7 +517,12 @@ void BRIDGE_SPI_CS_EXTI_HANDLER(void)
 	 * above already tolerates (see the handler header, point 2), and
 	 * the host driver's reply re-read / retry recovers the
 	 * transaction.  Writing 0 to a rc_w1 pending bit is a no-op, so
-	 * the untouched lines' zeros cost nothing. */
+	 * the untouched lines' zeros cost nothing.
+	 *
+	 * EVERY exit reaches this clear (the two error paths above jump here,
+	 * never `return`): a bare return left EXTI line 8 pending and the
+	 * handler re-entered immediately, spinning at BRIDGE_CS_IRQ_PRIO and
+	 * starving base level. */
 	EXTI_PD0 = group_pd;
 }
 
