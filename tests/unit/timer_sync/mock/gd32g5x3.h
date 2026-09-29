@@ -60,6 +60,7 @@
 #define TIMER_SP_MODE_SINGLE      ((uint32_t)1u)
 #define TIMER_EVENT_SRC_UPG       ((uint32_t)1u)
 #define TIMER_CTL0_CEN            ((uint32_t)1u)
+#define TIMER_CTL0_UPDIS          ((uint32_t)(1u << 1))
 #define TIMER_CTL0_CAM            ((uint32_t)0x60u)
 
 typedef struct {

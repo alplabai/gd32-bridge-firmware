@@ -81,10 +81,12 @@
  *                               (config + drain + ns conversion) is
  *                               complete and exercised end-to-end.
  *   14. PWM_SINGLE_PULSE     -- DONE: TIMERx OPM (one-pulse mode).
- *                               Switches the timer's whole SP-bit so
- *                               other channels on the same timer also
- *                               run as single-pulse until a PWM_SET
- *                               flips back to repetitive.
+ *                               SPM and CAR are timer-wide, so a
+ *                               one-shot answers STATUS_BUSY while a
+ *                               sibling channel on the same timer has
+ *                               a continuous PWM or capture claim
+ *                               (#87); a PWM_SET flips back to
+ *                               repetitive.
  *   15. TIMER_SYNC           -- DONE (§C.15b): master-slave SMC
  *                               config via timer_slave_mode_select
  *                               + timer_master_output0_trigger_source_select
@@ -155,6 +157,7 @@
 #include <stdint.h>
 
 #include "bridge_hw.h"
+#include "bridge_board_config.h"
 
 /* The wrapper's PUBLIC include directories expose the GigaDevice device
  * header.  It supplies the CMSIS/core definitions and pulls this project's
@@ -162,6 +165,7 @@
  * used by the real backend.  The vendor wrapper compiles its driver archive
  * independently; libopt controls declarations, not which driver units link. */
 #include "gd32g5x3.h"
+#include "gd32g5x3_dbg.h"
 #include "gd32_common.h"
 
 /* ----------------------------------------------------------------- */
@@ -184,6 +188,13 @@ bool     bridge_core_clock_matches = true;
 
 void bridge_hw_init(void)
 {
+	/* The priority numbers in bridge_board_config.h mean preemption levels
+	 * only under PRE2_SUB2. A Path-A bootloader handoff preserves AIRCR, and
+	 * the vendor helper otherwise retains a valid inherited grouping, so set
+	 * the bridge policy before configuring any NVIC line or, on Path-A,
+	 * unmasking IRQs. */
+	nvic_priority_group_set(NVIC_PRIGROUP_PRE2_SUB2);
+
 	/* SYSCFG hosts the TIMER quadrature-decoder mode fields
      * (SYSCFG_TIMERxCFG0.TSCFGy) that qenc_channel_init() programs
      * below, as well as the EXTI source mux that spi_cs_exti_init()
@@ -214,6 +225,18 @@ void bridge_hw_init(void)
      * boot PRIMASK is already clear and this is a no-op. */
 	__enable_irq();
 #endif
+
+	/* A breakpoint must preserve the state it is inspecting.  Hold the
+	 * timer counters this backend owns (PWM 0/7, quadrature 1..4 and ADC
+	 * pacing 5/6), both watchdog counters and I2C0's SMBus timeout while
+	 * the CM33 is halted (#55).  These bits affect only debug halt, not
+	 * normal execution.  Do not enable DBG_CTL0 low-power holds here: the
+	 * manual changes their clock source/standby behaviour, so that remains
+	 * an explicit SWD bench choice rather than shipped firmware policy. */
+	DBG_CTL1 |= DBG_CTL1_TIMER1_HOLD | DBG_CTL1_TIMER2_HOLD | DBG_CTL1_TIMER3_HOLD |
+	            DBG_CTL1_TIMER4_HOLD | DBG_CTL1_TIMER5_HOLD | DBG_CTL1_TIMER6_HOLD |
+	            DBG_CTL1_WWDGT_HOLD | DBG_CTL1_FWDGT_HOLD | DBG_CTL1_I2C0_HOLD;
+	DBG_CTL2 |= DBG_CTL2_TIMER0_HOLD | DBG_CTL2_TIMER7_HOLD;
 
 	/* ORDERING (merge of #61's se_reset_init and #127's clock sample):
      * se_reset_init() goes FIRST and that is load-bearing -- see its
@@ -452,8 +475,9 @@ void bridge_hw_init(void)
 	vref_ok = (vref_status_get() == SET);
 
 	/* ADC bring-up: configure 8 pads as analog, enable all four ADC
-     * peripheral clocks, run the per-peripheral init.  Calibration
-     * inside adc_periph_init now runs against a LIVE reference (it
+	 * peripheral clocks, reset every converter, set each shared clock
+	 * domain once, then run the per-converter init.  Calibration
+	 * inside adc_periph_boot_init now runs against a LIVE reference (it
      * previously self-calibrated against the undriven reference node,
      * baking in a bogus offset); the VREF bring-up above is the
      * prerequisite that makes that calibration meaningful. */
@@ -472,10 +496,12 @@ void bridge_hw_init(void)
      * path op re-times against (the read path's bounded EOC wait +
      * self-heal), so the failure surfaces loudly on first use instead
      * of wedging boot. */
-	(void)adc_periph_init(ADC0);
-	(void)adc_periph_init(ADC1);
-	(void)adc_periph_init(ADC2);
-	(void)adc_periph_init(ADC3);
+	adc_periph_boot_reset_all();
+	adc_shared_clock_init();
+	(void)adc_periph_boot_init(ADC0);
+	(void)adc_periph_boot_init(ADC1);
+	(void)adc_periph_boot_init(ADC2);
+	(void)adc_periph_boot_init(ADC3);
 	for (size_t i = 0; i < ADC_CHANNEL_MAP_COUNT; ++i) {
 		adc_sample_cycles_cache[i]    = ADC_DEFAULT_SAMPLE_CYCLES;
 		adc_resolution_bits_cache[i]  = ADC_RES_BITS_DEFAULT;

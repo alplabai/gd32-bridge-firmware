@@ -63,6 +63,10 @@
  * window (e.g. a max-length TRNG pull while the conditioning round
  * is mid-flight).  Maps to STATUS_BUSY -- hosts retry. */
 #define BRIDGE_HW_ERR_BUSY -5
+/* A valid, active operation has no result available yet.  Unlike BUSY,
+ * retrying later is expected to produce a result without changing the
+ * operation's ownership or configuration.  Maps to STATUS_NOT_READY. */
+#define BRIDGE_HW_ERR_NOT_READY -6
 
 /* --------------------------------------------------------------- */
 /* Reset-cause                                                       */
@@ -184,8 +188,9 @@ int bridge_hw_adc_stream_end(uint8_t stream_id);
  * from @p bin_offset; *seq_out is the frame counter (host detects a
  * mid-fetch roll), *total_bins_out the frame's bin count, *got_bins_out
  * how many were written.  BRIDGE_HW_ERR_NOTIMPL if the stream isn't
- * FFT-bound, BRIDGE_HW_ERR_IO before the current bound session's first
- * frame completes. */
+ * FFT-bound, BRIDGE_HW_ERR_BUSY before the current bound session's first
+ * frame completes, and BRIDGE_HW_ERR_IO when its acquisition DMA channel
+ * has faulted. */
 int bridge_hw_adc_spectrum_read(uint8_t   stream_id,
                                 uint16_t  bin_offset,
                                 uint8_t   max_bins,
@@ -339,7 +344,7 @@ int bridge_hw_pwm_capture_begin(uint8_t channel, uint8_t edge);
  * computed modulo one counter period and are therefore SINGLE-WRAP:
  * a captured signal whose edge spacing meets or exceeds the timer's
  * configured period (CAR + 1 ticks; boot default 65.5 ms) aliases to
- * the remainder with no detection.  BRIDGE_HW_ERR_NOTIMPL if the
+ * the remainder with no detection.  BRIDGE_HW_ERR_NOT_READY if the
  * ring is empty (host should poll); BRIDGE_HW_ERR_INVAL if the
  * channel is not currently in capture mode. */
 int bridge_hw_pwm_capture_read(uint8_t channel, uint32_t *period_ns, uint32_t *pulse_width_ns);
@@ -359,7 +364,10 @@ int bridge_hw_pwm_capture_end(uint8_t channel);
  * the timer + programming period = pulse_ns.  The PWM stays in
  * one-pulse mode until the next bridge_hw_pwm_set call switches it
  * back to continuous output (that call also re-enables the timer if a
- * prior single pulse left it halted).  pulse_ns == 0 answers
+ * prior single pulse left it halted).  Because the GD32's one-pulse mode
+ * and period register belong to the whole timer, this answers
+ * BRIDGE_HW_ERR_BUSY when a sibling channel has a continuous PWM output or
+ * an active capture session.  pulse_ns == 0 answers
  * BRIDGE_HW_ERR_RANGE; the widest pulse the 16-bit timer can produce is
  * 65535 us (65535000 ns) -- a wider request answers BRIDGE_HW_ERR_RANGE
  * rather than silently firing a shorter pulse than commanded.  A timer that
@@ -399,9 +407,11 @@ int bridge_hw_timer_sync(uint8_t master, uint8_t slave, uint8_t mode);
  * 1 = sleep, 2 = deep-sleep, 3 = standby.  @p wake_bitmap selects which
  * wake sources the firmware should arm (ALP_POWER_WAKE_* bits;
  * platform-specific).  @p wake_after_ms is a max wall-clock wait, or 0
- * for "no timer wake".  The GD32 prepares the V2N supervisor handshake
- * + signals the Renesas SoC to enter the matching mode, then re-runs
- * the bridge handshake on wakeup so the host can resume bridge calls. */
+ * for "no timer wake".  A bitmap containing any source this backend
+ * cannot arm returns BRIDGE_HW_ERR_NOTIMPL and does not enter the requested
+ * low-power mode.  The GD32 prepares the V2N supervisor handshake + signals
+ * the Renesas SoC to enter the matching mode, then re-runs the bridge
+ * handshake on wakeup so the host can resume bridge calls. */
 int bridge_hw_power_mode_set(uint8_t mode, uint32_t wake_bitmap, uint32_t wake_after_ms);
 
 /* --------------------------------------------------------------- */
