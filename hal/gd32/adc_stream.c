@@ -156,8 +156,8 @@ int bridge_hw_adc_stream_begin(uint8_t stream_id, uint8_t channel, uint32_t samp
      * transport happens to enable it first at boot today -- own the
      * dependency here instead of relying on bring-up order (silicon
      * 2026-06-04 audit: an I2C-only build would stream zero samples). */
-	rcu_periph_clock_enable(RCU_DMAMUX);
-	rcu_periph_clock_enable((stream_id == 0u) ? RCU_DMA0 : RCU_DMA1);
+	bridge_rcu_periph_clock_enable(RCU_DMAMUX);
+	bridge_rcu_periph_clock_enable((stream_id == 0u) ? RCU_DMA0 : RCU_DMA1);
 	if (!adc_stream_dma_disable_confirm(s->dma_periph, (dma_channel_enum)s->dma_channel)) {
 		return BRIDGE_HW_ERR_IO;
 	}
@@ -300,11 +300,11 @@ int bridge_hw_adc_stream_begin(uint8_t stream_id, uint8_t channel, uint32_t samp
      * covers 16 Hz..100 kHz exactly where it matters; below 16 Hz a
      * 10 kHz tick stretches to 1 Hz.  Division truncates -- worst-case
      * quantisation is one tick (documented in the protocol spec). */
-	rcu_periph_clock_enable(RCU_TRIGSEL);
+	bridge_rcu_periph_clock_enable(RCU_TRIGSEL);
 	trigsel_init(adc_stream_routrg(ch->periph),
 	             (stream_id == 0u) ? TRIGSEL_INPUT_TIMER5_TRGO0 : TRIGSEL_INPUT_TIMER6_TRGO0);
 
-	rcu_periph_clock_enable((stream_id == 0u) ? RCU_TIMER5 : RCU_TIMER6);
+	bridge_rcu_periph_clock_enable((stream_id == 0u) ? RCU_TIMER5 : RCU_TIMER6);
 	timer_deinit(s->pace_timer);
 	uint32_t psc, period_ticks;
 	if (sample_rate_hz >= 16u) {
@@ -758,7 +758,7 @@ static bool adc_dsp_fac_config(const adc_stream_state_t *s)
 	if (st == 0) return false; /* unreachable post-bind; kept as a defensive guard */
 
 	fac_deinit();
-	rcu_periph_clock_enable(RCU_FAC);
+	bridge_rcu_periph_clock_enable(RCU_FAC);
 
 	fac_parameter_struct p;
 	fac_struct_para_init(&p);
@@ -1086,7 +1086,7 @@ static bool adc_dsp_fft_config(const adc_stream_state_t *s)
 	const uint8_t shape = (win_st != 0) ? win_st->data[0] : 0u;
 
 	fft_deinit();
-	rcu_periph_clock_enable(RCU_FFT);
+	bridge_rcu_periph_clock_enable(RCU_FFT);
 	fft_parameter_struct f;
 	fft_struct_para_init(&f);
 	f.mode_sel     = FFT_MODE;

@@ -34,8 +34,10 @@ typedef struct {
 	uint32_t    arg;    /* a secondary argument (e.g. a flag mask) */
 } mock_seq_evt_t;
 
-extern mock_seq_evt_t mock_seq[MOCK_SEQ_MAX];
-extern int            mock_seq_n;
+extern mock_seq_evt_t    mock_seq[MOCK_SEQ_MAX];
+extern int               mock_seq_n;
+extern volatile uint32_t mock_primask;
+extern uint32_t          mock_rcu_lock_violations;
 
 void mock_seq_reset(void);
 void mock_seq_log(const char *name, uint32_t periph, uint32_t arg);
@@ -256,7 +258,8 @@ void mock_dma_set_transfer_get_hook(mock_hook_t hook);
 #define RCU_TIMER6  5u
 #define RCU_FAC     6u
 #define RCU_FFT     7u
-void rcu_periph_clock_enable(uint32_t periph_clk);
+typedef uint32_t rcu_periph_enum;
+void             rcu_periph_clock_enable(uint32_t periph_clk);
 
 /* ------------------------------------------------------------------ */
 /* TRIGSEL -- routing only, no register semantics needed by the tests. */
@@ -405,7 +408,8 @@ void mock_fft_set_poll_hook(mock_hook_t hook);
  * single MRS / CPSID i / MSR instructions; the vendor header gets them
  * from core_cm33.h, which this mock does not model.
  *
- * Modelled as a no-op mask that reads "interrupts were enabled". A one-shot
+ * Models the nesting-safe PRIMASK protocol so runtime RCU clock writes can
+ * prove they happen under the shared critical-section primitive. A one-shot
  * hook on __get_PRIMASK() lets lifecycle tests inject an ISR immediately
  * before a chosen critical section; callbacks are never fired after
  * __disable_irq(), where an interrupt would be impossible on silicon. */
@@ -416,11 +420,12 @@ static inline uint32_t __get_PRIMASK(void)
 
 static inline void __disable_irq(void)
 {
+	mock_primask = 1u;
 }
 
 static inline void __set_PRIMASK(uint32_t primask)
 {
-	(void)primask;
+	mock_primask = primask;
 }
 
 #endif /* GD32_BRIDGE_MOCK_GD32G5X3_H */

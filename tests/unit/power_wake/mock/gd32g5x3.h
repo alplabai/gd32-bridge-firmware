@@ -22,6 +22,20 @@ typedef enum { ERROR = 0, SUCCESS = !ERROR } ErrStatus;
 #define PMU_LDO_LOWPOWER   30u
 #define WFI_CMD            31u
 
+/* CMSIS PRIMASK intrinsics reached through hal/gd32/bridge_critical.h.
+ * No-ops here: this suite checks wake-bitmap validation, not masking. */
+static inline uint32_t __get_PRIMASK(void)
+{
+	return 0u;
+}
+static inline void __disable_irq(void)
+{
+}
+static inline void __set_PRIMASK(uint32_t primask)
+{
+	(void)primask;
+}
+
 extern uint32_t mock_power_hw_calls;
 
 void mock_power_reset(void);
