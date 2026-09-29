@@ -1,3 +1,0 @@
-# Hashes of file build rules.
-47cfdeae6fa11b5c682a3b530bd84964 CMakeFiles/protocol-vectors-header
-234a842f0d9d0181f544091c476802c1 protocol_vectors_gen/protocol_vectors_gen.h

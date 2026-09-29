@@ -1,1 +1,0 @@
-/usr/bin/cc -g CMakeFiles/test_pwm_ownership.dir/pwm_ownership/src/test_pwm_ownership.c.o -o test_pwm_ownership  libztest_shim.a 

@@ -1,1 +1,0 @@
-/usr/bin/cc -g CMakeFiles/test_timer_sync_iti.dir/timer_sync_iti/src/test_timer_sync_iti.c.o "CMakeFiles/test_timer_sync_iti.dir/home/caner/gd32-int/upd/hal/gd32/timer_sync_iti.c.o" -o test_timer_sync_iti  libztest_shim.a 

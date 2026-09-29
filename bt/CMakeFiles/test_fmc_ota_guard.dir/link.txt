@@ -1,1 +1,0 @@
-/usr/bin/cc -g CMakeFiles/test_fmc_ota_guard.dir/fmc_ota_guard/src/test_fmc_ota_guard.c.o -o test_fmc_ota_guard  libztest_shim.a 

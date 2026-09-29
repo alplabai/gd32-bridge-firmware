@@ -1,1 +1,0 @@
-/usr/bin/cc -g CMakeFiles/test_pwm_preload_transaction.dir/pwm_preload_transaction/src/test_pwm_preload_transaction.c.o "CMakeFiles/test_pwm_preload_transaction.dir/home/caner/gd32-int/upd/hal/gd32/pwm_preload_transaction.c.o" -o test_pwm_preload_transaction  libztest_shim.a 

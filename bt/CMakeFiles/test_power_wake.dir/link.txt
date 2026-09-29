@@ -1,1 +1,0 @@
-/usr/bin/cc -g CMakeFiles/test_power_wake.dir/power_wake/src/test_power_wake.c.o CMakeFiles/test_power_wake.dir/power_wake/mock/mock_power.c.o "CMakeFiles/test_power_wake.dir/home/caner/gd32-int/upd/hal/gd32/power.c.o" -o test_power_wake  libztest_shim.a 
