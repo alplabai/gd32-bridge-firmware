@@ -451,11 +451,21 @@ decided from a marker baked into the image (`ota_image_trial_capable()`,
 missing), not from the fw_version the host declares in `OTA_BEGIN`. Both
 the KNOWN-GOOD image in step 1 and the KNOWN-BAD image in step 2 must be
 built from this tree (any `gd32-bridge-slot-a`/`-b` build carries the
-marker automatically) so this runbook actually exercises the TRIAL path --
-an image built without the marker (a pre-fix binary, or one hand-assembled
-without going through this repo's build) commits/rolls back straight to
-CONFIRMED and none of steps 1-6 below observe TRIAL/watchdog behaviour at
-all.
+marker automatically) so this runbook actually exercises the TRIAL path.
+
+**Markerless images are refused outright, not silently downgraded
+(policy closed on #246, reconciled by #241 -- see `h_commit()` in
+`src/ota.c` for the full rationale).** An image built without the marker
+(a pre-fix binary, or one hand-assembled without going through this
+repo's build) fails `CMD_OTA_COMMIT` with `STATUS_INVAL`; the active slot
+is left completely untouched and the staged (inactive-slot) image is
+simply discarded on the next `OTA_BEGIN`. `CMD_OTA_GET_STATE`'s `err`
+byte (gh#101) attributes the failure specifically as
+`BRIDGE_OTA_ERR_NOT_TRIAL_CAPABLE` (`0x08`), distinguishable from every
+other COMMIT failure cause -- a host that needs to install a markerless
+image has no wire path to do so; it is installable only via SWD/factory
+programming. None of steps 1-6 below apply to a markerless image: there
+is no COMMIT to observe TRIAL/watchdog behaviour after.
 
 **Brick-risk precondition -- read before running step 2:** this step's
 bad-image case is the one place in this runbook that DELIBERATELY commits

@@ -81,6 +81,16 @@ static bool     g_erase_fail;      /* meta_commit's ota_fmc_erase_range()-fails
                                 * already pins.  The target is never the
                                 * higher-ranked page, so the rank rule
                                 * covers all three. */
+static bool     g_funnel_busy;     /* #266: models ota_fmc_funnel_busy() ==
+                                    * true -- a PREVIOUS session's
+                                    * base-level ota_erase_tick() still
+                                    * owns the FMC funnel when this BEGIN's
+                                    * metadata-demote step runs. Distinct
+                                    * from g_erase_fail: that models the
+                                    * erase itself failing; this models the
+                                    * erase never being attempted at all
+                                    * because the funnel peek refused
+                                    * first. */
 static void (*g_erase_after_hook)(void);
 static uint32_t   g_erase_calls;
 static uint32_t   g_erase_bases[2];
@@ -100,6 +110,11 @@ static uint8_t *_host_ptr(uint32_t addr)
 bool ota_fmc_supported(void)
 {
 	return true;
+}
+
+bool ota_fmc_funnel_busy(void)
+{
+	return g_funnel_busy;
 }
 
 ota_fmc_result_t ota_fmc_erase_range(uint32_t base, uint32_t len)
@@ -286,6 +301,7 @@ static void reset_model(void)
 	g_program_fail            = false;
 	g_program_timeout         = false;
 	g_erase_fail              = false;
+	g_funnel_busy             = false;
 	g_erase_after_hook        = NULL;
 	g_erase_calls             = 0u;
 	g_ota_mock_primask        = 0u;
@@ -850,6 +866,58 @@ ZTEST(gd32_bridge_ota, test_begin_demotes_target_in_metadata)
 	zassert_equal(rec.img_len[TEST_RUNNING_SLOT],
 	              4096u,
 	              "the running slot's descriptors must carry through untouched");
+}
+
+/* #266: BEGIN's metadata demote must refuse with STATUS_BUSY, not race the
+ * FMC funnel and report STATUS_IO, when a PREVIOUS session's background
+ * ota_erase_tick() still owns it.  Before the fix, meta_commit() was
+ * called unconditionally and its failure (funnel busy or not) always
+ * meant BRIDGE_OTA_ERR_META_DEMOTE_FAILED / STATUS_IO -- indistinguishable
+ * from a genuine flash fault and, unlike every sibling handler (h_write,
+ * h_verify, h_commit, h_rollback -- #147), with no state-machine guard
+ * ahead of the funnel at all. */
+ZTEST(gd32_bridge_ota, test_begin_demote_reports_busy_not_io_when_funnel_busy)
+{
+	reset_model();
+
+	const uint32_t len[2] = { 4096u, 4096u };
+	write_meta_record(OTA_META_REC0, 5u, TEST_RUNNING_SLOT, 0x03u, len);
+
+	g_funnel_busy = true;
+
+	uint8_t req[8];
+	wr_u32(&req[0], 64u); /* img_len */
+	wr_u32(&req[4], 0u);  /* crc */
+	uint8_t reply[8] = { 0 };
+	size_t  rlen     = 0u;
+	zassert_equal(ota_dispatch(CMD_OTA_BEGIN, req, sizeof(req), reply, sizeof(reply), &rlen),
+	              STATUS_BUSY,
+	              "a funnel collision must read as BUSY, not IO -- #266");
+	zassert_equal(g_erase_calls,
+	              0u,
+	              "meta_commit's erase must never be attempted once the funnel peek refuses");
+
+	/* The session must be left completely untouched: no reject, no error
+	 * recorded, metadata unchanged -- a plain retry is the whole contract. */
+	uint8_t st_reply[8] = { 0 };
+	size_t  st_rlen     = 0u;
+	zassert_equal(ota_dispatch(CMD_OTA_GET_STATE, NULL, 0u, st_reply, sizeof(st_reply), &st_rlen),
+	              STATUS_OK);
+	zassert_equal(st_reply[0], 0u /* OTA_ST_IDLE */, "a refused BEGIN must not enter BUSY");
+	zassert_equal(
+	    st_reply[5], BRIDGE_OTA_ERR_NONE, "a refused BEGIN must not record a failure cause");
+
+	ota_meta_record_t rec0;
+	zassert_true(read_meta_at(OTA_META_REC0, &rec0), "REC0 must remain untouched");
+	zassert_equal(
+	    rec0.counter, 5u, "the demote must never have run -- REC0's counter is untouched");
+
+	/* Once the funnel frees up, the exact same BEGIN must succeed. */
+	g_funnel_busy = false;
+	zassert_equal(ota_dispatch(CMD_OTA_BEGIN, req, sizeof(req), reply, sizeof(reply), &rlen),
+	              STATUS_OK,
+	              "a retried BEGIN must succeed once the funnel is free");
+	zassert_equal(reply[2], TEST_OTHER_SLOT, "the retried BEGIN targets the non-running slot");
 }
 
 /* #9: inject a transport command after the FMC seam returns but before the

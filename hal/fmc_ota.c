@@ -303,6 +303,21 @@ static void fmc_funnel_release(void)
 	s_fmc_owned = false; /* single aligned store; no section needed */
 }
 
+/* #266: query-only funnel peek for h_begin's metadata-demote step (ota.c).
+ * A BEGIN dispatched from a transport ISR while ota_erase_tick()'s
+ * base-level page walk still owns the funnel would otherwise call
+ * meta_commit() straight into fmc_funnel_claim(), lose the race, and
+ * report STATUS_IO -- indistinguishable from a real flash fault.  h_begin
+ * checks this FIRST and answers STATUS_BUSY instead, the same "refuse at
+ * the state machine, not the funnel" shape #147 gave h_rollback.  Racing
+ * this read against the base loop is safe: dispatch runs at IRQ context,
+ * which the base loop can never preempt, so s_fmc_owned cannot change
+ * between this read and the meta_commit() call that follows it. */
+bool ota_fmc_funnel_busy(void)
+{
+	return s_fmc_owned;
+}
+
 ota_fmc_result_t ota_fmc_erase_range(uint32_t base, uint32_t len)
 {
 	/* Layout regions stay OTA_PAGE_SIZE-granular (2 KB -- a multiple of
