@@ -198,6 +198,19 @@ repeating it:
 |  19 | PE15     | WL_REG_ON   |
 |  20 | PB13     | CAN_STBY    |
 
+Bits 8/9 (`PC14`/`PC15`, E1M IO24/IO25) are not ordinary pads: they are
+supplied through the backup-domain power switch together with SE_RST
+(`PC13`, the OPTIGA Trust M reset line), sharing a typical 3 mA source
+budget, capped at 2 MHz output toggle rate with a 30 pF max load
+(GD32G553xx Datasheet Rev2.0 p.130 Table 4-29 footnote 2; GD32G553 User
+Manual Rev1.2 p.133 §3.3.1). `GPIO_OSPEED_12MHZ` is already the slowest
+speed class the part offers, so the 2 MHz cap cannot be met by a
+firmware register change -- the host must not toggle IO24/IO25 faster
+than 2 MHz or load them beyond 30 pF, and current drawn through them
+competes with the milliamps holding SE_RST released. A carrier or host
+that ignores this budget can sag SE_RST below the OPTIGA's released
+threshold without either side seeing why.
+
 Any GD32 reset (WDT, fault, OTA A/B swap, SE reset) drops both REG_ON
 lines low and drives CAN_STBY high again -- the boot-time defaults in
 [`hal/gd32/init.c`](hal/gd32/init.c) apply on every reset, not just
