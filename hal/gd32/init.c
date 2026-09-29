@@ -533,6 +533,12 @@ extern void bridge_hw_dsp_pump(void);
  * page-region per tick so BEGIN never blocks the SPI reply inline.  No-op
  * in the OTA-inert build. */
 extern void ota_erase_tick(void);
+/* BRD_I2C stuck-SDA detector (gh#39, erratum 2.3.1): polls the SDA pad
+ * and runs the documented I2C software reset when the line is confirmed
+ * stuck low.  Weak no-op on the stub backend (src/transport_i2c.c);
+ * strong impl in hal/transport_hw_gd32.c. */
+extern void bridge_transport_i2c_stuck_poll(void);
+
 /* OTA trial/confirm pump (bench fact 2026-09-26, E1M-V2M103): once the
  * wire has noted a frame during an unconfirmed trial, commits the slot
  * permanent and reboots.  No-op in the OTA-inert build, and a no-op on
@@ -544,6 +550,7 @@ void bridge_hw_tick(void)
 	bridge_hw_dsp_pump();
 	ota_erase_tick();
 	ota_confirm_tick();
+	bridge_transport_i2c_stuck_poll();
 }
 
 /* ----------------------------------------------------------------- */
