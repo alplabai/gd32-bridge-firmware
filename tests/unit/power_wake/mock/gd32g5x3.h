@@ -21,6 +21,12 @@ typedef enum { ERROR = 0, SUCCESS = !ERROR } ErrStatus;
 #define I2C0               20u
 #define PMU_LDO_LOWPOWER   30u
 #define WFI_CMD            31u
+#define RTC_FLAG_WT        40u
+#define RTC_INT_WAKEUP     41u
+#define EXTI_19            50u
+#define EXTI_INTERRUPT     51u
+#define EXTI_TRIG_RISING   52u
+#define RTC_WKUP_IRQn      3
 
 /* CMSIS PRIMASK intrinsics reached through hal/gd32/bridge_critical.h.
  * No-ops here: this suite checks wake-bitmap validation, not masking. */
@@ -52,5 +58,11 @@ void       rtc_wakeup_enable(void);
 void       i2c_disable(uint32_t periph);
 void       pmu_to_deepsleepmode(uint32_t ldo, uint32_t command);
 void       pmu_to_standbymode(void);
+void       rtc_flag_clear(uint32_t flag);
+void       rtc_interrupt_enable(uint32_t interrupt);
+void       exti_flag_clear(uint32_t linex);
+void       exti_init(uint32_t linex, uint32_t mode, uint32_t trig_type);
+void       exti_interrupt_flag_clear(uint32_t linex);
+void       nvic_irq_enable(int32_t nvic_irq, uint8_t pre_priority, uint8_t sub_priority);
 
 #endif /* GD32_BRIDGE_POWER_WAKE_MOCK_GD32G5X3_H */

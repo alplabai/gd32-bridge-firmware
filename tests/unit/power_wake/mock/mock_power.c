@@ -84,6 +84,46 @@ void pmu_to_standbymode(void)
 	++mock_power_hw_calls;
 }
 
+void rtc_flag_clear(uint32_t flag)
+{
+	(void)flag;
+	++mock_power_hw_calls;
+}
+
+void rtc_interrupt_enable(uint32_t interrupt)
+{
+	(void)interrupt;
+	++mock_power_hw_calls;
+}
+
+void exti_flag_clear(uint32_t linex)
+{
+	(void)linex;
+	++mock_power_hw_calls;
+}
+
+void exti_init(uint32_t linex, uint32_t mode, uint32_t trig_type)
+{
+	(void)linex;
+	(void)mode;
+	(void)trig_type;
+	++mock_power_hw_calls;
+}
+
+void exti_interrupt_flag_clear(uint32_t linex)
+{
+	(void)linex;
+	++mock_power_hw_calls;
+}
+
+void nvic_irq_enable(int32_t nvic_irq, uint8_t pre_priority, uint8_t sub_priority)
+{
+	(void)nvic_irq;
+	(void)pre_priority;
+	(void)sub_priority;
+	++mock_power_hw_calls;
+}
+
 int bridge_transport_i2c_hw_init(void)
 {
 	++mock_power_hw_calls;
