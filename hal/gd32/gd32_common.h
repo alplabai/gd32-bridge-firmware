@@ -176,11 +176,16 @@ typedef struct {
 /* _Static_assert that the sizeof-derived size matches these).        */
 /* ----------------------------------------------------------------- */
 
-#define GPIO_PAD_MAP_COUNT    21u /* _Static_assert against sizeof in gpio.c       */
-#define ADC_CHANNEL_MAP_COUNT 8u  /* _Static_assert against sizeof in adc.c        */
-#define QENC_CHANNEL_COUNT    4u  /* _Static_assert against sizeof in qenc.c       */
-#define PWM_CHANNEL_COUNT     8u  /* _Static_assert against sizeof in pwm.c        */
-#define DAC_CHANNEL_COUNT     2u  /* _Static_assert against sizeof in dac.c        */
+#define GPIO_PAD_MAP_COUNT 21u /* _Static_assert against sizeof in gpio.c       */
+/* gpio_pad_map bits whose E1M IO is not routed to the GD32 on the SoM
+ * (rev 2625-R2): bit 8 = E1M IO24, driven by the DX-M1 on V2M and
+ * unconnected on V2N (gh#298).  Read/write naming one of these bits
+ * answer BRIDGE_HW_ERR_NOTIMPL (wire STATUS_NOSUPPORT). */
+#define GPIO_PAD_UNROUTED_MASK ((uint32_t)1u << 8)
+#define ADC_CHANNEL_MAP_COUNT  8u /* _Static_assert against sizeof in adc.c        */
+#define QENC_CHANNEL_COUNT     4u /* _Static_assert against sizeof in qenc.c       */
+#define PWM_CHANNEL_COUNT      8u /* _Static_assert against sizeof in pwm.c        */
+#define DAC_CHANNEL_COUNT      2u /* _Static_assert against sizeof in dac.c        */
 
 /* Bits 18/19 of the GPIO mask are sideband, not E1M pads: the Murata
  * LBEE5HY2FY-922 Wi-Fi/BT module's power enables (module has internal
