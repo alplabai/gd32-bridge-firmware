@@ -278,6 +278,20 @@ target_compile_options(test_i2c_timeout PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_i2c_timeout PRIVATE ztest_shim)
 add_test(NAME i2c_timeout COMMAND test_i2c_timeout)
 
+# --- i2c_recovery: I2CEN=0 read-back spin bound (#251) ---------------------
+#
+# The vendor register poke (I2C_CTL0/RCU_I2C0RST) is covered by the GD32
+# backend build; this vendor-header-free policy pins the escalation
+# threshold so an unbounded spin (the bug: dev's I2CEN=0 read-back looped
+# forever with no watchdog to recover it) cannot regress silently.
+add_executable(test_i2c_recovery
+    i2c_recovery/src/test_i2c_recovery.c
+)
+target_include_directories(test_i2c_recovery PRIVATE ${FW}/hal/gd32)
+target_compile_options(test_i2c_recovery PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_i2c_recovery PRIVATE ztest_shim)
+add_test(NAME i2c_recovery COMMAND test_i2c_recovery)
+
 # --- gpio_grouped: production GPIO port grouping + promotion order (#198) --
 #
 # Links the real hal/gd32/gpio.c against a minimal register/API mock.  This
