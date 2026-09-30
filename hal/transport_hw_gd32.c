@@ -204,6 +204,13 @@ static void spi_dma_init(void)
 	dma_init(BRIDGE_SPI_DMA, BRIDGE_SPI_RX_DMA_CH, &d);
 	dma_circulation_disable(BRIDGE_SPI_DMA, BRIDGE_SPI_RX_DMA_CH);
 	dma_memory_to_memory_disable(BRIDGE_SPI_DMA, BRIDGE_SPI_RX_DMA_CH);
+	/* DMAMUX synchronization (SYNCID 8 = EXTI_8, UM Rev1.2 p.315 Table 9-5)
+	 * would gate these channels to the CS window, but NBR[4:0] is 5 bits
+	 * (UM p.316), capping one synchronization burst at NBR+1 = 32 requests
+	 * against a 69-byte maximum envelope: every long transaction would be
+	 * truncated.  Not usable in either direction.  The disable calls here
+	 * and below are belt-and-braces (DMAMUX_RM_CHxCFG resets to 0 and
+	 * dma_deinit() precedes them), not an opt-out that had to be made. */
 	dmamux_synchronization_disable(BRIDGE_SPI_RX_DMAMUX_CH);
 	dma_flag_clear(BRIDGE_SPI_DMA, BRIDGE_SPI_RX_DMA_CH, DMA_FLAG_ERR);
 	dma_interrupt_enable(BRIDGE_SPI_DMA, BRIDGE_SPI_RX_DMA_CH, DMA_INT_ERR);
@@ -267,6 +274,12 @@ static bool spi_dma_arm_tx(uint32_t len)
 	return true;
 }
 
+/* Why CS is not routed through the CLA (gh#65): PA8 is not a TRIGSEL_INx
+ * pad and EXTI8 is not among TRIGSEL's EXTI inputs (only 0xa7..0xac, UM
+ * Rev1.2 p.225), so CLAIN11 into CLA0_OUT (0xbb) would be the only route
+ * from CS into the trigger fabric; and the CLA has no counter (UM p.329-330),
+ * so a stuck-low CS timeout needs a timer regardless.  TRIGSEL also sees an
+ * HCLK-synchronised CLA output, so such a path is unusable in Deep-sleep. */
 static void spi_cs_exti_init(void)
 {
 	bridge_rcu_periph_clock_enable(RCU_SYSCFG);
