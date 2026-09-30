@@ -41,6 +41,7 @@ env:
   # Pinned alp-sdk commit that carries the IRC8M clock override and the
   # published release-signing public key.
   ALP_SDK_PIN: ff136d79278c85596c1af1ce9c63ed2ae8efe9fd
+  WRAPPER_SHA256: 763243a4dc60b3525fb8b19126137104803a8935c1d1cece8063c10c75a43b9c
   OVERRIDE_SHA256: 38ea3d9fe2d30afb5270f81622acb652d169f42cf0cc597424eab9ba9330a8fb
   PUBKEY_SHA256: 664071ba6297240579dc46105931bff2fccf688802290757b872d677c98d4650
 
@@ -63,7 +64,13 @@ jobs:
       - name: tag must match firmware-version.txt
         run: |
           set -euo pipefail
-          want="v$(head -n1 firmware-version.txt | tr -d '[:space:]')"
+          ver="$(head -n1 firmware-version.txt | tr -d '[:space:]')"
+          # The fw-version packing below needs plain major.minor.patch.
+          if ! [[ "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::firmware-version.txt '$ver' is not plain X.Y.Z (pre-release suffix unsupported)"
+            exit 1
+          fi
+          want="v$ver"
           if [ "$GITHUB_REF_NAME" != "$want" ]; then
             echo "::error::tag $GITHUB_REF_NAME does not match firmware-version.txt ($want)"
             exit 1
@@ -76,12 +83,16 @@ jobs:
             gcc-arm-none-eabi libnewlib-arm-none-eabi
           arm-none-eabi-gcc --version | head -1
 
-      - name: stage the vendor wrapper CMakeLists
+      # alp-sdk's own wrapper (not ci/gd32_vendor_wrapper, which always compiles
+      # the stock system_gd32g5x3.c): it selects overrides/system_gd32g5x3.c
+      # when that file exists, so the IRC8M override is actually compiled.
+      - name: stage the vendor wrapper CMakeLists (pinned alp-sdk commit)
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/gd32_vendor/gd32_firmware_library/overrides"
-          cp ci/gd32_vendor_wrapper/CMakeLists.txt \
-             "$RUNNER_TEMP/gd32_vendor/gd32_firmware_library/CMakeLists.txt"
+          d="$RUNNER_TEMP/gd32_vendor/gd32_firmware_library"
+          mkdir -p "$d/overrides"
+          curl -fsSL --retry 3 -o "$d/CMakeLists.txt"             "https://raw.githubusercontent.com/alplabai/alp-sdk/$ALP_SDK_PIN/vendors/gd32_firmware_library/CMakeLists.txt"
+          echo "$WRAPPER_SHA256  $d/CMakeLists.txt" | sha256sum -c -
 
       # The stock SystemInit() hangs before main() on this SoM; a release must
       # carry alp-sdk's IRC8M override.  Fail here if it cannot be fetched or
@@ -109,8 +120,9 @@ jobs:
             exit 1
           fi
 
-      # No BRIDGE_ALLOW_STOCK_SYSTEM_INIT: CMakeLists.txt fails at configure
-      # time if the override is missing from the vendor dir.
+      # No BRIDGE_ALLOW_STOCK_SYSTEM_INIT: CMakeLists.txt only checks that the
+      # override file exists.  That the override is COMPILED is enforced by
+      # tools/check_clock_override.py in the verify step below.
       - name: build the partitioned set (bootloader, slot A, slot B)
         run: |
           cmake -B build-gd32 -S . \
