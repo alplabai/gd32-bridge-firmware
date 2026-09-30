@@ -763,13 +763,16 @@ void bridge_hw_init(void)
 	}
 }
 
-/* Periodic tick handler (gh#54): empty by design.  Its entire job is
+/* Periodic tick handler (gh#54): only counts periods (#315).  Its job is
  * to retire the main loop's __WFI() so bridge_hw_tick() runs.  The
  * watchdog is NEVER fed from here: a wedged main loop would otherwise
  * keep being fed by a healthy tick interrupt.  Strong definition
  * overrides the weak Default_Handler alias in the vendor startup. */
+volatile uint32_t bridge_systick_count; /* 50 ms periods; read by the I2C stuck-SDA poll */
+
 void SysTick_Handler(void)
 {
+	bridge_systick_count++;
 }
 
 /* Called at base level after every main-loop wake.  This backend uses the
