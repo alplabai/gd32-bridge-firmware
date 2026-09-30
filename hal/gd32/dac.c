@@ -31,14 +31,15 @@ const gd32_dac_ch_t dac_channels[] = {
 _Static_assert(sizeof(dac_channels) / sizeof(dac_channels[0]) == DAC_CHANNEL_COUNT,
                "dac_channels size must match DAC_CHANNEL_COUNT");
 
-/* DAC VREF.  `#define`d from ADC_VREF_MV (gd32_common.h) rather than
- * repeating the 1.8 V literal -- see that macro's comment; the two
+/* DAC VREF.  Aliased to the runtime adc_vref_mv (gd32_common.h) rather than
+ * repeating a literal -- see adc_vref_measure() (adc.c) and the runtime
+ * reference block in gd32_common.h; the two
  * copies drifting apart is exactly alp-sdk-internal
  * gd32-bridge-firmware#59.  Revisit if a future hw-revision moves to a
  * buffered VREFINT source or a different rail.  Full-scale code is
  * 4095 for 12-bit alignment; code = (value_mv * 4095) / VREF_mV with
  * overflow clamped. */
-#define DAC_VREF_MV    ADC_VREF_MV
+#define DAC_VREF_MV    ((uint32_t)adc_vref_mv) /* runtime, see adc_vref_measure() */
 #define DAC_FULL_SCALE 4095u
 
 /* Both E1M DAC channels are brought up in NORMAL_PIN_BUFFON (buffer
@@ -57,7 +58,7 @@ _Static_assert(sizeof(dac_channels) / sizeof(dac_channels[0]) == DAC_CHANNEL_COU
  * change doesn't have, so the buffer stays on and the window is
  * reported instead. */
 #define DAC_BUFFERED_MIN_MV 200u
-#define DAC_BUFFERED_MAX_MV (DAC_VREF_MV - 200u)
+#define DAC_BUFFERED_MAX_MV ((uint16_t)(DAC_VREF_MV - 200u))
 
 int bridge_hw_dac_set(uint8_t channel, uint16_t value_mv)
 {

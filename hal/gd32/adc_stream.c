@@ -551,7 +551,7 @@ int bridge_hw_adc_stream_read(uint8_t   stream_id,
 		for (uint16_t i = 0u; i < emit; ++i) {
 			uint32_t code = s->proc_ring[s->proc_read % BRIDGE_ADC_STREAM_RING_SAMPLES];
 			if (code > s->full_scale) code = s->full_scale;
-			mv[i] = (uint16_t)((code * ADC_VREF_MV) / s->full_scale);
+			mv[i] = (uint16_t)((code * (uint32_t)adc_vref_mv) / s->full_scale);
 			s->proc_read++;
 		}
 		*got_samples = (uint8_t)emit;
@@ -603,7 +603,7 @@ int bridge_hw_adc_stream_read(uint8_t   stream_id,
 	for (uint16_t i = 0u; i < to_emit; ++i) {
 		uint32_t code = s->ring[s->read_idx];
 		if (code > s->full_scale) code = s->full_scale;
-		mv[i]       = (uint16_t)((code * ADC_VREF_MV) / s->full_scale);
+		mv[i]       = (uint16_t)((code * (uint32_t)adc_vref_mv) / s->full_scale);
 		s->read_idx = (uint16_t)((s->read_idx + 1u) % BRIDGE_ADC_STREAM_RING_SAMPLES);
 	}
 	s->total_read += to_emit;
