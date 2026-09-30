@@ -302,6 +302,32 @@ ZTEST(gd32_bridge_transport_i2c, test_mangled_request_stages_no_pending)
 	zassert_equal(reply[2], (uint8_t)(crc >> 8), "CRC hi");
 }
 
+/* One rejected write counts once even though the HAL re-enters
+ * write_end() on the read's ADDSEND and again on both STOPs; idle
+ * bare-read polls (no bytes received) count zero and keep the snapshot. */
+ZTEST(gd32_bridge_transport_i2c, test_rejected_write_counts_once_and_idle_polls_not)
+{
+	uint8_t req[4];
+	uint8_t reply[3];
+
+	transport_i2c_init();
+	size_t req_len = build_write(req, CMD_PING, NULL, 0u);
+	req[req_len - 1] ^= 0xFFu;
+
+	const uint32_t fails_before = bridge_i2c_rx_diag.fail_count;
+
+	zassert_false(write_phase(req, req_len));
+	zassert_false(i2c_slave_write_end(), "read ADDSEND re-entry");
+	read_phase(reply, sizeof(reply));
+	zassert_false(i2c_slave_write_end(), "read STOP re-entry");
+	zassert_equal(bridge_i2c_rx_diag.fail_count, fails_before + 1u, "counted once");
+
+	i2c_slave_write_start();
+	zassert_false(i2c_slave_write_end(), "bare poll, nothing received");
+	zassert_equal(bridge_i2c_rx_diag.fail_count, fails_before + 1u, "idle poll not counted");
+	zassert_equal(bridge_i2c_rx_diag.fail_rx_len, (uint16_t)req_len, "snapshot kept");
+}
+
 /* --------------------------------------------------------------- */
 /* I2C-specific framing rules -- no SPI counterpart.                 */
 /* --------------------------------------------------------------- */

@@ -31,3 +31,8 @@ ZTEST(gd32_bridge_i2c_event_priority, test_stop_still_precedes_transmit)
 {
 	zassert_equal(bridge_i2c_event_select(false, false, true, true), BRIDGE_I2C_EVENT_STPDET);
 }
+
+ZTEST(gd32_bridge_i2c_event_priority, test_stale_stop_precedes_next_address_match)
+{
+	zassert_equal(bridge_i2c_event_select(false, true, true, false), BRIDGE_I2C_EVENT_STPDET);
+}
