@@ -351,6 +351,68 @@ int bridge_hw_power_mode_set(uint8_t mode, uint32_t wake_bitmap, uint32_t wake_a
 	}
 }
 
+/* Bounded spin budget for the PLL relock waits below.  The vendor
+ * SystemInit() spins unbounded, but this runs at base level on a live
+ * bridge: a PLL that never locks must leave the part on IRC8M and
+ * report failure, not hang it. */
+#define POWER_CLOCK_RESTORE_SPINS 100000u
+
+/* Deep-sleep exit clock restore (gh#12).  UM Rev1.2 p.142: on exit
+ * "the IRC8M is selected as the system clock", so CK_SYS falls to
+ * 8 MHz while the PWM/ADC/DWT constants in gd32_common.h assume 216 MHz.
+ * SRAM and registers are preserved across Deep-sleep, so RCU_PLL keeps
+ * the PLLP = (IRC8M / 2) * 108 / 2 configuration system_clock_216m_irc8m()
+ * (vendor overrides/system_gd32g5x3.c, a static function in another
+ * repo, so not callable here) programmed at boot; only the final steps
+ * of that sequence need replaying: FMC wait states BEFORE the clock
+ * rises, PLLEN, wait PLLSTB, SCS = PLLP, wait SCSS.  PMU_CTL0 (LDOVS
+ * 1.15 V) is likewise preserved (UM p.145), so it is not rewritten.
+ *
+ * Returns false, on IRC8M, if the PLL does not lock or the switch does
+ * not take within POWER_CLOCK_RESTORE_SPINS.  A timed-out switch is
+ * backed out (SCS = IRC8M) so the part is never left half-switched, and
+ * SystemCoreClock plus the bridge_core_clock_* telemetry are refreshed on
+ * EVERY exit so they always describe the live clock.  Must be called by
+ * the (not yet reachable, see bridge_power_tick()) mode-2 wake path
+ * before the PWM/ADC/DWT users run: PWM_TIMER_CLK_HZ,
+ * BRIDGE_ADC_PACE_CLK_HZ and the DWT cycle conversions hardcode 216 MHz.
+ * (The I2C timing is NOT one of them -- bridge_transport_i2c_hw_init()
+ * derives it from rcu_clock_freq_get(CK_APB1) at run time, gh#41.) */
+bool bridge_clock_restore_after_deepsleep(void)
+{
+	bool ok = false;
+
+	FMC_WS = (FMC_WS & (~FMC_WS_WSCNT)) | WS_WSCNT(7);
+	RCU_CTL |= RCU_CTL_PLLEN;
+
+	uint32_t to = POWER_CLOCK_RESTORE_SPINS;
+	while (0u == (RCU_CTL & RCU_CTL_PLLSTB) && --to != 0u) {
+	}
+
+	if (0u != (RCU_CTL & RCU_CTL_PLLSTB)) {
+		RCU_CFG0 = (RCU_CFG0 & ~RCU_CFG0_SCS) | RCU_CKSYSSRC_PLLP;
+
+		to = POWER_CLOCK_RESTORE_SPINS;
+		while (RCU_SCSS_PLLP != (RCU_CFG0 & RCU_CFG0_SCSS) && --to != 0u) {
+		}
+
+		ok = (RCU_SCSS_PLLP == (RCU_CFG0 & RCU_CFG0_SCSS));
+		if (!ok) {
+			/* Back the switch out so hardware cannot finish it after we
+			 * report failure. */
+			RCU_CFG0 = (RCU_CFG0 & ~RCU_CFG0_SCS) | RCU_CKSYSSRC_IRC8M;
+		}
+	}
+
+	/* SysTick is a core register, preserved across Deep-sleep; only
+	 * SystemCoreClock and its telemetry mirror need re-deriving from the
+	 * live RCU state. */
+	SystemCoreClockUpdate();
+	bridge_core_clock_hz      = SystemCoreClock;
+	bridge_core_clock_matches = (SystemCoreClock == PWM_TIMER_CLK_HZ);
+	return ok;
+}
+
 /* Base-level low-power entry (gh#63): the deferred half of
  * bridge_hw_power_mode_set().  Runs from bridge_hw_tick() -- base level,
  * AFTER the accepted request's reply has drained onto the wire, with
@@ -444,8 +506,11 @@ void bridge_power_tick(void)
 	/* NOTE (future I2C-wake branch): the mode-2 entry lives here --
 	 * quiet-link gate + EXTI_PD clear above, then i2c_disable(),
 	 * pmu_to_deepsleepmode(PMU_LDO_LOWPOWER, WFI_CMD), and
-	 * bridge_transport_i2c_hw_init() on the wake path (its live-clock
-	 * timing derivation handles the post-wake IRC8M, gh#41).  It is
+	 * bridge_clock_restore_after_deepsleep() then
+	 * bridge_transport_i2c_hw_init() on the wake path (the I2C timing
+	 * derivation reads the live clock, so it handles the post-wake IRC8M,
+	 * gh#41; the restore is for the hardcoded 216 MHz PWM/ADC/DWT
+	 * constants, gh#12).  It is
 	 * not reachable until bridge_hw_power_mode_set() stops rejecting
 	 * mode 2 -- see the mode-2 comment there.  That entry must reuse
 	 * the SysTick stop/restore and power_fwdgt_settle_before_lp_entry()

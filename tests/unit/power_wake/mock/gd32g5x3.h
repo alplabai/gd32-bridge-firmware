@@ -92,6 +92,22 @@ static inline void __DSB(void)
 	EXTI_PD1 = 0u;
 }
 
+/* Clock-tree registers for bridge_clock_restore_after_deepsleep() (gh#12).
+ * Plain variables; the test decides which status bits "hardware" reports. */
+#define RCU_CTL_PLLEN      0x01000000u
+#define RCU_CTL_PLLSTB     0x02000000u
+#define RCU_CFG0_SCS       0x3u
+#define RCU_CFG0_SCSS      0xCu
+#define RCU_CKSYSSRC_PLLP  0x3u
+#define RCU_CKSYSSRC_IRC8M 0x0u
+#define RCU_SCSS_PLLP      0xCu
+#define FMC_WS_WSCNT       0xFu
+#define WS_WSCNT(regval)   ((uint32_t)(regval))
+extern uint32_t FMC_WS, RCU_CTL, RCU_CFG0;
+extern uint32_t mock_system_core_clock_updates;
+extern uint32_t SystemCoreClock;
+void            SystemCoreClockUpdate(void);
+
 extern uint32_t mock_power_hw_calls;
 /* fwdgt_counter_reload() calls, SysTick->CTRL as seen by pmu_to_standbymode(),
  * and the ota_trial_unconfirmed() answer the mock returns. */
