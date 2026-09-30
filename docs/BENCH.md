@@ -98,11 +98,10 @@ the task and each traced back to a source in the tree:
 Two further pairings the task calls out explicitly are honoured below: #92
 (FMC guard) and #73 (OTA erase targeting) are validated together as "the OTA
 path," and issues #2 / #28 establish that the 2026-06-04 bench run proved
-only the A→B direction and rollback — B→A is not "the same test in the other
-direction," it is the **first time** that code path has ever executed on
-silicon, because slot A straddles the dual-bank boundary `0x08040000` and a
-B→A update is the direction that erases across it. That distinction is
-carried into the OTA phase's procedure, not glossed over.
+only the A→B direction and rollback. The recut layout now ends slot A and
+starts slot B at the dual-bank boundary `0x08040000`, but B→A is still the
+**first time** that direction and the new slot-B base execute on silicon.
+That distinction is carried into the OTA phase's procedure, not glossed over.
 
 ---
 
@@ -171,7 +170,7 @@ disassembly in the PR body).
 3. Power-cycle. Confirm the bootloader boots slot A: the bridge answers a
    protocol opcode over SPI/I2C (per `src/bootloader/DESIGN.md`'s
    2026-06-04 procedure — e.g. `CMD_PING`).
-4. Repeat for slot B (`BRIDGE_APP_SLOT_BASE=0x08045000u`).
+4. Repeat for slot B (`BRIDGE_APP_SLOT_BASE=0x08040000u`).
 5. Repeat the full two-slot boot cycle against images built at `-Os`.
 
 **PASS:** all four boots (slot A/B × `-O0`/`-Os`) answer a protocol opcode.
@@ -408,25 +407,21 @@ this step; it is not in #73's own required list, so its absence here is
 not a gap this runbook is silently accepting — it is an acknowledged open
 edge the PR itself names.
 
-### 2.4 — A→B vs. B→A: why the second direction is not optional
+### 2.4 — A→B vs. B→A: validate the recut bank-aligned layout
 
 Issues #2 and #28 establish, from the code and the 2026-06-04 bench record,
-that only A→B (plus rollback) has ever run on real silicon. Slot A
-(`0x0800A000..0x08045000`) straddles the dual-bank boundary
-`0x08040000` — its tail 20 pages live in bank 1, the same bank slot B lives
-in entirely. A B→A update erases slot A, including that bank-1 tail, while
-the *running* image (slot B) executes from bank 1. That is precisely the
-same-bank read-while-write condition `hal/fmc_ota.c:9-13`'s own comment
-says faults, and it is not exercised by an A→B run at all — A→B's erase
-target (slot B, wholly in bank 1) does not overlap the bank the *running*
-slot-A image occupies (bank 0, plus the same 20-page tail, but the running
-image there is what's being erased *into*, not fetched from, during an
-A→B cycle... the exposure is asymmetric by construction).
+that only A→B (plus rollback) has ever run on real silicon. The old slot A
+crossed the dual-bank boundary and made B→A a same-bank read-while-write
+hazard. The fixed map makes slot A `0x0800A000..0x08040000` (bank 0) and
+slot B `0x08040000..0x08076000` (bank 1); compile-time and linker assertions
+reject a future bank-crossing slot.
 
-**Run 2.2's full procedure in the B→A direction as a first-class test, not
-a "for completeness" repeat of A→B.** It is the first time this code path
-has ever executed on this hardware. If it fails, the failure is not a
-regression — nothing regressed, because nothing ran there before.
+Those host checks prove geometry, not FMC behaviour. **Run 2.2's full
+procedure in both directions, treating B→A as a first-class test rather
+than a "for completeness" repeat.** It is the first time the B→A path and
+the new slot-B base have executed on this hardware. Confirm that A→B erases
+and programs only bank 1, B→A only bank 0, and both resulting images boot.
+If B→A fails, the earlier bench record did not cover it.
 
 **Brick risk:** the highest single risk in this document. Recovery: bench
 SWD probe, and be ready to reflash both slots plus the metadata records if
