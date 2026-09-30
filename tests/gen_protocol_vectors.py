@@ -745,13 +745,13 @@ def build_vectors() -> list[tuple[str, str, str | None] | _Section]:
     out.append((
         "spi_ota_begin_reply_slot_b",
         spi_frame(SOF, STATUS_OK,
-                  bytes([0x3C, 0x00,                      # chunk_max = 60 (LE)
+                  bytes([0x38, 0x00,                      # chunk_max = 56 (LE)
                          0x01,                            # target_slot = B (this
                                                            # example is a slot-A
                                                            # -resident build)
                   ])).hex().upper(),
-        "SOF | STATUS=0x00 | chunk_max=60 (LE 0x003C) | target_slot=B(1) |"
-        " CRC -- 60 = MAX_PAYLOAD(65) - offset:u32 - len:u8 header."
+        "SOF | STATUS=0x00 | chunk_max=56 (LE 0x0038) | target_slot=B(1) |"
+        " CRC -- 56 = (MAX_PAYLOAD(65) - offset:u32 - len:u8 header) rounded down to the 8-byte flash program granule."
         " target_slot is ota.c's compile-time OTA_RUNNING_SLOT complement"
         " (#3), a BUILD property: this vector's value B is only what a"
         " slot-A-resident build replies (its own non-running slot); a"
