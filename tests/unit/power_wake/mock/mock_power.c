@@ -2,21 +2,35 @@
 
 #include "gd32g5x3.h"
 
+#include <stdbool.h>
+
 #include "bridge_hw.h"
 
-uint32_t   mock_power_hw_calls;
-uint32_t   EXTI_PD0;
-uint32_t   EXTI_PD1;
-uint32_t   FWDGT_STAT;
-mock_scb_t mock_scb;
-uint32_t   mock_primask;
-int        mock_rtc_clock_config_saw_irq_masked;
+uint32_t       mock_power_hw_calls;
+uint32_t       FMC_OBCTL;
+uint32_t       mock_fwdgt_feeds;
+uint32_t       mock_systick_ctrl_at_standby;
+int            mock_trial_unconfirmed;
+uint32_t       EXTI_PD0;
+uint32_t       EXTI_PD1;
+uint32_t       FWDGT_STAT;
+mock_scb_t     mock_scb;
+mock_systick_t mock_systick;
+uint32_t       mock_primask;
+int            mock_rtc_clock_config_saw_irq_masked;
 
 void mock_power_reset(void)
 {
-	mock_power_hw_calls                  = 0u;
-	mock_primask                         = 0u;
-	mock_rtc_clock_config_saw_irq_masked = 0;
+	mock_power_hw_calls          = 0u;
+	mock_primask                 = 0u;
+	FMC_OBCTL                    = 0u;
+	mock_fwdgt_feeds             = 0u;
+	mock_systick_ctrl_at_standby = 0u;
+	mock_trial_unconfirmed       = 0;
+	mock_systick.CTRL            = 0u;
+	mock_systick.VAL             = 0u;
+	mock_scb.SCR                 = 0u;
+	mock_scb.ICSR                = 0u;
 }
 
 void rcu_osci_on(uint32_t osci)
@@ -46,7 +60,14 @@ void pmu_backup_write_enable(void)
 void rcu_rtc_clock_config(uint32_t source)
 {
 	(void)source;
-	mock_rtc_clock_config_saw_irq_masked = (mock_primask != 0u);
+	/* Sticky: rtc_wakeup_init_once() latches, so only the FIRST arm in the
+	 * process reaches here whatever the case order.  1 = every call so far
+	 * ran masked, -1 = some call did not. */
+	if (mock_primask == 0u) {
+		mock_rtc_clock_config_saw_irq_masked = -1;
+	} else if (mock_rtc_clock_config_saw_irq_masked == 0) {
+		mock_rtc_clock_config_saw_irq_masked = 1;
+	}
 	++mock_power_hw_calls;
 }
 
@@ -90,6 +111,7 @@ void pmu_to_deepsleepmode(uint32_t ldo, uint32_t command)
 
 void pmu_to_standbymode(void)
 {
+	mock_systick_ctrl_at_standby = mock_systick.CTRL;
 	++mock_power_hw_calls;
 }
 
@@ -141,7 +163,13 @@ int bridge_transport_i2c_hw_init(void)
 
 void fwdgt_counter_reload(void)
 {
+	++mock_fwdgt_feeds;
 	++mock_power_hw_calls;
+}
+
+bool ota_trial_unconfirmed(void)
+{
+	return mock_trial_unconfirmed != 0;
 }
 
 FlagStatus gpio_input_bit_get(uint32_t gpio_periph, uint32_t pin)

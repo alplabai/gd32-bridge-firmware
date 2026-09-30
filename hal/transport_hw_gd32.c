@@ -1040,9 +1040,8 @@ void BRIDGE_I2C_ER_HANDLER(void)
  * Vendor workaround, verbatim: "Software periodically checks the status
  * of the SDA line. If SDA is detected to be stuck low, reinitialize
  * the I2C module."  Called from bridge_hw_tick() at base level, which
- * runs after each main-loop wake; there is no periodic SysTick yet
- * (gh#54), so a stuck bus with no other interrupt traffic is only caught
- * on the next wake.
+ * runs after each main-loop wake, and at least every 50 ms via the
+ * periodic SysTick (gh#54) even with no other interrupt traffic.
  *
  * Detector design: a single instantaneous pad read is ambiguous -- a
  * legitimate in-flight byte holds SDA low ~half the bit times, so two

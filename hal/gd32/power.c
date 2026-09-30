@@ -17,6 +17,7 @@
 #include "bridge_board_config.h" /* BRIDGE_I2C_PERIPH */
 #include "bridge_critical.h"
 #include "gd32_common.h"
+#include "ota.h" /* ota_trial_unconfirmed() */
 #include "power_wake.h"
 #include "transport.h" /* bridge_transport_i2c_hw_init() */
 
@@ -208,17 +209,35 @@ void RTC_WKUP_IRQHandler(void)
  * latch time (register writes, ISR-safe). */
 static volatile uint8_t s_lp_pending_mode;
 
+/* Longest standby wake this firmware accepts while FWDGSPD_STDBY (FMC_OBCTL
+ * bit 18) is 1, i.e. while the armed FWDGT keeps counting through Standby.
+ * The window is 445 ms minimum (hal/gd32/init.c); the requested time can
+ * run +14.3% long on a slow IRC32K (see POWER_WAKE_LSB_HZ), so 300 ms ->
+ * <= 343 ms actual, plus the ~0.2 ms settle gap, stays inside it.  With the
+ * bit at 0 the counter is frozen in Standby and any wake time is safe.  The
+ * stock option-byte value is not printed in UM Rev1.2, so the bit is read
+ * per request instead of assumed. */
+#define POWER_STDBY_FWDGT_MAX_MS 300u
+
 /* Watchdog-aware low-power entry gate: feed the FWDGT and honour UM
  * Rev1.2 p.525's spacing rule ("more than 3 IRC32K clock intervals
  * must be inserted in the middle of reload and deepsleep/standby mode
  * commands") before the entry wfi.  3 IRC32K intervals at the 28 kHz
  * minimum (Datasheet Rev2.0 p.125) is 107 us; the spin below is
- * ~150-250 us at 216 MHz.  Mirrors the same-named helper on the gh#54
- * branch (codex/periodic-tick-and-fwdgt) -- identical by design, take
- * either copy when the two branches merge. */
+ * ~150-250 us at 216 MHz.
+ *
+ * The feed is skipped while ota_trial_unconfirmed(): the running counter
+ * is then the bootloader's ~32.8 s revert dog, and feeding it from an
+ * aborted standby request would push the confirm deadline back.
+ *
+ * Whether the armed FWDGT keeps COUNTING through Standby is decided by
+ * FWDGSPD_STDBY; bridge_hw_power_mode_set() refuses a wake longer than
+ * POWER_STDBY_FWDGT_MAX_MS when it does. */
 static void power_fwdgt_settle_before_lp_entry(void)
 {
-	fwdgt_counter_reload();
+	if (!ota_trial_unconfirmed()) {
+		fwdgt_counter_reload();
+	}
 	while (0u != (FWDGT_STAT & (FWDGT_STAT_PUD | FWDGT_STAT_RUD | FWDGT_STAT_WUD))) {
 		/* bounded by construction: the only pending writes are
 		 * bridge_hw_init()'s long-completed fwdgt_config() */
@@ -309,7 +328,13 @@ int bridge_hw_power_mode_set(uint8_t mode, uint32_t wake_bitmap, uint32_t wake_a
 		}
 		if (wake_after_ms != 0u || (wake_bitmap & (POWER_WAKE_RTC | POWER_WAKE_TIMER)) != 0u) {
 			const uint32_t ms = (wake_after_ms != 0u) ? wake_after_ms : POWER_WAKE_TIMER_MAX_MS;
-			int            rc = rtc_wakeup_arm_ms(ms);
+			/* The FWDGT keeps counting through Standby when FWDGSPD_STDBY
+			 * is 1: a longer wake would end in a watchdog reset instead
+			 * of the requested wake.  Refuse before arming anything. */
+			if ((FMC_OBCTL & FMC_OBCTL_FWDGSPD_STDBY) != 0u && ms > POWER_STDBY_FWDGT_MAX_MS) {
+				return BRIDGE_HW_ERR_RANGE;
+			}
+			int rc = rtc_wakeup_arm_ms(ms);
 			if (rc != BRIDGE_HW_OK) return rc;
 		}
 		/* Latch the request: the STATUS_OK reply drains normally,
@@ -381,6 +406,17 @@ void bridge_power_tick(void)
 		/* Watchdog-aware entry (gh#54): feed + >= 3 IRC32K
 		 * intervals of gap before the wfi (UM p.525). */
 		power_fwdgt_settle_before_lp_entry();
+
+		/* Stop SysTick across the entry (gh#54): a tick pending or
+		 * firing at the wfi would end it at once (WFI with an
+		 * enabled interrupt pending is a no-op) and the vendor
+		 * helper only masks NVIC IRQs, not this core exception.
+		 * Clearing ENABLE|TICKINT plus PENDSTCLR makes the entry
+		 * see no tick; restored on the abort path below. */
+		const uint32_t systick_ctrl = SysTick->CTRL;
+		SysTick->CTRL &= ~(SysTick_CTRL_ENABLE_Msk | SysTick_CTRL_TICKINT_Msk);
+		SCB->ICSR = SCB_ICSR_PENDSTCLR_Msk;
+		__DSB();
 		pmu_to_standbymode();
 
 		/* Reaching this line means the standby entry ABORTED: the
@@ -401,6 +437,8 @@ void bridge_power_tick(void)
 		nvic_irq_enable(BRIDGE_I2C_EV_IRQN, BRIDGE_I2C_IRQ_PRIO, BRIDGE_I2C_IRQ_SUBPRIO);
 		nvic_irq_enable(BRIDGE_I2C_ER_IRQN, BRIDGE_I2C_IRQ_PRIO, BRIDGE_I2C_IRQ_SUBPRIO);
 		SCB->SCR &= ~SCB_SCR_SLEEPDEEP_Msk;
+		SysTick->VAL      = 0u; /* restart the 50 ms period */
+		SysTick->CTRL     = systick_ctrl;
 		s_lp_pending_mode = 0u; /* drop the failed request */
 	}
 	/* NOTE (future I2C-wake branch): the mode-2 entry lives here --
@@ -409,5 +447,7 @@ void bridge_power_tick(void)
 	 * bridge_transport_i2c_hw_init() on the wake path (its live-clock
 	 * timing derivation handles the post-wake IRC8M, gh#41).  It is
 	 * not reachable until bridge_hw_power_mode_set() stops rejecting
-	 * mode 2 -- see the mode-2 comment there. */
+	 * mode 2 -- see the mode-2 comment there.  That entry must reuse
+	 * the SysTick stop/restore and power_fwdgt_settle_before_lp_entry()
+	 * pair used for standby above. */
 }

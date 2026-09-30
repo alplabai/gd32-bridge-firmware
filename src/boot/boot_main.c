@@ -257,6 +257,11 @@ int main(void)
 	const int                n        = meta_candidates(&a, &b, cands);
 	bool                     valid[2] = { false, false };
 	for (int i = 0; i < n; ++i) {
+		/* A FWDGT started by the previous image (the app's 501 ms dog,
+		 * hal/gd32/init.c) can still be counting after a warm reset:
+		 * restart its window before each full-slot CRC (~72 ms at -Os,
+		 * 188 ms at -O0).  Harmless when no FWDGT is running. */
+		fwdgt_counter_reload();
 		valid[i] = active_slot_valid(cands[i]);
 	}
 	bool      last_resort = false;
@@ -306,6 +311,7 @@ int main(void)
 				 * unconditionally covers that case too -- no
 				 * separate branch needed. */
 			}
+			fwdgt_counter_reload(); /* full window for the app's boot path */
 			jump_to_slot(base);
 		}
 	}
@@ -313,7 +319,10 @@ int main(void)
      * to accept a reflash over the bridge; today, idle so a bench SWD probe
      * can take over. */
 	for (;;) {
-		__WFI();
+		/* Keep feeding: a surviving app FWDGT would otherwise turn this
+		 * diagnosable stop into a ~0.5 s reset loop.  No __WFI() -- no
+		 * interrupt source is enabled here to end it. */
+		fwdgt_counter_reload();
 	}
 	/* unreachable */
 	return 0;

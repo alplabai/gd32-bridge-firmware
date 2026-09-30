@@ -31,25 +31,39 @@ typedef enum { ERROR = 0, SUCCESS = !ERROR } ErrStatus;
 /* Symbols reached only by bridge_power_tick()'s deferred standby entry
  * (gh#63).  Plain storage, not counted: this suite pins what the ISR-side
  * bridge_hw_power_mode_set() does, not the base-level entry gate. */
-#define GPIOA                 0x40u
-#define GPIO_PIN_8            0x100u
-#define EXTI5_9_IRQn          23
-#define I2C0_EV_WKUP_IRQn     31
-#define I2C0_ER_IRQn          32
-#define FWDGT_STAT_PUD        0x1u
-#define FWDGT_STAT_RUD        0x2u
-#define FWDGT_STAT_WUD        0x4u
-#define SCB_SCR_SLEEPDEEP_Msk 0x4u
+#define GPIOA                    0x40u
+#define GPIO_PIN_8               0x100u
+#define EXTI5_9_IRQn             23
+#define I2C0_EV_WKUP_IRQn        31
+#define I2C0_ER_IRQn             32
+#define FWDGT_STAT_PUD           0x1u
+#define FWDGT_STAT_RUD           0x2u
+#define FWDGT_STAT_WUD           0x4u
+#define SCB_SCR_SLEEPDEEP_Msk    0x4u
+#define SCB_ICSR_PENDSTCLR_Msk   0x02000000u
+#define SysTick_CTRL_ENABLE_Msk  0x1u
+#define SysTick_CTRL_TICKINT_Msk 0x2u
 
 typedef struct {
 	uint32_t SCR;
+	uint32_t ICSR;
 } mock_scb_t;
 
+typedef struct {
+	uint32_t CTRL;
+	uint32_t VAL;
+} mock_systick_t;
+
+#define FMC_OBCTL_FWDGSPD_STDBY 0x00040000u /* BIT(18): FWDGT keeps counting in Standby */
+
+extern uint32_t   FMC_OBCTL;
 extern uint32_t   EXTI_PD0;
 extern uint32_t   EXTI_PD1;
 extern uint32_t   FWDGT_STAT;
 extern mock_scb_t mock_scb;
 #define SCB (&mock_scb)
+extern mock_systick_t mock_systick;
+#define SysTick (&mock_systick)
 
 /* CMSIS PRIMASK intrinsics reached through hal/gd32/bridge_critical.h.
  * Real (if trivial) tracking via mock_primask -- gh#257's test needs to
@@ -69,13 +83,24 @@ static inline void __set_PRIMASK(uint32_t primask)
 {
 	mock_primask = primask;
 }
+/* EXTI_PD0/1 are rc_w1 on silicon: the pending-clear write bridge_power_tick()
+ * issues just before its __DSB() has landed by the time it re-reads them, so
+ * model that here (a plain variable would keep the 1s and abort the entry). */
 static inline void __DSB(void)
 {
+	EXTI_PD0 = 0u;
+	EXTI_PD1 = 0u;
 }
 
 extern uint32_t mock_power_hw_calls;
-/* gh#257: true iff mock_primask was set (interrupts masked) the last
- * time rcu_rtc_clock_config() ran. */
+/* fwdgt_counter_reload() calls, SysTick->CTRL as seen by pmu_to_standbymode(),
+ * and the ota_trial_unconfirmed() answer the mock returns. */
+extern uint32_t mock_fwdgt_feeds;
+extern uint32_t mock_systick_ctrl_at_standby;
+extern int      mock_trial_unconfirmed;
+/* gh#257: 0 = rcu_rtc_clock_config() never ran, 1 = every call ran with
+ * interrupts masked, -1 = some call ran unmasked.  Never reset: the call
+ * is latched inside power.c, so it happens once per process. */
 extern int mock_rtc_clock_config_saw_irq_masked;
 
 void mock_power_reset(void);
