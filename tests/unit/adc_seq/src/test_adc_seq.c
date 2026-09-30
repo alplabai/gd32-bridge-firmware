@@ -540,6 +540,94 @@ ZTEST(gd32_adc_seq, test_fac_pump_does_not_consume_a_sample_when_x0_buffer_full)
 	bridge_hw_adc_stream_end(0u);
 }
 
+/* gh#306 -- FIR on silicon.  The mock now models FAC_PARACFG: an empty
+ * X0 preload leaves EXE set and the FIR function config never latches
+ * (bench: FAC_PARACFG stayed 0x81000000, pump stalled at X0BFF, Y empty). */
+static void bind_q31_fir(const uint8_t n_taps)
+{
+	uint8_t blob[4u + 8u * 4u];
+	memset(blob, 0, sizeof blob);
+	blob[0] = 1u; /* fmt = Q31 */
+	blob[1] = n_taps;
+	for (uint8_t k = 0u; k < n_taps; ++k) {
+		blob[4u + k * 4u + 3u] = 0x10u; /* tap = 0x10000000 (0.125) */
+	}
+	const uint16_t len = (uint16_t)(4u + n_taps * 4u);
+	uint8_t        cid = 0xFFu;
+	zassert_equal(bridge_hw_adc_dsp_chain_open(&cid), BRIDGE_HW_OK, "chain_open");
+	zassert_equal(bridge_hw_adc_dsp_stage_push(cid, 0u, 0u /* FIR */, 0u, len, blob, len),
+	              BRIDGE_HW_OK,
+	              "stage_push");
+	zassert_equal(bridge_hw_adc_dsp_chain_bind(cid, 0u), BRIDGE_HW_OK, "chain_bind");
+}
+
+ZTEST(gd32_adc_seq, test_fac_fir_config_latches_and_pump_filters)
+{
+	adc_seq_reset();
+	fac_latch_release();
+	zassert_equal(
+	    bridge_hw_adc_stream_begin(0u, BRIDGE_ADC_CH0, 1000u), BRIDGE_HW_OK, "stream_begin");
+	bind_q31_fir(8u);
+	adc_streams[0].ring[0] = 2560u;
+	mock_dma_set_remaining(DMA0, DMA_CH0, BRIDGE_ADC_STREAM_RING_SAMPLES - 1u);
+	bridge_hw_dsp_pump();
+
+	zassert_false(adc_streams[0].dsp_cfg_bad, "config must not wedge");
+	zassert_equal(mock_fac_func, (uint32_t)FUNC_CONVO_FIR, "FIR function latched (FUN=8)");
+	zassert_equal((mock_fac_paracfg & FAC_PARACFG_FUN), (uint32_t)FUNC_CONVO_FIR, "PARACFG FUN=8");
+	zassert_true((mock_fac_paracfg & FAC_PARACFG_EXE) != 0u, "started");
+	zassert_equal(mock_fac_coeffb_size, 8u, "X1 coefficient load latched");
+	zassert_equal(adc_streams[0].proc_write, 1u, "filtered sample produced");
+	bridge_hw_adc_stream_end(0u);
+}
+
+ZTEST(gd32_adc_seq, test_fac_config_reports_a_wedged_load)
+{
+	adc_seq_reset();
+	fac_latch_release();
+	zassert_equal(
+	    bridge_hw_adc_stream_begin(0u, BRIDGE_ADC_CH0, 1000u), BRIDGE_HW_OK, "stream_begin");
+	bind_q31_fir(8u);
+	mock_fac_load_wedge    = true; /* EXE never clears after the load */
+	adc_streams[0].ring[0] = 2560u;
+	mock_dma_set_remaining(DMA0, DMA_CH0, BRIDGE_ADC_STREAM_RING_SAMPLES - 1u);
+	bridge_hw_dsp_pump();
+	zassert_true(adc_streams[0].dsp_cfg_bad, "wedge surfaces as dsp_cfg_bad, not silence");
+	bridge_hw_adc_stream_end(0u);
+}
+
+ZTEST(gd32_adc_seq, test_fac_pump_drains_all_ready_output_words)
+{
+	adc_seq_reset();
+	fac_latch_release();
+	zassert_equal(
+	    bridge_hw_adc_stream_begin(0u, BRIDGE_ADC_CH0, 1000u), BRIDGE_HW_OK, "stream_begin");
+	bind_q31_fir(8u);
+	mock_fac_y_per_write   = 3u; /* Y holds 3 words after one X0 write */
+	adc_streams[0].ring[0] = 2560u;
+	mock_dma_set_remaining(DMA0, DMA_CH0, BRIDGE_ADC_STREAM_RING_SAMPLES - 1u);
+	bridge_hw_dsp_pump();
+	zassert_equal(adc_streams[0].proc_write, 3u, "every ready Y word drained, not just one");
+	bridge_hw_adc_stream_end(0u);
+}
+
+ZTEST(gd32_adc_seq, test_fac_first_pump_realigns_stale_backlog_without_busy)
+{
+	adc_seq_reset();
+	fac_latch_release();
+	zassert_equal(
+	    bridge_hw_adc_stream_begin(0u, BRIDGE_ADC_CH0, 1000u), BRIDGE_HW_OK, "stream_begin");
+	bind_q31_fir(8u);              /* seeds pump_raw_read = total_read = 0 */
+	adc_streams[0].lap_count = 5u; /* DMA lapped while the raw reader never ran */
+	mock_dma_set_remaining(DMA0, DMA_CH0, BRIDGE_ADC_STREAM_RING_SAMPLES - 10u);
+	bridge_hw_dsp_pump();
+	zassert_false(adc_streams[0].proc_gap, "no spurious BUSY at bind");
+	zassert_equal(adc_streams[0].pump_raw_read,
+	              5u * BRIDGE_ADC_STREAM_RING_SAMPLES + 10u,
+	              "cursor aligned with the live DMA total");
+	bridge_hw_adc_stream_end(0u);
+}
+
 /* gh#18 B9: the pump falling a full ring behind must surface as BUSY. */
 ZTEST(gd32_adc_seq, test_fac_pump_full_ring_resync_answers_busy_once)
 {
@@ -548,8 +636,9 @@ ZTEST(gd32_adc_seq, test_fac_pump_full_ring_resync_answers_busy_once)
 	zassert_equal(
 	    bridge_hw_adc_stream_begin(0u, BRIDGE_ADC_CH0, 1000u), BRIDGE_HW_OK, "stream_begin");
 	bind_f32_iir(0.25f, 0.5f, 0.25f, -1.561018075800718f, 0.641351538057563f);
-	adc_streams[0].lap_count = 1u; /* one full lap = ring-size backlog */
 	mock_dma_set_remaining(DMA0, DMA_CH0, BRIDGE_ADC_STREAM_RING_SAMPLES);
+	bridge_hw_dsp_pump();          /* first pass: FAC config + cursor align (gh#306) */
+	adc_streams[0].lap_count = 1u; /* one full lap = ring-size backlog */
 	bridge_hw_dsp_pump();
 
 	uint8_t  got = 0xFFu;

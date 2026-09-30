@@ -318,10 +318,19 @@ void nvic_irq_disable(IRQn_Type nvic_irq);
 
 typedef void (*mock_dsp_init_hook_t)(void);
 
-#define FAC_THRESHOLD_1        0u
-#define FAC_CP_ENABLE          1u
-#define FUNC_CONVO_FIR         0u
-#define FUNC_IIR_DIRECT_FORM_1 1u
+#define FAC_THRESHOLD_1 0u
+#define FAC_CP_ENABLE   1u
+/* Real vendor encodings (gd32g5x3_fac.h): FUN sits at PARACFG[30:24], EXE at
+ * bit 31, so the mock's FAC_PARACFG models the same register the silicon does
+ * (gh#306 -- an empty load leaves EXE set and nothing after it latches). */
+#define PARACFG_FUN(v)         ((uint32_t)(v) << 24)
+#define FUNC_LOAD_X0           PARACFG_FUN(1)
+#define FUNC_LOAD_X1           PARACFG_FUN(2)
+#define FUNC_CONVO_FIR         PARACFG_FUN(8)
+#define FUNC_IIR_DIRECT_FORM_1 PARACFG_FUN(9)
+#define FAC_PARACFG_FUN        ((uint32_t)0x7F000000u)
+#define FAC_PARACFG_EXE        ((uint32_t)0x80000000u)
+#define FAC_PARACFG            mock_fac_paracfg
 #define FAC_FLAG_X0BFF         ((uint32_t)(1u << 0))
 #define FAC_FLAG_YBEF          ((uint32_t)(1u << 1))
 #define FAC_FLAG_STEF          ((uint32_t)(1u << 2))
@@ -360,11 +369,15 @@ extern int16_t  mock_fac_coeffb[MOCK_FAC_MAX_COEFFS]; /* last preload B vector *
 extern uint8_t  mock_fac_coeffb_size;
 extern int16_t  mock_fac_coeffa[MOCK_FAC_MAX_COEFFS]; /* last preload A vector */
 extern uint8_t  mock_fac_coeffa_size;
-extern uint32_t mock_fac_func;       /* last fac_function_config() func */
-extern uint8_t  mock_fac_ipr;        /* last fac_function_config() ipr */
-extern int16_t  mock_fac_last_write; /* last fac_fixed_data_write() operand */
-extern int16_t  mock_fac_read_value; /* what fac_fixed_data_read() returns */
-extern uint32_t mock_fac_flags;      /* settable; bits are FAC_FLAG_* */
+extern uint32_t mock_fac_func;        /* last fac_function_config() func */
+extern uint8_t  mock_fac_ipr;         /* last fac_function_config() ipr */
+extern int16_t  mock_fac_last_write;  /* last fac_fixed_data_write() operand */
+extern int16_t  mock_fac_read_value;  /* what fac_fixed_data_read() returns */
+extern uint32_t mock_fac_flags;       /* settable; bits are FAC_FLAG_* */
+extern uint32_t mock_fac_paracfg;     /* modelled FAC_PARACFG (gh#306) */
+extern uint32_t mock_fac_y_pending;   /* output words waiting in Y */
+extern uint32_t mock_fac_y_per_write; /* outputs produced per X0 write (default 1) */
+extern bool     mock_fac_load_wedge;  /* X1 load never completes (EXE sticks) */
 
 void       fac_deinit(void);
 void       fac_struct_para_init(fac_parameter_struct *fac_parameter);
