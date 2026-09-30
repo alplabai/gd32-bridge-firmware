@@ -585,10 +585,10 @@ the wake-path interaction fixed in review), and I2C0 is disabled with
    end of BRD_I2C under worst-case production loading and confirm
    Fast-mode setup/hold margins.
 4. Halt the part in Deep-sleep and read `I2C_CTL0` bit 0 (`I2CEN`) — must
-   be 0. Wake, halt again, read `I2C_TIMING` — with no PLL relock in this
-   firmware, `CK_APB1` should still read ~8 MHz (IRC8M) and `I2C_TIMING`
-   should show the re-derived values for that clock (`PSC[3:0]`=`0x0`,
-   `SCLDELY[3:0]`=`0x3`, `SDADELY[3:0]`=`0x0`), not the 216 MHz values.
+   be 0. Wake (SPI CS falling edge or the RTC timer), halt again: the wake
+   path restores the PLL before re-initialising I2C0, so `RCU_CFG0.SCSS`
+   should read PLLP and `I2C_TIMING` the 216 MHz values (`PSC[3:0]`=`0xF`,
+   `SCLDELY[3:0]`=`0x5`, `SDADELY[3:0]`=`0x4`).
    Confirm a BRD_I2C transaction issued after wake completes correctly at
    address `0x70`.
 

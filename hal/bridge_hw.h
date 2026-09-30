@@ -413,7 +413,21 @@ int bridge_hw_timer_sync(uint8_t master, uint8_t slave, uint8_t mode);
  * cannot arm returns BRIDGE_HW_ERR_NOTIMPL and does not enter the requested
  * low-power mode.  The GD32 prepares the V2N supervisor handshake + signals
  * the Renesas SoC to enter the matching mode, then re-runs the bridge
- * handshake on wakeup so the host can resume bridge calls. */
+ * handshake on wakeup so the host can resume bridge calls.
+ *
+ * Mode 2 and mode 3 both REQUIRE a timer wake (wake_after_ms > 0 or the
+ * RTC/TIMER bit; else BRIDGE_HW_ERR_INVAL).  Mode 2 (deep-sleep) also wakes
+ * on a falling edge of the SPI CS line and resumes in place with the clock
+ * tree and I2C0 restored; the frame in flight during that wake is lost and
+ * the host must retry it.  The I2C slave cannot wake the part.  The RTC
+ * timer is armed when the request is accepted, not at entry, and
+ * auto-reloads: the sleep lasts from the entry (the next quiet-link tick
+ * after the reply drains) to the next timer period boundary, i.e. at most
+ * wake_after_ms and shorter by the time spent waiting for a quiet link.
+ * The entry re-checks CS, I2C0 and the transport / RTC interrupt-pending
+ * state with interrupts masked; if anything is pending it backs out and
+ * retries on the next tick, so an accepted request may sleep later than
+ * requested but never with a transaction in flight. */
 int bridge_hw_power_mode_set(uint8_t mode, uint32_t wake_bitmap, uint32_t wake_after_ms);
 
 /* --------------------------------------------------------------- */

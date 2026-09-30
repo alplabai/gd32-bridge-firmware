@@ -55,6 +55,8 @@ typedef struct {
 } mock_systick_t;
 
 #define FMC_OBCTL_FWDGSPD_STDBY 0x00040000u /* BIT(18): FWDGT keeps counting in Standby */
+#define FMC_OBCTL_FWDGSPD_DPSLP 0x00020000u /* BIT(17): FWDGT keeps counting in Deep-sleep */
+#define I2C_FLAG_I2CBSY         0x8000u
 
 extern uint32_t   FMC_OBCTL;
 extern uint32_t   EXTI_PD0;
@@ -114,6 +116,23 @@ extern uint32_t mock_power_hw_calls;
 extern uint32_t mock_fwdgt_feeds;
 extern uint32_t mock_systick_ctrl_at_standby;
 extern int      mock_trial_unconfirmed;
+/* Deep-sleep entry observations (mode 2). */
+extern uint32_t mock_deepsleep_entries, mock_i2c_disables, mock_i2c_inits,
+    mock_primask_at_deepsleep;
+extern FlagStatus mock_i2c_busy;
+/* Race injection (gh#12 review): CS pin level, per-IRQ NVIC pending bits, and
+ * hooks fired inside the pre-lock settle window (fwdgt_counter_reload) and
+ * inside i2c_disable(), so a test can land an event exactly there.  Ordering
+ * stamps record the order of the wake-path steps; counters record I2C
+ * re-enables, RTC timer stops and pending-flag clears. */
+extern FlagStatus mock_cs_level;
+extern uint64_t   mock_nvic_pending;
+extern void (*mock_on_settle)(void);
+extern void (*mock_on_i2c_disable)(void);
+extern uint32_t mock_i2c_enables, mock_rtc_disables, mock_rtc_flag_clears, mock_exti19_clears;
+extern uint32_t mock_seq, mock_seq_clock_restore, mock_seq_i2c_init, mock_seq_rtc_disable;
+extern int      mock_i2c_init_rc;
+void            i2c_enable(uint32_t periph);
 /* gh#257: 0 = rcu_rtc_clock_config() never ran, 1 = every call ran with
  * interrupts masked, -1 = some call ran unmasked.  Never reset: the call
  * is latched inside power.c, so it happens once per process. */
@@ -131,6 +150,7 @@ ErrStatus  rtc_wakeup_clock_set(uint32_t source);
 ErrStatus  rtc_wakeup_timer_set(uint16_t count);
 void       rtc_wakeup_enable(void);
 void       i2c_disable(uint32_t periph);
+FlagStatus i2c_flag_get(uint32_t periph, uint32_t flag);
 void       pmu_to_deepsleepmode(uint32_t ldo, uint32_t command);
 void       pmu_to_standbymode(void);
 void       rtc_flag_clear(uint32_t flag);
