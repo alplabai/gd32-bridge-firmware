@@ -436,7 +436,8 @@ void ota_system_reset(void)
 	 * them, if this function is ever reached on a path that ISN'T
 	 * followed by a reset (it isn't, today, but nothing here should
 	 * depend on that). See src/boot/boot_main.c's file header and
-	 * hal/gd32/init.c's bridge_hw_reset_reason() for the read side. */
+	 * the reset-cause snapshot in hal/gd32/init.c's bridge_hw_init() for the
+	 * read side. */
 	NVIC_SystemReset();
 }
 

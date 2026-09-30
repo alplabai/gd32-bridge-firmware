@@ -238,13 +238,14 @@ register -- survives `NVIC_SystemReset()`, same rationale as
 `hal/gd32/fault_handlers.c`'s use of `RTC_BKP0..7` for fault records;
 `RTC_BKP8` is the next free one), then **clears** `RSTFC` before jumping --
 unconditionally, on every single boot, not just the ones a trial confirm
-triggers. The application's `CMD_RESET_REASON` handler
-(`bridge_hw_reset_reason()`, `hal/gd32/init.c`) decodes from that stash, not
-from a live `RCU_RSTSCK` read (which would only ever see "no cause" -- the
-bootloader already cleared it by the time app code runs), reorders
-`FWDGTRSTF` **before** `EPRSTF` in its priority ladder (the G5 can latch
-`EPRSTF` alongside an internally-generated watchdog reset), and clears the
-stash on read, preserving the original clear-on-read contract.
+triggers. The application consumes that stash ONCE, at the top of
+`bridge_hw_init()` (`hal/gd32/init.c`): it copies `RTC_BKP8` into a
+boot-time snapshot and zeroes the stash. `CMD_RESET_REASON`
+(`bridge_hw_reset_reason()`) decodes that snapshot, not a live
+`RCU_RSTSCK` read (which would only ever see "no cause" -- the bootloader
+already cleared it by the time app code runs), so repeated reads are
+non-destructive and agree. The decode ladder (`hal/gd32/reset_reason.c`) is
+POR, BOR, FWDGT/WWDGT, EPR, LPR, SWR.
 `ota_system_reset()` (`hal/fmc_ota.c`) no longer touches `RCU_RSTSCK` at all
 -- the bootloader's unconditional per-boot stash+clear makes that
 redundant. This closes two gaps the earlier (single-clear-point) design
@@ -257,9 +258,9 @@ step regardless of what the app does afterward.
 
 **Fallback source, by configuration (C1, adversarial-verify finding):**
 `RTC_BKP8` is written ONLY by THIS fix's bootloader, so
-`bridge_hw_reset_reason()` treats a `RTC_BKP8 == 0` read as "no stash was
-ever written" and falls back to a LIVE `RCU_RSTSCK` read (same priority
-order, clearing `RSTFC` itself on that path) rather than reporting UNKNOWN
+`bridge_hw_init()` treats a `RTC_BKP8 == 0` read as "no stash was
+ever written" and falls back to a LIVE `RCU_RSTSCK` read at boot (same
+priority order, clearing `RSTFC` itself on that path) rather than reporting UNKNOWN
 unconditionally:
 
 | Configuration | `CMD_RESET_REASON` source |
@@ -268,10 +269,9 @@ unconditionally:
 | Full-flash, non-partitioned image (no bootloader runs at all) | live `RCU_RSTSCK` fallback |
 | Old (pre-fix) bootloader + new app | live `RCU_RSTSCK` fallback (the old bootloader never stashed anything) |
 
-The live-read fallback inherits the ORIGINAL single-reader limitation the
-stash exists to remove (this app is the only thing that will ever read or
-clear those bits), but that is strictly better than a permanent UNKNOWN on
-two real, reachable configurations.
+Either source is latched once at boot, so the fallback is as
+repeatable as the stash path and avoids a permanent UNKNOWN on two real,
+reachable configurations.
 
 **Cost on fielded units with the OLD (pre-fix) bootloader:** none of this
 protects them -- an old bootloader doesn't know about `flags`,
