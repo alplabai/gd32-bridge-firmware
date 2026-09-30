@@ -411,7 +411,6 @@ add_executable(test_adc_seq
     adc_seq/mock/mock_gd32.c
     ${FW}/hal/gd32/adc.c
     ${FW}/hal/gd32/adc_stream.c
-    ${FW}/hal/gd32/vref.c
     # adc_dsp_chain.c carries the chain pool + adc_dsp_chain_p1_capable()
     # that adc_stream.c's pump-side config functions call.  It was split
     # out of adc_stream.c by #69/#70 AFTER this target was written, so the

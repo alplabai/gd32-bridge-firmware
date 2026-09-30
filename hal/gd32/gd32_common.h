@@ -435,16 +435,13 @@ extern const gd32_dac_ch_t dac_channels[DAC_CHANNEL_COUNT];      /* dac.c */
 extern adc_stream_state_t  adc_streams[BRIDGE_ADC_STREAM_COUNT]; /* adc_stream.c */
 extern bool                trng_started;                         /* trng.c */
 extern bool                trng_ready;                           /* trng.c */
-extern bool                vref_ok;                              /* vref.c */
 
 /* ----------------------------------------------------------------- */
 /* Shared helpers (defined in the TU named per line).                 */
 /* ----------------------------------------------------------------- */
 
-bool trng_start(void);       /* trng.c */
-bool trng_poll_ready(void);  /* trng.c */
-bool vref_ready_check(void); /* vref.c, ISR-safe: only notes a late lock */
-void vref_late_tick(void);   /* vref.c, base level: measure + publish vref_ok */
+bool trng_start(void);      /* trng.c */
+bool trng_poll_ready(void); /* trng.c */
 /* Boot-only sequence: reset all converters, set the two shared clock domains
  * once (ADC0 covers ADC0/1/2; ADC3 covers itself), then initialise each
  * converter.  Request paths must use adc_periph_restore() instead so a

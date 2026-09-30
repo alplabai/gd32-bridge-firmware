@@ -93,7 +93,7 @@ static void adc_vref_publish(uint16_t code, uint16_t mv)
 }
 
 /* Sample VREFINT (ADC0 channel 18) 16x and latch adc_vref_mv.  Runs at boot
- * (before any request path) or from base level via vref_late_tick() with
+ * (before any request path) or from base level with
  * ADC0 claimed; never call it from an ISR -- the EOC waits are unbounded by
  * ADC_READ_ISR_BUDGET_US.  Returns false (adc_vref_mv left unchanged,
  * adc_vrefint_code = 0) if EOC never came. */
@@ -436,7 +436,6 @@ int bridge_hw_adc_read(uint8_t channel, uint8_t samples, uint16_t *mv)
 	if (mv == 0) return BRIDGE_HW_ERR_INVAL;
 	if (samples == 0u) return BRIDGE_HW_ERR_INVAL;
 	if (channel >= ADC_CHANNEL_MAP_COUNT) return BRIDGE_HW_ERR_RANGE;
-	if (!vref_ready_check()) return BRIDGE_HW_ERR_IO; /* dead reference -- fail loud */
 
 	const gd32_adc_ch_t *ch = &adc_channels_map[channel];
 

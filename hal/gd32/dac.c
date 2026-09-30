@@ -63,7 +63,6 @@ _Static_assert(sizeof(dac_channels) / sizeof(dac_channels[0]) == DAC_CHANNEL_COU
 int bridge_hw_dac_set(uint8_t channel, uint16_t value_mv)
 {
 	if (channel >= DAC_CHANNEL_COUNT) return BRIDGE_HW_ERR_RANGE;
-	if (!vref_ready_check()) return BRIDGE_HW_ERR_IO; /* dead reference -- fail loud */
 	/* Clamp to the buffer's achievable output window BEFORE the mV ->
      * code map, so a request past either edge programs the nearest
      * reachable code rather than a code the pad cannot produce. */
@@ -86,7 +85,6 @@ int bridge_hw_dac_get(uint8_t channel, uint16_t *value_mv)
 	if (value_mv == 0) return BRIDGE_HW_ERR_INVAL;
 	*value_mv = 0u;
 	if (channel >= DAC_CHANNEL_COUNT) return BRIDGE_HW_ERR_RANGE;
-	if (!vref_ready_check()) return BRIDGE_HW_ERR_IO; /* dead reference -- fail loud */
 	/* dac_output_value_get reads DAC_OUTx_DO, the read-only DATA OUTPUT
      * register (User Manual Rev1.2 p.484 SS18.4.12: "storage the data
      * that is being converted by DACx_OUT0") -- NOT the DAC_OUTx_DH

@@ -119,7 +119,6 @@ elseif(BRIDGE_HAL_BACKEND STREQUAL "gd32")
         hal/gd32/tmu.c
         hal/gd32/tmu_q31_scale.c
         hal/gd32/trng.c
-        hal/gd32/vref.c
         hal/transport_hw_gd32.c
         hal/fmc_ota.c
         hal/gd32_libc_stubs.c

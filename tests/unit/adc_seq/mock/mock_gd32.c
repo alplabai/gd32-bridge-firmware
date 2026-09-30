@@ -600,12 +600,3 @@ void mock_fft_set_poll_hook(mock_hook_t hook)
 {
 	mock_fft_poll_hook = hook;
 }
-
-/* --- gd32_common.h externs the driver needs but this suite doesn't use ---*/
-
-/* hal/gd32/vref.c is linked for real; this is its VREFRDY source. */
-bool       mock_vref_ready = true;
-FlagStatus vref_status_get(void)
-{
-	return mock_vref_ready ? SET : RESET;
-}

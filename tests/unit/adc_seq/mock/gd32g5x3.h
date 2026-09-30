@@ -175,8 +175,6 @@ void mock_adc_set_routine_data(uint32_t code);
 extern bool
     mock_adc_internal_ch_on; /* last internal-channel state; the seq log overflows on a timeout */
 extern bool mock_adc_eoc_stuck; /* true: triggers never raise EOC */
-extern bool mock_vref_ready;    /* VREFRDY level seen by vref_status_get() */
-FlagStatus  vref_status_get(void);
 
 /* ------------------------------------------------------------------ */
 /* DMA function surface.                                               */
