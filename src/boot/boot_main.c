@@ -53,8 +53,7 @@
 
 #include "gd32g5x3.h"
 
-#include "ota_layout.h"
-#include "crc32.h"
+#include "boot_decide.h"
 
 /* Trial/confirm watchdog calibration knob (bench fact 2026-09-26,
  * E1M-V2M103): a slot-B image passed VERIFY/COMMIT then hung before
@@ -114,70 +113,23 @@ static bool fwdgt_clock_ready(void)
 	return to != 0u;
 }
 
-static bool meta_read(uint32_t addr, ota_meta_record_t *r)
+/* Production flash mapper for boot_decide_slot(): flash is memory-mapped, so
+ * the address doubles as the read pointer. */
+static const uint8_t *map_flash(uint32_t address, size_t length, void *context)
 {
-	const ota_meta_record_t *p = (const ota_meta_record_t *)addr;
-	if (p->magic != OTA_META_MAGIC || p->struct_version != OTA_META_STRUCT_VER) {
-		return false;
-	}
-	if (ota_crc32(0u, (const uint8_t *)p, offsetof(ota_meta_record_t, rec_crc32)) != p->rec_crc32) {
-		return false;
-	}
-	*r = *p;
-	return true;
+	(void)length;
+	(void)context;
+	return (const uint8_t *)(uintptr_t)address;
 }
 
-/* Order the two CRC-valid metadata records newest-first into cands[]
- * and return how many are present (0..2).  The bootloader then tries
- * each in order (#754): a newer record that fails SEMANTIC validation
- * must not suppress an older bootable one, or the part drops into
- * permanent recovery with a perfectly good slot sitting unused. */
-static int
-meta_candidates(ota_meta_record_t *a, ota_meta_record_t *b, const ota_meta_record_t *cands[2])
+/* Feed hook for boot_decide_slot(): a FWDGT started by the previous image (the
+ * app's 501 ms dog, hal/gd32/init.c) can still be counting after a warm reset,
+ * so the decision restarts its window before each full-slot CRC (~72 ms at -Os,
+ * 188 ms at -O0).  Harmless when no FWDGT is running. */
+static void feed_watchdog(void *context)
 {
-	const bool va = meta_read(OTA_META_REC0, a);
-	const bool vb = meta_read(OTA_META_REC1, b);
-	int        n  = 0;
-	if (va && vb) {
-		if (a->counter >= b->counter) {
-			cands[n++] = a;
-			cands[n++] = b;
-		} else {
-			cands[n++] = b;
-			cands[n++] = a;
-		}
-	} else if (va) {
-		cands[n++] = a;
-	} else if (vb) {
-		cands[n++] = b;
-	}
-	return n;
-}
-
-static bool active_slot_valid(const ota_meta_record_t *m)
-{
-	const uint8_t slot = m->active_slot;
-	uint32_t      base;
-	/* A corrupt active_slot must NOT resolve to a valid flash base
-	 * (#741): reject it here, before the slot indexes the [2] arrays. */
-	if (!ota_slot_base_checked(slot, &base)) {
-		return false;
-	}
-	const uint32_t len = m->img_len[slot];
-	if ((m->slot_valid & (uint8_t)(1u << slot)) == 0u) {
-		return false;
-	}
-	if (len == 0u || len > OTA_SLOT_SIZE) {
-		return false;
-	}
-	if (ota_crc32(0u, (const uint8_t *)base, len) != m->img_crc32[slot]) {
-		return false;
-	}
-	/* CRC integrity is necessary but not sufficient: a CRC-valid but
-	 * truncated / vector-less image would boot into garbage MSP/reset
-	 * words (#755).  Require a bootable vector head before jumping.
-	 * Flash is memory-mapped, so the base doubles as the read pointer. */
-	return ota_image_bootable(base, (const uint8_t *)base, len);
+	(void)context;
+	fwdgt_counter_reload();
 }
 
 static void jump_to_slot(uint32_t slot_base)
@@ -252,68 +204,52 @@ int main(void)
 	RTC_BKP8 = rstsck;
 	RCU_RSTSCK |= RCU_RSTSCK_RSTFC;
 
-	ota_meta_record_t        a, b;
-	const ota_meta_record_t *cands[2];
-	const int                n        = meta_candidates(&a, &b, cands);
-	bool                     valid[2] = { false, false };
-	for (int i = 0; i < n; ++i) {
-		/* A FWDGT started by the previous image (the app's 501 ms dog,
-		 * hal/gd32/init.c) can still be counting after a warm reset:
-		 * restart its window before each full-slot CRC (~72 ms at -Os,
-		 * 188 ms at -O0).  Harmless when no FWDGT is running. */
-		fwdgt_counter_reload();
-		valid[i] = active_slot_valid(cands[i]);
-	}
-	bool      last_resort = false;
-	const int sel         = ota_boot_select(cands, valid, n, wdt_fired, &last_resort);
-	if (sel >= 0) {
-		uint32_t base;
-		if (ota_slot_base_checked(cands[sel]->active_slot, &base)) {
-			if ((cands[sel]->flags & OTA_META_FLAG_TRIAL) != 0u) {
-				/* Freeze the FWDGT counter while a debugger holds the
-				 * core halted (DBG_FWDGT_HOLD) -- without this, a
-				 * breakpointed bench session gets blown away by a
-				 * spurious watchdog reset mid-investigation; the
-				 * counter resumes counting from where it was once
-				 * execution continues, so this does not extend the
-				 * real (running) window. */
-				dbg_periph_enable(DBG_FWDGT_HOLD);
-				(void)fwdgt_clock_ready(); /* best-effort; see its own comment */
-				if (fwdgt_config(OTA_TRIAL_FWDGT_RELOAD, FWDGT_PSC_DIV256) != SUCCESS) {
-					/* CORRECTED (C2): fwdgt_config() already
-					 * issued FWDGT_CTL's KEY_ENABLE write before
-					 * this PSC/RLD failure -- the counter is
-					 * running NOW and cannot be un-armed by any
-					 * register in this peripheral.  A PSC/RLD
-					 * timeout does NOT mean "some window applies,
-					 * just maybe not the intended one": it means
-					 * the counter is running under FWDGT's
-					 * POWER-ON-RESET DEFAULTS (PSC=/4, RLD=0xFFF),
-					 * which is roughly 0.5 s at nominal IRC32K --
-					 * dangerously short compared to the intended
-					 * ~32.8 s.  Retry exactly once (the
-					 * fwdgt_clock_ready() call above already
-					 * removes the likely root cause -- see its own
-					 * comment); this is the bootloader arming its
-					 * OWN safety net, so a retry LOOP here would
-					 * defeat the point if the watchdog itself is
-					 * the thing stuck.  If it fails AGAIN, that
-					 * ~0.5 s default window is what is left armed
-					 * and this bootloader has no further recourse
-					 * short of re-implementing the raw PSC/RLD
-					 * register writes with a longer PUD/RUD wait
-					 * than gd32g5x3_fwdgt.c's own budget -- not
-					 * done here. */
-					(void)fwdgt_config(OTA_TRIAL_FWDGT_RELOAD, FWDGT_PSC_DIV256);
-				}
-				/* last_resort candidates are always TRIAL (see
-				 * ota_boot_select()'s own comment), so arming here
-				 * unconditionally covers that case too -- no
-				 * separate branch needed. */
+	boot_decision_t decision;
+	if (boot_decide_slot(map_flash, feed_watchdog, NULL, wdt_fired, &decision)) {
+		if (decision.trial) {
+			/* Freeze the FWDGT counter while a debugger holds the
+			 * core halted (DBG_FWDGT_HOLD) -- without this, a
+			 * breakpointed bench session gets blown away by a
+			 * spurious watchdog reset mid-investigation; the
+			 * counter resumes counting from where it was once
+			 * execution continues, so this does not extend the
+			 * real (running) window. */
+			dbg_periph_enable(DBG_FWDGT_HOLD);
+			(void)fwdgt_clock_ready(); /* best-effort; see its own comment */
+			if (fwdgt_config(OTA_TRIAL_FWDGT_RELOAD, FWDGT_PSC_DIV256) != SUCCESS) {
+				/* CORRECTED (C2): fwdgt_config() already
+				 * issued FWDGT_CTL's KEY_ENABLE write before
+				 * this PSC/RLD failure -- the counter is
+				 * running NOW and cannot be un-armed by any
+				 * register in this peripheral.  A PSC/RLD
+				 * timeout does NOT mean "some window applies,
+				 * just maybe not the intended one": it means
+				 * the counter is running under FWDGT's
+				 * POWER-ON-RESET DEFAULTS (PSC=/4, RLD=0xFFF),
+				 * which is roughly 0.5 s at nominal IRC32K --
+				 * dangerously short compared to the intended
+				 * ~32.8 s.  Retry exactly once (the
+				 * fwdgt_clock_ready() call above already
+				 * removes the likely root cause -- see its own
+				 * comment); this is the bootloader arming its
+				 * OWN safety net, so a retry LOOP here would
+				 * defeat the point if the watchdog itself is
+				 * the thing stuck.  If it fails AGAIN, that
+				 * ~0.5 s default window is what is left armed
+				 * and this bootloader has no further recourse
+				 * short of re-implementing the raw PSC/RLD
+				 * register writes with a longer PUD/RUD wait
+				 * than gd32g5x3_fwdgt.c's own budget -- not
+				 * done here. */
+				(void)fwdgt_config(OTA_TRIAL_FWDGT_RELOAD, FWDGT_PSC_DIV256);
 			}
-			fwdgt_counter_reload(); /* full window for the app's boot path */
-			jump_to_slot(base);
+			/* last_resort candidates are always TRIAL (see
+			 * ota_boot_select()'s own comment), so arming here
+			 * unconditionally covers that case too -- no
+			 * separate branch needed. */
 		}
+		fwdgt_counter_reload(); /* full window for the app's boot path */
+		jump_to_slot(decision.slot_base);
 	}
 	/* No valid image: recovery. A later build exposes the OTA opcodes here
      * to accept a reflash over the bridge; today, idle so a bench SWD probe

@@ -35,7 +35,7 @@ Each numbered item gives:
 
 - SWD probe (J-Link or equivalent) wired directly to the GD32G553's own SWD
   pins on the E1M-X V2N carrier — this is the *only* recovery path for
-  anything in Phase 1/2 below. `src/boot/boot_main.c:20-22` states it
+  anything in Phase 1/2 below. `src/boot/boot_main.c` states it
   plainly: this hardware revision has no host-driven (RZ/V2N-initiated) SWD
   reflash, so "recoverable" everywhere in this document means "recoverable
   with a probe physically on the board," never "recoverable over the wire."
@@ -70,7 +70,7 @@ recovery" language throughout this document that means "not recoverable
 The order below is not PR number order. Four things drove it, all stated in
 the task and each traced back to a source in the tree:
 
-1. **`src/boot/boot_main.c:20-22`** — a bug in boot, OTA, or FMC bricks the
+1. **`src/boot/boot_main.c`** — a bug in boot, OTA, or FMC bricks the
    part with no host-driven recovery. Everything touching those three areas
    (#90, #113, #106, #92, #73) is therefore validated *before* anything
    that assumes a working, field-flashable image, and is validated *on its
@@ -185,7 +185,7 @@ A failure at either optimisation level means the asm block does not in fact
 guarantee the property the PR argues from disassembly alone.
 
 **Brick risk:** yes, unconditionally — this is the exact function
-`src/boot/boot_main.c:20-22` warns about. Recovery: bench SWD probe only.
+`src/boot/boot_main.c` warns about. Recovery: bench SWD probe only.
 
 ### 1.2 — `.ramfunc` output-section split (#113 / issue #27 hygiene 1)
 
