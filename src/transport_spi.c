@@ -30,6 +30,7 @@
 #include <string.h>
 
 #include "protocol.h"
+#include "timing_stats.h"
 #include "transport.h"
 
 /* Weak default: the stub backend links this no-op so it needs no vendor
@@ -191,7 +192,9 @@ static void decode_and_dispatch(void)
 	const size_t   payload_len = spi_rx_len - 4u; /* SOF + CMD + .. + CRC(2) */
 	const uint16_t got_crc =
 	    (uint16_t)spi_rx_buf[2u + payload_len] | (uint16_t)spi_rx_buf[2u + payload_len + 1u] << 8;
+	TS_ONLY(const uint32_t ts_crc0 = timing_stats_now();)
 	const uint16_t expect_crc = crc16_ccitt_false(spi_rx_buf, 2u + payload_len);
+	TS_ONLY(const uint32_t ts_crc1 = timing_stats_now();)
 	if (got_crc != expect_crc) {
 		stage_error_reply(STATUS_IO);
 		return;
@@ -207,7 +210,9 @@ static void decode_and_dispatch(void)
 	                                                  reply_pl,
 	                                                  sizeof(reply_pl),
 	                                                  &reply_pl_len);
+	TS_ONLY(const uint32_t ts_disp1 = timing_stats_now();)
 	stage_reply((uint8_t)st, reply_pl, reply_pl_len);
+	TS_ONLY(timing_stats_record(ts_crc0, ts_crc1, ts_disp1, timing_stats_now(), cmd);)
 }
 
 /* --------------------------------------------------------------- */

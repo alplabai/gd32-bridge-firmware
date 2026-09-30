@@ -174,6 +174,26 @@ target_compile_options(test_transport_spi PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_transport_spi PRIVATE ztest_shim)
 add_test(NAME transport_spi COMMAND test_transport_spi)
 
+# --- timing_stats: opt-in SPI round-trip cycle stats (#104) ----------------
+# The same firmware sources as transport_spi, built WITH -DBRIDGE_TIMING_STATS
+# (the flag is per-target, so the transport_spi suite above keeps testing the
+# default, zero-cost path).
+add_executable(test_timing_stats
+    timing_stats/src/test_timing_stats.c
+    ${FW}/src/timing_stats.c
+    ${FW}/src/transport_spi.c
+    ${FW}/src/protocol.c
+    ${FW}/src/bootloader/bootloader.c
+    ${FW}/src/ota.c
+    ${FW}/src/crc32.c
+    ${FW}/hal/bridge_hw_stub.c
+)
+target_include_directories(test_timing_stats PRIVATE ${FW}/src ${FW}/hal)
+target_compile_definitions(test_timing_stats PRIVATE BRIDGE_TIMING_STATS=1)
+target_compile_options(test_timing_stats PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_timing_stats PRIVATE ztest_shim)
+add_test(NAME timing_stats COMMAND test_timing_stats)
+
 # --- fault_diag: CFSR/SYSCFG_STAT -> fault_record_t decode (issue #36) ------
 #
 # Pure logic, no vendor register header (see hal/gd32/fault_diag.h) -- the
