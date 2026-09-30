@@ -43,6 +43,7 @@ typedef enum { ERROR = 0, SUCCESS = !ERROR } ErrStatus;
 #define SCB_ICSR_PENDSTCLR_Msk   0x02000000u
 #define SysTick_CTRL_ENABLE_Msk  0x1u
 #define SysTick_CTRL_TICKINT_Msk 0x2u
+#define SysTick_LOAD_RELOAD_Msk  0x00FFFFFFu
 
 typedef struct {
 	uint32_t SCR;
@@ -51,6 +52,7 @@ typedef struct {
 
 typedef struct {
 	uint32_t CTRL;
+	uint32_t LOAD;
 	uint32_t VAL;
 } mock_systick_t;
 

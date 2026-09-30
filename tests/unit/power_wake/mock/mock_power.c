@@ -43,6 +43,7 @@ void mock_power_reset(void)
 	mock_systick_ctrl_at_standby = 0u;
 	mock_trial_unconfirmed       = 0;
 	mock_systick.CTRL            = 0u;
+	mock_systick.LOAD            = 0u;
 	mock_systick.VAL             = 0u;
 	mock_scb.SCR                 = 0u;
 	mock_scb.ICSR                = 0u;

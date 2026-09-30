@@ -392,6 +392,8 @@ ZTEST(power_wake, test_clock_restore_bounded_when_pll_never_locks)
 	zassert_equal(mock_system_core_clock_updates, 1u);
 	zassert_equal(bridge_core_clock_hz, 8000000u);
 	zassert_false(bridge_core_clock_matches);
+	/* 50 ms at 8 MHz, not the boot-clock reload that would outlast FWDGT. */
+	zassert_equal(SysTick->LOAD, 8000000u / 20u - 1u);
 }
 
 /* PLL locks but SCSS never reports PLLP: the switch must be backed out

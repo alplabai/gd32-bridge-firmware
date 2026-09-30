@@ -375,6 +375,10 @@ int bridge_hw_power_mode_set(uint8_t mode, uint32_t wake_bitmap, uint32_t wake_a
  * BRIDGE_ADC_PACE_CLK_HZ and the DWT cycle conversions hardcode 216 MHz.
  * (The I2C timing is NOT one of them -- bridge_transport_i2c_hw_init()
  * derives it from rcu_clock_freq_get(CK_APB1) at run time, gh#41.) */
+/* True while a Deep-sleep wake left the part on IRC8M; bridge_power_tick()
+ * retries the relock (like bridge_i2c_reinit_pending) until it holds. */
+static volatile uint8_t s_clock_relock_pending;
+
 bool bridge_clock_restore_after_deepsleep(void)
 {
 	bool ok = false;
@@ -407,6 +411,15 @@ bool bridge_clock_restore_after_deepsleep(void)
 	SystemCoreClockUpdate();
 	bridge_core_clock_hz      = SystemCoreClock;
 	bridge_core_clock_matches = (SystemCoreClock == PWM_TIMER_CLK_HZ);
+
+	/* SysTick LOAD was sized for the boot clock.  On a failed relock the
+	 * part runs on IRC8M, where that reload stretches the 50 ms tick ~27x
+	 * past the FWDGT window and the idle bridge would watchdog-reset.
+	 * Re-derive the 50 ms period from the live clock (same math as init). */
+	uint32_t reload = (SystemCoreClock / 20u) - 1u;
+	if (reload > SysTick_LOAD_RELOAD_Msk) reload = SysTick_LOAD_RELOAD_Msk;
+	SysTick->LOAD = reload;
+	SysTick->VAL  = 0u;
 	return ok;
 }
 
@@ -470,6 +483,12 @@ void bridge_power_tick(void)
 {
 	if (bridge_i2c_reinit_pending != 0u && bridge_transport_i2c_hw_init() == BRIDGE_HW_OK) {
 		bridge_i2c_reinit_pending = 0u;
+	}
+
+	if (s_clock_relock_pending != 0u && bridge_clock_restore_after_deepsleep()) {
+		s_clock_relock_pending = 0u;
+		/* APB1 moved: re-derive the I2C0 timing for the new clock. */
+		bridge_i2c_reinit_pending = 1u;
 	}
 
 	if (s_lp_pending_mode == 0u) return;
@@ -546,9 +565,10 @@ void bridge_power_tick(void)
 		}
 
 		pmu_to_deepsleepmode(PMU_LDO_LOWPOWER, WFI_CMD);
-		/* ponytail: a failed relock leaves the part on IRC8M (see
-		 * bridge_core_clock_matches telemetry); no retry. */
-		(void)bridge_clock_restore_after_deepsleep();
+		/* A failed relock leaves the part on IRC8M (see the
+		 * bridge_core_clock_matches telemetry); the restore already
+		 * re-sized SysTick for that clock and later ticks retry it. */
+		if (!bridge_clock_restore_after_deepsleep()) s_clock_relock_pending = 1u;
 		/* A successful init also calls fault_reset_loop_mark_healthy()
 		 * (RTC_BKP7 = 0), so every wake resets the consecutive-fault
 		 * counter.  Benign: the wake proves the transports came back. */
