@@ -829,7 +829,7 @@ ZTEST(gd32_bridge_ota, test_get_state_surfaces_err_cause)
  *
  * A power cut mid-erase/program used to leave metadata still describing
  * the target slot as a valid image with its OLD len/CRC -- and the
- * bootloader's CRC walk (boot_main.c) then read half-programmed 72-bit
+ * bootloader's CRC walk (src/boot/boot_decide.c) then read half-programmed 72-bit
  * doublewords, the one concretely reachable flash-ECC NMI in this
  * design.  BEGIN must commit a generation that clears the target's
  * slot_valid bit and zeroes its len/CRC BEFORE arming the erase. */
@@ -1094,7 +1094,7 @@ ZTEST(gd32_bridge_ota, test_divergence_second_begin_targets_non_running_slot)
 	              "ROLLBACK to a slot demoted by BEGIN must be refused (gh#36)");
 
 	/* Step 4: model the bootloader's fallback divergence directly
-	 * (boot_main.c:117-124, #754): the newest record names
+	 * (src/boot/boot_decide.c, #754): the newest record names
 	 * TEST_OTHER_SLOT active while this build keeps running
 	 * TEST_RUNNING_SLOT.  The demoted, half-erased slot is NOT valid,
 	 * so the record's valid bit covers only the running slot. */
@@ -1428,7 +1428,7 @@ static void drive_to_verified(void)
 
 /* Case 1: divergent, newest on REC0.  REC0 (counter 9) names
  * TEST_OTHER_SLOT; REC1 (counter 8, older) names TEST_RUNNING_SLOT -- the
- * shape the bootloader's newest-first fallback (boot_main.c:117-124,
+ * shape the bootloader's newest-first fallback (src/boot/boot_decide.c,
  * #754) leaves behind when REC0's slot fails validation and it boots
  * REC1's slot instead.  meta_commit must preserve REC1 (it is what is
  * keeping the part alive), not the higher counter.  This FAILS before the
