@@ -42,6 +42,17 @@ signed release or rebuild from the tagged source (`README.md`). A `.sig` that
 fails to verify, or a `sha256sum -c` failure, means stop: re-download, and if it
 still fails do not flash. Never flash an image whose checksum you have not run.
 
+### Metadata region layout
+
+The metadata region is 8192 bytes (`0x2000`) at `0x08008000`, four 2 KB flash
+pages. Record 0 sits at `0x08008000` and record 1 at `0x08008800`; the
+remaining pages are unused and stay erased (`0xFF`). The release asset
+`ota-meta-rec0.bin` is only the 44-byte record 0 (slot A active, struct
+version 2, written by `tools/gen_ota_metadata.py`), not the whole region. Erase
+`0x08008000..0x0800A000` first, then write the 44 bytes at `0x08008000`;
+everything else in the region is then `0xFF`, which is the intended state.
+Record 1 must stay erased so record 0 wins.
+
 ## 2. Path A: external SWD probe (J-Link or OpenOCD)
 
 Connect the probe to the GD32 SWDIO/SWCLK on the module's programming header
@@ -80,7 +91,8 @@ A recovered board is functional without them; they are a factory step.
 ## 3. Path B: host-driven SWD from the V2N A55
 
 The SoM routes the GD32 SWDIO/SWCLK (and NRST) back to SoC pads, so the Linux
-side can act as the SWD probe with no external hardware. The public alp-sdk
+side can act as the SWD probe with no external hardware: SWDIO on P70, SWCLK
+on P71, NRST on P74 (open-drain, shared with the PMIC), driven by bit-bang. The public alp-sdk
 repository documents the pin routing and carries a working SWD master:
 `chips/gd32_swd/` (driver) and `examples/v2n/v2n-gd32-swd-flash/` (example and
 README with the resolved pads). Use it, or any SWD master on those pads, to:
