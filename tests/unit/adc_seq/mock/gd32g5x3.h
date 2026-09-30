@@ -46,6 +46,8 @@ typedef void (*mock_hook_t)(void);
  * before the mock marks interrupts disabled. */
 void     mock_irq_set_lock_hook(uint32_t locks_until_hook, mock_hook_t hook);
 uint32_t mock_irq_get_primask(void);
+/* bridge_irq_lock() entries since the last mock_seq_reset(). */
+extern uint32_t mock_irq_lock_count;
 /* First/last index of an event matching name (+ periph if periph !=
  * MOCK_ANY_PERIPH), searched over [from, mock_seq_n).  Returns -1 if
  * not found. */
@@ -390,7 +392,9 @@ void       fac_stop(void);
 void       fac_fixed_data_write(int16_t data);
 int16_t    fac_fixed_data_read(void);
 FlagStatus fac_flag_get(uint32_t flag);
-void       mock_fac_set_init_hook(mock_dsp_init_hook_t hook);
+/* Raise FAC_FLAG_X0BFF once `writes` more fac_fixed_data_write() calls have run. */
+void mock_fac_set_write_hook_after(uint32_t writes);
+void mock_fac_set_init_hook(mock_dsp_init_hook_t hook);
 
 /* ------------------------------------------------------------------ */
 /* FFT -- the spectrum block. The completion flag is controllable so */
