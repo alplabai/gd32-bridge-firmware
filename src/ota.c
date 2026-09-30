@@ -461,8 +461,11 @@ static bool meta_commit(uint8_t  active_slot,
 
 	/* Refuse before erasing: a u32 wrap to 0 would rank the new record BELOW the old
 	 * one (bootloader compares a->counter >= b->counter, not field-updatable), so the
-	 * part would boot the old image.  Same ceiling gen_ota_metadata.py enforces. */
-	if (rec.counter >= OTA_META_COUNTER_LIMIT) {
+	 * part would boot the old image.  A TRIAL-setting write (flags != 0) must leave one
+	 * increment for the confirm write that clears TRIAL, so it refuses one step earlier;
+	 * the confirm itself may land up to OTA_META_COUNTER_LIMIT.  Same ceiling
+	 * gen_ota_metadata.py enforces. */
+	if (rec.counter >= (flags != 0u ? OTA_META_COUNTER_LIMIT - 1u : OTA_META_COUNTER_LIMIT)) {
 		return false;
 	}
 

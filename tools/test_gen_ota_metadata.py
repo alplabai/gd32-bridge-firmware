@@ -197,12 +197,12 @@ class CliExitStatus(unittest.TestCase):
         self.assertFalse(out_path.exists())
 
     def test_counter_above_wrap_ceiling_exits_two(self) -> None:
-        # A counter past 0xFFFFFFF0 leaves meta_commit no room to increment.
+        # Past 0xFFFFFFEE there is no room for a TRIAL commit plus its confirm.
         img = _image(GOOD_MSP, GOOD_RESET, pad_to=64)
-        proc, out_path = self._run(img, extra_args=["--counter", "0xFFFFFFF1"])
+        proc, out_path = self._run(img, extra_args=["--counter", "0xFFFFFFEF"])
         self.assertEqual(proc.returncode, 2)
         self.assertFalse(out_path.exists())
-        proc, out_path = self._run(img, extra_args=["--counter", "0xFFFFFFF0"])
+        proc, out_path = self._run(img, extra_args=["--counter", "0xFFFFFFEE"])
         self.assertEqual(proc.returncode, 0)
 
     def test_fw_version_above_u24_exits_two(self) -> None:

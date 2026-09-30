@@ -1654,11 +1654,36 @@ ZTEST(gd32_bridge_ota, test_meta_commit_refuses_counter_wrap)
 	              "COMMIT must refuse to wrap the metadata counter");
 
 	ota_meta_record_t rec;
-	if (read_meta_at(OTA_META_REC0, &rec)) {
-		zassert_true(rec.counter >= 0xFFFFFFEFu, "counter must never wrap below the old value");
-	}
+	zassert_true(read_meta_at(OTA_META_REC0, &rec), "refusal must not erase a page");
+	zassert_equal(rec.counter, 0xFFFFFFEFu, "REC0 must be untouched");
 	zassert_true(read_meta_at(OTA_META_REC1, &rec), "refusal must not erase a page");
 	zassert_equal(rec.counter, 0xFFFFFFF0u, "REC1 holds BEGIN's demotion record at the limit");
+}
+
+/* No demotion (inactive slot invalid): a TRIAL COMMIT at 0xFFFFFFEF would land 0xFFFFFFF0
+ * and leave the confirm no increment (TRIAL stuck, FWDGT reverts).  COMMIT must refuse
+ * up front; a TRIAL record at 0xFFFFFFEE must still confirm. */
+ZTEST(gd32_bridge_ota, test_trial_commit_leaves_room_for_confirm)
+{
+	reset_model();
+
+	const uint32_t len[2] = { 4096u, 4096u };
+	write_meta_record(
+	    OTA_META_REC0, 0xFFFFFFEFu, TEST_RUNNING_SLOT, (uint8_t)(1u << TEST_RUNNING_SLOT), len);
+	drive_to_verified();
+	uint8_t reply[8];
+	size_t  rlen = 0u;
+	zassert_equal(ota_dispatch(CMD_OTA_COMMIT, NULL, 0u, reply, sizeof(reply), &rlen),
+	              STATUS_IO,
+	              "TRIAL COMMIT must refuse when the confirm would have no room");
+
+	reset_model();
+	write_meta_record_flags(
+	    OTA_META_REC0, 0xFFFFFFEFu, TEST_RUNNING_SLOT, 0x03u, len, OTA_META_FLAG_TRIAL);
+	ota_boot_init();
+	ota_note_frame();
+	ota_confirm_tick();
+	zassert_equal(g_reset_calls, 1u, "confirm must land at the headroom below the limit");
 }
 
 /* Case 5: neither record names the running slot (both name

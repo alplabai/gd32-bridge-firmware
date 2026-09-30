@@ -210,12 +210,14 @@ def _u32_counter(s: str) -> int:
     """argparse type for --counter: a plain range error, not a struct.error
     traceback out of struct.pack() at the bottom of build_record()."""
     v = int(s, 0)
-    # Ceiling below u32 max: firmware meta_commit refuses to increment at/above
-    # OTA_META_COUNTER_LIMIT, because a wrap to 0 ranks below the old record.
-    if not (0 <= v <= 0xFFFFFFF0):
+    # OTA_META_COUNTER_LIMIT - 2: a TRIAL commit (+1) and its confirm (+1) must both fit
+    # under the limit, else firmware meta_commit refuses (a u32 wrap ranks below the old
+    # record).
+    ceiling = 0xFFFFFFF0 - 2
+    if not (0 <= v <= ceiling):
         raise argparse.ArgumentTypeError(
-            f"--counter {v} is out of range; must be 0..{0xFFFFFFF0} "
-            f"(above that meta_commit cannot increment without wrapping)")
+            f"--counter {v} is out of range; must be 0..{ceiling} "
+            f"(above that a TRIAL commit and its confirm cannot both increment without wrapping)")
     return v
 
 

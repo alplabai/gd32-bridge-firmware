@@ -99,9 +99,10 @@ enum { OTA_SLOT_A = 0u, OTA_SLOT_B = 1u };
  * instead of repeating the bench incident. */
 #define OTA_META_FLAG_TRIAL 0x01u
 
-/* meta_commit refuses to increment a record at or above this counter, so it can never
- * wrap (a wrap ranks below the old record). tools/gen_ota_metadata.py caps --counter
- * at this value too. */
+/* meta_commit refuses to increment a record at or above this counter (one step earlier
+ * for a TRIAL-setting write, which must leave room for its confirm), so it can never
+ * wrap (a wrap ranks below the old record).  tools/gen_ota_metadata.py caps --counter
+ * at this value minus 2 so a provisioned record can still run a full OTA. */
 #define OTA_META_COUNTER_LIMIT 0xFFFFFFF0u
 
 typedef struct {
