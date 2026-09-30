@@ -162,10 +162,11 @@ static inline bool ota_slot_base_checked(uint8_t slot, uint32_t *base_out)
  * (or bumping the version) would strand every deployed bootloader; the
  * record layout therefore stays v2 byte for byte.
  *
- * The floor is the version of the newest image known to have run: the
- * active slot's fw_version once it is CONFIRMED (TRIAL cleared), or -- while
- * the active slot is still an unconfirmed TRIAL -- the other slot's, i.e.
- * the image it replaced.  A new commit or a rollback below it is refused.
+ * The floor is the active slot's fw_version once it is CONFIRMED (TRIAL
+ * cleared), or -- while the active slot is still an unconfirmed TRIAL -- the
+ * other slot's, i.e. the image it replaced (not necessarily a confirmed one:
+ * after a rollback or a commit made from a TRIAL image it may be an
+ * unconfirmed or rejected image, and its version is the floor until confirm).  A new commit or a rollback below it is refused.
  * Raising it therefore needs no extra write: it rises when the TRIAL flag
  * is cleared.  fw_version 0 means "unknown" (legacy 8-byte BEGIN) and gives
  * floor 0, i.e. unconstrained; an unknown-version image cannot pass while a

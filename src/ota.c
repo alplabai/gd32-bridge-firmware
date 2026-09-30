@@ -1075,7 +1075,8 @@ static gd32_bridge_status_t h_rollback(void)
 	/* Anti-rollback floor (#49): never roll back below it.  Checked before
 	 * the flash walk below; changes nothing on refusal. */
 	if (cur.fw_version[other] < ota_version_floor(&cur)) {
-		s_err = BRIDGE_OTA_ERR_BELOW_FLOOR;
+		s_state = OTA_ST_ERROR; /* ROLLBACK is accepted from ERROR; OTA_ABORT clears */
+		s_err   = BRIDGE_OTA_ERR_BELOW_FLOOR;
 		return STATUS_INVAL;
 	}
 	/* A metadata valid-bit records what was true when that image was

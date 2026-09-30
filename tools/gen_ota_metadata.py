@@ -217,6 +217,18 @@ def _u32_counter(s: str) -> int:
     return v
 
 
+def _u24_version(s: str) -> int:
+    """argparse type for --fw-version. The wire declares (maj<<16)|(min<<8)|pat,
+    so at most 0xFFFFFF; a larger factory value becomes an anti-rollback floor
+    no OTA_COMMIT can reach (#49) and locks OTA out for the life of the part."""
+    v = int(s, 0)
+    if not (0 <= v <= 0xFFFFFF):
+        raise argparse.ArgumentTypeError(
+            f"--fw-version {v:#x} is out of range; must be (maj<<16)|(min<<8)|pat, "
+            f"0..0xFFFFFF")
+    return v
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--slot-image", type=pathlib.Path, required=True,
@@ -225,8 +237,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="which slot the image is flashed to (default: a)")
     parser.add_argument("--counter", type=_u32_counter, default=1,
                         help="metadata generation counter (default: 1 = factory)")
-    parser.add_argument("--fw-version", type=lambda s: int(s, 0), default=0,
-                        help="packed firmware version for the record (default: 0 = unknown)")
+    parser.add_argument("--fw-version", type=_u24_version, default=0,
+                        help="packed firmware version (maj<<16)|(min<<8)|pat, 0..0xFFFFFF, "
+                             "as OTA_BEGIN declares it; it becomes the anti-rollback floor "
+                             "(default: 0 = unknown, no floor)")
     parser.add_argument("--out", type=pathlib.Path, required=True,
                         help="output record binary (flash to 0x08008000)")
     args = parser.parse_args(argv)

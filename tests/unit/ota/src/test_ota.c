@@ -3098,6 +3098,15 @@ ZTEST(gd32_bridge_ota, test_rollback_floor_confirmed_refused_trial_allowed)
 	zassert_equal(ota_dispatch(CMD_OTA_ROLLBACK, NULL, 0u, reply, sizeof reply, &rlen),
 	              STATUS_INVAL);
 	zassert_equal(g_reset_calls, 0u, "refused rollback must not reset");
+	rlen = 0u;
+	zassert_equal(ota_dispatch(CMD_OTA_GET_STATE, NULL, 0u, reply, sizeof reply, &rlen), STATUS_OK);
+	zassert_equal(reply[5], (uint8_t)BRIDGE_OTA_ERR_BELOW_FLOOR, "err attributes the floor");
+	ota_meta_record_t after;
+	uint32_t          which;
+	zassert_true(meta_current_for_test(&after, &which));
+	zassert_equal(after.active_slot, TEST_RUNNING_SLOT, "record unchanged");
+	zassert_equal(after.counter, 7u, "record unchanged");
+	rlen = 0u;
 
 	/* Running 2.0.0 still TRIAL: the floor is the replaced image (1.0.0),
 	 * so reverting to it is exactly what must stay possible. */
@@ -3114,4 +3123,34 @@ ZTEST(gd32_bridge_ota, test_rollback_floor_confirmed_refused_trial_allowed)
 	                     crc);
 	zassert_equal(ota_dispatch(CMD_OTA_ROLLBACK, NULL, 0u, reply, sizeof reply, &rlen), STATUS_OK);
 	zassert_equal(g_reset_calls, 1u, "rollback from an unconfirmed trial proceeds");
+}
+
+ZTEST(gd32_bridge_ota, test_commit_while_active_trial_floor_is_other_slot)
+{
+	uint32_t len[2]        = { 0u, 0u };
+	uint32_t crc[2]        = { 0u, 0u };
+	len[TEST_RUNNING_SLOT] = TEST_IMG_LEN;
+	/* Running 2.0.0 still TRIAL, replaced image 1.0.0: floor = 1.0.0. */
+	reset_model();
+	plant_versioned_meta(OTA_META_REC0,
+	                     5u,
+	                     TEST_RUNNING_SLOT,
+	                     (uint8_t)(1u << TEST_RUNNING_SLOT),
+	                     OTA_META_FLAG_TRIAL,
+	                     0x00020000u,
+	                     0x00010000u,
+	                     len,
+	                     crc);
+	zassert_equal(commit_cycle_versioned(1u, 5u, 0u), STATUS_OK, "1.5.0 >= floor 1.0.0");
+	reset_model();
+	plant_versioned_meta(OTA_META_REC0,
+	                     5u,
+	                     TEST_RUNNING_SLOT,
+	                     (uint8_t)(1u << TEST_RUNNING_SLOT),
+	                     OTA_META_FLAG_TRIAL,
+	                     0x00020000u,
+	                     0x00010000u,
+	                     len,
+	                     crc);
+	zassert_equal(commit_cycle_versioned(0u, 9u, 0u), STATUS_INVAL, "0.9.0 < floor 1.0.0");
 }

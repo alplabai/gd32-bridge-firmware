@@ -196,6 +196,18 @@ class CliExitStatus(unittest.TestCase):
         self.assertEqual(proc.returncode, 2)
         self.assertFalse(out_path.exists())
 
+    def test_fw_version_above_u24_exits_two(self) -> None:
+        # maj<<24 packing would set a floor no OTA_COMMIT can reach (#49).
+        proc, out_path = self._run(_image(GOOD_MSP, GOOD_RESET, pad_to=64),
+                                    extra_args=["--fw-version", "0x01000000"])
+        self.assertEqual(proc.returncode, 2)
+        self.assertFalse(out_path.exists())
+
+    def test_fw_version_max_u24_accepted(self) -> None:
+        proc, _ = self._run(_image(GOOD_MSP, GOOD_RESET, pad_to=64),
+                             extra_args=["--fw-version", "0xFFFFFF"])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
