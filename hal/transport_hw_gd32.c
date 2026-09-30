@@ -203,7 +203,7 @@ static void spi_dma_init(void)
 	dma_init(BRIDGE_SPI_DMA, BRIDGE_SPI_RX_DMA_CH, &d);
 	dma_circulation_disable(BRIDGE_SPI_DMA, BRIDGE_SPI_RX_DMA_CH);
 	dma_memory_to_memory_disable(BRIDGE_SPI_DMA, BRIDGE_SPI_RX_DMA_CH);
-	dmamux_synchronization_disable(DMAMUX_MULTIPLEXER_CH3);
+	dmamux_synchronization_disable(BRIDGE_SPI_RX_DMAMUX_CH);
 	dma_flag_clear(BRIDGE_SPI_DMA, BRIDGE_SPI_RX_DMA_CH, DMA_FLAG_ERR);
 	dma_interrupt_enable(BRIDGE_SPI_DMA, BRIDGE_SPI_RX_DMA_CH, DMA_INT_ERR);
 
@@ -225,7 +225,7 @@ static void spi_dma_init(void)
 	dma_init(BRIDGE_SPI_DMA, BRIDGE_SPI_TX_DMA_CH, &d);
 	dma_circulation_disable(BRIDGE_SPI_DMA, BRIDGE_SPI_TX_DMA_CH);
 	dma_memory_to_memory_disable(BRIDGE_SPI_DMA, BRIDGE_SPI_TX_DMA_CH);
-	dmamux_synchronization_disable(DMAMUX_MULTIPLEXER_CH2);
+	dmamux_synchronization_disable(BRIDGE_SPI_TX_DMAMUX_CH);
 	dma_flag_clear(BRIDGE_SPI_DMA, BRIDGE_SPI_TX_DMA_CH, DMA_FLAG_ERR);
 	dma_interrupt_enable(BRIDGE_SPI_DMA, BRIDGE_SPI_TX_DMA_CH, DMA_INT_ERR);
 	nvic_irq_enable(

@@ -43,16 +43,17 @@
  * DMA0 CH2(TX)/CH3(RX) mirror GigaDevice's own
  * SPI_master_slave_fullduplex_dma reference; DMA0 CH0 is owned by ADC
  * stream 0 (hal/gd32/adc_stream.c) -- keep clear of it.  Requests route through
- * the DMAMUX (SPI1_RX = mux id 12, SPI1_TX = mux id 13).  NOTE: the DMAMUX
- * multiplexer channels used by hal/transport_hw_gd32.c
- * (DMAMUX_MULTIPLEXER_CH2/CH3) are hardcoded to match DMA0 CH2/CH3, not
- * derived from the BRIDGE_SPI_*_DMA_CH macros -- change them together. */
-#define BRIDGE_SPI_DMA        DMA0
-#define BRIDGE_SPI_DMA_RCU    RCU_DMA0
-#define BRIDGE_SPI_TX_DMA_CH  DMA_CH2
-#define BRIDGE_SPI_RX_DMA_CH  DMA_CH3
-#define BRIDGE_SPI_TX_DMA_REQ DMA_REQUEST_SPI1_TX
-#define BRIDGE_SPI_RX_DMA_REQ DMA_REQUEST_SPI1_RX
+ * the DMAMUX (SPI1_RX = mux id 12, SPI1_TX = mux id 13).  The DMAMUX
+ * multiplexer channel N serves DMA0 CH(N), so the BRIDGE_SPI_*_DMAMUX_CH
+ * macros below must move together with BRIDGE_SPI_*_DMA_CH. */
+#define BRIDGE_SPI_DMA          DMA0
+#define BRIDGE_SPI_DMA_RCU      RCU_DMA0
+#define BRIDGE_SPI_TX_DMA_CH    DMA_CH2
+#define BRIDGE_SPI_RX_DMA_CH    DMA_CH3
+#define BRIDGE_SPI_TX_DMA_REQ   DMA_REQUEST_SPI1_TX
+#define BRIDGE_SPI_RX_DMA_REQ   DMA_REQUEST_SPI1_RX
+#define BRIDGE_SPI_TX_DMAMUX_CH DMAMUX_MULTIPLEXER_CH2
+#define BRIDGE_SPI_RX_DMAMUX_CH DMAMUX_MULTIPLEXER_CH3
 
 /* GD32-side pins (alp-sdk gd32-io-mcu-map.tsv): SCLK PA9, MISO PA10,
  * MOSI PB15, NSS/CS PA8. */
