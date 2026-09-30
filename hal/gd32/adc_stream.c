@@ -182,6 +182,7 @@ int bridge_hw_adc_stream_begin(uint8_t stream_id, uint8_t channel, uint32_t samp
 	if (channel >= ADC_CHANNEL_MAP_COUNT) return BRIDGE_HW_ERR_RANGE;
 	if (sample_rate_hz == 0u) return BRIDGE_HW_ERR_INVAL;
 	if (sample_rate_hz > BRIDGE_ADC_STREAM_RATE_MAX_HZ) return BRIDGE_HW_ERR_RANGE;
+	if (!adc_ref_ok) return BRIDGE_HW_ERR_IO; /* dead/implausible reference */
 
 	adc_stream_state_t *s = &adc_streams[stream_id];
 	if (s->in_use) return BRIDGE_HW_ERR_INVAL; /* stream already running */

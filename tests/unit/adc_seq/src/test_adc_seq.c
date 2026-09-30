@@ -84,6 +84,7 @@ static void adc_seq_reset(void)
 	mock_adc_set_flag(BRIDGE_ADC_CH0_PERIPH, ADC_FLAG_EOC, RESET);
 	adc_vref_mv        = ADC_VREF_MV;
 	adc_vrefint_code   = 0u;
+	adc_ref_ok         = true;
 	mock_adc_eoc_stuck = false;
 }
 
@@ -1427,6 +1428,34 @@ ZTEST(gd32_adc_seq, test_vref_measure_forces_12bit_no_oversample_and_recalibrate
 	zassert_true(ena > res && ena > ovs, "converter re-enabled after the format");
 	zassert_true(trg > ena, "first trigger only after re-enable + calibration");
 	zassert_equal(adc_vref_mv, 1800u, "code 2730 -> 1800 mV");
+}
+
+/* Dead/floating VREFP: a raw VREFINT code outside the plausible window (or an
+ * EOC timeout) must latch adc_ref_ok = false so analog ops fail loud with
+ * BRIDGE_HW_ERR_IO instead of returning garbage millivolts as STATUS_OK. */
+ZTEST(gd32_adc_seq, test_dead_reference_fails_analog_ops_loud)
+{
+	uint16_t mv = 0u;
+
+	adc_seq_reset();
+	mock_adc_set_routine_data(2730u);
+	zassert_true(adc_vref_measure(), "measurement completes");
+	zassert_true(adc_ref_ok, "code 2730 (1800 mV) is plausible");
+
+	adc_seq_reset();
+	mock_adc_set_routine_data(1000u); /* 4914 mV: outside 1700..1900 */
+	zassert_true(adc_vref_measure(), "measurement completes");
+	zassert_false(adc_ref_ok, "out-of-window code is a dead reference");
+	zassert_equal(bridge_hw_adc_read(BRIDGE_ADC_CH0, 1u, &mv), BRIDGE_HW_ERR_IO, "read fails loud");
+	zassert_equal(bridge_hw_adc_stream_begin(0u, BRIDGE_ADC_CH0, 1000u),
+	              BRIDGE_HW_ERR_IO,
+	              "stream begin fails loud");
+
+	adc_seq_reset();
+	mock_adc_eoc_stuck = true;
+	zassert_false(adc_vref_measure(), "EOC timeout");
+	zassert_false(adc_ref_ok, "failed measurement is not ok");
+	mock_adc_eoc_stuck = false;
 }
 
 ZTEST_SUITE(gd32_adc_seq, NULL, NULL, NULL, NULL, NULL);

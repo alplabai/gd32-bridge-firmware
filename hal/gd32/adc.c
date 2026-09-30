@@ -74,13 +74,27 @@ uint16_t adc_vrefint_code = 0u;
 /* VREFINT code -> reference mV.  The ADC converts against the reference,
  * so code = VREFINT / Vref * 4095  =>  Vref = VREFINT * 4095 / code.
  * Rounded; anything outside the sane window (or code 0) falls back. */
+static uint32_t adc_vref_mv_raw(uint32_t code)
+{
+	return ((uint32_t)ADC_VREFINT_TYP_MV * ADC_FULL_SCALE + code / 2u) / code;
+}
+
 uint16_t adc_vref_mv_from_code(uint32_t code)
 {
 	if (code == 0u) return ADC_VREF_MV;
-	uint32_t mv = ((uint32_t)ADC_VREFINT_TYP_MV * ADC_FULL_SCALE + code / 2u) / code;
+	uint32_t mv = adc_vref_mv_raw(code);
 	if (mv < ADC_VREF_MIN_MV || mv > ADC_VREF_MAX_MV) return ADC_VREF_MV;
 	return (uint16_t)mv;
 }
+
+/* Analog-reference verdict, latched by adc_vref_measure().  True only when
+ * the VREFINT measurement completed AND its raw (unclamped) code maps into
+ * [ADC_VREF_MIN_MV, ADC_VREF_MAX_MV].  A floating or dead VREFP lands
+ * outside that window (or times out), and the wire protocol has no other
+ * fault signal, so ADC_READ / ADC stream / DAC_SET / DAC_GET return
+ * BRIDGE_HW_ERR_IO while this is false instead of garbage millivolts.
+ * Diagnostic: SWD-read `adc_ref_ok`. */
+bool adc_ref_ok = false;
 
 /* Publish the (code, mV) pair as one unit so a preempting reader never sees
  * a new mV paired with a stale code. */
@@ -89,14 +103,18 @@ static void adc_vref_publish(uint16_t code, uint16_t mv)
 	const uint32_t st = bridge_irq_lock();
 	adc_vrefint_code  = code;
 	adc_vref_mv       = mv;
+	adc_ref_ok        = false;
+	if (code != 0u) {
+		const uint32_t raw = adc_vref_mv_raw(code);
+		adc_ref_ok         = (raw >= ADC_VREF_MIN_MV && raw <= ADC_VREF_MAX_MV);
+	}
 	bridge_irq_unlock(st);
 }
 
-/* Sample VREFINT (ADC0 channel 18) 16x and latch adc_vref_mv.  Runs at boot
- * (before any request path) or from base level with
- * ADC0 claimed; never call it from an ISR -- the EOC waits are unbounded by
+/* Sample VREFINT (ADC0 channel 18) 16x and latch adc_vref_mv.  Runs once at
+ * boot, before any request path; never call it from an ISR -- the EOC waits are unbounded by
  * ADC_READ_ISR_BUDGET_US.  Returns false (adc_vref_mv left unchanged,
- * adc_vrefint_code = 0) if EOC never came. */
+ * adc_vrefint_code = 0) if EOC never came.  Also latches adc_ref_ok. */
 bool adc_vref_measure(void)
 {
 	enum { N = 16u };
@@ -436,6 +454,7 @@ int bridge_hw_adc_read(uint8_t channel, uint8_t samples, uint16_t *mv)
 	if (mv == 0) return BRIDGE_HW_ERR_INVAL;
 	if (samples == 0u) return BRIDGE_HW_ERR_INVAL;
 	if (channel >= ADC_CHANNEL_MAP_COUNT) return BRIDGE_HW_ERR_RANGE;
+	if (!adc_ref_ok) return BRIDGE_HW_ERR_IO; /* dead/implausible reference */
 
 	const gd32_adc_ch_t *ch = &adc_channels_map[channel];
 

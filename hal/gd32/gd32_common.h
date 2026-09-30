@@ -451,9 +451,10 @@ void            adc_shared_clock_init(void);                  /* adc.c */
 bool            adc_periph_boot_init(uint32_t periph);        /* adc.c */
 extern uint16_t adc_vrefint_code;                             /* adc.c */
 extern uint16_t adc_vref_mv;                                  /* adc.c */
+extern bool     adc_ref_ok;                                   /* adc.c, boot verdict */
 uint16_t        adc_vref_mv_from_code(uint32_t vrefint_code); /* adc.c, pure */
-bool            adc_vref_measure(void);              /* adc.c, boot / base level, ADC0 claimed */
-bool            adc_periph_restore(uint32_t periph); /* adc.c */
+bool            adc_vref_measure(void);                       /* adc.c, once at boot */
+bool            adc_periph_restore(uint32_t periph);          /* adc.c */
 
 /* Bounded RSTCLB/CLB calibration cycle (UM Rev1.2 17.4.1, p.424-425),
  * shared with the stream path: any ADCON toggle invalidates the

@@ -438,8 +438,8 @@ void bridge_hw_init(void)
 
 	/* I/O compensation cell (gh#66): set SYSCFG_CPSCTL.CPS_EN (bit 0,
 	 * UM Rev1.2 p.68-69 §1.7.15, offset 0x3C) and wait for CPS_RDY
-	 * (bit 8, read-only) with a BOUNDED spin in the same shape as the
-	 * VREFRDY wait below -- recording the verdict, never hanging.
+	 * (bit 8, read-only) with a BOUNDED spin -- recording the verdict,
+	 * never hanging.
 	 * The cell controls output commutation slew (tfall/trise) across
 	 * the whole I/O ring: the SPI pads' speed-10 class spans tR/tF
 	 * 4.0-6.6 ns across supply alone (Datasheet Rev2.0 p.130 Table
@@ -655,7 +655,8 @@ void bridge_hw_init(void)
      * Whether VREFP is board-tied to VDDA is the separate hardware
      * question tracked in #81 (meter on the VREFP ball); this change
      * does not resolve it.  VREFRDY has no meaning outside internal
-     * reference mode, so there is no ready flag to gate analog ops on.
+     * reference mode, so analog ops are gated on adc_ref_ok instead (the
+     * VREFINT plausibility verdict above).
      */
 
 	/* ADC bring-up: configure 8 pads as analog, enable all four ADC
@@ -684,8 +685,9 @@ void bridge_hw_init(void)
 	(void)adc_periph_boot_init(ADC1);
 	(void)adc_periph_boot_init(ADC2);
 	(void)adc_periph_boot_init(ADC3);
-	/* Derive the real ADC/DAC reference from VREFINT (#59); a failed
-	 * measurement keeps the 1.8 V default. */
+	/* Derive the real ADC/DAC reference from VREFINT (#59) and latch
+	 * adc_ref_ok: a timeout or an out-of-window code (dead/floating
+	 * VREFP) makes ADC/DAC ops return BRIDGE_HW_ERR_IO. */
 	(void)adc_vref_measure();
 	for (size_t i = 0; i < ADC_CHANNEL_MAP_COUNT; ++i) {
 		adc_sample_cycles_cache[i]    = ADC_DEFAULT_SAMPLE_CYCLES;
