@@ -271,13 +271,6 @@ target_compile_options(test_power_wake PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_power_wake PRIVATE ztest_shim)
 add_test(NAME power_wake COMMAND test_power_wake)
 
-# --- lptimer_tick: LPTIMER tick arithmetic (gh#65) ------------------------
-add_executable(test_lptimer_tick lptimer_tick/src/test_lptimer_tick.c)
-target_include_directories(test_lptimer_tick PRIVATE ${FW}/hal/gd32)
-target_compile_options(test_lptimer_tick PRIVATE ${TEST_FLAGS})
-target_link_libraries(test_lptimer_tick PRIVATE ztest_shim)
-add_test(NAME lptimer_tick COMMAND test_lptimer_tick)
-
 # --- timer_sync: production timer-sync/PWM guard + register-call sequence ---
 #
 # Links the REAL hal/gd32/timer_sync.c and pwm.c against a minimal vendor-API

@@ -8,8 +8,8 @@ Decision record. Document numbers refer to the GD32G553 User Manual Rev1.2
 A 50 ms SysTick already retires the main-loop `__WFI()` in Run/Sleep
 (gh#54), and `hal/gd32/power.c` stops it across Deep-sleep entry. An LPTIMER
 tick would add a periodic wake inside Deep-sleep, which changes power and
-wake semantics, so it is not enabled. `hal/gd32/lptimer_tick.h` holds the
-host-tested period maths for when it is: at IRC32K/16 = 2 kHz (500 us per
+wake semantics, so it is not enabled. If it ever is, mind the period maths:
+at IRC32K/16 = 2 kHz (500 us per
 count) a 2 ms tick is CARL = 3, not 3999 (3999 is 2 s). IRC32K is 28..36 kHz
 (DS p.125, Table 4-23), so every timeout derived from the tick must tolerate
 -12.5 % / +14.3 %. The RTC wakeup timer already in `power.c` gives the same
