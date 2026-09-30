@@ -8,13 +8,25 @@
 # repository secret GD32_RELEASE_SIGNING_KEY (a PEM private key) is configured.
 # The key is held by the maintainer; this repo never contains key material.
 # Without the secret the release is still published, marked UNSIGNED in its
-# notes, and carries SHA256SUMS only (integrity, not provenance).  Verify
-# against the public key Alp publishes as
-# keys/alp_release_signing_ecdsa_p256.pub.pem in the alp-sdk repository.
+# notes, and carries SHA256SUMS only (integrity, not provenance).  Signatures
+# are verified against the public key Alp publishes as
+# keys/alp_release_signing_ecdsa_p256.pub.pem in the alp-sdk repository
+# (pinned commit + SHA-256 below), so a mismatched secret fails the release.
 #
 # The vendor-library fetch below mirrors ci.yml's `gd32 backend build` job
 # exactly (same mirror, same tag, same pinned commit).  When ci.yml's
 # GD32_VENDOR_PIN moves, move it here in the same change.
+#
+# Release images MUST link the IRC8M clock override (the stock HXTAL SystemInit
+# hangs before main() on this SoM).  The override is staged from alp-sdk at the
+# pinned commit ALP_SDK_PIN and its SHA-256 is checked; the build never passes
+# BRIDGE_ALLOW_STOCK_SYSTEM_INIT, and tools/check_clock_override.py fails the
+# release if the linked images are not the override.  Move ALP_SDK_PIN and the
+# two SHA-256 values together, deliberately.
+#
+# Two jobs: `build` runs untrusted vendor CMake with a read-only token and no
+# secrets; `publish` holds contents:write and the signing key and never runs a
+# checkout or a build.
 
 name: release
 
@@ -23,17 +35,26 @@ on:
     tags: ['v*']
 
 permissions:
-  contents: write
+  contents: read
+
+env:
+  # Pinned alp-sdk commit that carries the IRC8M clock override and the
+  # published release-signing public key.
+  ALP_SDK_PIN: ff136d79278c85596c1af1ce9c63ed2ae8efe9fd
+  OVERRIDE_SHA256: 38ea3d9fe2d30afb5270f81622acb652d169f42cf0cc597424eab9ba9330a8fb
+  PUBKEY_SHA256: 664071ba6297240579dc46105931bff2fccf688802290757b872d677c98d4650
 
 jobs:
-  release:
-    name: build, checksum, sign (if keyed), publish
+  build:
+    name: build and checksum
     runs-on: ubuntu-latest
-    env:
-      SIGNING_KEY: ${{ secrets.GD32_RELEASE_SIGNING_KEY }}
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
 
@@ -58,9 +79,20 @@ jobs:
       - name: stage the vendor wrapper CMakeLists
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/gd32_vendor/gd32_firmware_library"
+          mkdir -p "$RUNNER_TEMP/gd32_vendor/gd32_firmware_library/overrides"
           cp ci/gd32_vendor_wrapper/CMakeLists.txt \
              "$RUNNER_TEMP/gd32_vendor/gd32_firmware_library/CMakeLists.txt"
+
+      # The stock SystemInit() hangs before main() on this SoM; a release must
+      # carry alp-sdk's IRC8M override.  Fail here if it cannot be fetched or
+      # is not the reviewed file.
+      - name: stage the IRC8M clock override (pinned alp-sdk commit)
+        run: |
+          set -euo pipefail
+          dst="$RUNNER_TEMP/gd32_vendor/gd32_firmware_library/overrides/system_gd32g5x3.c"
+          curl -fsSL --retry 3 -o "$dst" \
+            "https://raw.githubusercontent.com/alplabai/alp-sdk/$ALP_SDK_PIN/vendors/gd32_firmware_library/overrides/system_gd32g5x3.c"
+          echo "$OVERRIDE_SHA256  $dst" | sha256sum -c -
 
       - name: fetch the GD32 vendor firmware library (pinned commit, via tag)
         timeout-minutes: 5
@@ -77,13 +109,15 @@ jobs:
             exit 1
           fi
 
+      # No BRIDGE_ALLOW_STOCK_SYSTEM_INIT: CMakeLists.txt fails at configure
+      # time if the override is missing from the vendor dir.
       - name: build the partitioned set (bootloader, slot A, slot B)
         run: |
           cmake -B build-gd32 -S . \
             -DCMAKE_TOOLCHAIN_FILE=toolchain/arm-none-eabi.cmake \
             -DBRIDGE_HAL_BACKEND=gd32 \
             -DBRIDGE_OTA_PARTITIONED=ON \
-            -DBRIDGE_ALLOW_STOCK_SYSTEM_INIT=ON \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
             -DGD32_VENDOR_DIR="$RUNNER_TEMP/gd32_vendor/gd32_firmware_library"
           cmake --build build-gd32 -j"$(nproc)"
 
@@ -92,9 +126,19 @@ jobs:
           cmake -B build-gd32-flash -S . \
             -DCMAKE_TOOLCHAIN_FILE=toolchain/arm-none-eabi.cmake \
             -DBRIDGE_HAL_BACKEND=gd32 \
-            -DBRIDGE_ALLOW_STOCK_SYSTEM_INIT=ON \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
             -DGD32_VENDOR_DIR="$RUNNER_TEMP/gd32_vendor/gd32_firmware_library"
           cmake --build build-gd32-flash -j"$(nproc)"
+
+      - name: verify the linked images use the IRC8M clock override
+        run: |
+          set -euo pipefail
+          python3 tools/check_clock_override.py build-gd32/compile_commands.json \
+            build-gd32/gd32-bootloader.elf \
+            build-gd32/gd32-bridge-slot-a.elf \
+            build-gd32/gd32-bridge-slot-b.elf
+          python3 tools/check_clock_override.py build-gd32-flash/compile_commands.json \
+            build-gd32-flash/gd32-bridge.elf
 
       - name: verify core-fault vector ownership
         run: |
@@ -108,6 +152,9 @@ jobs:
         run: |
           set -euo pipefail
           v="$GITHUB_REF_NAME"
+          # major<<16|minor<<8|patch, as ota.c packs OTA_BEGIN's version.
+          IFS=. read -r maj min pat < <(head -n1 firmware-version.txt | tr -d '[:space:]')
+          fwv=$(( (maj << 16) | (min << 8) | pat ))
           mkdir dist
           cp build-gd32/gd32-bootloader.bin    "dist/gd32-bridge-$v-bootloader.bin"
           cp build-gd32/gd32-bridge-slot-a.bin "dist/gd32-bridge-$v-slot-a.bin"
@@ -116,12 +163,38 @@ jobs:
           # Factory A/B record, slot A active: flashed to 0x08008000.
           python3 tools/gen_ota_metadata.py \
             --slot-image build-gd32/gd32-bridge-slot-a.bin \
+            --fw-version "$fwv" \
             --out "dist/gd32-bridge-$v-ota-meta-rec0.bin"
           (cd dist && sha256sum -- *.bin > SHA256SUMS && cat SHA256SUMS)
 
-      # Only signs when the maintainer-held key is configured as a secret.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: sign (if keyed) and publish
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: dist
+          path: dist
+
+      # Signatures are checked against alp-sdk's PUBLISHED public key (pinned
+      # commit + SHA-256), not a key derived from the secret, so a secret that
+      # does not match the published key fails the release instead of shipping
+      # assets customers cannot verify.  The key is in this step's env only.
       - name: sign (detached ecdsa-p256-sha256), only if a key is configured
         id: sign
+        env:
+          SIGNING_KEY: ${{ secrets.GD32_RELEASE_SIGNING_KEY }}
         run: |
           set -euo pipefail
           if [ -z "${SIGNING_KEY:-}" ]; then
@@ -129,15 +202,17 @@ jobs:
             echo "::warning::GD32_RELEASE_SIGNING_KEY not configured -- publishing UNSIGNED"
             exit 0
           fi
+          pub="$RUNNER_TEMP/alp_release_signing_ecdsa_p256.pub.pem"
+          curl -fsSL --retry 3 -o "$pub" \
+            "https://raw.githubusercontent.com/alplabai/alp-sdk/$ALP_SDK_PIN/keys/alp_release_signing_ecdsa_p256.pub.pem"
+          echo "$PUBKEY_SHA256  $pub" | sha256sum -c -
           key="$RUNNER_TEMP/release-signing.pem"
           umask 077
           printf '%s\n' "$SIGNING_KEY" > "$key"
           trap 'rm -f "$key"' EXIT
-          openssl pkey -in "$key" -pubout -out "$RUNNER_TEMP/release-signing.pub.pem"
           for f in dist/*.bin dist/SHA256SUMS; do
             openssl dgst -sha256 -sign "$key" -out "$f.sig" "$f"
-            openssl dgst -sha256 -verify "$RUNNER_TEMP/release-signing.pub.pem" \
-              -signature "$f.sig" "$f"
+            openssl dgst -sha256 -verify "$pub" -signature "$f.sig" "$f"
           done
           echo "signed=true" >> "$GITHUB_OUTPUT"
 

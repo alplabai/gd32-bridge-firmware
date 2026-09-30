@@ -5,7 +5,7 @@ factory. If its image is lost or corrupt, restore it from the prebuilt images
 attached to a GitHub Release of this repository; no compiler or vendor library
 is needed. This document is the public recovery path. Factory provisioning
 (option bytes, per-unit records, manufacturing fixtures) is separate and
-internal.
+internal; a factory-provisioned unit needs the extra step in section 2.
 
 ## 1. Get and verify the images
 
@@ -31,6 +31,9 @@ sha256sum -c SHA256SUMS
 openssl dgst -sha256 -verify PUBKEY -signature SHA256SUMS.sig SHA256SUMS
 ```
 
+`SHA256SUMS` plus its signature is enough: `sha256sum -c` then covers every
+`.bin`. The per-file `.sig` files are extra and need not be checked one by one.
+
 The release notes state `UNSIGNED` when no signing key was configured for that
 build. Then only the checksums apply, and they prove integrity, not who built it.
 
@@ -41,6 +44,14 @@ and power the module. Metadata must be erased before it is written: both
 records (`0x08008000` and `0x08008800`) must be cleared, because the bootloader
 and application pick the record with the highest counter and a stale second
 record would keep an old slot active.
+
+A factory-provisioned unit may have a write-protection (WP) area over the
+bootloader and a security level (SPC) set. Then mass erase is refused and SWD
+cannot write main flash, so `loadbin` below fails. First clear the WP area,
+then demote SPC from low to no protection with a full mass erase, then
+power-cycle the module, and only then follow the steps below. NEVER set SPC to
+high level protection (`0xCC33`): it cannot be undone. A part that was never
+provisioned needs none of this.
 
 J-Link Commander (device: GD32G553):
 
@@ -64,17 +75,18 @@ A recovered board is functional without them; they are a factory step.
 ## 3. Path B: host-driven SWD from the V2N A55
 
 The SoM routes the GD32 SWDIO/SWCLK (and NRST) back to SoC pads, so the Linux
-side can act as the SWD probe with no external hardware. Generically:
+side can act as the SWD probe with no external hardware. The public alp-sdk
+repository documents the pin routing and carries a working SWD master:
+`chips/gd32_swd/` (driver) and `examples/v2n/v2n-gd32-swd-flash/` (example and
+README with the resolved pads). Use it, or any SWD master on those pads, to:
 
 1. Copy the verified `.bin` files to the V2N.
-2. Run a host-side SWD master (for example OpenOCD with a sysfs/libgpiod
-   bit-bang adapter) on the SoC pads wired to GD32 SWDIO/SWCLK, with NRST
-   under host control.
-3. Perform the same erase-then-program sequence and addresses as Path A.
+2. Halt the GD32 and erase `0x08008000..0x0800A000` (then sectors as needed).
+3. Program the same files at the same addresses as Path A.
 4. Release NRST and let the GD32 boot.
 
-The SoC pad names, pin-mux setup and the ready-made scripts used on Alp's
-bench are internal and are not part of this repository.
+A generic OpenOCD sysfs/libgpiod bit-bang adapter on those pads is untested
+here; prefer the alp-sdk example.
 
 ## 4. Verify
 
