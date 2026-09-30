@@ -1644,8 +1644,9 @@ static void dispatch_chain_open_from_fake_hook(void *context)
 	    probe->link, CMD_ADC_DSP_CHAIN_OPEN, NULL, 0u, reply, sizeof(reply), &probe->reply_len);
 }
 
-/* SPI's CS EXTI can pre-empt an I2C dispatch while the outer handler is in
- * the HAL.  Use the non-atomic chain allocator from #139 as the probe: the
+/* The guard is direction-agnostic: a nested dispatch (either link) can arrive
+ * while the outer handler is in the HAL.  Use the non-atomic chain allocator
+ * from #139 as the probe: the
  * nested request must fail before a second HAL call, and the guard must
  * release when the outer request returns. */
 ZTEST(protocol, test_nested_dispatch_returns_busy_without_hal_mutation)

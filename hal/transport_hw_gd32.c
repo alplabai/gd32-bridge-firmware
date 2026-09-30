@@ -130,8 +130,8 @@ static volatile bool     spi_dma_error_pending;
 static volatile uint32_t spi_dma_rx_arm_fail_count;
 static volatile uint32_t spi_dma_tx_arm_fail_count;
 
-/* DMA error IRQs deliberately run below CS EXTI (priority 1).  The CS-rising
- * handler also samples ERRIF directly, so an error that arrives just before
+/* DMA error IRQs (priority 3) deliberately run below both transport IRQs, CS
+ * EXTI (priority 2) and I2C EV/ER (priority 1).  The CS-rising
  * CS release cannot be hidden behind the pending lower-priority IRQ. */
 static void spi_dma_latch_error(dma_channel_enum channel)
 {
@@ -369,7 +369,7 @@ void BRIDGE_SPI_CS_EXTI_HANDLER(void)
 	 * GPIO source in this design is PA9 = SPI1_SCK
 	 * (hal/bridge_board_config.h:58-59).  An enabled EXTI line 9 at
 	 * the 25 MHz link rate would assert on every SCK edge into this
-	 * vector at BRIDGE_CS_IRQ_PRIO 1 -- not unbounded re-entry, a hard
+	 * vector at BRIDGE_CS_IRQ_PRIO 2 -- not unbounded re-entry, a hard
 	 * LIVELOCK that takes the bridge off the bus.  PA9 must never be
 	 * given an EXTI line in any configuration that ships.  (If the
 	 * CRC-and-dispatch work is ever deferred out of this ISR, use

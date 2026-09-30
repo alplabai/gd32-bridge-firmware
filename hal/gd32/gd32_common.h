@@ -142,7 +142,7 @@ typedef struct {
 	 * the lap ISR had not counted yet at sample time (write index
 	 * regressed while lap_count stood still) and add the missed lap
 	 * to that consumer's total.  Two consumers, two trackers, no
-	 * shared mutation: the read path (stream_read, CS-EXTI prio 1)
+	 * shared mutation: the read path (stream_read, CS-EXTI prio 2)
 	 * owns rd_pos; the base-level pump owns pump_pos.  Either may
 	 * observe the same missed lap and correct its OWN total; neither
 	 * writes lap_count, so the count the ISR eventually makes can

@@ -397,8 +397,8 @@ int bridge_hw_adc_read(uint8_t channel, uint8_t samples, uint16_t *mv)
 
 	/* Claim the shared converter for the whole sequence below (#133).
      * The stream scan above only covers stream-vs-read; this is what
-     * covers read-vs-read and read-vs-stream_begin across the CS-EXTI
-     * pre-emption of I2C0_EV.  Every return path from here down must
+     * covers read-vs-read and read-vs-stream_begin across the
+     * I2C0_EV pre-emption of CS-EXTI.  Every return path from here down must
      * release. */
 	if (!adc_periph_claim(ch->periph)) return BRIDGE_HW_ERR_BUSY;
 

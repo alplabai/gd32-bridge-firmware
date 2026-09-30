@@ -484,7 +484,7 @@ int bridge_hw_pwm_configure(uint8_t  channel,
      * disagreement.
      *
      * The section covers a disable, one RMW, an enable and a store --
-     * short enough for the CS-EXTI handler's deadline (bridge_critical.h).
+     * short enough for the transport ISRs' deadlines (bridge_critical.h).
      *
      * The reverse cross-transport sequence is excluded by #19's atomic
      * protocol-dispatch guard: an I2C request that pre-empts CS-EXTI is

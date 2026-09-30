@@ -113,9 +113,18 @@
  * runs, on a bus shared with the DA9292 PMIC and the OPTIGA, so its ISR must
  * never wait behind a long SPI protocol_dispatch().  The reverse hazard -- the
  * I2C ISR pre-empting an SPI dispatch and re-entering protocol_dispatch() --
- * is closed by the atomic dispatch guard in src/protocol.c (a nested request
- * answers STATUS_BUSY, host retries). bridge_hw_init() selects PRE2_SUB2,
- * which provides two preemption bits and two subpriority bits. CS EXTI framing
+ * is closed by the atomic dispatch guard in src/protocol.c: the nested I2C
+ * request answers STATUS_BUSY.  The host does NOT retry transparently today:
+ * the alp-sdk gd32g553 driver surfaces it to the caller as ALP_ERR_BUSY
+ * (only gd32g553_init() has a retry loop).
+ * Cost moved onto SPI: the CS EXTI handler, including the CS-rising TX
+ * re-arm in hal/transport_hw_gd32.c, can now be delayed by a whole I2C-side
+ * dispatch (about 37 ms for CMD_ADC_READ, longer for FMC/OTA work over I2C).
+ * Before, only PRIMASK windows delayed it.  In that window the host's reply
+ * read can see the previous staged reply or a TX underrun; recovery relies on
+ * STATUS_SEQ being negotiated plus the host's re-read ladder.
+ * bridge_hw_init() selects PRE2_SUB2, which provides two preemption bits and
+ * two subpriority bits. CS EXTI framing
  * is at BRIDGE_CS_IRQ_PRIO, I2C EV/ER at BRIDGE_I2C_IRQ_PRIO, and ADC-stream
  * DMA lap FTF at BRIDGE_ADC_STREAM_LAP_IRQ_PRIO. The periodic
  * SysTick (gh#54) runs at the lowest priority (raw 15 = preemption 3,

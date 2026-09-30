@@ -256,7 +256,7 @@ int bridge_hw_power_mode_set(uint8_t mode, uint32_t wake_bitmap, uint32_t wake_a
 	 * GD32G5.  Mode 2 (deep-sleep) + mode 3 (standby) are LATCHED
 	 * here and executed from bridge_power_tick() at base level (gh#63)
 	 * -- never entered from this call, because this call runs INSIDE a
-	 * transport ISR (CS-EXTI prio 1 / I2C-EV prio 2) and:
+	 * transport ISR (I2C-EV prio 1 / CS-EXTI prio 2) and:
 	 *
 	 *   - an ARMv8-M WFI only ends on an exception that can preempt
 	 *     the current execution priority, so a deep-sleep entered

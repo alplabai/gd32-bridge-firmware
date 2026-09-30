@@ -433,7 +433,7 @@ int bridge_hw_adc_stream_begin(uint8_t stream_id, uint8_t channel, uint32_t samp
  *
  * The DMA full-transfer-finish (FTF) interrupt flag is cleared as
  * part of step 3's "reinit DMA module": ROVF and a ring-wrap FTF can
- * land in the same window (this handler runs at CS-EXTI priority 1,
+ * land in the same window (this handler runs at CS-EXTI priority 2,
  * which blocks the priority-3 lap ISR -- DMA0/1_Channel0_IRQHandler
  * above -- from running until this function returns), and a FTF left
  * pending here fires the instant this handler returns, bumping
@@ -570,7 +570,7 @@ int bridge_hw_adc_stream_read(uint8_t   stream_id,
 	 * stream.
 	 *
 	 * Snapshot lap_count BEFORE the write index: this read runs in
-	 * the CS-EXTI handler (prio 1), which outprioritises the lap ISR
+	 * the CS-EXTI handler (prio 2), which outprioritises the lap ISR
 	 * (prio 3), so a reload landing mid-read leaves lap_count
 	 * momentarily one short while w has already wrapped small.  The
 	 * regression correction in adc_stream_total_written() absorbs
@@ -713,7 +713,7 @@ int bridge_hw_adc_stream_end(uint8_t stream_id)
  * hardware filter (first-lit 2026-07-13: coeffs in X1, DEEP X0 input
  * buffer, clip-enabled, batch or streaming).  The FILTER runs in the
  * base-level pump (bridge_hw_dsp_pump, from the main WFI loop) -- NEVER
- * in stream_read (the CS-EXTI transport handler, prio 1) where even a
+ * in stream_read (the CS-EXTI transport handler, prio 2) where even a
  * modest FIR would add link latency (the 2026-06-04 link-rot mode).
  *
  * There is ONE FAC block, so ONE filter stream may be bound at a time;
