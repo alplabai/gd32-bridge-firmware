@@ -1,0 +1,164 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Tag-triggered release: builds the partitioned recovery set and the full-flash
+# image, checksums them, and publishes them as GitHub Release assets so a
+# bridge can be recovered without a toolchain (Refs #166; docs/RECOVERY.md).
+#
+# Signing: detached ECDSA-P256/SHA-256 signatures are produced ONLY when the
+# repository secret GD32_RELEASE_SIGNING_KEY (a PEM private key) is configured.
+# The key is held by the maintainer; this repo never contains key material.
+# Without the secret the release is still published, marked UNSIGNED in its
+# notes, and carries SHA256SUMS only (integrity, not provenance).  Verify
+# against the public key Alp publishes as
+# keys/alp_release_signing_ecdsa_p256.pub.pem in the alp-sdk repository.
+#
+# The vendor-library fetch below mirrors ci.yml's `gd32 backend build` job
+# exactly (same mirror, same tag, same pinned commit).  When ci.yml's
+# GD32_VENDOR_PIN moves, move it here in the same change.
+
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: build, checksum, sign (if keyed), publish
+    runs-on: ubuntu-latest
+    env:
+      SIGNING_KEY: ${{ secrets.GD32_RELEASE_SIGNING_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # A release whose tag disagrees with firmware-version.txt would ship
+      # binaries whose embedded version differs from the release name.
+      - name: tag must match firmware-version.txt
+        run: |
+          set -euo pipefail
+          want="v$(head -n1 firmware-version.txt | tr -d '[:space:]')"
+          if [ "$GITHUB_REF_NAME" != "$want" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match firmware-version.txt ($want)"
+            exit 1
+          fi
+
+      - name: install the Arm GNU toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            gcc-arm-none-eabi libnewlib-arm-none-eabi
+          arm-none-eabi-gcc --version | head -1
+
+      - name: stage the vendor wrapper CMakeLists
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/gd32_vendor/gd32_firmware_library"
+          cp ci/gd32_vendor_wrapper/CMakeLists.txt \
+             "$RUNNER_TEMP/gd32_vendor/gd32_firmware_library/CMakeLists.txt"
+
+      - name: fetch the GD32 vendor firmware library (pinned commit, via tag)
+        timeout-minutes: 5
+        env:
+          GD32_VENDOR_PIN: 4a0258080c45227a31fd4c32fa2c4860ba11c16a
+        run: |
+          set -euo pipefail
+          git clone --branch v1.5.0 --depth 1 \
+            https://github.com/alplabai/gd32g5x3-firmware-library.git \
+            "$RUNNER_TEMP/gd32_vendor/gd32_firmware_library/upstream"
+          actual="$(git -C "$RUNNER_TEMP/gd32_vendor/gd32_firmware_library/upstream" rev-parse HEAD)"
+          if [ "$actual" != "$GD32_VENDOR_PIN" ]; then
+            echo "::error::vendor firmware library HEAD is $actual, expected $GD32_VENDOR_PIN -- moved tag; refusing to build a release against it."
+            exit 1
+          fi
+
+      - name: build the partitioned set (bootloader, slot A, slot B)
+        run: |
+          cmake -B build-gd32 -S . \
+            -DCMAKE_TOOLCHAIN_FILE=toolchain/arm-none-eabi.cmake \
+            -DBRIDGE_HAL_BACKEND=gd32 \
+            -DBRIDGE_OTA_PARTITIONED=ON \
+            -DBRIDGE_ALLOW_STOCK_SYSTEM_INIT=ON \
+            -DGD32_VENDOR_DIR="$RUNNER_TEMP/gd32_vendor/gd32_firmware_library"
+          cmake --build build-gd32 -j"$(nproc)"
+
+      - name: build the full-flash image
+        run: |
+          cmake -B build-gd32-flash -S . \
+            -DCMAKE_TOOLCHAIN_FILE=toolchain/arm-none-eabi.cmake \
+            -DBRIDGE_HAL_BACKEND=gd32 \
+            -DBRIDGE_ALLOW_STOCK_SYSTEM_INIT=ON \
+            -DGD32_VENDOR_DIR="$RUNNER_TEMP/gd32_vendor/gd32_firmware_library"
+          cmake --build build-gd32-flash -j"$(nproc)"
+
+      - name: verify core-fault vector ownership
+        run: |
+          python3 tools/check_fault_vectors.py \
+            build-gd32/gd32-bootloader.elf \
+            build-gd32/gd32-bridge-slot-a.elf \
+            build-gd32/gd32-bridge-slot-b.elf \
+            build-gd32-flash/gd32-bridge.elf
+
+      - name: collect assets, generate the metadata record, checksum
+        run: |
+          set -euo pipefail
+          v="$GITHUB_REF_NAME"
+          mkdir dist
+          cp build-gd32/gd32-bootloader.bin    "dist/gd32-bridge-$v-bootloader.bin"
+          cp build-gd32/gd32-bridge-slot-a.bin "dist/gd32-bridge-$v-slot-a.bin"
+          cp build-gd32/gd32-bridge-slot-b.bin "dist/gd32-bridge-$v-slot-b.bin"
+          cp build-gd32-flash/gd32-bridge.bin  "dist/gd32-bridge-$v-full-flash.bin"
+          # Factory A/B record, slot A active: flashed to 0x08008000.
+          python3 tools/gen_ota_metadata.py \
+            --slot-image build-gd32/gd32-bridge-slot-a.bin \
+            --out "dist/gd32-bridge-$v-ota-meta-rec0.bin"
+          (cd dist && sha256sum -- *.bin > SHA256SUMS && cat SHA256SUMS)
+
+      # Only signs when the maintainer-held key is configured as a secret.
+      - name: sign (detached ecdsa-p256-sha256), only if a key is configured
+        id: sign
+        run: |
+          set -euo pipefail
+          if [ -z "${SIGNING_KEY:-}" ]; then
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::GD32_RELEASE_SIGNING_KEY not configured -- publishing UNSIGNED"
+            exit 0
+          fi
+          key="$RUNNER_TEMP/release-signing.pem"
+          umask 077
+          printf '%s\n' "$SIGNING_KEY" > "$key"
+          trap 'rm -f "$key"' EXIT
+          openssl pkey -in "$key" -pubout -out "$RUNNER_TEMP/release-signing.pub.pem"
+          for f in dist/*.bin dist/SHA256SUMS; do
+            openssl dgst -sha256 -sign "$key" -out "$f.sig" "$f"
+            openssl dgst -sha256 -verify "$RUNNER_TEMP/release-signing.pub.pem" \
+              -signature "$f.sig" "$f"
+          done
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+
+      - name: publish the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SIGNED: ${{ steps.sign.outputs.signed }}
+        run: |
+          set -euo pipefail
+          if [ "$SIGNED" = "true" ]; then
+            status="Signed: each asset has a detached ECDSA-P256/SHA-256 signature (.sig); verify per docs/RECOVERY.md."
+          else
+            status="UNSIGNED: no release-signing key was configured for this build. Checksums (SHA256SUMS) prove integrity only, not provenance. Do not treat these assets as Alp-attested."
+          fi
+          {
+            echo "GD32 bridge firmware $GITHUB_REF_NAME - recovery images."
+            echo
+            echo "$status"
+            echo
+            echo "Flashing guide: docs/RECOVERY.md (in this repository at this tag)."
+            echo "Flash addresses: bootloader 0x08000000, metadata record 0x08008000, slot A 0x0800A000, slot B 0x08040000."
+          } > notes.md
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "$GITHUB_REF_NAME" --notes-file notes.md --verify-tag
