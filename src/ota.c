@@ -983,6 +983,16 @@ static gd32_bridge_status_t h_commit(void)
 		s_err   = BRIDGE_OTA_ERR_NOT_TRIAL_CAPABLE;
 		return STATUS_INVAL;
 	}
+	/* Anti-rollback floor (#49): refuse an image older than the newest
+	 * confirmed one.  STATUS_INVAL + a dedicated s_err, active slot
+	 * untouched, like the trial-marker refusal above. */
+	ota_meta_record_t floor_rec;
+	uint32_t          floor_which;
+	if (meta_current(&floor_rec, &floor_which) && s_fw_version < ota_version_floor(&floor_rec)) {
+		s_state = OTA_ST_ERROR;
+		s_err   = BRIDGE_OTA_ERR_BELOW_FLOOR;
+		return STATUS_INVAL;
+	}
 	if (!meta_commit(s_inactive,
 	                 true,
 	                 s_fw_version /* 0 = legacy BEGIN, unknown */,
@@ -1061,6 +1071,13 @@ static gd32_bridge_status_t h_rollback(void)
 	if ((cur.slot_valid & (uint8_t)(1u << other)) == 0u || cur.img_len[other] == 0u ||
 	    cur.img_len[other] > OTA_SLOT_SIZE) {
 		return STATUS_INVAL; /* no valid fallback slot */
+	}
+	/* Anti-rollback floor (#49): never roll back below it.  Checked before
+	 * the flash walk below; changes nothing on refusal. */
+	if (cur.fw_version[other] < ota_version_floor(&cur)) {
+		s_state = OTA_ST_ERROR; /* ROLLBACK is accepted from ERROR; OTA_ABORT clears */
+		s_err   = BRIDGE_OTA_ERR_BELOW_FLOOR;
+		return STATUS_INVAL;
 	}
 	/* A metadata valid-bit records what was true when that image was
 	 * committed, not a guarantee that its flash is still intact.  The

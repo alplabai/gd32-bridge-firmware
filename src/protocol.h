@@ -363,6 +363,9 @@ typedef enum {
 	                                     * that demotes the stale target
 	                                     * slot's valid bit before erase
 	                                     * failed */
+	BRIDGE_OTA_ERR_BELOW_FLOOR        = 0x0A, /* COMMIT/ROLLBACK refused: the
+	                                     * image's version is below the
+	                                     * anti-rollback floor (#49) */
 } gd32_bridge_ota_err_t;
 
 /*

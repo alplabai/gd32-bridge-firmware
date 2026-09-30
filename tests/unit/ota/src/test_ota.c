@@ -398,8 +398,12 @@ static void write_meta_record_flags(uint32_t       addr,
 	rec.active_slot    = active_slot;
 	rec.slot_valid     = slot_valid;
 	rec.flags          = flags;
-	rec.img_len[0]     = img_len[0];
-	rec.img_len[1]     = img_len[1];
+	/* Versions unknown (0 = no anti-rollback floor); the 0xFF fill would
+	 * otherwise read as a 0xFFFFFFFF floor. */
+	rec.fw_version[0] = 0u;
+	rec.fw_version[1] = 0u;
+	rec.img_len[0]    = img_len[0];
+	rec.img_len[1]    = img_len[1];
 	rec.rec_crc32 = ota_crc32(0u, (const uint8_t *)&rec, offsetof(ota_meta_record_t, rec_crc32));
 	memcpy(_host_ptr(addr), &rec, sizeof(rec));
 }
@@ -2918,4 +2922,235 @@ ZTEST(gd32_bridge_ota, test_boot_init_last_resort_composition_gates_without_prem
 	zassert_true(read_meta_at(OTA_META_REC1, &rec1));
 	zassert_equal(rec1.active_slot, TEST_RUNNING_SLOT);
 	zassert_equal(rec1.flags, 0u);
+}
+
+/* ---- anti-rollback floor (#49 fix b) ------------------------------- */
+
+static void plant_versioned_meta(uint32_t       addr,
+                                 uint32_t       counter,
+                                 uint8_t        active,
+                                 uint8_t        slot_valid,
+                                 uint8_t        flags,
+                                 uint32_t       ver_active,
+                                 uint32_t       ver_other,
+                                 const uint32_t len[2],
+                                 const uint32_t crc[2])
+{
+	ota_meta_record_t rec;
+	memset(&rec, 0, sizeof(rec));
+	rec.magic                   = OTA_META_MAGIC;
+	rec.struct_version          = OTA_META_STRUCT_VER;
+	rec.counter                 = counter;
+	rec.active_slot             = active;
+	rec.slot_valid              = slot_valid;
+	rec.flags                   = flags;
+	rec.fw_version[active]      = ver_active;
+	rec.fw_version[active ^ 1u] = ver_other;
+	rec.img_len[0]              = len[0];
+	rec.img_len[1]              = len[1];
+	rec.img_crc32[0]            = crc[0];
+	rec.img_crc32[1]            = crc[1];
+	rec.rec_crc32 = ota_crc32(0u, (const uint8_t *)&rec, offsetof(ota_meta_record_t, rec_crc32));
+	memcpy(_host_ptr(addr), &rec, sizeof(rec));
+}
+
+ZTEST(gd32_bridge_ota, test_version_floor_derivation)
+{
+	ota_meta_record_t r;
+	memset(&r, 0, sizeof r);
+	r.active_slot            = OTA_SLOT_A;
+	r.fw_version[OTA_SLOT_A] = 0x00020000u;
+	r.fw_version[OTA_SLOT_B] = 0x00010000u;
+	zassert_equal(ota_version_floor(&r), 0x00020000u, "confirmed: floor = active version");
+	r.flags = OTA_META_FLAG_TRIAL;
+	zassert_equal(ota_version_floor(&r), 0x00010000u, "trial: floor = replaced image's version");
+	r.active_slot = 7u;
+	zassert_equal(ota_version_floor(&r), 0u, "corrupt active_slot: no floor");
+	memset(&r, 0, sizeof r);
+	r.active_slot = OTA_SLOT_B;
+	zassert_equal(ota_version_floor(&r), 0u, "unknown (0) versions: unconstrained");
+}
+
+/* BEGIN (v0.7 form, with the version triple) ... COMMIT of a marker image. */
+static gd32_bridge_status_t commit_cycle_versioned(uint8_t maj, uint8_t min, uint8_t pat)
+{
+	uint8_t  img[TEST_IMG_LEN] = { 0 };
+	uint32_t other_base;
+	zassert_true(ota_slot_base_checked(TEST_OTHER_SLOT, &other_base));
+	put32(&img[0], 0x20010000u);
+	put32(&img[4], (other_base + 8u) | 1u);
+	const uint8_t  magic[16] = OTA_TRIAL_MARKER_MAGIC_BYTES;
+	const uint16_t sv        = OTA_TRIAL_MARKER_STRUCT_VER;
+	const uint16_t cap       = OTA_TRIAL_CAP_CONFIRM;
+	memcpy(&img[TEST_MARKER_OFFSET], magic, sizeof magic);
+	img[TEST_MARKER_OFFSET + 16u] = (uint8_t)(sv & 0xFFu);
+	img[TEST_MARKER_OFFSET + 17u] = (uint8_t)(sv >> 8);
+	img[TEST_MARKER_OFFSET + 18u] = (uint8_t)(cap & 0xFFu);
+	img[TEST_MARKER_OFFSET + 19u] = (uint8_t)(cap >> 8);
+
+	uint8_t req[11];
+	wr_u32(&req[0], sizeof img);
+	wr_u32(&req[4], ota_crc32(0u, img, sizeof img));
+	req[8]  = maj;
+	req[9]  = min;
+	req[10] = pat;
+	uint8_t reply[8];
+	size_t  rlen = 0u;
+	zassert_equal(ota_dispatch(CMD_OTA_BEGIN, req, sizeof req, reply, sizeof reply, &rlen),
+	              STATUS_OK);
+	for (unsigned i = 0u; i < (OTA_SLOT_SIZE / OTA_PAGE_SIZE) + 4u; ++i) {
+		ota_erase_tick();
+	}
+	uint8_t wreply[8];
+	size_t  wrl = 0u;
+	zassert_equal(write_chunk(0u, img, sizeof img, wreply, &wrl), STATUS_OK);
+	rlen = 0u;
+	zassert_equal(ota_dispatch(CMD_OTA_VERIFY, NULL, 0u, reply, sizeof reply, &rlen), STATUS_OK);
+	rlen = 0u;
+	return ota_dispatch(CMD_OTA_COMMIT, NULL, 0u, reply, sizeof reply, &rlen);
+}
+
+static void plant_confirmed_running_v2(void)
+{
+	uint32_t len[2]        = { 0u, 0u };
+	uint32_t crc[2]        = { 0u, 0u };
+	len[TEST_RUNNING_SLOT] = TEST_IMG_LEN;
+	plant_versioned_meta(OTA_META_REC0,
+	                     5u,
+	                     TEST_RUNNING_SLOT,
+	                     (uint8_t)(1u << TEST_RUNNING_SLOT),
+	                     0u /* CONFIRMED */,
+	                     0x00020000u /* running = 2.0.0 */,
+	                     0u,
+	                     len,
+	                     crc);
+}
+
+ZTEST(gd32_bridge_ota, test_commit_below_floor_refused)
+{
+	reset_model();
+	plant_confirmed_running_v2();
+	zassert_equal(commit_cycle_versioned(1u, 9u, 9u), STATUS_INVAL, "1.9.9 < floor 2.0.0");
+	uint8_t reply[8];
+	size_t  rlen = 0u;
+	zassert_equal(ota_dispatch(CMD_OTA_GET_STATE, NULL, 0u, reply, sizeof reply, &rlen), STATUS_OK);
+	zassert_equal(reply[5], (uint8_t)BRIDGE_OTA_ERR_BELOW_FLOOR, "err attributes the floor");
+	zassert_equal(g_reset_calls, 0u, "refusal must not reset");
+	ota_meta_record_t after;
+	uint32_t          which;
+	zassert_true(meta_current_for_test(&after, &which));
+	zassert_equal(after.active_slot, TEST_RUNNING_SLOT, "active slot untouched");
+}
+
+ZTEST(gd32_bridge_ota, test_commit_unknown_version_refused_when_floor_set)
+{
+	reset_model();
+	plant_confirmed_running_v2();
+	zassert_equal(commit_cycle_versioned(0u, 0u, 0u), STATUS_INVAL, "unknown version < floor");
+}
+
+ZTEST(gd32_bridge_ota, test_commit_at_or_above_floor_accepted)
+{
+	reset_model();
+	plant_confirmed_running_v2();
+	zassert_equal(commit_cycle_versioned(2u, 0u, 0u), STATUS_OK, "== floor accepted");
+	reset_model();
+	plant_confirmed_running_v2();
+	zassert_equal(commit_cycle_versioned(2u, 0u, 1u), STATUS_OK, "> floor accepted");
+	ota_meta_record_t after;
+	uint32_t          which;
+	zassert_true(meta_current_for_test(&after, &which));
+	zassert_equal(after.fw_version[TEST_OTHER_SLOT], 0x00020001u, "version recorded");
+	zassert_equal(after.struct_version, OTA_META_STRUCT_VER, "record layout unchanged");
+}
+
+ZTEST(gd32_bridge_ota, test_commit_legacy_record_no_floor)
+{
+	/* A record with every version 0 (firmware before versions) has floor 0. */
+	reset_model();
+	uint32_t len[2]        = { 0u, 0u };
+	len[TEST_RUNNING_SLOT] = TEST_IMG_LEN;
+	write_meta_record_flags(OTA_META_REC0, 5u, TEST_RUNNING_SLOT, 0x01u, len, 0u);
+	zassert_equal(commit_cycle_versioned(0u, 0u, 1u), STATUS_OK);
+}
+
+ZTEST(gd32_bridge_ota, test_rollback_floor_confirmed_refused_trial_allowed)
+{
+	reset_model();
+	uint32_t len[2];
+	uint32_t crc[2];
+	crc[TEST_OTHER_SLOT]   = plant_bootable_image(TEST_OTHER_SLOT, &len[TEST_OTHER_SLOT]);
+	len[TEST_RUNNING_SLOT] = 0u;
+	crc[TEST_RUNNING_SLOT] = 0u;
+	uint8_t reply[8];
+	size_t  rlen = 0u;
+
+	/* CONFIRMED running 2.0.0, fallback 1.0.0: below the floor. */
+	plant_versioned_meta(OTA_META_REC0,
+	                     7u,
+	                     TEST_RUNNING_SLOT,
+	                     (uint8_t)(1u << TEST_OTHER_SLOT),
+	                     0u,
+	                     0x00020000u,
+	                     0x00010000u,
+	                     len,
+	                     crc);
+	zassert_equal(ota_dispatch(CMD_OTA_ROLLBACK, NULL, 0u, reply, sizeof reply, &rlen),
+	              STATUS_INVAL);
+	zassert_equal(g_reset_calls, 0u, "refused rollback must not reset");
+	rlen = 0u;
+	zassert_equal(ota_dispatch(CMD_OTA_GET_STATE, NULL, 0u, reply, sizeof reply, &rlen), STATUS_OK);
+	zassert_equal(reply[5], (uint8_t)BRIDGE_OTA_ERR_BELOW_FLOOR, "err attributes the floor");
+	ota_meta_record_t after;
+	uint32_t          which;
+	zassert_true(meta_current_for_test(&after, &which));
+	zassert_equal(after.active_slot, TEST_RUNNING_SLOT, "record unchanged");
+	zassert_equal(after.counter, 7u, "record unchanged");
+	rlen = 0u;
+
+	/* Running 2.0.0 still TRIAL: the floor is the replaced image (1.0.0),
+	 * so reverting to it is exactly what must stay possible. */
+	reset_model();
+	crc[TEST_OTHER_SLOT] = plant_bootable_image(TEST_OTHER_SLOT, &len[TEST_OTHER_SLOT]);
+	plant_versioned_meta(OTA_META_REC0,
+	                     7u,
+	                     TEST_RUNNING_SLOT,
+	                     (uint8_t)(1u << TEST_OTHER_SLOT),
+	                     OTA_META_FLAG_TRIAL,
+	                     0x00020000u,
+	                     0x00010000u,
+	                     len,
+	                     crc);
+	zassert_equal(ota_dispatch(CMD_OTA_ROLLBACK, NULL, 0u, reply, sizeof reply, &rlen), STATUS_OK);
+	zassert_equal(g_reset_calls, 1u, "rollback from an unconfirmed trial proceeds");
+}
+
+ZTEST(gd32_bridge_ota, test_commit_while_active_trial_floor_is_other_slot)
+{
+	uint32_t len[2]        = { 0u, 0u };
+	uint32_t crc[2]        = { 0u, 0u };
+	len[TEST_RUNNING_SLOT] = TEST_IMG_LEN;
+	/* Running 2.0.0 still TRIAL, replaced image 1.0.0: floor = 1.0.0. */
+	reset_model();
+	plant_versioned_meta(OTA_META_REC0,
+	                     5u,
+	                     TEST_RUNNING_SLOT,
+	                     (uint8_t)(1u << TEST_RUNNING_SLOT),
+	                     OTA_META_FLAG_TRIAL,
+	                     0x00020000u,
+	                     0x00010000u,
+	                     len,
+	                     crc);
+	zassert_equal(commit_cycle_versioned(1u, 5u, 0u), STATUS_OK, "1.5.0 >= floor 1.0.0");
+	reset_model();
+	plant_versioned_meta(OTA_META_REC0,
+	                     5u,
+	                     TEST_RUNNING_SLOT,
+	                     (uint8_t)(1u << TEST_RUNNING_SLOT),
+	                     OTA_META_FLAG_TRIAL,
+	                     0x00020000u,
+	                     0x00010000u,
+	                     len,
+	                     crc);
+	zassert_equal(commit_cycle_versioned(0u, 9u, 0u), STATUS_INVAL, "0.9.0 < floor 1.0.0");
 }

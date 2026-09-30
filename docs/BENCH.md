@@ -475,6 +475,21 @@ image has no wire path to do so; it is installable only via SWD/factory
 programming. None of steps 1-6 below apply to a markerless image: there
 is no COMMIT to observe TRIAL/watchdog behaviour after.
 
+**Anti-rollback floor (#49):** `CMD_OTA_COMMIT` of an image whose declared
+`fw_version` is below the newest confirmed image, and `CMD_OTA_ROLLBACK` to a
+slot below it, fail with `STATUS_INVAL` and `err = BRIDGE_OTA_ERR_BELOW_FLOOR`
+(`0x0A`); nothing is written and no reset happens. The floor is derived from
+the existing metadata record (no layout change): the active slot's version
+once confirmed, or the replaced image's version (not necessarily a confirmed one) while the
+active slot is still TRIAL (so rolling an unconfirmed image back stays
+possible). Version 0
+(legacy 8-byte `OTA_BEGIN`) is "unknown": floor 0, and such an image is refused
+once a non-zero floor exists. Not a security control -- the version is
+host-declared; recovery override is SWD/factory programming. Treat the
+declared version as irreversible: a host that mistakenly declares 255.255.255
+(`0xFFFFFF`) raises the floor permanently once that image confirms, and only
+SWD/factory reprovisioning recovers it.
+
 **Brick-risk precondition -- read before running step 2:** this step's
 bad-image case is the one place in this runbook that DELIBERATELY commits
 an image known not to come up. That is only safe with the NEW bootloader
