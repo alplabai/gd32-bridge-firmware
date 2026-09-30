@@ -542,3 +542,18 @@ target_compile_options(test_transport_hw_cs_exti PRIVATE ${TEST_FLAGS}
     -Wno-pointer-to-int-cast)
 target_link_libraries(test_transport_hw_cs_exti PRIVATE ztest_shim)
 add_test(NAME transport_hw_cs_exti COMMAND test_transport_hw_cs_exti)
+
+# --- main_boot_order: gh#304 main() calls ota_boot_init() in the right slot --
+#
+# Builds the REAL src/main.c (main renamed) against recording stubs; its
+# weak bridge_hw_init/bridge_hw_tick are overridden and the first tick
+# longjmps out of the endless loop.
+add_executable(test_main_boot_order
+    main_boot_order/src/test_main_boot_order.c
+    ${FW}/src/main.c
+)
+target_compile_definitions(test_main_boot_order PRIVATE main=fw_main)
+target_include_directories(test_main_boot_order PRIVATE ${FW}/src ${FW}/hal)
+target_compile_options(test_main_boot_order PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_main_boot_order PRIVATE ztest_shim)
+add_test(NAME main_boot_order COMMAND test_main_boot_order)
