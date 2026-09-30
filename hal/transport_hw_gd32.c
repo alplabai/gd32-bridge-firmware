@@ -980,6 +980,16 @@ void BRIDGE_I2C_EV_HANDLER(void)
 	}
 }
 
+/* Bench diagnostics for #315: how often each ER-vector cause fired.  Plain
+ * global (not static) so a SWD mem_rd can read it by map address. */
+struct bridge_i2c_err_diag {
+	uint32_t berr;
+	uint32_t ouerr;
+	uint32_t timeout;
+	uint32_t stuck_release;
+};
+struct bridge_i2c_err_diag bridge_i2c_err_diag;
+
 /* I2C0 error ISR: clear every bus error the enabled group (I2C_INT_ERR,
  * see bridge_transport_i2c_hw_init()) can raise, then resynchronise the
  * slave framing so the transport recovers instead of merely no longer
@@ -1008,10 +1018,12 @@ void BRIDGE_I2C_ER_HANDLER(void)
 	}
 	if (RESET != i2c_interrupt_flag_get(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_BERR)) {
 		i2c_interrupt_flag_clear(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_BERR);
+		bridge_i2c_err_diag.berr++;
 		bus_error = true;
 	}
 	if (RESET != i2c_interrupt_flag_get(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_OUERR)) {
 		i2c_interrupt_flag_clear(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_OUERR);
+		bridge_i2c_err_diag.ouerr++;
 		bus_error = true;
 	}
 	/* A timeout leaves the request/reply framing untrustworthy even though
@@ -1021,6 +1033,7 @@ void BRIDGE_I2C_ER_HANDLER(void)
 	 * error.  Sequence + escalation: bridge_i2c_timeout_service(). */
 	if (bridge_i2c_timeout_service(
 	        &i2c_recovery_ops, &bridge_i2c_timeout_recoveries, &bridge_i2c_reset_escalations)) {
+		bridge_i2c_err_diag.timeout++;
 		bus_error = true;
 	}
 
@@ -1149,6 +1162,7 @@ void bridge_transport_i2c_stuck_poll(void)
 	}
 	if (++i2c_sda_low_ticks < 2u) return; /* confirm across two ticks */
 	i2c_sda_low_ticks = 0u;
+	bridge_i2c_err_diag.stuck_release++;
 
 	/* Documented software reset (UM Rev1.2 p.1262 s28.3.5), bounded and
 	 * built on the same bridge_i2c_bus_release() the ER-vector TIMEOUT arm uses --
