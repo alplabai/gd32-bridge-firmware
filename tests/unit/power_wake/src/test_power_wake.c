@@ -9,6 +9,7 @@
 #include <zephyr/ztest.h>
 
 #include "bridge_hw.h"
+#include "gd32_common.h"
 #include "gd32g5x3.h"
 #include "power_wake.h"
 
@@ -159,6 +160,62 @@ ZTEST(power_wake, test_standby_entry_feeds_only_outside_a_trial)
 	zassert_equal(bridge_hw_power_mode_set(3u, 0u, 100u), BRIDGE_HW_OK);
 	bridge_power_tick();
 	zassert_equal(mock_fwdgt_feeds, 0u, "TRIAL: the counter is the bootloader's revert dog");
+}
+
+/* gh#12: Deep-sleep exit leaves CK_SYS on IRC8M; the restore must raise the
+ * wait states, lock the PLL, select PLLP and re-derive SystemCoreClock.  The
+ * mock "hardware" reports PLLSTB and SCSS=PLLP as already set. */
+ZTEST(power_wake, test_clock_restore_selects_pll_and_updates_core_clock)
+{
+	mock_power_reset();
+	FMC_WS                         = 0u;
+	RCU_CTL                        = RCU_CTL_PLLSTB;
+	mock_system_core_clock_updates = 0u;
+	SystemCoreClock                = PWM_TIMER_CLK_HZ;
+	/* SCSS reads back the selected source on silicon; model that. */
+	RCU_CFG0 = RCU_SCSS_PLLP;
+
+	zassert_true(bridge_clock_restore_after_deepsleep());
+	zassert_equal(FMC_WS & FMC_WS_WSCNT, 7u, "wait states left at 7 for the 216 MHz clock");
+	zassert_true((RCU_CTL & RCU_CTL_PLLEN) != 0u, "PLL re-enabled");
+	zassert_equal(RCU_CFG0 & RCU_CFG0_SCS, RCU_CKSYSSRC_PLLP, "PLLP selected");
+	zassert_equal(mock_system_core_clock_updates, 1u);
+	zassert_equal(bridge_core_clock_hz, PWM_TIMER_CLK_HZ);
+	zassert_true(bridge_core_clock_matches);
+}
+
+/* Every failure exit still re-derives SystemCoreClock and refreshes the
+ * telemetry mirror, so it describes the live (8 MHz) clock. */
+ZTEST(power_wake, test_clock_restore_bounded_when_pll_never_locks)
+{
+	mock_power_reset();
+	RCU_CTL                        = 0u; /* PLLSTB never sets */
+	RCU_CFG0                       = 0u;
+	mock_system_core_clock_updates = 0u;
+	SystemCoreClock                = 8000000u;
+
+	zassert_false(bridge_clock_restore_after_deepsleep());
+	zassert_equal(RCU_CFG0 & RCU_CFG0_SCS, 0u, "stays on IRC8M");
+	zassert_equal(mock_system_core_clock_updates, 1u);
+	zassert_equal(bridge_core_clock_hz, 8000000u);
+	zassert_false(bridge_core_clock_matches);
+}
+
+/* PLL locks but SCSS never reports PLLP: the switch must be backed out
+ * (SCS = IRC8M) and the clock state refreshed, not left half-switched. */
+ZTEST(power_wake, test_clock_restore_backs_out_when_scss_never_switches)
+{
+	mock_power_reset();
+	RCU_CTL                        = RCU_CTL_PLLSTB;
+	RCU_CFG0                       = 0u; /* SCSS never reads PLLP */
+	mock_system_core_clock_updates = 0u;
+	SystemCoreClock                = 8000000u;
+
+	zassert_false(bridge_clock_restore_after_deepsleep());
+	zassert_equal(RCU_CFG0 & RCU_CFG0_SCS, RCU_CKSYSSRC_IRC8M, "SCS reverted to IRC8M");
+	zassert_equal(mock_system_core_clock_updates, 1u);
+	zassert_equal(bridge_core_clock_hz, 8000000u);
+	zassert_false(bridge_core_clock_matches);
 }
 
 ZTEST_SUITE(power_wake, NULL, NULL, NULL, NULL, NULL);

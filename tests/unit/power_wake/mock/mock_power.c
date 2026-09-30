@@ -14,6 +14,11 @@ int            mock_trial_unconfirmed;
 uint32_t       EXTI_PD0;
 uint32_t       EXTI_PD1;
 uint32_t       FWDGT_STAT;
+uint32_t       FMC_WS, RCU_CTL, RCU_CFG0;
+uint32_t       mock_system_core_clock_updates;
+uint32_t       SystemCoreClock;
+uint32_t       bridge_core_clock_hz;
+bool           bridge_core_clock_matches;
 mock_scb_t     mock_scb;
 mock_systick_t mock_systick;
 uint32_t       mock_primask;
@@ -183,4 +188,9 @@ uint32_t NVIC_GetPendingIRQ(int32_t irqn)
 {
 	(void)irqn;
 	return 0u;
+}
+
+void SystemCoreClockUpdate(void)
+{
+	++mock_system_core_clock_updates;
 }

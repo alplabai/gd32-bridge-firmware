@@ -383,6 +383,9 @@ _Static_assert(PWM_TIMER_CLK_HZ / (PWM_TIMER_PRESCALER + 1u) == 1000000000u / PW
 extern uint32_t bridge_core_clock_hz;      /* init.c */
 extern bool     bridge_core_clock_matches; /* init.c */
 
+/* power.c: re-select the PLL after a Deep-sleep exit (gh#12); false on timeout. */
+bool bridge_clock_restore_after_deepsleep(void);
+
 /* ----------------------------------------------------------------- */
 /* Shared tables (defined in the TU named per line).                  */
 /* ----------------------------------------------------------------- */
