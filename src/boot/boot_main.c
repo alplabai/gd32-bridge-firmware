@@ -27,9 +27,9 @@
  * boot, STASHES the raw value in RTC_BKP8 (backup-domain, survives
  * NVIC_SystemReset -- same rationale as hal/gd32/fault_handlers.c's use of
  * RTC_BKP0..7 for fault records; RTC_BKP8 is the next free register), then
- * clears RSTFC before jumping.  The application's bridge_hw_reset_reason()
- * (hal/gd32/init.c) decodes CMD_RESET_REASON from that stash, not from a
- * live RCU_RSTSCK read -- by the time the app runs, this bootloader has
+ * clears RSTFC before jumping.  The application consumes the stash once in
+ * bridge_hw_init() (hal/gd32/init.c) and decodes CMD_RESET_REASON from that
+ * boot-time snapshot, not from a live RCU_RSTSCK read -- by the time the app runs, this bootloader has
  * already cleared the live register, so reading it directly there would
  * always see "no cause".  This also means a stale FWDGTRSTF from an
  * EARLIER, unrelated cycle can never survive past THIS boot to be
