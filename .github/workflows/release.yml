@@ -166,7 +166,7 @@ jobs:
           set -euo pipefail
           v="$GITHUB_REF_NAME"
           # major<<16|minor<<8|patch, as ota.c packs OTA_BEGIN's version.
-          IFS=. read -r maj min pat < <(head -n1 firmware-version.txt | tr -d '[:space:]')
+          IFS=. read -r maj min pat <<< "$(head -n1 firmware-version.txt | tr -d '[:space:]')"
           fwv=$(( (maj << 16) | (min << 8) | pat ))
           mkdir dist
           cp build-gd32/gd32-bootloader.bin    "dist/gd32-bridge-$v-bootloader.bin"
