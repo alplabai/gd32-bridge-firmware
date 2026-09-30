@@ -116,8 +116,10 @@ conversion has always assumed and never measured.
 **Procedure:** with the *current, unmodified* firmware still on the part
 (no flash required for this step — it can run before any other change in
 this batch lands), meter the VREFP ball (J6) against VDDA with a DMM. Then
-flash #81 and halt the part under SWD; read `VREF_CS` back and require it
-reads `0x0000 0002` (POR value — `VREFEN=0, HIPM=1`, external-reference
+flash #323 (or #81, whichever lands; both leave the buffer off) and halt
+the part under SWD; read `VREF_CS` back and require it reads `0x0000 0002`,
+and read `adc_ref_ok` (must be `1`; `0` means the boot VREFINT check found a
+dead or implausible reference and ADC/DAC ops return `BRIDGE_HW_ERR_IO`) (POR value — `VREFEN=0, HIPM=1`, external-reference
 mode per User Manual Rev1.2 p.520 Table 20-1, as cited in #81's own body).
 
 **PASS:** VREFP tracks VDDA (reads ~1.8 V, moves with VDDA if VDDA is

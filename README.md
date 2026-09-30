@@ -152,7 +152,9 @@ Development flashing uses an external SWD probe on `GD32_SWDIO` /
 > v0.2.3–v0.2.7 campaign cleared the soak-quarantined HAL defects
 > (`pwm_capture`, `adc_stream`,
 > `qenc`, `tmu` — silicon-validated; the analog subsystem additionally
-> needed the v0.2.6 internal-VREF bring-up).  The ADC DSP-chain runtime
+> reference is now external VREFP with the on-chip buffer off, #323; ADC/DAC
+> ops return `BRIDGE_HW_ERR_IO` if the boot VREFINT check finds a dead or
+> implausible reference).  The ADC DSP-chain runtime
 > dispatch (FIR/IIR via the FAC, FFT via `CMD_ADC_SPECTRUM_READ`) is
 > wired in `hal/gd32/adc_stream.c`; the chain pool and `chain_bind`
 > capability validation (#69, #70) live in the vendor-header-free
