@@ -818,12 +818,12 @@ extern void ota_confirm_tick(void);
  * IRC32K spread (Datasheet Rev2.0 p.125 Table 4-23).  Sized against the
  * longest legitimate stretch between two feeds, i.e. one transport ISR
  * plus one bridge_hw_tick() pass, built -Os (CMakeLists.txt):
- *   - OTA_VERIFY / rollback CRC of a full 0x3B000 slot: table-driven
+ *   - OTA_VERIFY / rollback CRC of a full 0x36000 slot: table-driven
  *     crc32 <= 16 instr/byte * 4 cycles (deliberately generous) *
- *     241664 B / 216 MHz ~= 72 ms (188 ms if built -O0);
+ *     221184 B / 216 MHz ~= 66 ms (172 ms if built -O0);
  *   - ota_erase_tick(): one 2 KB region = 20 ms single-bank, 40 ms
  *     dual-bank (tERASE max 20 ms/page, Datasheet p.126);
- *   - COMMIT: CRC + one metadata page erase/program ~ 72 + 21 ms;
+ *   - COMMIT: CRC + one metadata page erase/program ~ 66 + 21 ms;
  *   - ADC calibrate wedged: ~200000 iterations (adc.c) ~ 63 ms at
  *     314.8 ns/iter (hal/fmc_ota.c derivation), plus the ~400000
  *     iteration EOC bound ~ 126 ms;
@@ -838,9 +838,9 @@ extern void ota_confirm_tick(void);
  * or a host NRST the 501 ms dog may still be counting through the whole
  * boot path, not just this tick.  The budget before the first feed here:
  *   - bootloader (src/boot/boot_main.c): one full-slot CRC per candidate,
- *     up to 2 x 72 ms at -Os (2 x 188 ms at -O0).  The bootloader feeds
+ *     up to 2 x 66 ms at -Os (2 x 172 ms at -O0).  The bootloader feeds
  *     before each candidate CRC, before the jump and in its no-valid-image
- *     park, so each stretch is one CRC (<= 188 ms) and the park stays a
+ *     park, so each stretch is one CRC (<= 172 ms) and the park stays a
  *     diagnosable stop instead of a ~0.5 s reset loop;
  *   - bridge_hw_init(): a healthy boot is a few ms; every bounded wait
  *     wedged at once (compensation cell 200000 iterations ~ 63 ms, VREF
