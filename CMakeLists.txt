@@ -84,6 +84,7 @@ elseif(BRIDGE_HAL_BACKEND STREQUAL "gd32")
     # backend; the stub HAL backend never links the vendor Reset_Handler
     # that pulls in `__libc_init_array`.
     list(APPEND GD32_BRIDGE_SOURCES
+        hal/gd32/reset_reason.c
         hal/gd32/init.c
         hal/gd32/adc.c
         hal/gd32/adc_dsp_chain.c

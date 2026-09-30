@@ -170,6 +170,19 @@
 #include "gd32g5x3.h"
 #include "gd32g5x3_dbg.h"
 #include "gd32_common.h"
+#include "reset_reason.h"
+
+_Static_assert(RCU_RSTSCK_OBLRSTF == BRIDGE_RESET_RSTSCK_OBLRSTF, "vendor OBLRSTF mask changed");
+_Static_assert(RCU_RSTSCK_RSTFC == BRIDGE_RESET_RSTSCK_RSTFC, "vendor RSTFC mask changed");
+_Static_assert(RCU_RSTSCK_BORRSTF == BRIDGE_RESET_RSTSCK_BORRSTF, "vendor BORRSTF mask changed");
+_Static_assert(RCU_RSTSCK_EPRSTF == BRIDGE_RESET_RSTSCK_EPRSTF, "vendor EPRSTF mask changed");
+_Static_assert(RCU_RSTSCK_PORRSTF == BRIDGE_RESET_RSTSCK_PORRSTF, "vendor PORRSTF mask changed");
+_Static_assert(RCU_RSTSCK_SWRSTF == BRIDGE_RESET_RSTSCK_SWRSTF, "vendor SWRSTF mask changed");
+_Static_assert(RCU_RSTSCK_FWDGTRSTF == BRIDGE_RESET_RSTSCK_FWDGTRSTF,
+               "vendor FWDGTRSTF mask changed");
+_Static_assert(RCU_RSTSCK_WWDGTRSTF == BRIDGE_RESET_RSTSCK_WWDGTRSTF,
+               "vendor WWDGTRSTF mask changed");
+_Static_assert(RCU_RSTSCK_LPRSTF == BRIDGE_RESET_RSTSCK_LPRSTF, "vendor LPRSTF mask changed");
 
 /* ----------------------------------------------------------------- */
 /* Boot hooks (overrides of the weak defaults in src/main.c)         */
@@ -186,8 +199,9 @@
  * the value the constants ASSUME so a debugger attaching before
  * bridge_hw_init has run does not read a spurious 0 and conclude the
  * clock tree is broken. */
-uint32_t bridge_core_clock_hz      = PWM_TIMER_CLK_HZ;
-bool     bridge_core_clock_matches = true;
+uint32_t        bridge_core_clock_hz      = PWM_TIMER_CLK_HZ;
+bool            bridge_core_clock_matches = true;
+static uint32_t s_reset_reason_snapshot;
 
 /* gh#146: the stack region's lower bound, provided by both linker
  * scripts (toolchain/gd32g553_flash.ld, gd32g553_app_slot.ld.in --
@@ -260,6 +274,22 @@ void bridge_hw_init(void)
 	 * care beyond running once before any nesting. */
 	__set_MSPLIM((uint32_t)_stack_limit);
 	SCB->CCR |= SCB_CCR_STKOFHFNMIGN_Msk;
+
+	/* Reset-cause snapshot, taken ONCE, before any later boot work.  The
+	 * BOOTLOADER stashes RCU_RSTSCK in RTC_BKP8 (backup domain, survives
+	 * NVIC_SystemReset) and clears RSTFC itself; RTC_BKP8 == 0 means no
+	 * bootloader ran (full-flash image or a pre-stash bootloader), so latch
+	 * and clear the live register instead.  Either way the raw value is
+	 * kept in s_reset_reason_snapshot and CMD_RESET_REASON decodes it
+	 * non-destructively, so repeated reads agree. */
+	RCU_APB1EN |= RCU_APB1EN_PMUEN;
+	PMU_CTL0 |= PMU_CTL0_BKPWEN;
+	s_reset_reason_snapshot = RTC_BKP8;
+	if (s_reset_reason_snapshot != 0u) {
+		RTC_BKP8 = 0u;
+	} else {
+		s_reset_reason_snapshot = bridge_reset_reason_latch_and_clear(&RCU_RSTSCK);
+	}
 
 	/* The priority numbers in bridge_board_config.h mean preemption levels
 	 * only under PRE2_SUB2. A Path-A bootloader handoff preserves AIRCR, and
@@ -749,79 +779,8 @@ void bridge_hw_tick(void)
 
 uint8_t bridge_hw_reset_reason(void)
 {
-	/* Decoded from the BOOTLOADER's stash (RTC_BKP8, backup-domain,
-     * survives NVIC_SystemReset -- reset-cause ownership rework, bench
-     * fact 2026-09-26), NOT a live RCU_RSTSCK read: src/boot/boot_main.c
-     * reads RCU_RSTSCK (reset/clock control status register, GD32G5xx
-     * Reference Manual §6.6.13) exactly ONCE per boot, stashes the raw
-     * value here, then clears RSTFC before jumping -- so by the time this
-     * application code runs, RCU_RSTSCK has already been reset to a clean
-     * slate for whatever NEXT reset follows.  A live read here would see
-     * only causes from AFTER the bootloader ran (normally none), not what
-     * actually preceded this boot.  See src/boot/boot_main.c's file
-     * header for the full rationale.
-     *
-     * Sticky bits in the high byte: PORRSTF (bit 27), BORRSTF (25),
-     * EPRSTF (26, NRST pin), SWRSTF (28), FWDGTRSTF (29), WWDGTRSTF (30),
-     * LPRSTF (31) -- decoded in coldest-first priority order, WITH ONE
-     * DELIBERATE EXCEPTION: FWDGTRSTF/WWDGTRSTF is checked BEFORE EPRSTF.
-     * The GD32G5x3 can latch EPRSTF alongside an internally-generated
-     * watchdog reset (check the datasheet's reset-tree section for the
-     * exact condition on this part); if a caller wants the DOMINANT
-     * cause, a real watchdog event must win over a coincidentally-latched
-     * EPRSTF bit, not the other way around.  Power-on and brownout still
-     * take priority over everything -- those really are "colder" than a
-     * watchdog.  Encoded byte matches the host's `gd32g553_reset_cause_t`
-     * in <alp/chips/gd32g553.h>:
-     *
-     *   0 = UNKNOWN, 1 = POWER_ON, 2 = NRST_PIN, 3 = SOFT,
-     *   4 = WDT, 5 = BROWNOUT, 6 = LOWPOWER.
-     *
-     * Clear-on-read: the stash is zeroed after decoding (needs the same
-     * backup-domain write-unlock the bootloader uses), so the next reader
-     * sees UNKNOWN unless the bootloader stashes a fresh cause on a later
-     * boot.
-     *
-     * Fallback (C1, adversarial-verify finding): the stash is only ever
-     * written by THIS fix's bootloader.  A RTC_BKP8 == 0 read here means
-     * one of two things this function cannot tell apart -- and does not
-     * need to: (a) the full-flash, non-partitioned image (no bootloader
-     * runs at all, see CMakeLists.txt's BRIDGE_OTA_PARTITIONED option), or
-     * (b) an OLD (pre-this-fix) bootloader paired with this new app, which
-     * never stashed anything.  Reading RTC_BKP8 == 0 unconditionally as
-     * UNKNOWN would silently regress CMD_RESET_REASON to "always UNKNOWN"
-     * on both of those real configurations.  Fall back to a LIVE
-     * RCU_RSTSCK read instead, same priority order, and clear RSTFC here
-     * (this function becomes the sole owner of that clear on this path,
-     * same as it always was before the bootloader-stash rework existed). */
-	uint32_t   rstsck     = RTC_BKP8;
-	const bool from_stash = (rstsck != 0u);
-	if (!from_stash) {
-		rstsck = RCU_RSTSCK;
-	}
-	uint8_t cause = 0u; /* UNKNOWN */
-
-	if (rstsck & RCU_RSTSCK_PORRSTF) {
-		cause = 1u; /* POWER_ON */
-	} else if (rstsck & RCU_RSTSCK_BORRSTF) {
-		cause = 5u; /* BROWNOUT */
-	} else if (rstsck & (RCU_RSTSCK_FWDGTRSTF | RCU_RSTSCK_WWDGTRSTF)) {
-		cause = 4u; /* WDT */
-	} else if (rstsck & RCU_RSTSCK_EPRSTF) {
-		cause = 2u; /* NRST_PIN */
-	} else if (rstsck & RCU_RSTSCK_LPRSTF) {
-		cause = 6u; /* LOWPOWER */
-	} else if (rstsck & RCU_RSTSCK_SWRSTF) {
-		cause = 3u; /* SOFT */
-	}
-
-	RCU_APB1EN |= RCU_APB1EN_PMUEN;
-	PMU_CTL0 |= PMU_CTL0_BKPWEN;
-	RTC_BKP8 = 0u; /* clear-on-read, whichever source answered */
-	if (!from_stash) {
-		RCU_RSTSCK |= RCU_RSTSCK_RSTFC;
-	}
-	return cause;
+	/* Snapshot taken in bridge_hw_init(); reading it never clears anything. */
+	return bridge_reset_reason_decode(s_reset_reason_snapshot);
 }
 
 uint8_t bridge_hw_da9292_status_cached(void)
