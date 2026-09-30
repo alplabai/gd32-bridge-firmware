@@ -46,6 +46,10 @@ void mock_seq_reset(void)
 	mock_fac_last_write      = 0;
 	mock_fac_read_value      = 0;
 	mock_fac_flags           = 0u;
+	mock_fac_paracfg         = 0u;
+	mock_fac_y_pending       = 0u;
+	mock_fac_y_per_write     = 1u;
+	mock_fac_load_wedge      = false;
 	mock_primask             = 0u;
 	mock_rcu_lock_violations = 0u;
 	mock_irq_set_lock_hook(0u, 0);
@@ -67,6 +71,10 @@ uint8_t  mock_fac_ipr;
 int16_t  mock_fac_last_write;
 int16_t  mock_fac_read_value;
 uint32_t mock_fac_flags;
+uint32_t mock_fac_paracfg;
+uint32_t mock_fac_y_pending;
+uint32_t mock_fac_y_per_write;
+bool     mock_fac_load_wedge;
 
 void mock_seq_log(const char *name, uint32_t periph, uint32_t arg)
 {
@@ -425,6 +433,7 @@ static mock_dsp_init_hook_t mock_fac_init_hook;
 
 void fac_deinit(void)
 {
+	mock_fac_paracfg = 0u;
 }
 void fac_struct_para_init(fac_parameter_struct *p)
 {
@@ -450,6 +459,18 @@ void fac_fixed_buffer_preload(fac_fixed_data_preload_struct *p)
 	 * decode hands to the FAC, so the AN208 / Iir_dma numbers can be
 	 * asserted directly. */
 	if (p->coeffb_size > MOCK_FAC_MAX_COEFFS || p->coeffa_size > MOCK_FAC_MAX_COEFFS) return;
+	/* gh#306: model the vendor sequence on silicon.  PARACFG = IPP | LOAD_X0
+	 * | EXE, then input_size words complete the load.  A load of size 0
+	 * NEVER completes: EXE stays set and the X1 load below is never
+	 * latched (FAC_PARACFG stayed 0x81000000 on the bench). */
+	mock_fac_paracfg = (uint32_t)p->input_size | FUNC_LOAD_X0 | FAC_PARACFG_EXE;
+	if (p->input_size == 0u) {
+		mock_seq_log("fac_fixed_buffer_preload", 0u, 0u);
+		return;
+	}
+	mock_fac_paracfg &= ~FAC_PARACFG_EXE;
+	mock_fac_paracfg = (uint32_t)p->coeffb_size | FUNC_LOAD_X1 | FAC_PARACFG_EXE;
+	if (!mock_fac_load_wedge) mock_fac_paracfg &= ~FAC_PARACFG_EXE;
 	memset(mock_fac_coeffb, 0, sizeof mock_fac_coeffb);
 	memset(mock_fac_coeffa, 0, sizeof mock_fac_coeffa);
 	for (uint8_t k = 0u; k < p->coeffb_size; ++k)
@@ -462,31 +483,46 @@ void fac_fixed_buffer_preload(fac_fixed_data_preload_struct *p)
 }
 void fac_function_config(fac_parameter_struct *p)
 {
-	mock_fac_func = p->func;
-	mock_fac_ipr  = p->ipr; /* gh#35: the headroom exponent must land here */
+	/* Function config only latches when no load is in flight (EXE clear). */
+	if (mock_fac_paracfg & FAC_PARACFG_EXE) {
+		mock_seq_log("fac_function_config", p->func, p->ipr);
+		return;
+	}
+	mock_fac_func    = p->func;
+	mock_fac_ipr     = p->ipr; /* gh#35: the headroom exponent must land here */
+	mock_fac_paracfg = (mock_fac_paracfg & ~FAC_PARACFG_FUN) | p->func;
 	mock_seq_log("fac_function_config", p->func, p->ipr);
 }
 void fac_start(void)
 {
+	mock_fac_paracfg |= FAC_PARACFG_EXE;
 	mock_seq_log("fac_start", 0u, 0u);
 }
 void fac_stop(void)
 {
+	mock_fac_paracfg &= ~FAC_PARACFG_EXE;
 	mock_seq_log("fac_stop", 0u, 0u);
 }
 void fac_fixed_data_write(int16_t data)
 {
 	mock_fac_last_write = data; /* gh#35 bias test */
+	/* Y only fills once a filter function is latched AND running. */
+	if ((mock_fac_paracfg & FAC_PARACFG_EXE) &&
+	    ((mock_fac_paracfg & FAC_PARACFG_FUN) == FUNC_CONVO_FIR ||
+	     (mock_fac_paracfg & FAC_PARACFG_FUN) == FUNC_IIR_DIRECT_FORM_1))
+		mock_fac_y_pending += mock_fac_y_per_write;
 	mock_seq_log("fac_fixed_data_write", 0u, (uint32_t)(uint16_t)data);
 }
 int16_t fac_fixed_data_read(void)
 {
+	if (mock_fac_y_pending != 0u) mock_fac_y_pending--;
 	return mock_fac_read_value;
 }
 FlagStatus fac_flag_get(uint32_t flag)
 {
 	/* YBEF must read RESET for the pump's output path to run; the
 	 * saturation flags are settable per test (gh#35). */
+	if (flag == FAC_FLAG_YBEF) return (mock_fac_y_pending == 0u) ? SET : RESET;
 	return (mock_fac_flags & flag) ? SET : RESET;
 }
 void mock_fac_set_init_hook(mock_dsp_init_hook_t hook)

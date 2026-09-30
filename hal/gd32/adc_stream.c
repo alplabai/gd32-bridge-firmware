@@ -911,11 +911,42 @@ static uint8_t adc_dsp_bias_shift(uint16_t full_scale)
 	}
 }
 
+/* gh#306: run the vendor preload and prove it completed.
+ *
+ * fac_fixed_buffer_preload() writes FAC_PARACFG = IPP | LOAD_X0 | EXE
+ * unconditionally, then streams `input_size` words into X0.  With
+ * input_size == 0 no word ever completes the load, so EXE stays set on
+ * silicon (FAC_PARACFG 0x81000000) and the LOAD_X1 coefficient load and
+ * the FIR/IIR function config that follow never latch -- the pump then
+ * stalls at X0BFF with Y empty.  The vendor Examples/FAC/Fir_polling
+ * and Iir_dma preload a NON-EMPTY X0 (input_array_size samples), so we
+ * prime X0 with `x0_zeros` zeros (n_taps - 1: the first real sample then
+ * yields the first output, since FIR/IIR emit inputs - taps + 1 words).
+ * A load is never issued with size 0.  EXE clearing is the hardware's
+ * "load latched" signal: bound-wait for it so a wedge is reported
+ * (-> dsp_cfg_bad) instead of silently starving the stream. */
+#define ADC_DSP_FAC_LOAD_SPIN_MAX 10000u
+
+static bool adc_dsp_fac_preload(fac_fixed_data_preload_struct *pl, uint8_t x0_zeros)
+{
+	static int16_t zeros[BRIDGE_DSP_MAX_FIR_TAPS]; /* .bss, never written */
+	if (x0_zeros == 0u) x0_zeros = 1u;
+	if (x0_zeros > BRIDGE_DSP_MAX_FIR_TAPS) return false;
+	pl->input_ctx  = zeros;
+	pl->input_size = x0_zeros;
+	fac_fixed_buffer_preload(pl);
+	for (uint32_t spin = 0u; spin < ADC_DSP_FAC_LOAD_SPIN_MAX; ++spin) {
+		if ((FAC_PARACFG & FAC_PARACFG_EXE) == 0u) return true;
+	}
+	fac_deinit(); /* wedged load: reset the block rather than leave EXE stuck */
+	return false;
+}
+
 /* Configure the FAC for stream s's bound chain (single FIR or single-
  * section IIR -- the only shapes chain_bind now lets through, see
  * adc_dsp_chain_p1_capable() in adc_dsp_chain.c).  Streaming mode:
- * coeffs preloaded into X1, no input preload -- the pump feeds X0 one
- * sample at a time.  chain_bind is where a caller now learns a chain
+ * coeffs preloaded into X1, X0 primed with zeros (gh#306, see
+ * adc_dsp_fac_preload) -- the pump feeds X0 one sample at a time.  chain_bind is where a caller now learns a chain
  * is unrealisable (BRIDGE_HW_ERR_NOTIMPL, #69) -- the `return false`
  * paths below are unreachable in normal operation once bind enforces
  * the shared predicate; they stay only as a defence-in-depth guard
@@ -1029,11 +1060,9 @@ static bool adc_dsp_fac_config(const adc_stream_state_t *s)
 		pl.coeffb_size = nt;
 		pl.coeffa_ctx  = 0;
 		pl.coeffa_size = 0u;
-		pl.input_ctx   = 0;
-		pl.input_size  = 0u;
 		pl.output_ctx  = 0;
 		pl.output_size = 0u;
-		fac_fixed_buffer_preload(&pl);
+		if (!adc_dsp_fac_preload(&pl, (uint8_t)(nt - 1u))) return false;
 
 		p.func = FUNC_CONVO_FIR;
 		p.ipp  = nt;
@@ -1104,11 +1133,9 @@ static bool adc_dsp_fac_config(const adc_stream_state_t *s)
 		pl.coeffb_size = 3u;
 		pl.coeffa_ctx  = a;
 		pl.coeffa_size = 2u;
-		pl.input_ctx   = 0;
-		pl.input_size  = 0u;
 		pl.output_ctx  = 0;
 		pl.output_size = 0u;
-		fac_fixed_buffer_preload(&pl);
+		if (!adc_dsp_fac_preload(&pl, 2u)) return false; /* IPP - 1 */
 
 		/* IPP = feed-forward count (3), IPQ = feedback count (2).
 		 * IPR = g: the accumulator gain 2^g buys the decode scaling
@@ -1155,6 +1182,19 @@ static void adc_dsp_pump_stream(uint8_t sid)
 			 * release stopped the block. Leave revoked/ended sessions stopped. */
 			fac_stop();
 			return;
+		}
+		/* gh#306: chain_bind seeds pump_raw_read from total_read, which is
+		 * 0 when the raw reader never ran; the DMA has been lapping since
+		 * stream_begin, so the first pass below would see a full-ring
+		 * backlog and answer a spurious BUSY.  Nothing before this point
+		 * was ever wanted by the filter: if a ring or more has piled up,
+		 * silently jump to the live total (no proc_gap). */
+		const uint32_t live = adc_stream_total_written(s, &s->pump_pos);
+		if ((uint32_t)(live - s->pump_raw_read) >= BRIDGE_ADC_STREAM_RING_SAMPLES) {
+			const uint32_t irq_state = bridge_irq_lock();
+			if (adc_dsp_owner_live_locked(&adc_dsp_fac_owner, (int8_t)sid, s, false))
+				s->pump_raw_read = live;
+			bridge_irq_unlock(irq_state);
 		}
 	}
 
@@ -1241,7 +1281,10 @@ static void adc_dsp_pump_stream(uint8_t sid)
 		const int16_t x = (int16_t)(((int32_t)code - mid) << shift);
 		fac_fixed_data_write(x);
 
-		if (fac_flag_get(FAC_FLAG_YBEF) == RESET) {
+		/* gh#306: drain every ready output word (YBEF == RESET means Y is
+		 * NOT empty), not one per write -- a primed/backed-up Y otherwise
+		 * never catches up.  Bounded: Y is 32 deep, Y threshold 1. */
+		for (uint8_t drain = 0u; drain < 32u && fac_flag_get(FAC_FLAG_YBEF) == RESET; ++drain) {
 			/* Re-bias the signed q1.15 output back onto the unipolar
 			 * code plane (the shift undoes the encode shift, mid undoes
 			 * the mid-scale subtraction above).  Swings beyond one
