@@ -755,6 +755,12 @@ h_begin(const uint8_t *req, size_t len, uint8_t *reply, size_t cap, size_t *rlen
 		ota_meta_record_t cur;
 		uint32_t          which = 0u;
 		if (meta_current(&cur, &which)) {
+			/* Counter headroom: BEGIN demotion + COMMIT (TRIAL) + CONFIRM are three
+			 * increments; refuse up front rather than strand the cycle at COMMIT. */
+			if (cur.counter > OTA_META_BEGIN_MAX_COUNTER) {
+				ota_session_reject(BRIDGE_OTA_ERR_META_DEMOTE_FAILED);
+				return STATUS_IO;
+			}
 			/* #266: refuse at the state machine, not the funnel.  A BEGIN
 			 * landing while a PREVIOUS session's base-level
 			 * ota_erase_tick() still owns the FMC funnel would otherwise
