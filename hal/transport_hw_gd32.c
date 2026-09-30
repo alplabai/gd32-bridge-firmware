@@ -920,7 +920,11 @@ static void bridge_i2c_force_bus_release(void)
  * Servicing STPDET first disables I2C_INT_TI before the TI arm below can
  * run, so no orphan byte is ever written into TDATA for a transaction
  * that has already stopped (see the TDATA-flush comment on the read arm
- * for what happens if one gets written anyway). */
+ * for what happens if one gets written anyway).
+ *
+ * STPDET is also tested AHEAD of ADDSEND: a pending STOP is always older
+ * than a pending address match, so service it first or a stale STPDET
+ * would be handled after (and clobber) the next transaction's ADDSEND. */
 void BRIDGE_I2C_EV_HANDLER(void)
 {
 	const bridge_i2c_event_t event = bridge_i2c_event_select(

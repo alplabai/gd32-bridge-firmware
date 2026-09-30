@@ -322,6 +322,12 @@ ZTEST(gd32_bridge_transport_i2c, test_rejected_write_counts_once_and_idle_polls_
 	zassert_false(i2c_slave_write_end(), "read STOP re-entry");
 	zassert_equal(bridge_i2c_rx_diag.fail_count, fails_before + 1u, "counted once");
 
+	/* Early STOP mid-read, then a fresh read with no write between. */
+	read_phase(reply, 2u);
+	zassert_false(i2c_slave_write_end(), "early-STOP re-entry");
+	read_phase(reply, sizeof(reply));
+	zassert_equal(reply[0], STATUS_NO_PENDING, "clean NO_PENDING after aborted read");
+
 	i2c_slave_write_start();
 	zassert_false(i2c_slave_write_end(), "bare poll, nothing received");
 	zassert_equal(bridge_i2c_rx_diag.fail_count, fails_before + 1u, "idle poll not counted");

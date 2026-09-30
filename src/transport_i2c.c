@@ -180,8 +180,10 @@ bool i2c_slave_write_end(void)
 	     * pattern forever instead of the documented STATUS_NO_PENDING
 	     * sentinel.  A reply that has only been PARTIALLY drained is
 	     * left alone (falls through to the plain no-op below) -- an
-	     * early-STOP mid-read is not the case this guards. */
-		if (i2c_tx_cursor >= i2c_tx_len) {
+	     * early-STOP mid-read is not the case this guards.  A rejected
+	     * write is the exception: its staged reply is always NO_PENDING,
+	     * so re-staging is harmless and heals a partly-drained tail. */
+		if (frame_rejected || i2c_tx_cursor >= i2c_tx_len) {
 			stage_no_pending();
 		}
 		return pending_reply_valid;
