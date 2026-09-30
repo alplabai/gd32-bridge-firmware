@@ -205,11 +205,13 @@ static inline int ota_boot_select(const ota_meta_record_t **cands,
  * words at the slot base (the boot path jumps via those two). */
 #define OTA_IMG_MIN_LEN 8u
 
-/* GD32G553 SRAM window a plausible initial MSP must fall in.  Upper
- * bound is generous (covers >128 KB parts) so a valid image is never
- * rejected; the point is to reject a garbage MSP, not size RAM exactly. */
+/* SRAM window a valid initial MSP must fall in.  OTA_SRAM_END is one past
+ * the 96 KB RAM region every linker script declares (the only place a
+ * correctly linked _sp can land); a full-descending stack starts at that
+ * top edge, so MSP == OTA_SRAM_END is accepted (the check uses <=).
+ * Mirrored in tools/gen_ota_metadata.py -- keep the two in lockstep. */
 #define OTA_SRAM_BASE 0x20000000u
-#define OTA_SRAM_END  0x20040000u
+#define OTA_SRAM_END  0x20018000u
 
 /* Semantic bootability check for a slot's image, beyond the host CRC
  * (#755).  A CRC-valid one-byte / truncated / vector-less image would

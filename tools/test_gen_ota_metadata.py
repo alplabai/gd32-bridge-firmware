@@ -44,7 +44,7 @@ def _image(msp: int, reset: int, pad_to: int = 8) -> bytes:
 # vector on a real, much larger image; these tests use small synthetic
 # images, so the reset vector here only needs the same two properties
 # (Thumb bit set, inside the slot) at an address the short image covers.
-GOOD_MSP = 0x20010000  # inside [0x20000000, 0x20040000], word-aligned
+GOOD_MSP = 0x20010000  # inside [0x20000000, 0x20018000], word-aligned
 GOOD_RESET = gom.OTA_SLOT_A_BASE | 1  # Thumb bit set, base itself
 
 
@@ -61,6 +61,15 @@ class CheckBootable(unittest.TestCase):
         img = _image(0x08000000, GOOD_RESET, pad_to=64)  # flash, not SRAM
         with self.assertRaisesRegex(ValueError, "initial MSP"):
             gom.check_bootable(0, img)
+
+    def test_msp_above_sram_rejected(self) -> None:
+        img = _image(0x20030000, GOOD_RESET, pad_to=64)  # old 256 KB window
+        with self.assertRaisesRegex(ValueError, "initial MSP"):
+            gom.check_bootable(0, img)
+
+    def test_msp_top_of_stack_edge_accepted(self) -> None:
+        img = _image(gom.OTA_SRAM_END, GOOD_RESET, pad_to=64)
+        gom.check_bootable(0, img)  # must not raise
 
     def test_msp_misaligned_rejected(self) -> None:
         img = _image(GOOD_MSP | 1, GOOD_RESET, pad_to=64)

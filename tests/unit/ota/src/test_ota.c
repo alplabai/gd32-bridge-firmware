@@ -653,11 +653,11 @@ ZTEST(gd32_bridge_ota, test_exact_end_chunk_accepted)
 	begin_session(OTA_SLOT_SIZE);
 	g_program_calls = 0u;
 
-	const uint8_t data[4] = { 1, 2, 3, 4 };
+	const uint8_t data[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
 	uint8_t       reply[8];
 	size_t        rlen = 0u;
-	/* off + dlen == OTA_SLOT_SIZE is the last legal byte range. */
-	gd32_bridge_status_t st = write_chunk(OTA_SLOT_SIZE - 4u, data, sizeof(data), reply, &rlen);
+	/* off + dlen == OTA_SLOT_SIZE is the last legal byte range (8-aligned). */
+	gd32_bridge_status_t st = write_chunk(OTA_SLOT_SIZE - 8u, data, sizeof(data), reply, &rlen);
 	zassert_equal(st, STATUS_OK, "exact-end chunk must be accepted, got %d", st);
 	zassert_equal(g_program_calls, 1u);
 }
@@ -730,6 +730,10 @@ ZTEST(gd32_bridge_ota, test_image_bootable_validates_vector_head)
 	zassert_false(ota_image_bootable(base, img, len), "unaligned MSP must reject");
 	put32(&img[0], 0x08000000u);
 	zassert_false(ota_image_bootable(base, img, len), "MSP outside SRAM must reject");
+	put32(&img[0], 0x20030000u); /* inside the old 256 KB window, past 96 KB SRAM */
+	zassert_false(ota_image_bootable(base, img, len), "MSP above 96 KB SRAM must reject");
+	put32(&img[0], 0x20018000u); /* top-of-stack edge: one past SRAM, accepted */
+	zassert_true(ota_image_bootable(base, img, len), "MSP at SRAM end (top of stack) must pass");
 	put32(&img[0], 0x20010000u); /* restore */
 
 	/* Reset vector without the Thumb bit, or outside the image. */
@@ -739,6 +743,47 @@ ZTEST(gd32_bridge_ota, test_image_bootable_validates_vector_head)
 	zassert_false(ota_image_bootable(base, img, len), "reset past image end must reject");
 	put32(&img[4], (base - 4u) | 1u); /* before base */
 	zassert_false(ota_image_bootable(base, img, len), "reset before image base must reject");
+}
+
+/* gh#25: the advertised chunk_max must be a multiple of the 8-byte flash
+ * program granule, pacing at it must work end to end including a short
+ * unaligned FINAL chunk, and a misaligned offset is refused with
+ * STATUS_INVAL (session stays READY) rather than STATUS_IO. */
+ZTEST(gd32_bridge_ota, test_chunk_max_is_granule_aligned_and_streams)
+{
+	reset_model();
+	uint8_t req[8];
+	wr_u32(&req[0], 203u); /* 3 * 56 + 35: the final chunk is 35 B, not a multiple of 8 */
+	wr_u32(&req[4], 0u);
+	uint8_t reply[8];
+	size_t  rlen = 0u;
+	zassert_equal(ota_dispatch(CMD_OTA_BEGIN, req, sizeof(req), reply, sizeof(reply), &rlen),
+	              STATUS_OK);
+	const uint16_t chunk_max = (uint16_t)(reply[0] | (reply[1] << 8));
+	zassert_true(chunk_max > 0u && (chunk_max % 8u) == 0u, "chunk_max must be 8-aligned");
+	for (unsigned i = 0u; i < (OTA_SLOT_SIZE / OTA_PAGE_SIZE) + 4u; ++i) {
+		ota_erase_tick();
+	}
+
+	uint8_t data[255];
+	for (unsigned i = 0u; i < sizeof(data); ++i) {
+		data[i] = (uint8_t)i;
+	}
+	g_program_calls = 0u;
+	zassert_equal(write_chunk(chunk_max + 1u, data, 8u, reply, &rlen),
+	              STATUS_INVAL,
+	              "misaligned offset must be refused cleanly");
+	zassert_equal(g_program_calls, 0u, "the refusal must happen before any flash program");
+	zassert_equal(ota_state_now(), 1u /* OTA_ST_READY */, "refusal must not poison the session");
+
+	uint32_t off = 0u;
+	while (off + chunk_max < 203u) {
+		zassert_equal(write_chunk(off, data, (uint8_t)chunk_max, reply, &rlen), STATUS_OK);
+		off += chunk_max;
+	}
+	/* short final chunk at an 8-aligned offset: 203 - 168 = 35 B, exercising the 0xFF tail pad */
+	zassert_equal(off, 168u);
+	zassert_equal(write_chunk(off, data, (uint8_t)(203u - off), reply, &rlen), STATUS_OK);
 }
 
 /* ---- #770: BEGIN arms a background erase, acks immediately ---------- */

@@ -49,9 +49,9 @@ Each numbered item gives:
   check specifically needs payload diffing).
 - An RZ/V2N host (or host-side test harness) able to drive the wire protocol
   opcodes named below and to pace OTA chunks at an arbitrary offset/size —
-  several steps need chunk offsets the current advertised `chunk_max`
-  cannot produce cleanly (see the OTA phase and the `chunk_max` open
-  question).
+  several steps need chunk offsets other than multiples of the advertised
+  `chunk_max` (56, 8-aligned since gh#25; a misaligned offset is refused with
+  `STATUS_INVAL`, see the `chunk_max` section).
 - Build environment for all four firmware targets (`gd32-bridge`,
   `gd32-bridge-slot-a`, `gd32-bridge-slot-b`, `gd32-bootloader`) at both the
   tree's current default optimisation (unpinned, effectively `-O0`) and at
@@ -1066,6 +1066,8 @@ that this batch has an opportunity to answer while the board is already up.
 
 ### The `chunk_max` question (issue #25)
 
+> Resolved in firmware (gh#25): `OTA_BEGIN` now advertises `chunk_max = 56` (8-aligned) and `h_write` refuses a misaligned offset with `STATUS_INVAL`. The historical analysis below is kept for the bench record.
+
 `OTA_BEGIN`'s advertised `chunk_max` is 60 bytes
 (`GD32_BRIDGE_MAX_PAYLOAD_BYTES - 5`), and 60 is not a multiple of 8 — the
 flash program granule `ota_fmc_program()` requires. A host that took the
@@ -1179,4 +1181,4 @@ attached before commanding an edge.
 | 8 | #85 | #46 | No |
 | 9 | #91 | #13, #54 (declined) | No |
 | 10 | #99 | #36 | Low, self-recovering |
-| — | (not in batch) | #25 (chunk_max), #53→#64 (RTC wake) | — |
+| — | (not in batch) | #53→#64 (RTC wake); #25 (chunk_max) is fixed in firmware | — |

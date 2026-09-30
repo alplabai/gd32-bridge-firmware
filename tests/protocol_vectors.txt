@@ -139,8 +139,8 @@ spi_adc_dsp_chain_bind_probe_request = A5390000C789
 spi_ota_begin_request          = A5F0F8A30000EFBEADDEA850
 # SOF | CMD=0xF0 | size=41976 (LE) | expected_crc32=0xDEADBEEF (LE) | fw_major=0 | fw_minor=2 | fw_patch=9 | CRC -- the v0.7 ADDITIVE form: the triple lands in the A/B metadata at COMMIT (fw_version[slot], 0 = unknown); pre-v0.7 firmware ignores the 3 trailing bytes, and the 8-byte legacy form stays valid
 spi_ota_begin_request_v0_7     = A5F0F8A30000EFBEADDE000209523D
-# SOF | STATUS=0x00 | chunk_max=60 (LE 0x003C) | target_slot=B(1) | CRC -- 60 = MAX_PAYLOAD(65) - offset:u32 - len:u8 header. target_slot is ota.c's compile-time OTA_RUNNING_SLOT complement (#3), a BUILD property: this vector's value B is only what a slot-A-resident build replies (its own non-running slot); a slot-B-resident build replies A for the identical request
-spi_ota_begin_reply_slot_b     = A5003C0001DAB8
+# SOF | STATUS=0x00 | chunk_max=56 (LE 0x0038) | target_slot=B(1) | CRC -- 56 = (MAX_PAYLOAD(65) - offset:u32 - len:u8 header) rounded down to the 8-byte flash program granule. target_slot is ota.c's compile-time OTA_RUNNING_SLOT complement (#3), a BUILD property: this vector's value B is only what a slot-A-resident build replies (its own non-running slot); a slot-B-resident build replies A for the identical request
+spi_ota_begin_reply_slot_b     = A5003800011A64
 # SOF | CMD=0xF1 | offset=0 (LE) | len=8 | data=01..08 (one FMC doubleword) | CRC -- the len byte rejects transaction-merged zero-extended captures that survive the span CRC via the palindromic-CRC self-consumption hole; offsets pace on 8-byte boundaries
 spi_ota_write_chunk_off0_8b_request = A5F10000000008010203040506070840B1
 # SOF | STATUS=0x00 | received_bytes=8 (LE, cumulative high-water) | CRC

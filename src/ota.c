@@ -60,6 +60,17 @@
 #include "gd32/bridge_critical.h"
 #endif
 
+/* Flash programs in 8-byte doublewords and ota_fmc_program() needs an
+ * 8-aligned address, so the host must pace chunk offsets on 8-byte
+ * boundaries: advertise the largest 8-multiple that fits the payload
+ * (offset:u32 + len:u8 header = 5 B).  A short FINAL chunk is fine -- the
+ * tail is 0xFF-padded within one call -- but a non-8-multiple chunk_max
+ * would make every second offset misaligned (gh#25). */
+#define OTA_PROGRAM_GRANULE 8u
+#define OTA_CHUNK_MAX       ((GD32_BRIDGE_MAX_PAYLOAD_BYTES - 5u) & ~(OTA_PROGRAM_GRANULE - 1u))
+_Static_assert(OTA_CHUNK_MAX > 0u && OTA_CHUNK_MAX % OTA_PROGRAM_GRANULE == 0u,
+               "chunk_max must be a multiple of the flash program granule");
+
 /* Unit tests pin the final check-and-publish boundary below. Production
  * builds compile this out completely: it is not an OTA wire or HAL seam. */
 #if defined(BRIDGE_OTA_TEST_HOOKS)
@@ -783,7 +794,7 @@ h_begin(const uint8_t *req, size_t len, uint8_t *reply, size_t cap, size_t *rlen
 	/* Host OTA_BEGIN reply: chunk_max:u16 (LE), target_slot:u8.
      * chunk_max accounts for the offset:u32 + len:u8 header (v0.6). */
 	if (cap >= 3u) {
-		const uint16_t chunk_max = (uint16_t)(GD32_BRIDGE_MAX_PAYLOAD_BYTES - 5u);
+		const uint16_t chunk_max = OTA_CHUNK_MAX;
 		reply[0]                 = (uint8_t)(chunk_max & 0xFFu);
 		reply[1]                 = (uint8_t)(chunk_max >> 8);
 		reply[2]                 = s_inactive;
@@ -826,6 +837,11 @@ h_write(const uint8_t *req, size_t len, uint8_t *reply, size_t cap, size_t *rlen
 		s_state = OTA_ST_ERROR;
 		s_err   = BRIDGE_OTA_ERR_CHUNK_RANGE;
 		return STATUS_OUT_OF_RANGE;
+	}
+	if ((off % OTA_PROGRAM_GRANULE) != 0u) {
+		/* ota_fmc_program needs an 8-aligned address; refuse cleanly here
+		 * (session untouched) instead of a STATUS_IO from the flash layer. */
+		return STATUS_INVAL;
 	}
 	/* The transport is AT-LEAST-ONCE: the slave can decode a request
      * twice (silicon-caught 2026-06-04: chunk #256 replayed
