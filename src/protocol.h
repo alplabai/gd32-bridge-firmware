@@ -142,8 +142,10 @@ typedef enum {
 	CMD_PWM_CONFIGURE = 0x22,
 	CMD_ADC_READ      = 0x30,
 	/* v0.3: sticky per-channel ADC tuning -- oversampling ratio,
-     * sample-and-hold cycles, resolution (12/14/16-bit, the latter via
-     * 16x or 256x oversample on the GD32G5).  CMD_ADC_READ honours
+     * sample-and-hold count (a raw RSMP value in ADCCK cycles, sample time = value + 2.5
+     * cycles; not microseconds, not a rung selector),
+     * resolution (6/8/10/12-bit; the GD32G5 DRES field has no 14/16-bit
+     * mode, so those widths reply STATUS_NOSUPPORT).  CMD_ADC_READ honours
      * the configured tuning on the next call. */
 	CMD_ADC_CONFIGURE = 0x32,
 	/* v0.3: DMA-backed streaming.  Two streams can run concurrently
