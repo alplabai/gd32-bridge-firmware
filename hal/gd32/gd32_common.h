@@ -85,6 +85,12 @@ typedef struct {
 #define BRIDGE_ADC_STREAM_RING_SAMPLES 1024u
 #define BRIDGE_ADC_STREAM_COUNT        2u
 
+/* Samples the FIR/IIR DSP pump filters per claim/commit pair (gh#272).
+ * The FAC work runs with interrupts ON; this only amortises the two short
+ * interrupt-off sections (flag test-and-set) and bounds the work discarded
+ * if END lands mid-batch.  It does NOT set an interrupt-off window. */
+#define ADC_DSP_PUMP_LOCK_BATCH 8u
+
 /* Honest sample-rate contract: the requested rate is realised by a
  * dedicated pacing timer (see stream_begin), not ignored.  100 kHz
  * cap = the ring's documented design point (fills in ~10 ms); 0 is

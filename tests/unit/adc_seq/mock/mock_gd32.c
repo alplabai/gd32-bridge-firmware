@@ -12,6 +12,9 @@ int               mock_seq_n;
 volatile uint32_t mock_primask;
 uint32_t          mock_rcu_lock_violations;
 
+uint32_t        mock_irq_lock_count;
+static uint32_t mock_fac_stall_after_writes;
+
 static mock_hook_t mock_irq_lock_hook;
 static uint32_t    mock_irq_locks_until_hook;
 
@@ -23,6 +26,7 @@ void mock_irq_set_lock_hook(uint32_t locks_until_hook, mock_hook_t hook)
 
 uint32_t mock_irq_get_primask(void)
 {
+	mock_irq_lock_count++;
 	if (mock_irq_lock_hook != 0 && mock_irq_locks_until_hook > 0u &&
 	    --mock_irq_locks_until_hook == 0u) {
 		mock_hook_t hook = mock_irq_lock_hook;
@@ -39,19 +43,21 @@ void mock_seq_reset(void)
 	/* gh#35 FAC captures reset with the rest of the mock. */
 	memset(mock_fac_coeffb, 0, sizeof mock_fac_coeffb);
 	memset(mock_fac_coeffa, 0, sizeof mock_fac_coeffa);
-	mock_fac_coeffb_size     = 0u;
-	mock_fac_coeffa_size     = 0u;
-	mock_fac_func            = 0u;
-	mock_fac_ipr             = 0u;
-	mock_fac_last_write      = 0;
-	mock_fac_read_value      = 0;
-	mock_fac_flags           = 0u;
-	mock_fac_paracfg         = 0u;
-	mock_fac_y_pending       = 0u;
-	mock_fac_y_per_write     = 1u;
-	mock_fac_load_wedge      = false;
-	mock_primask             = 0u;
-	mock_rcu_lock_violations = 0u;
+	mock_fac_coeffb_size        = 0u;
+	mock_fac_coeffa_size        = 0u;
+	mock_fac_func               = 0u;
+	mock_fac_ipr                = 0u;
+	mock_fac_last_write         = 0;
+	mock_fac_read_value         = 0;
+	mock_fac_flags              = 0u;
+	mock_fac_paracfg            = 0u;
+	mock_fac_y_pending          = 0u;
+	mock_fac_y_per_write        = 1u;
+	mock_fac_load_wedge         = false;
+	mock_fac_stall_after_writes = 0u;
+	mock_primask                = 0u;
+	mock_rcu_lock_violations    = 0u;
+	mock_irq_lock_count         = 0u;
 	mock_irq_set_lock_hook(0u, 0);
 	mock_dma_set_transfer_get_hook(0);
 	mock_fac_set_init_hook(0);
@@ -511,6 +517,8 @@ void fac_fixed_data_write(int16_t data)
 	    ((mock_fac_paracfg & FAC_PARACFG_FUN) == FUNC_CONVO_FIR ||
 	     (mock_fac_paracfg & FAC_PARACFG_FUN) == FUNC_IIR_DIRECT_FORM_1))
 		mock_fac_y_pending += mock_fac_y_per_write;
+	if (mock_fac_stall_after_writes != 0u && --mock_fac_stall_after_writes == 0u)
+		mock_fac_flags |= FAC_FLAG_X0BFF;
 	mock_seq_log("fac_fixed_data_write", 0u, (uint32_t)(uint16_t)data);
 }
 int16_t fac_fixed_data_read(void)
@@ -524,6 +532,10 @@ FlagStatus fac_flag_get(uint32_t flag)
 	 * saturation flags are settable per test (gh#35). */
 	if (flag == FAC_FLAG_YBEF) return (mock_fac_y_pending == 0u) ? SET : RESET;
 	return (mock_fac_flags & flag) ? SET : RESET;
+}
+void mock_fac_set_write_hook_after(uint32_t writes)
+{
+	mock_fac_stall_after_writes = writes;
 }
 void mock_fac_set_init_hook(mock_dsp_init_hook_t hook)
 {

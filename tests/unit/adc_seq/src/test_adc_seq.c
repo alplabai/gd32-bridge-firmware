@@ -611,6 +611,26 @@ ZTEST(gd32_adc_seq, test_fac_pump_drains_all_ready_output_words)
 	bridge_hw_adc_stream_end(0u);
 }
 
+/* A write that releases more Y words than one claim/commit batch can hold
+ * must not overflow the local out[]: the surplus stays queued in Y and is
+ * drained by later batches, in order, with nothing dropped. */
+ZTEST(gd32_adc_seq, test_fac_pump_drain_is_bounded_by_the_commit_buffer)
+{
+	adc_seq_reset();
+	fac_latch_release();
+	zassert_equal(
+	    bridge_hw_adc_stream_begin(0u, BRIDGE_ADC_CH0, 1000u), BRIDGE_HW_OK, "stream_begin");
+	bind_q31_fir(8u);
+	mock_fac_y_per_write = 20u; /* > ADC_DSP_PUMP_LOCK_BATCH words per X0 write */
+	mock_dma_set_remaining(DMA0, DMA_CH0, BRIDGE_ADC_STREAM_RING_SAMPLES - 1u);
+	bridge_hw_dsp_pump();
+	zassert_true(adc_streams[0].proc_write <= 2u * ADC_DSP_PUMP_LOCK_BATCH, "no out[] overrun");
+	zassert_equal(adc_streams[0].proc_write + mock_fac_y_pending,
+	              20u,
+	              "every produced Y word is either published or still queued");
+	bridge_hw_adc_stream_end(0u);
+}
+
 ZTEST(gd32_adc_seq, test_fac_first_pump_realigns_stale_backlog_without_busy)
 {
 	adc_seq_reset();
@@ -1078,6 +1098,140 @@ ZTEST(gd32_adc_seq, test_fac_post_commit_preemption_cannot_drain_replacement)
 	zassert_equal(bridge_hw_adc_stream_end(0u), BRIDGE_HW_OK, "replacement stream ends cleanly");
 }
 
+/* Arm a FIR stream whose FAC is already configured and owned (first tick
+ * claims + configures with nothing pending), ready for `samples` mid-scale
+ * raw samples to be pumped. */
+static void arm_fac_pump_with_samples(uint32_t samples)
+{
+	adc_seq_reset();
+	zassert_equal(
+	    bridge_hw_adc_stream_begin(0u, BRIDGE_ADC_CH0, 1000u), BRIDGE_HW_OK, "stream begins");
+	bind_test_fir_chain(0u);
+	mock_dma_set_remaining(DMA0, DMA_CH0, BRIDGE_ADC_STREAM_RING_SAMPLES);
+	bridge_hw_dsp_pump();
+	for (uint16_t i = 0u; i < samples; ++i)
+		adc_streams[0].ring[i] = 2048u;
+	mock_dma_set_remaining(DMA0, DMA_CH0, BRIDGE_ADC_STREAM_RING_SAMPLES - samples);
+}
+
+ZTEST(gd32_adc_seq, test_fac_pump_lock_count_is_bounded_per_batch)
+{
+	/* gh#272: each batch costs exactly one claim + one commit section (the
+	 * FAC work between them runs with interrupts on), never one per sample. */
+	const uint32_t samples         = 100u;
+	const uint32_t locks_per_batch = 2u;
+	const uint32_t batches = (samples + ADC_DSP_PUMP_LOCK_BATCH - 1u) / ADC_DSP_PUMP_LOCK_BATCH;
+	arm_fac_pump_with_samples(samples);
+	const uint32_t before = mock_irq_lock_count;
+	bridge_hw_dsp_pump();
+
+	zassert_equal(
+	    mock_irq_lock_count - before, batches * locks_per_batch, "claim+commit per batch");
+	zassert_equal(adc_streams[0].proc_write, samples, "every sample still processed");
+	zassert_equal(mock_irq_get_primask(), 0u, "no interrupt-off window left open");
+	zassert_equal(bridge_hw_adc_stream_end(0u), BRIDGE_HW_OK, "stream ends cleanly");
+}
+
+ZTEST(gd32_adc_seq, test_fac_pump_stall_mid_batch_keeps_stalled_sample_in_ring)
+{
+	const uint32_t samples = 5u;
+	arm_fac_pump_with_samples(samples);
+
+	/* X0BFF rises after the 3rd sample's write: the flag is polled before each
+	 * sample, so samples 0..2 are consumed and sample 3 stays in the raw ring. */
+	const uint32_t stall_at = 3u;
+	mock_fac_flags          = 0u;
+	mock_fac_set_write_hook_after(stall_at);
+	bridge_hw_dsp_pump();
+
+	zassert_equal(adc_streams[0].pump_raw_read, stall_at, "stalled sample left in the ring");
+	zassert_equal(adc_streams[0].proc_write, stall_at, "only consumed samples published");
+	zassert_equal(bridge_hw_adc_stream_end(0u), BRIDGE_HW_OK, "stream ends cleanly");
+}
+
+ZTEST(gd32_adc_seq, test_fac_pump_end_between_batches_does_not_drain_replacement)
+{
+	replacement_end_result   = BRIDGE_HW_ERR_IO;
+	replacement_begin_result = BRIDGE_HW_ERR_IO;
+	arm_fac_pump_with_samples(2u * ADC_DSP_PUMP_LOCK_BATCH);
+
+	/* Locks: 1 = batch-1 claim, 2 = batch-1 commit, 3 = batch-2 claim.
+	 * END -> BEGIN -> BIND lands just before the batch-2 claim. */
+	mock_irq_set_lock_hook(3u, replace_stream_with_fir);
+	bridge_hw_dsp_pump();
+
+	zassert_equal(replacement_end_result, BRIDGE_HW_OK, "END between batches succeeds");
+	zassert_equal(replacement_begin_result, BRIDGE_HW_OK, "same-ID replacement begins");
+	zassert_equal(adc_streams[0].proc_write, 0u, "batch 2 publishes nothing into the replacement");
+	zassert_equal(adc_streams[0].pump_raw_read, 0u, "batch 2 does not drain the replacement");
+	zassert_equal(bridge_hw_adc_stream_end(0u), BRIDGE_HW_OK, "replacement ends cleanly");
+}
+
+static uint8_t  read_hook_rc  = 0xFFu;
+static uint8_t  read_hook_got = 0u;
+static uint16_t read_hook_mv[8];
+
+static void read_stream_from_hook(void)
+{
+	read_hook_rc = (uint8_t)bridge_hw_adc_stream_read(0u, 8u, &read_hook_got, read_hook_mv);
+}
+
+ZTEST(gd32_adc_seq, test_fac_pump_does_not_overwrite_unread_proc_ring_before_commit)
+{
+	/* gh#272: proc_ring slot proc_write % ring aliases the sample one ring
+	 * older, which stream_read still serves while the backlog is ~1020.  A
+	 * read landing between claim and commit must see the ORIGINAL samples:
+	 * the batch is staged locally and copied in only inside the commit. */
+	arm_fac_pump_with_samples(ADC_DSP_PUMP_LOCK_BATCH);
+	adc_stream_state_t *s = &adc_streams[0];
+	for (uint16_t i = 0u; i < BRIDGE_ADC_STREAM_RING_SAMPLES; ++i)
+		s->proc_ring[i] = i; /* distinct marker per slot, all <= full_scale */
+	s->proc_read  = 0u;
+	s->proc_write = BRIDGE_ADC_STREAM_RING_SAMPLES - 4u; /* backlog 1020 */
+
+	read_hook_rc = 0xFFu;
+	mock_irq_set_lock_hook(2u, read_stream_from_hook); /* just before the commit */
+	bridge_hw_dsp_pump();
+
+	zassert_equal(read_hook_rc, BRIDGE_HW_OK, "mid-batch read succeeds");
+	zassert_equal(read_hook_got, 8u, "reader drains a full request");
+	for (uint16_t i = 0u; i < 8u; ++i) {
+		zassert_equal(read_hook_mv[i],
+		              (uint16_t)(((uint32_t)i * ADC_VREF_MV) / s->full_scale),
+		              "slot %u still holds its original sample, not a newer overwrite",
+		              (unsigned)i);
+	}
+	zassert_equal(s->proc_write,
+	              BRIDGE_ADC_STREAM_RING_SAMPLES - 4u + ADC_DSP_PUMP_LOCK_BATCH,
+	              "batch published at commit");
+	zassert_equal(bridge_hw_adc_stream_end(0u), BRIDGE_HW_OK, "stream ends cleanly");
+}
+
+ZTEST(gd32_adc_seq, test_fac_pump_end_between_claim_and_commit_discards_batch)
+{
+	replacement_end_result   = BRIDGE_HW_ERR_IO;
+	replacement_begin_result = BRIDGE_HW_ERR_IO;
+	arm_fac_pump_with_samples(ADC_DSP_PUMP_LOCK_BATCH);
+
+	/* Locks: 1 = batch-1 claim, 2 = batch-1 commit.  END -> BEGIN -> BIND
+	 * lands after the claim, so the commit must fail and discard. */
+	mock_irq_set_lock_hook(2u, replace_stream_with_fir);
+	bridge_hw_dsp_pump();
+
+	zassert_equal(replacement_end_result, BRIDGE_HW_OK, "END between claim and commit succeeds");
+	zassert_equal(replacement_begin_result, BRIDGE_HW_OK, "same-ID replacement begins");
+	zassert_equal(adc_streams[0].proc_write, 0u, "failed commit publishes nothing");
+	zassert_equal(adc_streams[0].pump_raw_read, 0u, "failed commit consumes nothing");
+
+	/* The revoked token must not wedge the FAC: the next pump re-inits it
+	 * and processes the replacement's single sample. */
+	const int before = mock_seq_n;
+	bridge_hw_dsp_pump();
+	zassert_true(mock_seq_find_from("fac_init", 0u, before) >= 0, "next pump configures the FAC");
+	zassert_equal(adc_streams[0].proc_write, 1u, "replacement sample processed");
+	zassert_equal(bridge_hw_adc_stream_end(0u), BRIDGE_HW_OK, "replacement ends cleanly");
+}
+
 ZTEST(gd32_adc_seq, test_fft_post_commit_preemption_cannot_drain_replacement)
 {
 	adc_seq_reset();
@@ -1170,17 +1324,25 @@ ZTEST(gd32_adc_seq, test_fft_publish_commit_preemption_cannot_expose_stale_frame
 	mock_dma_set_remaining(DMA0, DMA_CH0, BRIDGE_ADC_STREAM_RING_SAMPLES);
 	bridge_hw_dsp_pump();
 
-	for (uint16_t i = 0u; i < 32u; ++i)
+	const uint32_t samples = 32u;
+	for (uint16_t i = 0u; i < samples; ++i)
 		adc_streams[0].ring[i] = i;
-	mock_dma_set_remaining(DMA0, DMA_CH0, BRIDGE_ADC_STREAM_RING_SAMPLES - 32u);
+	mock_dma_set_remaining(DMA0, DMA_CH0, BRIDGE_ADC_STREAM_RING_SAMPLES - samples);
 	mock_fft_set_flag(SET);
 
 	/* Each sample takes one lease-protected capture and one protected
-	 * append (64 locks); lock 65 claims the unreadable publishing token.
-	 * Inject END -> BEGIN -> BIND on lock 66, immediately before the final
-	 * metadata/owner commit. The callback runs from __get_PRIMASK(), before
-	 * interrupts become masked, so this is a silicon-reachable boundary. */
-	mock_irq_set_lock_hook(66u, replace_stream_with_fft);
+	 * append (2 locks per sample); the next lock claims the unreadable
+	 * publishing token.  Inject END -> BEGIN -> BIND on the lock after
+	 * that, immediately before the final metadata/owner commit. The
+	 * callback runs from __get_PRIMASK(), before interrupts become masked,
+	 * so this is a silicon-reachable boundary.  Derived from the sample
+	 * count so a lock added to the pump moves this test's expectation
+	 * visibly rather than silently shifting the injection point. */
+	const uint32_t locks_per_sample = 2u; /* capture + append */
+	const uint32_t claim_locks      = 1u; /* publishing-token claim */
+	const uint32_t commit_lock      = 1u; /* the lock the hook precedes */
+	mock_irq_set_lock_hook(samples * locks_per_sample + claim_locks + commit_lock,
+	                       replace_stream_with_fft);
 	bridge_hw_dsp_pump();
 
 	zassert_equal(replacement_end_result, BRIDGE_HW_OK, "END before publish commit succeeds");

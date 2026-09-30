@@ -734,8 +734,10 @@ int bridge_hw_adc_stream_end(uint8_t stream_id)
  * stream_id N would compute the identical token an earlier session on
  * the same stream_id N once held.  That collision is unreachable
  * today ONLY because the token is never live across two overlapping
- * sessions: adc_dsp_owner_claim_config() (the sole writer of a fresh
- * transitional token) requires *owner == ADC_DSP_OWNER_NONE first,
+ * sessions: the only writers of a transitional token are
+ * adc_dsp_owner_claim_config(), the FIR pump claim and the FFT publish,
+ * and each writes it only while *owner is NONE or already this stream's
+ * id (claim_config requires *owner == ADC_DSP_OWNER_NONE first),
  * and every path that ends a session (adc_dsp_fac_release /
  * adc_dsp_fft_release, both driven from stream_end) restores
  * ADC_DSP_OWNER_NONE before a replacement stream_begin on the same ID
@@ -1229,88 +1231,110 @@ static void adc_dsp_pump_stream(uint8_t sid)
 	const int32_t mid   = (int32_t)((s->full_scale + 1u) / 2u);
 	const uint8_t shift = adc_dsp_bias_shift(s->full_scale);
 
-	while (avail-- > 0) {
-		/* gh#272: this section runs once per sample, up to the 100 kHz
-		 * cap.  It was reviewed for "is this a place to do work" per
-		 * bridge_critical.h's own rule: every statement inside is
-		 * either the liveness re-check (must run before ANY FAC MMIO,
-		 * since END can deinit the block between samples) or a single
-		 * FAC register access (poll/write/poll/read/poll/poll) --
-		 * bounded, no loop, no wait, nothing that can itself block.
-		 * The raw-sample fetch (ridx/code/x) and the processed-sample
-		 * publish (proc_ring/proc_write) stay INSIDE the same section
-		 * on purpose: moving them out was tried and reverted -- it let
-		 * a sample get marked "consumed" (pump_raw_read advanced)
-		 * without ever reaching the FAC when END preempted between the
-		 * fetch and the liveness check, silently dropping it instead
-		 * of leaving it for the replacement session
-		 * (test_fac_post_commit_preemption_cannot_drain_replacement
-		 * pins exactly this).  No bench measurement of this section's
-		 * cycle cost against SPI reply latency has been taken (no
-		 * hardware access this pass) -- that bench step is still
-		 * owed; this comment records the static-analysis case that
-		 * the section is small and further shrinking it costs a real
-		 * correctness property, not laziness. */
-		const uint32_t irq_state = bridge_irq_lock();
-		if (!adc_dsp_owner_live_locked(&adc_dsp_fac_owner, (int8_t)sid, s, false)) {
-			bridge_irq_unlock(irq_state);
-			return;
-		}
-		/* FAC input saturated: leave the sample in the ring for the next
-		 * tick instead of consuming it un-filtered (gh#18 A23). */
-		if (fac_flag_get(FAC_FLAG_X0BFF) == SET) {
-			bridge_irq_unlock(irq_state);
-			break;
-		}
-		const uint16_t ridx = (uint16_t)(s->pump_raw_read % BRIDGE_ADC_STREAM_RING_SAMPLES);
-		const uint16_t code = (uint16_t)(s->ring[ridx] & 0x0FFFu); /* 12-bit raw ring word */
-		s->pump_raw_read++;
+	while (avail > 0) {
+		/* gh#272: the FAC work runs with interrupts ON.  Each batch of at
+		 * most ADC_DSP_PUMP_LOCK_BATCH samples takes two short sections,
+		 * each a flag test-and-set (bridge_critical.h): CLAIM swaps the
+		 * FAC owner to the transitional token (the FFT pump's pattern), and
+		 * COMMIT publishes pump_raw_read / proc_write only if the token is
+		 * still ours.  The interrupt-off window no longer scales with the
+		 * FAC access count: the window is bounded and does not grow with the
+		 * FAC work.
+		 * END during the batch releases the owner (release clears the
+		 * transitional token too); commit then fails and the batch is
+		 * discarded, so a consumed-but-unfiltered or stale sample is never
+		 * exposed (test_fac_post_commit_preemption_cannot_drain_replacement).
+		 * Filtered samples go to a LOCAL buffer and are copied into proc_ring
+		 * inside the commit section: slot proc_write % ring aliases sample
+		 * proc_write - ring, which stream_read may still be serving, so it
+		 * must not be overwritten before proc_write is published.  The batch
+		 * size only amortises the two sections. */
+		const int8_t   transitional = adc_dsp_owner_transitional(sid);
+		const uint32_t claim_state  = bridge_irq_lock();
+		const bool leased = adc_dsp_owner_live_locked(&adc_dsp_fac_owner, (int8_t)sid, s, false);
+		if (leased) adc_dsp_fac_owner = transitional;
+		bridge_irq_unlock(claim_state);
+		if (!leased) return;
 
-		/* gh#35 fix 3 / gh#253: bias the input around mid-scale BEFORE
-		 * the shift.  The old non-negative mapping (code << 3) was
-		 * reasoned only about a unity-DC-gain low-pass; for any high-
-		 * pass, band-pass or DC-blocking biquad the output is
-		 * legitimately negative for about half the samples, and the
-		 * old output clamp (c < 0 -> 0) half-wave-rectified the served
-		 * stream -- a large spurious DC term and harmonics the signal
-		 * never contained, delivered with STATUS_OK.  With the bias, x
-		 * is a signed q1.15 in [-1, 0.9995) centred on 0, the FAC
-		 * output is signed symmetric, and the mid re-bias below maps a
-		 * mid-scale-centred swing back onto the unipolar code plane
-		 * WITHOUT discarding the negative half. */
-		const int16_t x = (int16_t)(((int32_t)code - mid) << shift);
-		fac_fixed_data_write(x);
-
-		/* gh#306: drain every ready output word (YBEF == RESET means Y is
-		 * NOT empty), not one per write -- a primed/backed-up Y otherwise
-		 * never catches up.  Bounded: Y is 32 deep, Y threshold 1. */
-		for (uint8_t drain = 0u; drain < 32u && fac_flag_get(FAC_FLAG_YBEF) == RESET; ++drain) {
-			/* Re-bias the signed q1.15 output back onto the unipolar
-			 * code plane (the shift undoes the encode shift, mid undoes
-			 * the mid-scale subtraction above).  Swings beyond one
-			 * code half-range clip here -- the processed plane's own
-			 * headroom; genuine FAC saturation is flagged via dsp_sat
-			 * below, so a clipped or railed series is never reported
-			 * as STATUS_OK. */
-			int32_t c = (((int32_t)fac_fixed_data_read()) >> shift) + mid;
-			if (c < 0) c = 0;
-			if (c > (int32_t)s->full_scale) c = (int32_t)s->full_scale;
-			/* gh#35: saturation visibility.  Poll the FAC's sticky
-			 * error flags (UM p.1515 FAC_STAT STEF bit 10 = output
-			 * saturation, GSTEF bit 11 = gain saturation) rather
-			 * than arming their interrupt enables (STEIE/GSTEIE,
-			 * p.1514) -- the pump runs at base level, no vector is
-			 * needed, and polling cannot preempt the transports.
-			 * Either flag means the served stream contains railed
-			 * values: mark the stream sticky so stream_read stops
-			 * answering STATUS_OK for it. */
-			if (SET == fac_flag_get(FAC_FLAG_STEF) || SET == fac_flag_get(FAC_FLAG_GSTEF)) {
-				s->dsp_sat = true;
+		int32_t batch = avail;
+		if (batch > (int32_t)ADC_DSP_PUMP_LOCK_BATCH) batch = (int32_t)ADC_DSP_PUMP_LOCK_BATCH;
+		uint32_t raw_read = s->pump_raw_read;
+		uint16_t out[ADC_DSP_PUMP_LOCK_BATCH];
+		uint32_t n_out   = 0u;
+		bool     sat     = false;
+		bool     stalled = false;
+		int32_t  used    = 0;
+		/* A write can release several Y words (gh#306 drains Y, not one
+		 * word per write), so out[] can fill before the batch does: stop
+		 * feeding when it is full, and never drain past its capacity.  Any
+		 * word left in Y stays queued in order and is drained by the next
+		 * batch; nothing is dropped or overflowed. */
+		for (; used < batch && n_out < ADC_DSP_PUMP_LOCK_BATCH; ++used) {
+			/* FAC input saturated: leave the sample in the ring for the
+			 * next tick instead of consuming it un-filtered (gh#18 A23). */
+			if (fac_flag_get(FAC_FLAG_X0BFF) == SET) {
+				stalled = true;
+				break;
 			}
-			s->proc_ring[s->proc_write % BRIDGE_ADC_STREAM_RING_SAMPLES] = (uint16_t)c;
-			s->proc_write++;
+			const uint16_t ridx = (uint16_t)(raw_read % BRIDGE_ADC_STREAM_RING_SAMPLES);
+			const uint16_t code = (uint16_t)(s->ring[ridx] & 0x0FFFu); /* 12-bit raw ring word */
+			raw_read++;
+
+			/* gh#35 fix 3 / gh#253: bias the input around mid-scale BEFORE
+			 * the shift, so a high-pass / band-pass / DC-blocking biquad's
+			 * legitimately negative half is not half-wave-rectified.  x is
+			 * a signed q1.15 centred on 0; the mid re-bias below maps a
+			 * mid-scale-centred swing back onto the unipolar code plane
+			 * WITHOUT discarding the negative half. */
+			const int16_t x = (int16_t)(((int32_t)code - mid) << shift);
+			fac_fixed_data_write(x);
+
+			/* gh#306: drain every ready output word (YBEF == RESET means Y
+			 * is NOT empty), not one per write -- a primed/backed-up Y
+			 * otherwise never catches up.  Bounded: Y is 32 deep, Y
+			 * threshold 1, and out[] capacity. */
+			for (uint8_t drain = 0u; drain < 32u && n_out < ADC_DSP_PUMP_LOCK_BATCH &&
+			                         fac_flag_get(FAC_FLAG_YBEF) == RESET;
+			     ++drain) {
+				/* Re-bias the signed q1.15 output back onto the unipolar
+				 * code plane.  Swings beyond one code half-range clip
+				 * here; genuine FAC saturation is flagged via dsp_sat
+				 * below, so a railed series is never reported as
+				 * STATUS_OK. */
+				int32_t c = (((int32_t)fac_fixed_data_read()) >> shift) + mid;
+				if (c < 0) c = 0;
+				if (c > (int32_t)s->full_scale) c = (int32_t)s->full_scale;
+				/* gh#35: poll the FAC's sticky error flags (UM p.1515
+				 * FAC_STAT STEF bit 10 = output saturation, GSTEF bit 11
+				 * = gain saturation) rather than arming their interrupt
+				 * enables (STEIE/GSTEIE, p.1514) -- the pump runs at base
+				 * level, no vector is needed, and polling cannot preempt
+				 * the transports.  Either flag means the served stream
+				 * contains railed values: mark it sticky so stream_read
+				 * stops answering STATUS_OK. */
+				if (SET == fac_flag_get(FAC_FLAG_STEF) || SET == fac_flag_get(FAC_FLAG_GSTEF)) {
+					sat = true;
+				}
+				out[n_out++] = (uint16_t)c;
+			}
 		}
-		bridge_irq_unlock(irq_state);
+
+		const uint32_t commit_state = bridge_irq_lock();
+		const bool     live = adc_dsp_owner_live_locked(&adc_dsp_fac_owner, transitional, s, false);
+		if (live) {
+			uint32_t proc_wr = s->proc_write;
+			for (uint32_t i = 0u; i < n_out; ++i)
+				s->proc_ring[(proc_wr + i) % BRIDGE_ADC_STREAM_RING_SAMPLES] = out[i];
+			s->pump_raw_read = raw_read;
+			s->proc_write    = proc_wr + n_out;
+			if (sat) s->dsp_sat = true;
+			adc_dsp_fac_owner = (int8_t)sid;
+		} else if (adc_dsp_fac_owner == transitional) {
+			adc_dsp_fac_owner = ADC_DSP_OWNER_NONE; /* as commit_config: never wedge a claim */
+		}
+		bridge_irq_unlock(commit_state);
+		if (!live || stalled) return;
+		avail -= used;
 	}
 }
 
