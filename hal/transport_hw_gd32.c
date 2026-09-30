@@ -801,6 +801,58 @@ int bridge_transport_i2c_hw_init(void)
 	return BRIDGE_HW_OK;
 }
 
+/* SWD-readable recovery counters (#150).  Non-static so they resolve by name
+ * in the ELF symbol table.  Each counter has exactly one writer context so the
+ * plain read-modify-write cannot lose an increment to preemption:
+ *   bridge_i2c_timeout_recoveries       ER handler only (TIMEOUT arm ran)
+ *   bridge_i2c_reset_escalations        ER handler only (a TIMEOUT recovery
+ *                                       needed the RCU_I2C0RST escalation)
+ *   bridge_i2c_stuck_sda_escalations    base level only (stuck-SDA poll, #39,
+ *                                       needed the RCU_I2C0RST escalation) */
+volatile uint32_t bridge_i2c_timeout_recoveries;
+volatile uint32_t bridge_i2c_reset_escalations;
+volatile uint32_t bridge_i2c_stuck_sda_escalations;
+
+static void i2c_ops_en_clear(void)
+{
+	I2C_CTL0(BRIDGE_I2C_PERIPH) &= ~I2C_CTL0_I2CEN; /* Write I2CEN = 0 */
+}
+static bool i2c_ops_en_is_set(void)
+{
+	return 0u != (I2C_CTL0(BRIDGE_I2C_PERIPH) & I2C_CTL0_I2CEN); /* Check I2CEN = 0 */
+}
+static void i2c_ops_en_set(void)
+{
+	I2C_CTL0(BRIDGE_I2C_PERIPH) |= I2C_CTL0_I2CEN; /* Write I2CEN = 1 */
+}
+static void i2c_ops_rcu_reset(void)
+{
+	rcu_periph_reset_enable(RCU_I2C0RST);
+	rcu_periph_reset_disable(RCU_I2C0RST);
+}
+static void i2c_ops_reinit(void)
+{
+	(void)bridge_transport_i2c_hw_init();
+}
+static bool i2c_ops_timeout_pending(void)
+{
+	return RESET != i2c_interrupt_flag_get(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_TIMEOUT);
+}
+static void i2c_ops_timeout_clear(void)
+{
+	i2c_interrupt_flag_clear(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_TIMEOUT);
+}
+
+static const bridge_i2c_recovery_ops_t i2c_recovery_ops = {
+	.en_clear        = i2c_ops_en_clear,
+	.en_is_set       = i2c_ops_en_is_set,
+	.en_set          = i2c_ops_en_set,
+	.rcu_reset       = i2c_ops_rcu_reset,
+	.reinit          = i2c_ops_reinit,
+	.timeout_pending = i2c_ops_timeout_pending,
+	.timeout_clear   = i2c_ops_timeout_clear,
+};
+
 /* Documented I2C0 software reset (UM Rev1.2 p.1262 SS28.3.5): "Write
  * I2CEN = 0 / Check I2CEN = 0 / Write I2CEN = 1", I2CEN held low for
  * >= 3 APB clock cycles, which "releases SCL and SDA" while leaving
@@ -823,27 +875,21 @@ int bridge_transport_i2c_hw_init(void)
  * a wedge, but UM SS28.3.9 documents TIMEOUT as a flag only, not an
  * automatic SCL/SDA release -- clearing it alone leaves a genuinely
  * stalled pad exactly as stalled with the evidence erased.  This helper
- * is the slave's own bounded way to force the physical release, shared
- * by the stuck-SDA poll (#39, below) and the ER-vector bus-error path
- * (below) so neither one merely reports the wedge. */
+ * is the slave's own bounded way to force the physical release for the
+ * stuck-SDA poll (#39, below).  The ER-vector TIMEOUT path (below) reaches
+ * the same sequence through bridge_i2c_timeout_service(), both built on
+ * bridge_i2c_bus_release() (hal/gd32/i2c_recovery.h), so neither one merely
+ * reports the wedge.
+ *
+ * The sequence itself (I2CEN=0, bounded read-back spin, RCU reset + re-init
+ * on exhaustion) lives in hal/gd32/i2c_recovery.h so the host tests drive it
+ * with a mock; this wrapper only adds the escalation count for the stuck-SDA
+ * poll (#39) path. */
 static void bridge_i2c_force_bus_release(void)
 {
-	I2C_CTL0(BRIDGE_I2C_PERIPH) &= ~I2C_CTL0_I2CEN; /* Write I2CEN = 0 */
-	uint32_t spins = 0u;
-	while (0u != (I2C_CTL0(BRIDGE_I2C_PERIPH) & I2C_CTL0_I2CEN)) {
-		/* Check I2CEN = 0 -- the read-back IS the >= 3 APB cycle hold */
-		if (bridge_i2c_en_clear_spin_exhausted(++spins)) {
-			/* I2CEN never read back clear: the documented software
-			 * reset alone cannot recover this peripheral.  Force it
-			 * with the RCU peripheral reset and bring I2C0 back up
-			 * from scratch rather than spin any further. */
-			rcu_periph_reset_enable(RCU_I2C0RST);
-			rcu_periph_reset_disable(RCU_I2C0RST);
-			(void)bridge_transport_i2c_hw_init();
-			return;
-		}
+	if (bridge_i2c_bus_release(&i2c_recovery_ops)) {
+		bridge_i2c_stuck_sda_escalations++;
 	}
-	I2C_CTL0(BRIDGE_I2C_PERIPH) |= I2C_CTL0_I2CEN; /* Write I2CEN = 1 */
 }
 
 /* I2C0 event ISR: address match (direction-aware), RX during a write,
@@ -968,21 +1014,13 @@ void BRIDGE_I2C_ER_HANDLER(void)
 		i2c_interrupt_flag_clear(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_OUERR);
 		bus_error = true;
 	}
-	if (RESET != i2c_interrupt_flag_get(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_TIMEOUT)) {
-		/* A timeout leaves the request/reply framing untrustworthy even
-		 * though the IP only exposes it as a status flag. Clear it and use
-		 * the same portable-side resynchronisation as a bus error; otherwise
-		 * the next address match can append to a transaction that timed out
-		 * while this handler was pre-empted. */
-		i2c_interrupt_flag_clear(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_TIMEOUT);
-		/* #252: clearing the flag only records that the IP saw the
-		 * wedge -- UM SS28.3.9 specifies TIMEOUT as a flag, not an
-		 * automatic slave abort or SCL/SDA release, so a genuinely
-		 * stalled pad stays stalled with the evidence now erased.
-		 * Force the documented release so this vector is the slave's
-		 * own bounded way out, instead of waiting on whatever else
-		 * next touches the bus. */
-		bridge_i2c_force_bus_release();
+	/* A timeout leaves the request/reply framing untrustworthy even though
+	 * the IP only exposes it as a status flag.  Clear it and force the
+	 * documented bus release (#252: UM SS28.3.9 specifies TIMEOUT as a flag,
+	 * not an automatic SCL/SDA release), then resynchronise below like a bus
+	 * error.  Sequence + escalation: bridge_i2c_timeout_service(). */
+	if (bridge_i2c_timeout_service(
+	        &i2c_recovery_ops, &bridge_i2c_timeout_recoveries, &bridge_i2c_reset_escalations)) {
 		bus_error = true;
 	}
 
@@ -1113,8 +1151,8 @@ void bridge_transport_i2c_stuck_poll(void)
 	i2c_sda_low_ticks = 0u;
 
 	/* Documented software reset (UM Rev1.2 p.1262 s28.3.5), bounded and
-	 * shared with the ER-vector path -- see bridge_i2c_force_bus_release()
-	 * above (#251). */
+	 * built on the same bridge_i2c_bus_release() the ER-vector TIMEOUT arm uses --
+	 * see bridge_i2c_force_bus_release() above (#251). */
 	bridge_i2c_force_bus_release();
 	i2c_slave_tx_abort(); /* drop a half-consumed staged reply */
 }
