@@ -261,13 +261,11 @@ _Static_assert(GPIO_PAD_CAN_STBY < GPIO_PAD_MAP_COUNT,
  * wire-legal pair
  *     CMD_ADC_CONFIGURE(channel=0, oversample_ratio=256, sample_cycles=638)
  *     CMD_ADC_READ(channel=0, samples=8)
- * occupied the SPI CS-EXTI handler at NVIC group priority 1 for ~37 ms.
- * For that whole window I2C0_EV/I2C0_ER (group priority 2) cannot run;
- * if the I2C side was addressed the bridge holds SCL low the entire time
- * (clock stretching is enabled in bridge_transport_i2c_hw_init and no
- * I2C timeout is configured anywhere), stalling the SHARED BRD_I2C bus
- * and not just this bridge; and base level -- bridge_hw_dsp_pump() and
- * ota_erase_tick() -- does not run at all.
+ * occupies the SPI CS-EXTI handler at NVIC group priority 2 for ~37 ms.
+ * I2C0_EV/I2C0_ER (group priority 1, #150) pre-empt it, so an addressed
+ * I2C slave transaction no longer waits behind this window on the SHARED
+ * BRD_I2C bus (its nested dispatch answers STATUS_BUSY, #19).  Base level --
+ * bridge_hw_dsp_pump() and ota_erase_tick() -- still does not run at all.
  *
  * #17 bounds the FAULT path, where the converter is wedged.  This is the
  * NOMINAL path: the operation completes correctly and #17's bound never

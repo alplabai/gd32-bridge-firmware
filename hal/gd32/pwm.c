@@ -468,8 +468,8 @@ int bridge_hw_pwm_configure(uint8_t  channel,
      * one field, and CEN (bit 0) and SPM (bit 3) live in that same
      * register -- written by bridge_hw_pwm_set and
      * bridge_hw_pwm_single_pulse, which reach this timer from the OTHER
-     * transport's ISR.  Unprotected, this happened: I2C0_EV (priority 2)
-     * snapshots `ctl0` with CEN = 0 and SPM = 0; the SPI CS-EXTI handler
+     * transport's ISR.  Unprotected, this happened: CS-EXTI (priority 2)
+     * snapshots `ctl0` with CEN = 0 and SPM = 0; the I2C0_EV handler
      * (priority 1) pre-empts and runs a single-pulse, setting SPM and
      * CEN; this side resumes and writes its stale word back, clearing
      * BOTH -- the one-shot never fires and its caller was told
@@ -487,7 +487,7 @@ int bridge_hw_pwm_configure(uint8_t  channel,
      * short enough for the CS-EXTI handler's deadline (bridge_critical.h).
      *
      * The reverse cross-transport sequence is excluded by #19's atomic
-     * protocol-dispatch guard: a CS-EXTI request that pre-empts I2C is
+     * protocol-dispatch guard: an I2C request that pre-empts CS-EXTI is
      * answered STATUS_BUSY before either PWM handler can run. */
 	const uint32_t sect        = bridge_irq_lock();
 	const bool     was_running = (TIMER_CTL0(ch->periph) & (uint32_t)TIMER_CTL0_CEN) != 0u;

@@ -1629,6 +1629,7 @@ ZTEST(protocol, test_link_features_rejects_unknown_link)
 }
 
 typedef struct {
+	gd32_bridge_link_t   link; /* transport the NESTED request arrives on */
 	gd32_bridge_status_t status;
 	size_t               reply_len;
 } nested_dispatch_probe_t;
@@ -1639,13 +1640,8 @@ static void dispatch_chain_open_from_fake_hook(void *context)
 	uint8_t                  reply[REPLY_SCRATCH_CAP];
 
 	probe->reply_len = 0xDEADu;
-	probe->status    = protocol_dispatch(GD32_BRIDGE_LINK_SPI,
-	                                     CMD_ADC_DSP_CHAIN_OPEN,
-	                                     NULL,
-	                                     0u,
-	                                     reply,
-	                                     sizeof(reply),
-	                                     &probe->reply_len);
+	probe->status    = protocol_dispatch(
+	    probe->link, CMD_ADC_DSP_CHAIN_OPEN, NULL, 0u, reply, sizeof(reply), &probe->reply_len);
 }
 
 /* SPI's CS EXTI can pre-empt an I2C dispatch while the outer handler is in
@@ -1655,7 +1651,7 @@ static void dispatch_chain_open_from_fake_hook(void *context)
 ZTEST(protocol, test_nested_dispatch_returns_busy_without_hal_mutation)
 {
 	uint8_t                 reply[REPLY_SCRATCH_CAP];
-	nested_dispatch_probe_t nested = { STATUS_OK, 0u };
+	nested_dispatch_probe_t nested = { GD32_BRIDGE_LINK_SPI, STATUS_OK, 0u };
 
 	bridge_hw_fake_reset();
 	bridge_hw_fake_dsp_chain_set_next_id(0x07u);
@@ -1694,6 +1690,37 @@ ZTEST(protocol, test_nested_dispatch_returns_busy_without_hal_mutation)
 	zassert_equal(reply_len, 1u);
 	zassert_equal(reply[0], 0x08u);
 	zassert_equal(bridge_hw_fake_call_count(FAKE_FN_ADC_DSP_CHAIN_OPEN), 2u);
+}
+
+/* #150: the I2C ISR now sits ABOVE the SPI CS EXTI, so it is I2C that
+ * pre-empts a long SPI dispatch.  The nested I2C request must be refused
+ * (STATUS_BUSY, host retries) without touching the HAL, so the ISR returns
+ * at once and SCL is released instead of waiting out the SPI handler. */
+ZTEST(protocol, test_nested_i2c_dispatch_preempting_spi_returns_busy)
+{
+	uint8_t                 reply[REPLY_SCRATCH_CAP];
+	nested_dispatch_probe_t nested = { GD32_BRIDGE_LINK_I2C, STATUS_OK, 0xDEADu };
+
+	bridge_hw_fake_reset();
+	bridge_hw_fake_dsp_chain_set_next_id(0x09u);
+	bridge_hw_fake_set_call_hook(
+	    FAKE_FN_ADC_DSP_CHAIN_OPEN, dispatch_chain_open_from_fake_hook, &nested);
+
+	size_t reply_len = 0u;
+	zassert_equal(protocol_dispatch(GD32_BRIDGE_LINK_SPI,
+	                                CMD_ADC_DSP_CHAIN_OPEN,
+	                                NULL,
+	                                0u,
+	                                reply,
+	                                sizeof(reply),
+	                                &reply_len),
+	              STATUS_OK,
+	              "outer SPI command completes");
+	zassert_equal(nested.status, STATUS_BUSY, "pre-empting I2C dispatch is refused");
+	zassert_equal(nested.reply_len, 0u, "BUSY reply has no payload");
+	zassert_equal(bridge_hw_fake_call_count(FAKE_FN_ADC_DSP_CHAIN_OPEN),
+	              1u,
+	              "nested request never enters the HAL");
 }
 
 /* Direct returns inside the inner switch must still pass through the outer

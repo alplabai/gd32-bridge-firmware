@@ -229,9 +229,9 @@ void bridge_hw_init(void)
 	 * (protocol dispatch frames, adc_stream, tmu, gpio).  The deepest
 	 * executable chains:
 	 *
-	 *   CS-EXTI (prio 1) -> protocol_dispatch -> worst opcode handler
+	 *   CS-EXTI (prio 2) -> protocol_dispatch -> worst opcode handler
 	 *     -> adc_stream path .......... <= ~248 + 104 + 88 + frame ~700
-	 *   + nested I2C-EV (prio 2) -> protocol_dispatch -> handler ~300
+	 *   + nested I2C-EV (prio 1) -> protocol_dispatch -> handler ~300
 	 *   + 2 exception frames (no FPU context: 32 B each) ........ ~64
 	 *   ---------------------------------------------------- approx 1.1 K
 	 *
@@ -753,8 +753,8 @@ void bridge_hw_init(void)
 	 *
 	 * NVIC priority 15 (lowest, __NVIC_PRIO_BITS = 4 on this part):
 	 * the handler body is empty -- waking __WFI() is its entire job
-	 * -- and it must never delay BRIDGE_CS_IRQ_PRIO 1 or
-	 * BRIDGE_I2C_IRQ_PRIO 2. */
+	 * -- and it must never delay BRIDGE_I2C_IRQ_PRIO 1 or
+	 * BRIDGE_CS_IRQ_PRIO 2. */
 	{
 		uint32_t reload = (SystemCoreClock / 20u) - 1u; /* 50 ms */
 		if (reload > SysTick_LOAD_RELOAD_Msk) reload = SysTick_LOAD_RELOAD_Msk;

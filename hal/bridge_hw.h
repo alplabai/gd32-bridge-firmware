@@ -33,7 +33,7 @@
 /*   through it: protocol_dispatch() runs synchronously inside      */
 /*   both the SPI CS EXTI handler and the I2C ISR                   */
 /*   (hal/transport_hw_gd32.c, src/transport_i2c.c), which pre-empt */
-/*   each other (BRIDGE_CS_IRQ_PRIO=1 < BRIDGE_I2C_IRQ_PRIO=2 in    */
+/*   each other (BRIDGE_I2C_IRQ_PRIO=1 < BRIDGE_CS_IRQ_PRIO=2 in    */
 /*   hal/bridge_board_config.h), so one handler's frame CRC can     */
 /*   reseed CRC_DATA mid-computation for the other.  Full           */
 /*   derivation, register recipes and a bootloader-only option:     */

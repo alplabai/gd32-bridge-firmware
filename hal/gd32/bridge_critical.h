@@ -7,8 +7,8 @@
  * Why this file exists (#19 and its children #133/#134/#147): this is a
  * bare-metal application in which
  * protocol_dispatch() runs synchronously inside BOTH transport ISRs --
- * BRIDGE_SPI_CS_EXTI_HANDLER at BRIDGE_CS_IRQ_PRIO (1) and
- * BRIDGE_I2C_EV_HANDLER at BRIDGE_I2C_IRQ_PRIO (2), see
+ * BRIDGE_I2C_EV_HANDLER at BRIDGE_I2C_IRQ_PRIO (1) and
+ * BRIDGE_SPI_CS_EXTI_HANDLER at BRIDGE_CS_IRQ_PRIO (2), see
  * hal/bridge_board_config.h.  Group priority 1 pre-empts group priority
  * 2.  protocol_dispatch() now refuses a nested transport request with
  * STATUS_BUSY (#19), but short critical sections are still required for
@@ -19,7 +19,7 @@
  *
  * Why PRIMASK and not BASEPRI: BASEPRI is the finer instrument, but the
  * short shared-state claims this helper protects need to exclude the
- * CS-EXTI handler, which is already the highest-priority interrupt this
+ * transport handlers, which are already the highest-priority interrupts this
  * application owns.  Masking everything is therefore equivalent in effect
  * here, and PRIMASK is one register with no priority-encoding subtleties to
  * get wrong.

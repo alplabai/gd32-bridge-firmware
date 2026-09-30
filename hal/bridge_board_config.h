@@ -108,7 +108,13 @@
  * needs no static value here.  Slave timing only needs setup/hold +
  * prescaler; the 400 kHz bus rate is the master's SCLH/SCLL, not ours. */
 
-/* NVIC priorities (preemption, sub). bridge_hw_init() selects PRE2_SUB2,
+/* NVIC priorities (preemption, sub).  I2C EV/ER sit ABOVE the SPI CS EXTI
+ * (#150): the I2C slave stretches SCL low from address match until its ISR
+ * runs, on a bus shared with the DA9292 PMIC and the OPTIGA, so its ISR must
+ * never wait behind a long SPI protocol_dispatch().  The reverse hazard -- the
+ * I2C ISR pre-empting an SPI dispatch and re-entering protocol_dispatch() --
+ * is closed by the atomic dispatch guard in src/protocol.c (a nested request
+ * answers STATUS_BUSY, host retries). bridge_hw_init() selects PRE2_SUB2,
  * which provides two preemption bits and two subpriority bits. CS EXTI framing
  * is at BRIDGE_CS_IRQ_PRIO, I2C EV/ER at BRIDGE_I2C_IRQ_PRIO, and ADC-stream
  * DMA lap FTF at BRIDGE_ADC_STREAM_LAP_IRQ_PRIO. The periodic
@@ -117,10 +123,10 @@
  * __WFI() every 50 ms so bridge_hw_tick() advances with a quiet host,
  * and it must never delay a transport ISR.  Housekeeping still runs at
  * base level; the tick handler body is empty. */
-#define BRIDGE_CS_IRQ_PRIO             1u
-#define BRIDGE_CS_IRQ_SUBPRIO          1u
-#define BRIDGE_I2C_IRQ_PRIO            2u
+#define BRIDGE_I2C_IRQ_PRIO            1u
 #define BRIDGE_I2C_IRQ_SUBPRIO         0u
+#define BRIDGE_CS_IRQ_PRIO             2u
+#define BRIDGE_CS_IRQ_SUBPRIO          1u
 #define BRIDGE_ADC_STREAM_LAP_IRQ_PRIO 3u
 
 _Static_assert(BRIDGE_CS_IRQ_PRIO < 4u, "PRE2_SUB2 has two preemption bits");
@@ -128,9 +134,10 @@ _Static_assert(BRIDGE_I2C_IRQ_PRIO < 4u, "PRE2_SUB2 has two preemption bits");
 _Static_assert(BRIDGE_ADC_STREAM_LAP_IRQ_PRIO < 4u, "PRE2_SUB2 has two preemption bits");
 _Static_assert(BRIDGE_CS_IRQ_SUBPRIO < 4u, "PRE2_SUB2 has two subpriority bits");
 _Static_assert(BRIDGE_I2C_IRQ_SUBPRIO < 4u, "PRE2_SUB2 has two subpriority bits");
-_Static_assert(BRIDGE_CS_IRQ_PRIO < BRIDGE_I2C_IRQ_PRIO, "CS EXTI must preempt I2C");
-_Static_assert(BRIDGE_I2C_IRQ_PRIO < BRIDGE_ADC_STREAM_LAP_IRQ_PRIO,
-               "I2C must preempt ADC DMA lap handling");
+_Static_assert(BRIDGE_I2C_IRQ_PRIO < BRIDGE_CS_IRQ_PRIO,
+               "I2C must preempt the CS EXTI dispatch (bounds SCL stretch, #150)");
+_Static_assert(BRIDGE_CS_IRQ_PRIO < BRIDGE_ADC_STREAM_LAP_IRQ_PRIO,
+               "CS EXTI must preempt ADC DMA lap handling");
 
 /* =================================================================== */
 /* RTC / wakeup-timer clock source -- LXTAL is not available on this   */

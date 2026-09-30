@@ -955,8 +955,8 @@ static gd32_bridge_status_t handle_adc_dsp_chain_bind(const uint8_t *req,
  * negotiated it.
  *
  * `volatile` because the two writers run at different NVIC preemption
- * levels -- CS-EXTI at BRIDGE_CS_IRQ_PRIO (1) can preempt I2C0_EV at
- * BRIDGE_I2C_IRQ_PRIO (2) mid-handler (hal/bridge_board_config.h).
+ * levels -- I2C0_EV at BRIDGE_I2C_IRQ_PRIO (1) can preempt CS-EXTI at
+ * BRIDGE_CS_IRQ_PRIO (2) mid-handler (hal/bridge_board_config.h).
  * Indexing by link means the two levels no longer touch the same byte,
  * so the qualifier is now belt-and-braces rather than load-bearing --
  * but the array is still read from one level and written from another
@@ -974,7 +974,7 @@ uint8_t protocol_link_features(gd32_bridge_link_t link)
  * called directly from protocol_dispatch's switch instead of going
  * through the table (#130).  Passing the tag as an argument -- rather
  * than parking a "current link" in a file-scope variable the whole table
- * could read -- is deliberate: CS-EXTI at priority 1 preempts I2C0_EV at
+ * could read -- is deliberate: I2C0_EV at priority 1 preempts CS-EXTI at
  * priority 2, so any such variable would need save/restore discipline at
  * every dispatch to survive nesting.  An argument needs none. */
 static gd32_bridge_status_t handle_link_features(gd32_bridge_link_t link,
