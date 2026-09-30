@@ -145,11 +145,14 @@ int bridge_hw_adc_read(uint8_t channel, uint8_t samples, uint16_t *mv);
 
 /* v0.3: sticky ADC tuning.  oversample_ratio is one of
  * 1/2/4/8/16/32/64/128/256 (rounded down to nearest power-of-two
- * by the firmware).  sample_cycles is a raw ADC-clock cycle count:
- * zero selects the 240-cycle firmware default, while non-zero values
- * are clamped to the vendor-supported 2..638 range.  resolution is
- * 6/8/10/12 bits.  The 14- and 16-bit effective-resolution modes are
- * not implemented and return BRIDGE_HW_ERR_NOTIMPL (wire STATUS_NOSUPPORT).
+ * by the firmware).  sample_cycles is the raw sample-time value handed to
+ * the vendor adc_routine_channel_config() (the RSMP register count in ADCCK
+ * cycles; sample time = value + 2.5 cycles), not microseconds and not a
+ * rung selector: zero selects the 240 firmware default, while non-zero
+ * values are clamped to the vendor-supported 2..638 range.  resolution is
+ * 6/8/10/12 bits (the GD32G553 DRES field supports nothing wider).  14 and
+ * 16 are not supported by the hardware and return BRIDGE_HW_ERR_NOTIMPL
+ * (wire STATUS_NOSUPPORT).
  */
 int bridge_hw_adc_configure(uint8_t  channel,
                             uint16_t oversample_ratio,

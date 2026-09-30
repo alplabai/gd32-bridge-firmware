@@ -615,10 +615,8 @@ int bridge_hw_adc_configure(uint8_t  channel,
 	 * Field semantics follow the wire contract (alp-sdk docs/gd32-bridge-
 	 * protocol.md §3.9):
 	 *   resolution_bits: 0 -> default (12).  6/8/10/12 map to the
-	 *     hardware DRES field.  14/16 are effective-resolution modes
-	 *     that the GD32 can only reach by under-shifting an oversampled
-	 *     accumulator (DRES tops out at 12 bit); that extension is not
-	 *     implemented yet -> NOSUPPORT.  Any other width is invalid ->
+	 *     hardware DRES field.  14/16 are not supported by the
+	 *     hardware (DRES tops out at 12 bit) -> NOSUPPORT.  Any other width is invalid ->
 	 *     INVAL.
 	 *   oversample_ratio: 0/1 -> off; anything larger is floored to the
 	 *     nearest power of two in 2..256 (adc_oversample_params, never
@@ -637,9 +635,11 @@ int bridge_hw_adc_configure(uint8_t  channel,
      * NOT the fastest window -- collapsing 240 -> 2 cycles on the
      * high-impedance divider inputs the default exists to serve would
      * leave the S/H cap unsettled and read systematically low (worse
-     * still under oversampling).  Any non-zero value is a direct cycle
-     * count clamped into the vendor's accepted 2..638 range (per
-     * `adc_routine_channel_config`'s sample_time parameter). */
+     * still under oversampling).  Any non-zero value is a raw RSMP
+     * register count (the sample_time parameter of
+     * `adc_routine_channel_config`, ADCCK cycles with sample time = value + 2.5
+     * cycles; not microseconds, not a rung selector) clamped into the
+     * vendor's accepted 2..638 range. */
 	uint16_t sc = (sample_cycles == 0u) ? ADC_DEFAULT_SAMPLE_CYCLES : sample_cycles;
 	if (sc < 2u) sc = 2u;
 	if (sc > 638u) sc = 638u;
