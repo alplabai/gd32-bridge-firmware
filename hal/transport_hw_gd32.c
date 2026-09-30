@@ -62,7 +62,8 @@
 #include "gd32/i2c_recovery.h"
 #include "gd32/i2c_timeout.h"
 #include "gd32/spi_dma_arm_status.h"
-#include "protocol.h"  /* GD32_BRIDGE_DEFAULT_I2C_ADDR */
+#include "protocol.h" /* GD32_BRIDGE_DEFAULT_I2C_ADDR */
+#include "timing_stats.h"
 #include "transport.h" /* the seams we drive */
 
 /* =================================================================== */
@@ -423,6 +424,7 @@ void BRIDGE_SPI_CS_EXTI_HANDLER(void)
              * inter-transaction gap (its CS setup window alone is 60 us);
              * protocol_dispatch() in step 4 is deliberately outside that
              * budget (see above). */
+			TS_ONLY(timing_stats_mark_cs_edge();)
 			const bool rx_quiesced = spi_dma_disable_confirm(BRIDGE_SPI_RX_DMA_CH);
 			const bool tx_quiesced = spi_dma_disable_confirm(BRIDGE_SPI_TX_DMA_CH);
 			if (!rx_quiesced || !tx_quiesced) {

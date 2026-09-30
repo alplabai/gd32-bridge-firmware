@@ -32,6 +32,7 @@
 
 #include "ota.h"
 #include "protocol.h"
+#include "timing_stats.h"
 #include "transport.h"
 
 /* Optional weak hooks the HAL layer can override.  Defaults to a
@@ -69,6 +70,7 @@ __attribute__((weak)) void __WFI(void)
 int main(void)
 {
 	bridge_hw_init();
+	TS_ONLY(timing_stats_init();)
 	/* Reconcile the A/B metadata against the slot we are running BEFORE any
 	 * frame can arrive: decides whether this is an unconfirmed TRIAL boot
 	 * (wire gated BUSY, ota_confirm_tick() waits for a frame) and self-heals

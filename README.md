@@ -111,6 +111,10 @@ instead — it exists only for compile-and-link coverage (CI's `gd32
 backend build` job, which never runs on silicon); never pass it for an
 image you intend to flash.
 
+**`-DBRIDGE_TIMING_STATS=ON`** (bench only, default OFF) records per-SPI-transaction
+DWT cycle counts in a RAM struct read over SWD; see
+[`docs/timing-stats.md`](docs/timing-stats.md).  OFF adds nothing to the image.
+
 **`-DBRIDGE_OTA_PARTITIONED=ON`** (requires `BRIDGE_HAL_BACKEND=gd32`)
 arms the in-system upgrade path and emits the partitioned set instead:
 `gd32-bootloader` (32 KB at flash base), `gd32-bridge-slot-a` and
