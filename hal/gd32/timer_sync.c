@@ -14,12 +14,16 @@
 #include "bridge_hw.h"
 #include "gd32g5x3.h"
 
-#include "gd32_common.h"
+#include "bridge_critical.h"
+#include "timer_sync_iti.h"
+#include "timer_sync_master.h"
 
 /* Master/slave id (host-side enum) -> GD32 peripheral base address.
- * The protocol-level contract numbers the three advanced timers
- * compactly as 0 = TIMER0, 1 = TIMER7, 2 = TIMER19; this keeps the
- * wire byte small without naming the underlying SoC peripheral. */
+ * The protocol-level contract numbers the two initialised PWM timers
+ * compactly as 0 = TIMER0 and 1 = TIMER7.  TIMER19 is deliberately not
+ * exposed: this firmware never clocks, initialises or starts it, so
+ * accepting the old id 2 would report success after programming only
+ * the other half of a master/slave pair (#142). */
 static uint32_t timer_sync_periph(uint8_t id)
 {
 	switch (id) {
@@ -27,8 +31,6 @@ static uint32_t timer_sync_periph(uint8_t id)
 		return TIMER0;
 	case 1u:
 		return TIMER7;
-	case 2u:
-		return TIMER19;
 	default:
 		return 0u;
 	}
@@ -36,10 +38,10 @@ static uint32_t timer_sync_periph(uint8_t id)
 
 int bridge_hw_timer_sync(uint8_t master, uint8_t slave, uint8_t mode)
 {
-	if (master == slave) return BRIDGE_HW_ERR_INVAL;
 	const uint32_t mp = timer_sync_periph(master);
 	const uint32_t sp = timer_sync_periph(slave);
 	if (mp == 0u || sp == 0u) return BRIDGE_HW_ERR_RANGE;
+	if (master == slave) return BRIDGE_HW_ERR_INVAL;
 
 	/* Translate the wire `mode` byte (host-defined: 0 disabled,
      * 1 reset, 2 gated, 3 trigger, 4 external-clock, 5 encoder-mode-1)
@@ -72,23 +74,42 @@ int bridge_hw_timer_sync(uint8_t master, uint8_t slave, uint8_t mode)
 		return BRIDGE_HW_ERR_INVAL;
 	}
 
+	/* Look up which SYSCFG-routed ITIx actually carries the requested
+	 * master's TRGO0 on this slave (timer_sync_iti_lookup, hal/gd32/
+	 * timer_sync_iti.c); 0u marks a pair the GD32G553 internal-trigger
+	 * table does not connect at all.  Done before either timer's
+	 * registers are touched below: today every (master, slave) pair
+	 * timer_sync_periph() can produce is covered, so this can never
+	 * actually fire, but keeping the guard ahead of the writes means a
+	 * future timer id added without a matching table row fails closed
+	 * instead of leaving the master half-configured. */
+	const uint32_t iti = timer_sync_iti_lookup(slave, master);
+	if (iti == 0u) return BRIDGE_HW_ERR_INVAL;
+
 	/* Master side: emit the update event as TRGO0 (the canonical
-     * "I just rolled over" pulse that synchronises a downstream
-     * slave to the master's period) + flip the master-slave mode
-     * bit so the master broadcasts its trigger.  Idempotent. */
+	 * "I just rolled over" pulse that synchronises a downstream
+	 * slave to the master's period) + flip the master-slave mode
+	 * bit so the master broadcasts its trigger.  Idempotent.
+	 *
+	 * CAUTION (gd32-bridge-firmware#89): TIMER_TRI_OUT0_SRC_UPDATE
+	 * fires TRGO0 on ANY update event, including the software-forced
+	 * UPG that bridge_hw_pwm_set /
+	 * bridge_hw_pwm_single_pulse on TIMER0/TIMER7.  A PWM_SET or
+	 * PWM_SINGLE_PULSE call on a timer currently acting as a sync
+	 * master would glitch its slave's trigger timing.  The broad source
+	 * remains necessary for documented rollover synchronization; the
+	 * state update below instead makes pwm.c refuse only operations that
+	 * must force an update event while this route is live. */
+	const uint32_t sect = bridge_irq_lock();
 	timer_master_output0_trigger_source_select(mp, TIMER_TRI_OUT0_SRC_UPDATE);
 	timer_master_slave_mode_config(mp, TIMER_MASTER_SLAVE_MODE_ENABLE);
 
-	/* Slave side: listen to internal trigger 0 (ITI0).  The
-     * SYSCFG_TIMERCFG router maps the slave's ITI0 to a physical
-     * upstream TIMER's TRGO; the chip-default routing is the
-     * reference-manual table for the slave-master pair selected
-     * here, and bring-up tests will tune SYSCFG if a non-default
-     * routing is needed for a given (master, slave) combination.
-     * Following the vendor pattern, configure the slave-mode AFTER
-     * the input-trigger selection so the slave doesn't act on a
-     * stale TRGI source. */
-	timer_input_trigger_source_select(sp, TIMER_SMCFG_TRGSEL_ITI0);
+	/* Slave side.  Following the vendor pattern, configure the
+	 * slave-mode AFTER the input-trigger selection so the slave
+	 * doesn't act on a stale TRGI source. */
+	timer_input_trigger_source_select(sp, iti);
 	timer_slave_mode_select(sp, slave_mode);
+	timer_sync_master_set(master, mode != 0u);
+	bridge_irq_unlock(sect);
 	return BRIDGE_HW_OK;
 }

@@ -5,12 +5,12 @@
  * gd32-bridge firmware: board/silicon configuration for the transport
  * peripherals on the E1M-X V2N module's GD32G553MEY7TR supervisor.
  *
- * This header is included ONLY by the gd32 HAL backend
- * (hal/transport_hw_gd32.c); it references GigaDevice register macros.
+ * This header is included by the GD32 HAL backend; it references GigaDevice
+ * register macros.
  *
  * SOURCE OF TRUTH for the pin map (alp-sdk):
- *   metadata/e1m_modules/v2n/gd32-io-mcu-map.tsv
- *   metadata/chips/gd32g553.yaml
+ *   alp-sdk metadata/e1m_modules/v2n/gd32-io-mcu-map.tsv
+ *   alp-sdk metadata/chips/gd32g553.yaml
  * Peripheral + pin assignments below are CONFIRMED against the
  * GD32G553xx datasheet (Rev2.0) pin-definition table and the team
  * "GD32 Pin Config" sheet: PA8/PA9/PA10/PB15 = SPI1 NSS/SCK/MISO/MOSI,
@@ -34,10 +34,8 @@
 /* Renesas master P76(MOSI)/P77(MISO)/P96(SCLK)/P97(CS) <-> GD32 below. */
 /* Mode 0 (CPOL=0,CPHA=0), MSB-first, 8-bit, hardware NSS.             */
 /* =================================================================== */
-#define BRIDGE_SPI_PERIPH      SPI1
-#define BRIDGE_SPI_RCU         RCU_SPI1
-#define BRIDGE_SPI_IRQN        SPI1_IRQn
-#define BRIDGE_SPI_IRQ_HANDLER SPI1_IRQHandler
+#define BRIDGE_SPI_PERIPH SPI1
+#define BRIDGE_SPI_RCU    RCU_SPI1
 
 /* SPI1 slave DMA (25 MHz link: one byte every 320 ns -- an interrupt per
  * byte cannot keep up even at the 216 MHz core, so RX and TX stream over
@@ -53,7 +51,7 @@
 #define BRIDGE_SPI_TX_DMA_REQ DMA_REQUEST_SPI1_TX
 #define BRIDGE_SPI_RX_DMA_REQ DMA_REQUEST_SPI1_RX
 
-/* GD32-side pins (gd32-io-mcu-map.tsv): SCLK PA9, MISO PA10,
+/* GD32-side pins (alp-sdk gd32-io-mcu-map.tsv): SCLK PA9, MISO PA10,
  * MOSI PB15, NSS/CS PA8. */
 #define BRIDGE_SPI_SCK_PORT  GPIOA
 #define BRIDGE_SPI_SCK_PIN   GPIO_PIN_9
@@ -91,7 +89,7 @@
 #define BRIDGE_I2C_ER_IRQN    I2C0_ER_IRQn
 #define BRIDGE_I2C_ER_HANDLER I2C0_ER_IRQHandler
 
-/* GD32-side pins (gd32-io-mcu-map.tsv): SCL PA15, SDA PB9. */
+/* GD32-side pins (alp-sdk gd32-io-mcu-map.tsv): SCL PA15, SDA PB9. */
 #define BRIDGE_I2C_SCL_PORT GPIOA
 #define BRIDGE_I2C_SCL_PIN  GPIO_PIN_15
 #define BRIDGE_I2C_SDA_PORT GPIOB
@@ -106,14 +104,26 @@
  * needs no static value here.  Slave timing only needs setup/hold +
  * prescaler; the 400 kHz bus rate is the master's SCLH/SCLL, not ours. */
 
-/* NVIC priorities (preemption, sub).  Transport ISRs sit above the
- * SysTick PMIC poll; SPI (point-to-point, latency-sensitive) above I2C. */
-#define BRIDGE_SPI_IRQ_PRIO    1u
-#define BRIDGE_SPI_IRQ_SUBPRIO 0u
-#define BRIDGE_CS_IRQ_PRIO     1u
-#define BRIDGE_CS_IRQ_SUBPRIO  1u
-#define BRIDGE_I2C_IRQ_PRIO    2u
-#define BRIDGE_I2C_IRQ_SUBPRIO 0u
+/* NVIC priorities (preemption, sub). bridge_hw_init() selects PRE2_SUB2,
+ * which provides two preemption bits and two subpriority bits. CS EXTI framing
+ * is at BRIDGE_CS_IRQ_PRIO, I2C EV/ER at BRIDGE_I2C_IRQ_PRIO, and ADC-stream
+ * DMA lap FTF at BRIDGE_ADC_STREAM_LAP_IRQ_PRIO. Periodic
+ * housekeeping runs at base level from the main WFI loop, not SysTick
+ * -- there is no SysTick handler in this firmware. */
+#define BRIDGE_CS_IRQ_PRIO             1u
+#define BRIDGE_CS_IRQ_SUBPRIO          1u
+#define BRIDGE_I2C_IRQ_PRIO            2u
+#define BRIDGE_I2C_IRQ_SUBPRIO         0u
+#define BRIDGE_ADC_STREAM_LAP_IRQ_PRIO 3u
+
+_Static_assert(BRIDGE_CS_IRQ_PRIO < 4u, "PRE2_SUB2 has two preemption bits");
+_Static_assert(BRIDGE_I2C_IRQ_PRIO < 4u, "PRE2_SUB2 has two preemption bits");
+_Static_assert(BRIDGE_ADC_STREAM_LAP_IRQ_PRIO < 4u, "PRE2_SUB2 has two preemption bits");
+_Static_assert(BRIDGE_CS_IRQ_SUBPRIO < 4u, "PRE2_SUB2 has two subpriority bits");
+_Static_assert(BRIDGE_I2C_IRQ_SUBPRIO < 4u, "PRE2_SUB2 has two subpriority bits");
+_Static_assert(BRIDGE_CS_IRQ_PRIO < BRIDGE_I2C_IRQ_PRIO, "CS EXTI must preempt I2C");
+_Static_assert(BRIDGE_I2C_IRQ_PRIO < BRIDGE_ADC_STREAM_LAP_IRQ_PRIO,
+               "I2C must preempt ADC DMA lap handling");
 
 /* =================================================================== */
 /* RTC / wakeup-timer clock source -- LXTAL is not available on this   */

@@ -2,9 +2,11 @@
  * Copyright 2026 Alp Lab AB
  * SPDX-License-Identifier: Apache-2.0
  *
- * GD32G5x3 bridge HAL backend -- DMA-paced ADC streaming + DSP chain pool.
- * Split move-only from hal/bridge_hw_gd32.c (fw v0.2.8); see
- * hal/gd32/init.c for the backend-wide implementation notes.
+ * GD32G5x3 bridge HAL backend -- DMA-paced ADC streaming + the FAC/FFT
+ * register-level DSP pump.  Split move-only from hal/bridge_hw_gd32.c
+ * (fw v0.2.8); see hal/gd32/init.c for the backend-wide implementation
+ * notes.  The DSP-chain POOL and bind-time validation moved out to
+ * hal/gd32/adc_dsp_chain.c (#69/#70) -- see adc_dsp_chain.h.
  */
 
 #include <stdbool.h>
@@ -14,6 +16,9 @@
 #include "bridge_hw.h"
 #include "gd32g5x3.h"
 
+#include "adc_dsp_chain.h"
+#include "bridge_board_config.h"
+#include "bridge_critical.h"
 #include "gd32_common.h"
 
 /* Stream slots; layout + sizing doc in gd32_common.h. */
@@ -24,8 +29,48 @@ adc_stream_state_t adc_streams[BRIDGE_ADC_STREAM_COUNT];
  * bridge_board_config.h): a lap tick fires once per ring period
  * (>= ~10 ms at the 100 kHz rate cap) and is pure bookkeeping, so it
  * must never delay the latency-sensitive link ISRs. */
-#define ADC_STREAM_LAP_IRQ_PRIO    3u
+#define ADC_STREAM_LAP_IRQ_PRIO    BRIDGE_ADC_STREAM_LAP_IRQ_PRIO
 #define ADC_STREAM_LAP_IRQ_SUBPRIO 0u
+
+/* UM Rev1.2 §8.4.7 permits writing the channel address/count registers
+ * only after CHEN reads clear.  The SPL helpers are plain register writes,
+ * so make that interlock explicit rather than assuming a preceding write
+ * has already reached the DMA controller.  This path is command-driven,
+ * not a sampling hot path; a bounded failure is therefore preferable to
+ * reusing a possibly still-live channel configuration. */
+#define ADC_STREAM_DMA_DISABLE_SPINS 64u
+
+static bool adc_stream_dma_disable_confirm(uint32_t dma_periph, dma_channel_enum channel)
+{
+	dma_channel_disable(dma_periph, channel);
+	for (uint32_t spin = 0u; spin < ADC_STREAM_DMA_DISABLE_SPINS; ++spin) {
+		if ((DMA_CHCTL(dma_periph, channel) & DMA_CHXCTL_CHEN) == 0u) return true;
+	}
+	return false;
+}
+
+static uint32_t adc_stream_dmamux_channel(const adc_stream_state_t *s)
+{
+	return (s->dma_periph == DMA0) ? (uint32_t)s->dma_channel : (uint32_t)s->dma_channel + 7u;
+}
+
+/* ERRIF means this channel has stopped delivering a trustworthy ring.  The
+ * latch is used by both its DMA IRQ and the higher-priority CS handler, which
+ * polls it directly before interpreting stream state. */
+static void adc_stream_latch_dma_error(uint8_t stream_id)
+{
+	adc_stream_state_t *s = &adc_streams[stream_id];
+	if (dma_interrupt_flag_get(s->dma_periph, (dma_channel_enum)s->dma_channel, DMA_INT_FLAG_ERR) ==
+	    RESET) {
+		return;
+	}
+	/* ERRIFC only: a global clear would discard a concurrent FTF. */
+	dma_interrupt_flag_clear(s->dma_periph, (dma_channel_enum)s->dma_channel, DMA_INT_FLAG_ERR);
+	dma_interrupt_disable(
+	    s->dma_periph, (dma_channel_enum)s->dma_channel, DMA_INT_FTF | DMA_INT_ERR);
+	dma_channel_disable(s->dma_periph, (dma_channel_enum)s->dma_channel);
+	s->dma_error_count++;
+}
 
 /* DMA full-transfer-finish "lap" ISRs -- one per stream (stream 0 ->
  * DMA0 CH0, stream 1 -> DMA1 CH0, fixed in stream_begin below).  The
@@ -41,6 +86,7 @@ void DMA0_Channel0_IRQHandler(void)
 		dma_interrupt_flag_clear(DMA0, DMA_CH0, DMA_INT_FLAG_FTF);
 		adc_streams[0].lap_count++;
 	}
+	adc_stream_latch_dma_error(0u);
 }
 
 void DMA1_Channel0_IRQHandler(void)
@@ -49,6 +95,7 @@ void DMA1_Channel0_IRQHandler(void)
 		dma_interrupt_flag_clear(DMA1, DMA_CH0, DMA_INT_FLAG_FTF);
 		adc_streams[1].lap_count++;
 	}
+	adc_stream_latch_dma_error(1u);
 }
 
 /* TRIGSEL route target for an ADC peripheral's routine-group trigger. */
@@ -68,8 +115,65 @@ static uint16_t adc_stream_write_index(const adc_stream_state_t *s)
 {
 	const uint32_t remaining =
 	    dma_transfer_number_get(s->dma_periph, (dma_channel_enum)s->dma_channel);
-	if (remaining > BRIDGE_ADC_STREAM_RING_SAMPLES) return 0u;
+	/* remaining == 0 (mid circular reload) is write index 0, never 1024: a
+	 * 1024 stored into read_idx would index ring[1024], which aliases the
+	 * read_idx member itself (gh#18 A22). */
+	if (remaining == 0u || remaining > BRIDGE_ADC_STREAM_RING_SAMPLES) return 0u;
 	return (uint16_t)(BRIDGE_ADC_STREAM_RING_SAMPLES - remaining);
+}
+
+/* Total samples the DMA has ever deposited, with gh#149's coalescing
+ * recovery folded in.
+ *
+ * The raw arithmetic -- lap_count * RING_SAMPLES + write index -- is
+ * exact ONLY while the lap ISR counts every FTF.  It can undercount:
+ * the DMA's FTF latches once per circular reload, so a reload that
+ * lands while its predecessor's FTF is still pending (or before the
+ * pended prio-3 lap ISR gets to run) is counted at most once -- and
+ * from THIS side of the NVIC there is no distinguishing "ISR pended,
+ * will count" from "two reloads, one count".  The observable symptom
+ * is a write index that REGRESSED (the counter reloaded top-down)
+ * while lap_count stood still: that is one full ring the raw formula
+ * silently drops, permanently skewing this consumer's backlog math so
+ * the next "fresh" samples are one ring stale -- data corruption with
+ * no error code, the failure mode gh#149 opened with.
+ *
+ * Recovery: each consumer tracks its own last-observed (laps, w) and
+ * adds RING_SAMPLES to the total when it sees a regression with
+ * lap_count unchanged.  The correction is per-sample (not persisted
+ * into lap_count), so the lap ISR counting that same reload a moment
+ * later cannot double-credit: the next sample sees lap_count moved
+ * and needs no correction.  Two wraps between two samples of the same
+ * consumer cannot be counted this way -- gh#265: this does NOT fall
+ * back to the >= RING_SAMPLES overrun resync below.  If total_written
+ * is short by one RING_SAMPLES, backlog = total_written - total_read
+ * is short by the identical amount, so that branch cannot fire
+ * either; the two errors are not independent.  What actually happens:
+ * the shortfall self-heals the moment this consumer next observes
+ * lap_count move, one ring period later -- until then it is served
+ * one-ring-stale samples with BRIDGE_HW_OK, no BRIDGE_HW_ERR_BUSY.
+ * That is bounded and self-healing, not silent corruption: for two
+ * wraps to land between samples the prio-3 lap vector must be starved
+ * for a whole ring period (>= ~10 ms at the 100 kHz cap), which no
+ * bounded prio-1/2 work in this tree approaches (the longest is the
+ * ROVF recovery's ~2 ms bounded recalibration spin).
+ *
+ * trk is the caller's own tracker (s->rd_pos for the prio-1 read
+ * path, s->pump_pos for the base-level pump) -- never lap_count.  The
+ * tracker type lives in gd32_common.h (adc_dma_pos_t). */
+
+static uint32_t adc_stream_total_written(adc_stream_state_t *s, adc_dma_pos_t *trk)
+{
+	const uint32_t laps  = s->lap_count;
+	const uint16_t w     = adc_stream_write_index(s);
+	uint32_t       total = laps * BRIDGE_ADC_STREAM_RING_SAMPLES + (uint32_t)w;
+	if (trk->valid && laps == trk->laps && w < trk->w) {
+		total += BRIDGE_ADC_STREAM_RING_SAMPLES; /* one uncounted reload */
+	}
+	trk->laps  = laps;
+	trk->w     = w;
+	trk->valid = true;
+	return total;
 }
 
 int bridge_hw_adc_stream_begin(uint8_t stream_id, uint8_t channel, uint32_t sample_rate_hz)
@@ -109,8 +213,11 @@ int bridge_hw_adc_stream_begin(uint8_t stream_id, uint8_t channel, uint32_t samp
      * transport happens to enable it first at boot today -- own the
      * dependency here instead of relying on bring-up order (silicon
      * 2026-06-04 audit: an I2C-only build would stream zero samples). */
-	rcu_periph_clock_enable(RCU_DMAMUX);
-	rcu_periph_clock_enable((stream_id == 0u) ? RCU_DMA0 : RCU_DMA1);
+	bridge_rcu_periph_clock_enable(RCU_DMAMUX);
+	bridge_rcu_periph_clock_enable((stream_id == 0u) ? RCU_DMA0 : RCU_DMA1);
+	if (!adc_stream_dma_disable_confirm(s->dma_periph, (dma_channel_enum)s->dma_channel)) {
+		return BRIDGE_HW_ERR_IO;
+	}
 	dma_deinit(s->dma_periph, (dma_channel_enum)s->dma_channel);
 
 	dma_parameter_struct init;
@@ -144,9 +251,25 @@ int bridge_hw_adc_stream_begin(uint8_t stream_id, uint8_t channel, uint32_t samp
      * with_DMA): mode + trigger + DMA controls all land BEFORE the
      * enable.  Programming CTL1 on an already-running converter is
      * exactly how the v0.2.3 stream silently produced zero samples.
-     * Calibration is NOT redone here: an ADCON toggle preserves the
-     * boot calibration from adc_periph_init, and recalibrating would
-     * be an unbounded vendor spin inside the CS-EXTI handler. */
+     * Calibration IS redone below, after ADCON re-enables: an ADCON
+     * toggle does NOT preserve the boot calibration from
+     * the boot setup (UM Rev1.2 p.424: the factor is applied only
+     * "until the next ADC power-off", and clearing ADCON IS that
+     * power-off, p.447) -- and the recalibration is bounded
+     * (adc_calibrate_bounded), so it is not the unbounded vendor spin
+     * this comment used to worry about (#34). */
+	/* Claim the shared converter for the reconfigure below (#133).  The
+     * stream-vs-stream scan above says nothing about a single-shot
+     * bridge_hw_adc_read in flight on the sibling bridge channel, and
+     * that read holds this same flag for its whole convert loop -- so a
+     * BEGIN that lands mid-read is told BUSY instead of re-pointing
+     * routine rank 0 out from under it.  Long-term ownership stays with
+     * the in_use publication; this flag only covers the window in which
+     * the converter is being reprogrammed -- which now also spans the
+     * bounded recalibration above, since that too runs on the shared
+     * converter and must not race a sibling read. */
+	if (!adc_periph_claim(ch->periph)) return BRIDGE_HW_ERR_BUSY;
+
 	adc_disable(ch->periph);
 	/* Apply the channel's cached resolution + oversample while the
 	 * converter is disabled (DRES/OVSAMPCTL only latch with ADCON==0).
@@ -174,21 +297,77 @@ int bridge_hw_adc_stream_begin(uint8_t stream_id, uint8_t channel, uint32_t samp
      * bridge_hw_adc_read on this peripheral BEFORE the converter
      * re-enables -- a stale EOC otherwise fires one spurious DMA
      * beat the moment the request unmasks, depositing a phantom
-     * zeroth sample and desynchronising the ring cursor. */
+     * zeroth sample and desynchronising the ring cursor.  ROVF gets
+     * the same treatment: overflow detection is live the instant
+     * ADCON sets (DMA is already enabled above), and a session-stale
+     * ROVF left set would stall conversion before the first sample
+     * (UM Rev1.2 17.4.12, p.431-432; #44). */
 	adc_flag_clear(ch->periph, ADC_FLAG_EOC);
+	adc_flag_clear(ch->periph, ADC_FLAG_ROVF);
 	adc_enable(ch->periph);
 	for (volatile uint32_t stab = 0u; stab < 4096u; ++stab) {
-		/* tSTAB dwell after ADCON, same bound adc_periph_init uses */
+		/* tSTAB dwell after ADCON, same bound the boot setup uses */
 	}
+	/* Recalibrate after the ADCON toggle above -- see the disable/
+     * enable comment at the top of this bracket (#34).  Bounded, cost
+     * ~25 us (adc.c's bridge_hw_adc_read carries the full derivation);
+     * a false return means the calibration FSM never finished, so
+     * fail the begin rather than arm a stream on an unproven
+     * converter -- the DMA channel + lap ISR are not armed yet at
+     * this point, so there is no live stream state to unwind.
+     *
+     * DISCLOSURE (#34 review): this is one of three request-path call
+     * sites (the others: bridge_hw_adc_read in adc.c, and
+     * adc_stream_recover_rovf below) that now pay calibration's
+     * ~200000-iteration wedged-FSM worst case on every invocation,
+     * not just once at boot -- see adc.c's bridge_hw_adc_read for the
+     * full disclosure and the decision not to shorten the bound. */
+	if (!adc_calibrate_bounded(ch->periph)) {
+		/* Release the converter claim before bailing (#133 x #80).
+         * Neither change has this hazard alone -- #80 added this early
+         * return, #133 added the claim above it, and the MERGE is what
+         * puts a return inside the claimed window.  Leaking the claim
+         * here would leave adc_periph_busy[] set forever: every later
+         * bridge_hw_adc_read and stream_begin on this converter would
+         * answer BRIDGE_HW_ERR_BUSY, reboot-only recovery, from a single
+         * calibration failure. */
+		adc_periph_release(ch->periph);
+		return BRIDGE_HW_ERR_IO;
+	}
+
+	/* Reader-visible session fields are initialised BEFORE the DMA and
+	 * pacing timer arm and before in_use publishes: protocol_dispatch runs
+	 * in the transport ISRs and may preempt this call (gh#18 A21). */
+	s->channel = channel;
+	/* Snapshot the full-scale for the mv math so a mid-stream
+	 * bridge_hw_adc_configure (which only rewrites the cache) can't
+	 * change the divisor under a running stream -- the converter keeps
+	 * the format this begin applied until stream_end. */
+	s->full_scale   = adc_full_scale_for_bits(adc_resolution_bits_cache[channel]);
+	s->read_idx     = 0u;
+	s->total_read   = 0u; /* lap_count zeroed above, pre-arm */
+	s->dsp_chain_id = 0u;
+	s->dsp_bound    = false;
+	s->proc_gap     = false;
+	s->dsp_cfg_bad  = false; /* gh#35 sticky flags: clean slate per session */
+	s->dsp_sat      = false;
 
 	/* Arm the lap counter BEFORE the channel starts: clear any stale
 	 * full-transfer flag from a prior session on this controller, then
 	 * enable the FTF interrupt + its NVIC line so EVERY ring reload is
 	 * counted -- the overrun detection in stream_read is exact
 	 * total-written-vs-read accounting, not a heuristic. */
-	s->lap_count = 0u;
-	dma_flag_clear(s->dma_periph, (dma_channel_enum)s->dma_channel, DMA_FLAG_FTF);
-	dma_interrupt_enable(s->dma_periph, (dma_channel_enum)s->dma_channel, DMA_INT_FTF);
+	s->lap_count       = 0u;
+	s->dma_error_count = 0u;
+	/* gh#149: reset both consumers' position trackers so a new session
+	 * starts from a clean baseline -- a stale tracker from a prior
+	 * session would compare against a garbage (laps, w) and could add a
+	 * phantom lap on the first read. */
+	s->rd_pos.valid   = false;
+	s->pump_pos.valid = false;
+	dma_flag_clear(s->dma_periph, (dma_channel_enum)s->dma_channel, DMA_FLAG_FTF | DMA_FLAG_ERR);
+	dma_interrupt_enable(
+	    s->dma_periph, (dma_channel_enum)s->dma_channel, DMA_INT_FTF | DMA_INT_ERR);
 	nvic_irq_enable((s->dma_periph == DMA0) ? DMA0_Channel0_IRQn : DMA1_Channel0_IRQn,
 	                ADC_STREAM_LAP_IRQ_PRIO,
 	                ADC_STREAM_LAP_IRQ_SUBPRIO);
@@ -201,11 +380,11 @@ int bridge_hw_adc_stream_begin(uint8_t stream_id, uint8_t channel, uint32_t samp
      * covers 16 Hz..100 kHz exactly where it matters; below 16 Hz a
      * 10 kHz tick stretches to 1 Hz.  Division truncates -- worst-case
      * quantisation is one tick (documented in the protocol spec). */
-	rcu_periph_clock_enable(RCU_TRIGSEL);
+	bridge_rcu_periph_clock_enable(RCU_TRIGSEL);
 	trigsel_init(adc_stream_routrg(ch->periph),
 	             (stream_id == 0u) ? TRIGSEL_INPUT_TIMER5_TRGO0 : TRIGSEL_INPUT_TIMER6_TRGO0);
 
-	rcu_periph_clock_enable((stream_id == 0u) ? RCU_TIMER5 : RCU_TIMER6);
+	bridge_rcu_periph_clock_enable((stream_id == 0u) ? RCU_TIMER5 : RCU_TIMER6);
 	timer_deinit(s->pace_timer);
 	uint32_t psc, period_ticks;
 	if (sample_rate_hz >= 16u) {
@@ -223,18 +402,73 @@ int bridge_hw_adc_stream_begin(uint8_t stream_id, uint8_t channel, uint32_t samp
 	timer_master_output0_trigger_source_select(s->pace_timer, TIMER_TRI_OUT0_SRC_UPDATE);
 	timer_enable(s->pace_timer);
 
-	s->in_use  = true;
-	s->channel = channel;
-	/* Snapshot the full-scale for the mv math so a mid-stream
-	 * bridge_hw_adc_configure (which only rewrites the cache) can't
-	 * change the divisor under a running stream -- the converter keeps
-	 * the format this begin applied until stream_end. */
-	s->full_scale   = adc_full_scale_for_bits(adc_resolution_bits_cache[channel]);
-	s->read_idx     = 0u;
-	s->total_read   = 0u; /* lap_count zeroed above, pre-arm */
-	s->dsp_chain_id = 0u;
-	s->dsp_bound    = false;
+	/* Publish last: every reader-visible field was set before the DMA
+	 * and pacing timer were armed (gh#18 A21). */
+	s->in_use = true;
+	/* Reconfigure done and in_use published: hand the converter's
+     * short-term claim back (#133).  From here the in_use scan in
+     * bridge_hw_adc_read is what keeps single-shot reads off this
+     * converter, for as long as the stream runs. */
+	adc_periph_release(ch->periph);
 	return BRIDGE_HW_OK;
+}
+
+/* Recover the ADC from a routine-data overflow (#44) -- the 9-step
+ * sequence UM Rev1.2 17.4.12 (p.431-432) documents.  Steps 2 and 7
+ * toggle ADCON, which invalidates the calibration factor the same way
+ * stream_begin's disable/enable does (#34): recalibrate before
+ * returning so the stream resumes on a proven converter, not merely
+ * an unstalled one.  DDM (request-after-last) and the external-
+ * trigger routine config are untouched by this sequence and the
+ * pacing timer never stopped, so step 9 ("start conversion") needs no
+ * explicit call here -- the next TRGO edge resumes conversion once
+ * ADCON is back.  Returns false only if the recalibration's bounded
+ * spin never completes (the converter itself stayed wedged).
+ *
+ * DISCLOSURE (#34 review): this is the third of three request-path
+ * call sites that now pay adc_calibrate_bounded's ~200000-iteration
+ * wedged-FSM worst case on every invocation rather than once at boot
+ * -- see adc.c's bridge_hw_adc_read for the full disclosure and the
+ * decision not to shorten the bound.
+ *
+ * The DMA full-transfer-finish (FTF) interrupt flag is cleared as
+ * part of step 3's "reinit DMA module": ROVF and a ring-wrap FTF can
+ * land in the same window (this handler runs at CS-EXTI priority 1,
+ * which blocks the priority-3 lap ISR -- DMA0/1_Channel0_IRQHandler
+ * above -- from running until this function returns), and a FTF left
+ * pending here fires the instant this handler returns, bumping
+ * lap_count against a total_read the caller is about to re-anchor to
+ * "0 new samples since recovery" -- the next poll would then
+ * misreport a full-ring loss it didn't actually see (the #18 phantom-
+ * loss class).  UM Rev1.2 §8.4.8 (p.295): the flag lives in DMA_INTF,
+ * cleared via the dedicated bit in DMA_INTC (FTFIFC) -- disabling
+ * CHEN does not clear it, so it needs its own clear here. */
+static bool adc_stream_recover_rovf(adc_stream_state_t *s, const gd32_adc_ch_t *ch)
+{
+	adc_dma_mode_disable(ch->periph); /* 1. Clear DMA bit of ADC_CTL1. */
+	adc_disable(ch->periph);          /* 2. Clear ADCON bit of ADC_CTL1. */
+
+	/* 3. Clear CHEN bit of DMA_CHxCTL, reinit the DMA module.  The
+	 * count register is reloaded to the full ring length explicitly:
+	 * an overflow almost certainly caught the channel mid-ring rather
+	 * than exactly at a circular-reload boundary.  A stale FTF (see
+	 * the function comment above) is cleared here too, alongside the
+	 * rest of the reinit, before the channel comes back up. */
+	if (!adc_stream_dma_disable_confirm(s->dma_periph, (dma_channel_enum)s->dma_channel)) {
+		return false;
+	}
+	dma_transfer_number_config(
+	    s->dma_periph, (dma_channel_enum)s->dma_channel, BRIDGE_ADC_STREAM_RING_SAMPLES);
+	dma_interrupt_flag_clear(s->dma_periph, (dma_channel_enum)s->dma_channel, DMA_INT_FLAG_FTF);
+
+	adc_flag_clear(ch->periph, ADC_FLAG_ROVF); /* 4. Clear ROVF bit of ADC_STAT. */
+	dma_channel_enable(s->dma_periph, (dma_channel_enum)s->dma_channel); /* 5. Set CHEN. */
+	adc_dma_mode_enable(ch->periph); /* 6. Set DMA bit of ADC_CTL1. */
+	adc_enable(ch->periph);          /* 7. Set ADCON bit of ADC_CTL1. */
+	for (volatile uint32_t stab = 0u; stab < 4096u; ++stab) {
+		/* 8. Wait T(setup) -- same bound stream_begin/the boot setup use. */
+	}
+	return adc_calibrate_bounded(ch->periph); /* ADCON edge above invalidated calibration. */
 }
 
 int bridge_hw_adc_stream_read(uint8_t   stream_id,
@@ -249,6 +483,37 @@ int bridge_hw_adc_stream_read(uint8_t   stream_id,
 
 	adc_stream_state_t *s = &adc_streams[stream_id];
 	if (!s->in_use) return BRIDGE_HW_ERR_INVAL;
+	adc_stream_latch_dma_error(stream_id);
+	if (s->dma_error_count != 0u) return BRIDGE_HW_ERR_IO;
+
+	/* ROVF (routine-data overflow) recovery (#44) -- checked before
+	 * EITHER data plane below, raw or DSP-filtered: both draw from
+	 * this stream's DMA ring, and UM Rev1.2 17.4.12 (p.431-432) is
+	 * explicit that "[t]he ADC conversion will be stalled until the
+	 * ROVF bit is cleared" -- unrecovered, the write index freezes and
+	 * every subsequent poll answers STATUS_OK with zero samples,
+	 * forever, on both planes. */
+	const gd32_adc_ch_t *ch = &adc_channels_map[s->channel];
+	if (SET == adc_flag_get(ch->periph, ADC_FLAG_ROVF)) {
+		const bool     recal_ok = adc_stream_recover_rovf(s, ch);
+		const uint16_t w        = adc_stream_write_index(s);
+		/* Re-anchor through the SAME corrected total the read path
+		 * uses (gh#149): the recovery 9-step can step the DMA, so
+		 * both position trackers are re-based against the raw
+		 * post-recovery position -- valid=false makes the next
+		 * sample a clean baseline rather than a regression. */
+		s->rd_pos.valid   = false;
+		s->pump_pos.valid = false;
+		s->read_idx       = (uint16_t)(w % BRIDGE_ADC_STREAM_RING_SAMPLES);
+		s->total_read     = s->lap_count * BRIDGE_ADC_STREAM_RING_SAMPLES + (uint32_t)w;
+		s->pump_raw_read  = s->total_read;
+		/* Same wire contract as the ring-overrun branch below
+		 * (alp-sdk docs/gd32-bridge-protocol.md §3.10): STATUS_BUSY, "poll
+		 * faster".  A failed recalibration is the harder failure --
+		 * report IO so the host doesn't keep polling a converter left
+		 * in an unproven state. */
+		return recal_ok ? BRIDGE_HW_ERR_BUSY : BRIDGE_HW_ERR_IO;
+	}
 
 	/* DSP data plane (#496): a bound FIR/IIR chain means the host reads
 	 * FILTERED samples the base-level pump produced in proc_ring -- NOT
@@ -260,6 +525,20 @@ int bridge_hw_adc_stream_read(uint8_t   stream_id,
 	if (s->dsp_bound) {
 		if (s->dsp_terminal == 3u) return BRIDGE_HW_ERR_NOTIMPL; /* FFT */
 
+		/* gh#35 sticky fault surfacing: a config refusal (coefficients
+		 * out of the FAC's realisable range) answers RANGE; a
+		 * saturated FAC (STEF/GSTEF, see the pump) answers IO.  In
+		 * both cases the stream is never again reported as
+		 * STATUS_OK-serving-clean-data until stream_end resets the
+		 * flags. */
+		if (s->dsp_cfg_bad) return BRIDGE_HW_ERR_RANGE;
+		if (s->dsp_sat) return BRIDGE_HW_ERR_IO;
+
+		if (s->proc_gap) {
+			s->proc_gap  = false;
+			s->proc_read = s->proc_write;
+			return BRIDGE_HW_ERR_BUSY; /* pump resynced past a full ring */
+		}
 		const uint32_t pw       = s->proc_write;
 		const int32_t  pbacklog = (int32_t)(pw - s->proc_read);
 		if (pbacklog <= 0) return BRIDGE_HW_OK; /* pump hasn't produced yet */
@@ -280,26 +559,29 @@ int bridge_hw_adc_stream_read(uint8_t   stream_id,
 	}
 
 	/* Drain as many fresh samples as the host asked for, capped by
-     * what the DMA has actually deposited since the last read.
-     * Overrun accounting is EXACT total-written-vs-read: the writer's
-     * lifetime deposit count is lap_count full rings (the FTF lap ISR
-     * above) plus the live write index; the reader's is total_read.
-     * A backlog beyond one ring means the writer lapped the reader
-     * and overwrote samples the host never saw -- mixed-lap data that
-     * must not be delivered as a contiguous stream.
-     *
-     * Snapshot lap_count BEFORE the write index: this read runs in
-     * the CS-EXTI handler (prio 1), which outprioritises the lap ISR
-     * (prio 3), so a reload landing mid-read leaves lap_count
-     * momentarily one short while w has already wrapped small.  That
-     * ordering only ever UNDERcounts the backlog (a transient
-     * empty-looking poll that self-corrects once the pended lap ISR
-     * runs) -- never a false overrun.  Unsigned uint32 wrap of the
-     * lifetime totals is harmless: the difference below stays small
-     * and modular arithmetic keeps it exact. */
-	const uint32_t laps          = s->lap_count;
+	 * what the DMA has actually deposited since the last read.
+	 * Overrun accounting is EXACT total-written-vs-read: the writer's
+	 * lifetime deposit count is lap_count full rings (the FTF lap ISR
+	 * above) plus the live write index, with gh#149's coalescing
+	 * recovery folded in by adc_stream_total_written(); the reader's
+	 * is total_read.  A backlog beyond one ring means the writer
+	 * lapped the reader and overwrote samples the host never saw --
+	 * mixed-lap data that must not be delivered as a contiguous
+	 * stream.
+	 *
+	 * Snapshot lap_count BEFORE the write index: this read runs in
+	 * the CS-EXTI handler (prio 1), which outprioritises the lap ISR
+	 * (prio 3), so a reload landing mid-read leaves lap_count
+	 * momentarily one short while w has already wrapped small.  The
+	 * regression correction in adc_stream_total_written() absorbs
+	 * exactly that snapshot (and the genuinely coalesced lap the ISR
+	 * will never count), so the combined path can only ever
+	 * UNDERcount by a lap it has already corrected once -- never a
+	 * false overrun.  Unsigned uint32 wrap of the lifetime totals is
+	 * harmless: the difference below stays small and modular
+	 * arithmetic keeps it exact. */
+	const uint32_t total_written = adc_stream_total_written(s, &s->rd_pos);
 	const uint16_t w             = adc_stream_write_index(s);
-	const uint32_t total_written = laps * BRIDGE_ADC_STREAM_RING_SAMPLES + (uint32_t)w;
 	const int32_t  backlog       = (int32_t)(total_written - s->total_read);
 	if (backlog <= 0) return BRIDGE_HW_OK; /* empty ring (or transient undercount) */
 
@@ -309,9 +591,9 @@ int bridge_hw_adc_stream_read(uint8_t   stream_id,
 	     * beat).  Drop the corrupt backlog and resynchronise the
 	     * cursor to the live write position so the NEXT read returns
 	     * fresh, gap-free samples; answer BUSY so the host learns
-	     * samples were lost (docs/gd32-bridge-protocol.md §3.10: ring
+	     * samples were lost (alp-sdk docs/gd32-bridge-protocol.md §3.10: ring
 	     * overrun -> STATUS_BUSY, "poll faster"). */
-		s->read_idx   = w;
+		s->read_idx   = (uint16_t)(w % BRIDGE_ADC_STREAM_RING_SAMPLES);
 		s->total_read = total_written;
 		return BRIDGE_HW_ERR_BUSY;
 	}
@@ -329,14 +611,12 @@ int bridge_hw_adc_stream_read(uint8_t   stream_id,
 	return BRIDGE_HW_OK;
 }
 
-/* Return a chain slot to the pool (defined with the DSP-chain pool
- * below).  Forward-declared here because stream_end -- which lives
- * above the pool definition -- is the sole runtime releaser. */
-static void adc_dsp_chain_release(uint8_t chain_id);
-
-/* DSP dispatch helpers, defined in the #496 pump section at end of file
- * but referenced earlier by chain_bind / stream_end. */
-bool        adc_dsp_filter_stream_busy(uint8_t except_stream);
+/* adc_dsp_chain_release + adc_dsp_filter_stream_busy now live in
+ * adc_dsp_chain.c (#69/#70 host-testability split) and are declared
+ * in adc_dsp_chain.h, included above.
+ *
+ * DSP dispatch helpers still defined in the #496 pump section at end
+ * of this file but referenced earlier by stream_end. */
 void        adc_dsp_fac_release(uint8_t stream_id);
 void        adc_dsp_fft_release(uint8_t stream_id);
 static void adc_dsp_pump_fft(uint8_t sid);
@@ -356,15 +636,22 @@ int bridge_hw_adc_stream_end(uint8_t stream_id)
 	timer_deinit(s->pace_timer);
 	adc_dma_request_after_last_disable(ch->periph);
 	adc_dma_mode_disable(ch->periph);
-	dma_channel_disable(s->dma_periph, (dma_channel_enum)s->dma_channel);
+	if (!adc_stream_dma_disable_confirm(s->dma_periph, (dma_channel_enum)s->dma_channel)) {
+		return BRIDGE_HW_ERR_IO;
+	}
+	/* MUXID zero is the DMAMUX idle state.  Releasing it before clearing
+	 * in_use prevents a later stream from selecting the same ADC request on
+	 * the other controller's multiplexer channel (UM Rev1.2 §9.4.2). */
+	DMAMUX_RM_CHXCFG(adc_stream_dmamux_channel(s)) &= ~DMAMUX_RM_CHXCFG_MUXID;
 
 	/* Stand the lap counter down with the channel: mask the FTF
      * interrupt + NVIC line and clear a possibly-pending flag so a
      * later single-shot user of this DMA controller can't inherit a
      * stale lap tick. */
-	dma_interrupt_disable(s->dma_periph, (dma_channel_enum)s->dma_channel, DMA_INT_FTF);
+	dma_interrupt_disable(
+	    s->dma_periph, (dma_channel_enum)s->dma_channel, DMA_INT_FTF | DMA_INT_ERR);
 	nvic_irq_disable((s->dma_periph == DMA0) ? DMA0_Channel0_IRQn : DMA1_Channel0_IRQn);
-	dma_flag_clear(s->dma_periph, (dma_channel_enum)s->dma_channel, DMA_FLAG_FTF);
+	dma_flag_clear(s->dma_periph, (dma_channel_enum)s->dma_channel, DMA_FLAG_FTF | DMA_FLAG_ERR);
 
 	/* A trigger edge may have started a conversion just before the
      * timer stopped.  Dwell past one conversion time (~6.3 us healthy;
@@ -377,16 +664,18 @@ int bridge_hw_adc_stream_end(uint8_t stream_id)
 		/* fixed dwell, ~tens of microseconds */
 	}
 
-	/* Full single-shot restore: deinit + reconfigure + recalibrate
-     * (calibration BOUNDED -- this runs in the CS-EXTI handler).  This
+	/* Full single-shot restore: reconfigure + recalibrate (calibration
+	 * BOUNDED -- this runs in the CS-EXTI handler).  This deliberately
+	 * does not reset an ADC or reconfigure a shared clock domain, because
+	 * ADC0/1/2 may have a sibling stream running.  It
      * puts EXTERNAL_TRIGGER_DISABLE, routine length 1 and a fresh
      * calibration back so a following bridge_hw_adc_read sees the
-     * exact converter state adc_periph_init promised it -- the same
+	 * exact converter state the boot setup promised it -- the same
      * self-heal shape the read path's timeout branch uses.  The stream
      * state clears regardless of the restore verdict (the stream IS
      * over); a calibration that never completed reports IO so the host
      * knows the converter came back in an unproven state. */
-	const bool restored = adc_periph_init(ch->periph);
+	const bool restored = adc_periph_restore(ch->periph);
 
 	/* Release the DSP chain bound to this stream back to the pool.
      * chain_open is the ONLY allocator (sets in_use=true) and nothing
@@ -400,298 +689,22 @@ int bridge_hw_adc_stream_end(uint8_t stream_id)
 		adc_dsp_chain_release(s->dsp_chain_id);
 	}
 
-	s->in_use    = false;
-	s->dsp_bound = false;
+	s->in_use      = false;
+	s->dsp_bound   = false;
+	s->dsp_cfg_bad = false; /* gh#35: sticky flags live exactly one session */
+	s->dsp_sat     = false;
 	return restored ? BRIDGE_HW_OK : BRIDGE_HW_ERR_IO;
 }
 
-/* ----------------------------------------------------------------- */
-/* v0.5 (§2B wave-2) -- chunked DSP-chain upload                     */
-/* ----------------------------------------------------------------- */
-
-/* Pool sizing -- mirrors the constants in `<alp/chips/gd32g553.h>`
- * so the host's view of "what fits" agrees with the firmware's
- * actual buffer reservation.  These local copies avoid pulling the
- * SDK header into the firmware tree (which would drag in alp_status_t
- * + supplementary ALP types the firmware doesn't otherwise consume).
- * Bumping any of them requires a coordinated edit on both sides --
- * see `docs/gd32-bridge-protocol.md` §3.x for the wire-format
- * implications. */
-#define BRIDGE_DSP_MAX_CHAINS      4u
-#define BRIDGE_DSP_MAX_STAGES      4u
-#define BRIDGE_DSP_MAX_STAGE_BYTES 260u
-
-/* Valid `kind` byte range -- alp_dsp_stage_kind_t mirrors the wire
- * encoding: 0 FIR, 1 IIR, 2 WINDOW, 3 FFT.  Anything outside this
- * range rejects at stage_push so a typo from the host is caught
- * before any bytes hit the per-stage buffer. */
-#define BRIDGE_DSP_KIND_MAX 3u
-
-/* Per-kind parameter bounds -- mirror the ALP_DSP_MAX_* macros in
- * `<alp/dsp.h>` so the firmware's assembled-blob validation agrees
- * with the host's construction limits.  See the reassembled blob
- * layout in `<alp/chips/gd32g553.h>` (gd32g553_adc_dsp_stage_push):
- *   FIR    : format:u8 n_taps:u8    rsvd:u16  taps[n_taps*4]  (Q31/F32)
- *   IIR    : format:u8 n_sections:u8 rsvd:u16 coeffs[n_sec*5*4]
- *   WINDOW : shape:u8  rsvd[3]                                  (4 B)
- *   FFT    : n_points:u16 out_fmt:u8 rsvd:u8                    (4 B) */
-#define BRIDGE_DSP_MAX_FIR_TAPS     64u
-#define BRIDGE_DSP_MAX_IIR_SECTIONS 8u
-#define BRIDGE_DSP_MIN_FFT_POINTS   32u
-#define BRIDGE_DSP_MAX_FFT_POINTS   1024u
-#define BRIDGE_DSP_COEFF_FMT_MAX    1u /* 0 F32, 1 Q31 */
-#define BRIDGE_DSP_WINDOW_SHAPE_MAX 3u /* rect/hann/hamming/blackman */
-#define BRIDGE_DSP_FFT_OUT_FMT_MAX  2u /* complex/magnitude/magnitude-onesided */
-#define BRIDGE_DSP_STAGE_HDR_BYTES  4u /* every kind's fixed 4-byte header */
-
-typedef struct {
-	uint8_t  kind;           /* alp_dsp_stage_kind_t (valid when total_size > 0) */
-	uint16_t total_size;     /* declared in first chunk; locks for the stage    */
-	uint16_t bytes_received; /* running count toward total_size                  */
-	bool     complete;       /* bytes_received == total_size                     */
-	uint8_t  data[BRIDGE_DSP_MAX_STAGE_BYTES];
-} adc_dsp_stage_t;
-
-typedef struct {
-	bool            in_use;
-	bool            bound;
-	adc_dsp_stage_t stages[BRIDGE_DSP_MAX_STAGES];
-} adc_dsp_chain_t;
-
-/* 4 chains x 4 stages x 260 B = 4160 bytes of stage-data RAM + ~80
- * bytes of metadata; well inside the GD32G553's 128 KB SRAM. */
-static adc_dsp_chain_t adc_dsp_chains[BRIDGE_DSP_MAX_CHAINS];
-
-/* Return a chain slot to the pool.  The counterpart to chain_open's
- * first-fit allocation: there is no host-facing close opcode, so a
- * chain's lifetime is tied to the stream it binds -- stream_end calls
- * this on the bound chain.  Idempotent-safe for an out-of-range id. */
-static void adc_dsp_chain_release(uint8_t chain_id)
-{
-	if (chain_id >= BRIDGE_DSP_MAX_CHAINS) return;
-	adc_dsp_chains[chain_id].bound  = false;
-	adc_dsp_chains[chain_id].in_use = false;
-}
-
-/* Validate one completed stage's reassembled blob against its declared
- * `kind`.  stage_push only bounds the byte COUNT (<= total_size) and
- * the kind range; it never looks at the payload.  This runs at bind --
- * the last point before the chain goes live -- so a filter with a bad
- * tap count, an out-of-range FFT size, or a header/length mismatch is
- * rejected here rather than mis-programming the FAC/FFT block later.
- * The 4-byte header is present for every kind (guaranteed because bind
- * only inspects populated stages, and total_size >= 1 for those --
- * but we re-check to keep the field reads in-bounds). */
-static bool adc_dsp_stage_blob_valid(const adc_dsp_stage_t *st)
-{
-	if (st->total_size < BRIDGE_DSP_STAGE_HDR_BYTES) return false;
-	const uint8_t *d = st->data;
-
-	switch (st->kind) {
-	case 0u: { /* FIR: format:u8 n_taps:u8 rsvd:u16 taps[n_taps*4] */
-		const uint8_t fmt    = d[0];
-		const uint8_t n_taps = d[1];
-		if (fmt > BRIDGE_DSP_COEFF_FMT_MAX) return false;
-		if (n_taps == 0u || n_taps > BRIDGE_DSP_MAX_FIR_TAPS) return false;
-		return st->total_size == (uint16_t)(BRIDGE_DSP_STAGE_HDR_BYTES + (uint16_t)n_taps * 4u);
-	}
-	case 1u: { /* IIR: format:u8 n_sections:u8 rsvd:u16 coeffs[n_sec*5*4] */
-		const uint8_t fmt   = d[0];
-		const uint8_t n_sec = d[1];
-		if (fmt > BRIDGE_DSP_COEFF_FMT_MAX) return false;
-		if (n_sec == 0u || n_sec > BRIDGE_DSP_MAX_IIR_SECTIONS) return false;
-		return st->total_size == (uint16_t)(BRIDGE_DSP_STAGE_HDR_BYTES + (uint16_t)n_sec * 5u * 4u);
-	}
-	case 2u: /* WINDOW: shape:u8 rsvd[3] */
-		if (d[0] > BRIDGE_DSP_WINDOW_SHAPE_MAX) return false;
-		return st->total_size == BRIDGE_DSP_STAGE_HDR_BYTES;
-	case 3u: { /* FFT: n_points:u16 out_fmt:u8 rsvd:u8 */
-		const uint16_t n_points = (uint16_t)(d[0] | ((uint16_t)d[1] << 8));
-		const uint8_t  out_fmt  = d[2];
-		if (out_fmt > BRIDGE_DSP_FFT_OUT_FMT_MAX) return false;
-		if (n_points < BRIDGE_DSP_MIN_FFT_POINTS || n_points > BRIDGE_DSP_MAX_FFT_POINTS)
-			return false;
-		if ((n_points & (uint16_t)(n_points - 1u)) != 0u) return false; /* pow2 */
-		return st->total_size == BRIDGE_DSP_STAGE_HDR_BYTES;
-	}
-	default:
-		return false;
-	}
-}
-
-int bridge_hw_adc_dsp_chain_open(uint8_t *chain_id)
-{
-	if (chain_id == 0) return BRIDGE_HW_ERR_INVAL;
-	*chain_id = 0u;
-
-	/* First-fit search over the chain pool.  The pool is small (4
-     * entries today) so the linear scan is comfortably faster than
-     * any free-list bookkeeping would be; if the pool grows, this
-     * function is the natural place to add a free-list head. */
-	for (uint8_t i = 0u; i < BRIDGE_DSP_MAX_CHAINS; ++i) {
-		if (!adc_dsp_chains[i].in_use) {
-			/* Zero the chain state so a previously-released chain
-             * doesn't leak stale stage data into the new allocation. */
-			for (uint8_t s = 0u; s < BRIDGE_DSP_MAX_STAGES; ++s) {
-				adc_dsp_chains[i].stages[s].kind           = 0u;
-				adc_dsp_chains[i].stages[s].total_size     = 0u;
-				adc_dsp_chains[i].stages[s].bytes_received = 0u;
-				adc_dsp_chains[i].stages[s].complete       = false;
-			}
-			adc_dsp_chains[i].in_use = true;
-			adc_dsp_chains[i].bound  = false;
-			*chain_id                = i;
-			return BRIDGE_HW_OK;
-		}
-	}
-	/* Pool exhaustion.  Protocol layer maps BRIDGE_HW_ERR_NOTIMPL to
-     * STATUS_NOSUPPORT (0x06) today.  STATUS_NOMEM (0x07) has 17
-     * defensive reply_cap guards in protocol.c, but both transports
-     * pass a 65-byte reply buffer so none of them can fire on the
-     * wire -- what's missing is a NOMEM-equivalent BRIDGE_HW_ERR_*
-     * here in hal/bridge_hw.h for this path. */
-	return BRIDGE_HW_ERR_NOTIMPL;
-}
-
-int bridge_hw_adc_dsp_stage_push(uint8_t        chain_id,
-                                 uint8_t        stage_index,
-                                 uint8_t        kind,
-                                 uint16_t       chunk_offset,
-                                 uint16_t       chunk_total_size,
-                                 const uint8_t *chunk_data,
-                                 size_t         chunk_data_len)
-{
-	if (chain_id >= BRIDGE_DSP_MAX_CHAINS) return BRIDGE_HW_ERR_RANGE;
-	if (stage_index >= BRIDGE_DSP_MAX_STAGES) return BRIDGE_HW_ERR_RANGE;
-	if (kind > BRIDGE_DSP_KIND_MAX) return BRIDGE_HW_ERR_INVAL;
-	if (chunk_total_size == 0u) return BRIDGE_HW_ERR_INVAL;
-	if (chunk_total_size > BRIDGE_DSP_MAX_STAGE_BYTES) return BRIDGE_HW_ERR_RANGE;
-	if (chunk_data_len == 0u || chunk_data == 0) return BRIDGE_HW_ERR_INVAL;
-	/* `chunk_offset + chunk_data_len <= chunk_total_size` -- guard
-     * against integer overflow on the addition (both inputs are
-     * 16-bit-bounded above) by doing the subtraction. */
-	if (chunk_data_len > (size_t)(chunk_total_size - chunk_offset)) return BRIDGE_HW_ERR_RANGE;
-
-	adc_dsp_chain_t *chain = &adc_dsp_chains[chain_id];
-	if (!chain->in_use) return BRIDGE_HW_ERR_INVAL;
-	if (chain->bound) return BRIDGE_HW_ERR_INVAL; /* mutation after bind */
-
-	adc_dsp_stage_t *st = &chain->stages[stage_index];
-
-	if (chunk_offset == 0u) {
-		/* First chunk of this stage.  Seed `kind` + `total_size`;
-         * any subsequent chunks must agree with these values so a
-         * mid-upload re-target of the stage is caught as INVAL. */
-		st->kind           = kind;
-		st->total_size     = chunk_total_size;
-		st->bytes_received = 0u;
-		st->complete       = false;
-	} else {
-		/* Continuation chunk.  The host must keep the same kind +
-         * total_size as the first chunk of this (chain, stage)
-         * pair -- otherwise the buffer would be a mix of two
-         * different stage payloads. */
-		if (st->total_size == 0u) return BRIDGE_HW_ERR_INVAL; /* stage not yet opened */
-		if (st->kind != kind) return BRIDGE_HW_ERR_INVAL;
-		if (st->total_size != chunk_total_size) return BRIDGE_HW_ERR_INVAL;
-		if (st->complete) return BRIDGE_HW_ERR_INVAL; /* already done */
-	}
-
-	for (size_t i = 0u; i < chunk_data_len; ++i) {
-		st->data[chunk_offset + i] = chunk_data[i];
-	}
-	st->bytes_received += (uint16_t)chunk_data_len;
-	if (st->bytes_received == st->total_size) {
-		st->complete = true;
-	}
-	return BRIDGE_HW_OK;
-}
-
-int bridge_hw_adc_dsp_chain_bind(uint8_t chain_id, uint8_t stream_id)
-{
-	if (chain_id >= BRIDGE_DSP_MAX_CHAINS) return BRIDGE_HW_ERR_RANGE;
-	if (stream_id >= BRIDGE_ADC_STREAM_COUNT) return BRIDGE_HW_ERR_RANGE;
-
-	adc_dsp_chain_t *chain = &adc_dsp_chains[chain_id];
-	if (!chain->in_use) return BRIDGE_HW_ERR_INVAL;
-	if (chain->bound) return BRIDGE_HW_ERR_INVAL; /* already attached */
-
-	/* Validate every populated stage is complete + the chain
-     * follows the ordering rules documented in
-     * `bridge_hw_adc_dsp_chain_bind`'s contract:
-     *   - FFT must be the terminal stage (no stage after it),
-     *   - WINDOW must immediately precede FFT,
-     *   - empty stages (total_size == 0) are allowed only at
-     *     contiguous tail positions -- not interleaved with
-     *     populated stages. */
-	uint8_t fft_index            = BRIDGE_DSP_MAX_STAGES;
-	uint8_t window_index         = BRIDGE_DSP_MAX_STAGES;
-	uint8_t last_populated_index = BRIDGE_DSP_MAX_STAGES;
-	for (uint8_t i = 0u; i < BRIDGE_DSP_MAX_STAGES; ++i) {
-		adc_dsp_stage_t *st = &chain->stages[i];
-		if (st->total_size == 0u) continue;
-		if (!st->complete) return BRIDGE_HW_ERR_INVAL; /* mid-upload */
-		/* Payload well-formed for its kind?  stage_push checked only the
-         * byte count + kind range; this is where a malformed FIR/IIR/
-         * WINDOW/FFT blob is caught, before it can mis-program the HW. */
-		if (!adc_dsp_stage_blob_valid(st)) return BRIDGE_HW_ERR_INVAL;
-		if (last_populated_index != BRIDGE_DSP_MAX_STAGES &&
-		    (uint8_t)(i - last_populated_index) != 1u) {
-			return BRIDGE_HW_ERR_INVAL; /* gap in stage list */
-		}
-		last_populated_index = i;
-		if (st->kind == 3u /* FFT */) {
-			if (fft_index != BRIDGE_DSP_MAX_STAGES) return BRIDGE_HW_ERR_INVAL;
-			fft_index = i;
-		} else if (st->kind == 2u /* WINDOW */) {
-			if (window_index != BRIDGE_DSP_MAX_STAGES) return BRIDGE_HW_ERR_INVAL;
-			window_index = i;
-		}
-	}
-	if (last_populated_index == BRIDGE_DSP_MAX_STAGES) {
-		return BRIDGE_HW_ERR_INVAL; /* empty chain */
-	}
-	if (fft_index != BRIDGE_DSP_MAX_STAGES) {
-		/* FFT must be terminal -- no populated stage after it. */
-		if (fft_index != last_populated_index) return BRIDGE_HW_ERR_INVAL;
-		/* WINDOW (if present) must directly precede the FFT. */
-		if (window_index != BRIDGE_DSP_MAX_STAGES &&
-		    (fft_index == 0u || window_index != fft_index - 1u)) {
-			return BRIDGE_HW_ERR_INVAL;
-		}
-	} else if (window_index != BRIDGE_DSP_MAX_STAGES) {
-		/* WINDOW without a terminating FFT has no defined meaning in
-         * the filtered-samples path -- reject per docs/gd32-bridge-
-         * protocol.md §3.x. */
-		return BRIDGE_HW_ERR_INVAL;
-	}
-
-	adc_stream_state_t *s = &adc_streams[stream_id];
-	if (!s->in_use) return BRIDGE_HW_ERR_INVAL;   /* stream not running */
-	if (s->dsp_bound) return BRIDGE_HW_ERR_INVAL; /* stream already has a chain */
-
-	/* One FAC block -> one filter (FIR/IIR) stream at a time.  A FFT
-	 * terminal uses the separate FFT block, so it's exempt. */
-	const uint8_t terminal_kind = chain->stages[last_populated_index].kind;
-	if (terminal_kind != 3u /* not FFT */ && adc_dsp_filter_stream_busy(stream_id)) {
-		return BRIDGE_HW_ERR_NOTIMPL; /* FAC already serving another stream */
-	}
-
-	/* Attachment is a state flip on both halves.  The terminal stage
-     * kind decides the data plane: FIR/IIR -> the base-level pump
-     * filters raw samples through the FAC into this stream's processed
-     * ring and stream_read serves filtered mV; FFT -> stream_read
-     * answers NOSUPPORT (spectrum is read via CMD_ADC_SPECTRUM_READ).
-     * Reset the processed-ring cursors so the pump starts clean. */
-	s->dsp_terminal  = chain->stages[last_populated_index].kind;
-	s->proc_write    = 0u;
-	s->proc_read     = 0u;
-	s->pump_raw_read = s->total_read; /* pump picks up where the raw reader is */
-	s->dsp_chain_id  = chain_id;
-	s->dsp_bound     = true;
-	chain->bound     = true;
-	return BRIDGE_HW_OK;
-}
+/* v0.5 (§2B wave-2) chunked DSP-chain upload -- the pool, chain_open,
+ * stage_push, adc_dsp_stage_blob_valid, chain_release and chain_bind
+ * (plus the shared adc_dsp_chain_p1_capable() capability predicate and
+ * the FAC/FFT busy checks it and chain_bind both use) now live in
+ * adc_dsp_chain.c (#69/#70 host-testability split -- see that file's
+ * header comment).  adc_dsp_chain.h, included above, is this file's
+ * only remaining dependency on that pool: the pump-side config
+ * functions below index `adc_dsp_chains[]` directly to decode a bound
+ * chain's stage blobs before programming the FAC/FFT registers. */
 
 /* =====================================================================
  * #496 FAC FIR/IIR runtime dispatch -- the filtered data plane.
@@ -704,76 +717,237 @@ int bridge_hw_adc_dsp_chain_bind(uint8_t chain_id, uint8_t stream_id)
  * modest FIR would add link latency (the 2026-06-04 link-rot mode).
  *
  * There is ONE FAC block, so ONE filter stream may be bound at a time;
- * chain_bind rejects a second filter chain with NOSUPPORT (below).
+ * chain_bind rejects a second filter chain with NOSUPPORT
+ * (adc_dsp_chain.c: adc_dsp_filter_stream_busy()).
  * ===================================================================== */
 
-/* stream_id currently loaded into the FAC, or -1 when the FAC is idle. */
-static int8_t adc_dsp_fac_owner = -1;
+/* The FAC/FFT owner byte is shared by the base-level DSP pump and the
+ * ISR-side stream teardown. Negative per-stream values are deliberately
+ * NOT readable owners: they let release revoke a long configuration or FFT
+ * publication while spectrum/data readers treat the block as unavailable
+ * (#184/#185/#187). Transitions to/from an active owner are liveness-checked
+ * in short PRIMASK critical sections; long hardware work stays interruptible. */
+#define ADC_DSP_OWNER_NONE ((int8_t)-1)
 
-/* Is a FIR/IIR (filter, not FFT) chain already bound to some OTHER
- * stream?  The single FAC can serve only one at a time. */
-bool adc_dsp_filter_stream_busy(uint8_t except_stream)
+/* gh#271: this transitional token is a function of stream_id ALONE --
+ * it carries no per-session generation, so a session that reused
+ * stream_id N would compute the identical token an earlier session on
+ * the same stream_id N once held.  That collision is unreachable
+ * today ONLY because the token is never live across two overlapping
+ * sessions: adc_dsp_owner_claim_config() (the sole writer of a fresh
+ * transitional token) requires *owner == ADC_DSP_OWNER_NONE first,
+ * and every path that ends a session (adc_dsp_fac_release /
+ * adc_dsp_fft_release, both driven from stream_end) restores
+ * ADC_DSP_OWNER_NONE before a replacement stream_begin on the same ID
+ * can run -- stream_begin/stream_end themselves are serialised by the
+ * single-threaded protocol dispatch that calls them.  If a second
+ * writer of this token is ever introduced, this invariant -- and the
+ * _Static_assert below it -- must move with it. */
+_Static_assert(BRIDGE_ADC_STREAM_COUNT <= 126u,
+               "adc_dsp_owner_transitional's -2-stream_id must stay representable in int8_t "
+               "without wrapping onto ADC_DSP_OWNER_NONE (-1) at stream_id 255");
+
+static int8_t adc_dsp_owner_transitional(uint8_t stream_id)
 {
-	for (uint8_t i = 0u; i < BRIDGE_ADC_STREAM_COUNT; ++i) {
-		if (i == except_stream) continue;
-		if (adc_streams[i].in_use && adc_streams[i].dsp_bound &&
-		    adc_streams[i].dsp_terminal != 3u /* not FFT */) {
-			return true;
-		}
-	}
-	return false;
+	return (int8_t)(-2 - (int8_t)stream_id);
 }
+
+static bool adc_dsp_owner_live_locked(const volatile int8_t    *owner,
+                                      int8_t                    expected_owner,
+                                      const adc_stream_state_t *stream,
+                                      bool                      fft_terminal)
+{
+	const bool terminal_matches =
+	    fft_terminal ? (stream->dsp_terminal == 3u) : (stream->dsp_terminal != 3u);
+	return *owner == expected_owner && stream->in_use && stream->dsp_bound && terminal_matches;
+}
+
+static bool adc_dsp_owner_claim_config(volatile int8_t          *owner,
+                                       uint8_t                   stream_id,
+                                       const adc_stream_state_t *stream,
+                                       bool                      fft_terminal)
+{
+	const uint32_t irq_state = bridge_irq_lock();
+	bool           claimed   = false;
+	if (*owner == ADC_DSP_OWNER_NONE &&
+	    adc_dsp_owner_live_locked(owner, ADC_DSP_OWNER_NONE, stream, fft_terminal)) {
+		*owner  = adc_dsp_owner_transitional(stream_id);
+		claimed = true;
+	}
+	bridge_irq_unlock(irq_state);
+	return claimed;
+}
+
+static bool adc_dsp_owner_commit_config(volatile int8_t          *owner,
+                                        uint8_t                   stream_id,
+                                        const adc_stream_state_t *stream,
+                                        bool                      fft_terminal)
+{
+	const int8_t   transitional = adc_dsp_owner_transitional(stream_id);
+	const uint32_t irq_state    = bridge_irq_lock();
+	const bool     live = adc_dsp_owner_live_locked(owner, transitional, stream, fft_terminal);
+	if (live) {
+		*owner = (int8_t)stream_id;
+	} else if (*owner == transitional) {
+		/* END may have landed before the configuring claim was visible,
+		 * so release could not clear it. Do not leave a negative claim
+		 * wedged after the post-config liveness check fails. */
+		*owner = ADC_DSP_OWNER_NONE;
+	}
+	bridge_irq_unlock(irq_state);
+	return live;
+}
+
+static bool adc_dsp_owner_release(volatile int8_t *owner, uint8_t stream_id)
+{
+	const int8_t   transitional = adc_dsp_owner_transitional(stream_id);
+	const uint32_t irq_state    = bridge_irq_lock();
+	const bool     released     = *owner == (int8_t)stream_id || *owner == transitional;
+	if (released) *owner = ADC_DSP_OWNER_NONE;
+	bridge_irq_unlock(irq_state);
+	return released;
+}
+
+/* stream_id currently loaded into the FAC, a negative configuring token,
+ * or ADC_DSP_OWNER_NONE while the FAC is idle. */
+static volatile int8_t adc_dsp_fac_owner = ADC_DSP_OWNER_NONE;
 
 /* Release the FAC if this stream owned it (called from stream_end). */
 void adc_dsp_fac_release(uint8_t stream_id)
 {
-	if (adc_dsp_fac_owner == (int8_t)stream_id) {
+	if (adc_dsp_owner_release(&adc_dsp_fac_owner, stream_id)) {
 		fac_stop();
-		adc_dsp_fac_owner = -1;
 	}
 }
 
 /* Decode one wire coefficient (4 bytes little-endian, Q31 or F32) into
  * the FAC's Q15 fixed-point.  Q31 -> arithmetic >>16; F32 -> clamp to
- * [-1, +1) and scale by 2^15. */
-static int16_t adc_dsp_coeff_q15(uint8_t fmt, const uint8_t *p)
+ * [-1, +1) and scale by 2^15.
+ *
+ * gh#35 fix 2: `g` is the section's headroom exponent -- the FAC's
+ * accumulator gain IPR multiplies the accumulator output by 2^IPR
+ * (UM Rev1.2 p.1505 s35.3.6: "The parameter IPR is the gain, applied
+ * to the accumulator output by multiplied 2IPR, where IPR is in the
+ * range [0:7]"), so coefficients delivered to local memory are scaled
+ * DOWN by 2^g and the gain buys the factor back.  This is exactly the
+ * mechanism AN208 p.13 prescribes ("To make full use of these data,
+ * the above parameters are scaled up by 16384") and the vendor
+ * Iir_dma example uses with iir_gain = 1.  Without it, any |coeff| >=
+ * 1.0 -- routine for a lightly damped biquad, whose a1 routinely sits
+ * between -1 and -2 -- was silently clamped onto the q1.15 rail,
+ * changing the filter's cutoff and Q with no error anywhere on the
+ * wire.  g == 0 keeps this identical to the pre-gh#35 decode. */
+static int16_t adc_dsp_f32_to_q15(float f, uint8_t g)
 {
-	uint32_t w =
-	    (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-	if (fmt == 1u) { /* Q31 */
-		return (int16_t)((int32_t)w >> 16);
-	}
-	/* F32 */
-	float f;
-	__builtin_memcpy(&f, &w, sizeof(f));
-	if (f >= 0.999969f) f = 0.999969f;
+	f = f / (float)(1u << g);
+	if (f >= 1.0f) f = 0.999969f;
 	if (f <= -1.0f) f = -1.0f;
 	return (int16_t)(f * 32768.0f);
 }
 
+/* Negate a q1.15 feedback coefficient.  gh#35 fix 1: the wire contract
+ * (<alp/dsp.h>) is y[n] = b*x - a*y, but the FAC ADDS the feedback
+ * term (UM Rev1.2 p.1505 eq.(35-2): "yn = 2IPR (sum(xn-k x bk) +
+ * sum(yn-k x ak))"), so a1/a2 must be sign-reversed at decode or every
+ * biquad's poles come out mirrored -- a filter designed stable can be
+ * realised unstable.  Both the negation and the halving are confirmed
+ * by the vendor Iir_dma example (main.c:58-60 + ipr=1 at :205).  The
+ * INT16_MIN case clamps to INT16_MAX because -(-32768) is not
+ * representable in int16_t.  Do NOT "fix" the sign back. */
+static int16_t adc_dsp_neg_q15(int16_t v)
+{
+	return (v == INT16_MIN) ? INT16_MAX : (int16_t)(-v);
+}
+
+/* Largest |coefficient| across a section's F32 values, for the
+ * headroom exponent.  Returns a negative value (-1.0f) to signal
+ * "out of FAC range": max|coeff| >= 128 needs g = 7 and still does
+ * not fit, which is where gh#35 draws the line -- refuse the chain
+ * (sticky, surfaced through stream_read as RANGE) instead of silently
+ * clamping onto the rail. */
+#define ADC_DSP_FAC_COEFF_MAX 128.0f
+
+static float adc_dsp_f32_max_abs(const float *v, uint8_t n)
+{
+	float max = 0.0f;
+	for (uint8_t k = 0u; k < n; ++k) {
+		const float a = (v[k] < 0.0f) ? -v[k] : v[k];
+		if (a > max) max = a;
+	}
+	return (max >= ADC_DSP_FAC_COEFF_MAX) ? -1.0f : max;
+}
+
+/* Smallest g in [0,7] with max/2^g <= 1, so no coefficient lands on
+ * the q1.15 rail (caller has already rejected max >= 128, so g = 7
+ * always suffices; the max == 2^g edge clamps to 0.999969, a 3e-5
+ * gain error that is the plane's own resolution). */
+static uint8_t adc_dsp_headroom_exp(float max_abs)
+{
+	uint8_t g = 0u;
+	while (g < 7u && max_abs > (float)(1u << g))
+		++g;
+	return g;
+}
+
+/* gh#253: bit-width-derived bias/scale for the FAC pump's input map
+ * and output re-bias.  adc_full_scale_for_bits() only ever returns
+ * (1 << res_bits) - 1 for res_bits in {12, 10, 8, 6} (adc.c), so
+ * full_scale + 1 is always one of {4096, 1024, 256, 64} and the shift
+ * that maps a code centred on mid-scale into (most of) the signed
+ * q1.15 range is exactly 15 - res_bits.  The 12-bit case (shift 3,
+ * mid 2048) is the original gh#35 constant; this generalises it
+ * instead of assuming every stream is 12-bit. */
+static uint8_t adc_dsp_bias_shift(uint16_t full_scale)
+{
+	switch (full_scale) {
+	case 1023u:
+		return 5u; /* 10-bit: 15-10 */
+	case 255u:
+		return 7u; /* 8-bit: 15-8 */
+	case 63u:
+		return 9u; /* 6-bit: 15-6 */
+	default:
+		return 3u; /* 12-bit: 15-12 */
+	}
+}
+
 /* Configure the FAC for stream s's bound chain (single FIR or single-
- * section IIR).  Streaming mode: coeffs preloaded into X1, no input
- * preload -- the pump feeds X0 one sample at a time.  Returns false for
- * a shape the FAC path doesn't handle in P1 (multi-stage, multi-section
- * IIR), leaving the stream unfiltered (stream_read then answers BUSY so
- * the host doesn't mistake raw data for filtered). */
+ * section IIR -- the only shapes chain_bind now lets through, see
+ * adc_dsp_chain_p1_capable() in adc_dsp_chain.c).  Streaming mode:
+ * coeffs preloaded into X1, no input preload -- the pump feeds X0 one
+ * sample at a time.  chain_bind is where a caller now learns a chain
+ * is unrealisable (BRIDGE_HW_ERR_NOTIMPL, #69) -- the `return false`
+ * paths below are unreachable in normal operation once bind enforces
+ * the shared predicate; they stay only as a defence-in-depth guard
+ * against the two sides drifting apart again, in which case the
+ * stream is simply left unfiltered. */
 static bool adc_dsp_fac_config(const adc_stream_state_t *s)
 {
 	const adc_dsp_chain_t *chain = &adc_dsp_chains[s->dsp_chain_id];
 
-	/* P1 handles exactly one populated non-FFT stage. */
-	const adc_dsp_stage_t *st        = 0;
-	uint8_t                populated = 0u;
+	/* Defence in depth: chain_bind already refused any chain P1 can't
+	 * realise via this SAME predicate -- re-checking it here means a
+	 * future capability lift landing on only one side can't silently
+	 * reopen the #69 hang.  Since #132 the predicate also re-runs
+	 * adc_dsp_stage_blob_valid() over every populated stage, so it
+	 * covers the PAYLOAD fields decoded below (the FIR tap count, the
+	 * IIR section count, the FFT out_fmt) and not just the chain's
+	 * shape -- which is what this comment always claimed. */
+	if (!adc_dsp_chain_p1_capable(chain)) return false;
+
+	/* P1 handles exactly one populated non-FFT stage (guaranteed by
+	 * the capability check above; find it to decode its blob). */
+	const adc_dsp_stage_t *st = 0;
 	for (uint8_t i = 0u; i < BRIDGE_DSP_MAX_STAGES; ++i) {
 		if (chain->stages[i].total_size != 0u) {
 			st = &chain->stages[i];
-			++populated;
+			break;
 		}
 	}
-	if (st == 0 || populated != 1u) return false;
+	if (st == 0) return false; /* unreachable post-bind; kept as a defensive guard */
 
 	fac_deinit();
-	rcu_periph_clock_enable(RCU_FAC);
+	bridge_rcu_periph_clock_enable(RCU_FAC);
 
 	fac_parameter_struct p;
 	fac_struct_para_init(&p);
@@ -782,10 +956,61 @@ static bool adc_dsp_fac_config(const adc_stream_state_t *s)
 	if (st->kind == 0u) { /* FIR: format:u8 n_taps:u8 rsvd:u16 taps[] */
 		const uint8_t fmt = st->data[0];
 		const uint8_t nt  = st->data[1];
-		int16_t       taps[BRIDGE_DSP_MAX_FIR_TAPS];
+		/* Hard bound at the point of use (#132).  The predicate above
+		 * already rejects nt == 0 or nt > BRIDGE_DSP_MAX_FIR_TAPS, so
+		 * this cannot fire today -- it is here so the array index below
+		 * is provably in range from THIS function alone, without the
+		 * reader (or a future editor of adc_dsp_chain.c) having to
+		 * carry the bound across a translation-unit boundary.  `taps`
+		 * lives on the single 2 KB stack used by the transport ISR's
+		 * protocol_dispatch().  Nested dispatch is refused by #19, but
+		 * there is still no MSPLIM or stack painting: an overflow here
+		 * is silent. */
+		if (nt == 0u || nt > BRIDGE_DSP_MAX_FIR_TAPS) return false;
+		if (st->total_size != (uint16_t)(BRIDGE_DSP_STAGE_HDR_BYTES + (uint16_t)nt * 4u))
+			return false;
+		/* gh#35 fix 2: decode every tap, derive the section's headroom
+		 * exponent from the largest magnitude, scale, and set IPR to
+		 * buy the factor back.  Q31 values are inside [-1, 1) by
+		 * construction so g collapses to 0 and the >>16 decode is
+		 * exact; only F32 taps can exceed the q1.15 range.  A max >=
+		 * 128 cannot be scaled into range even at g = 7 -- refuse
+		 * (sticky, surfaced via stream_read as RANGE) rather than
+		 * clamping onto the rail and serving a different filter with
+		 * STATUS_OK.
+		 *
+		 * gh#270: the int16 taps and the F32 decode scratch are never
+		 * both LIVE at once -- one format populates only its own half
+		 * of the loop below, and the later F32->q15 pass only ever
+		 * needs taps_u.i16[k] AFTER it has read taps_u.f32[k], so the
+		 * two can share one buffer instead of costing a second 256-
+		 * byte frame on the 2 KB protocol_dispatch() stack.  The
+		 * shrink-in-place write is safe because taps_u.i16[k] never
+		 * occupies a byte taps_u.f32[j] for j >= k has not already
+		 * been read (2 bytes/tap written can never catch up with the
+		 * 4 bytes/tap already consumed). */
+		union {
+			int16_t i16[BRIDGE_DSP_MAX_FIR_TAPS];
+			float   f32[BRIDGE_DSP_MAX_FIR_TAPS];
+		} taps_u;
+		uint8_t g = 0u;
 		for (uint8_t k = 0u; k < nt; ++k) {
-			taps[k] =
-			    adc_dsp_coeff_q15(fmt, &st->data[BRIDGE_DSP_STAGE_HDR_BYTES + (uint16_t)k * 4u]);
+			const uint16_t off = (uint16_t)(BRIDGE_DSP_STAGE_HDR_BYTES + (uint16_t)k * 4u);
+			const uint32_t w   = (uint32_t)st->data[off] | ((uint32_t)st->data[off + 1u] << 8) |
+			                     ((uint32_t)st->data[off + 2u] << 16) |
+			                     ((uint32_t)st->data[off + 3u] << 24);
+			if (fmt == 1u) { /* Q31 */
+				taps_u.i16[k] = (int16_t)((int32_t)w >> 16);
+			} else { /* F32 */
+				__builtin_memcpy(&taps_u.f32[k], &w, sizeof(taps_u.f32[k]));
+			}
+		}
+		if (fmt != 1u) {
+			const float max = adc_dsp_f32_max_abs(taps_u.f32, nt);
+			if (max < 0.0f) return false; /* >= 128: out of FAC range */
+			g = adc_dsp_headroom_exp(max);
+			for (uint8_t k = 0u; k < nt; ++k)
+				taps_u.i16[k] = adc_dsp_f32_to_q15(taps_u.f32[k], g);
 		}
 		p.coeff_addr       = 0u;
 		p.coeff_size       = nt;
@@ -800,7 +1025,7 @@ static bool adc_dsp_fac_config(const adc_stream_state_t *s)
 
 		fac_fixed_data_preload_struct pl;
 		fac_fixed_data_preload_init(&pl);
-		pl.coeffb_ctx  = taps;
+		pl.coeffb_ctx  = taps_u.i16;
 		pl.coeffb_size = nt;
 		pl.coeffa_ctx  = 0;
 		pl.coeffa_size = 0u;
@@ -813,24 +1038,55 @@ static bool adc_dsp_fac_config(const adc_stream_state_t *s)
 		p.func = FUNC_CONVO_FIR;
 		p.ipp  = nt;
 		p.ipq  = 0u;
-		p.ipr  = 0u;
+		p.ipr  = g; /* accumulator gain 2^g buys the decode's scaling back */
 		fac_function_config(&p);
 		fac_start();
 		return true;
 	}
 
-	if (st->kind == 1u) { /* IIR direct-form-1, SINGLE biquad in P1 */
-		const uint8_t fmt   = st->data[0];
-		const uint8_t n_sec = st->data[1];
-		if (n_sec != 1u) return false; /* cascaded sections: later */
+	if (st->kind == 1u) { /* IIR direct-form-1, SINGLE biquad in P1 -- the
+	                       * n_sections == 1 limit is enforced by
+	                       * adc_dsp_chain_p1_capable() above, not here. */
+		const uint8_t fmt = st->data[0];
 		/* section = b0,b1,b2,a1,a2 (5 coeffs).  FAC coeffb = feed-
-		 * forward B (b0,b1,b2), coeffa = feedback A (a1,a2). */
+		 * forward B (b0,b1,b2), coeffa = feedback A (a1,a2).
+		 *
+		 * gh#35 fixes 1 + 2 (they must land together -- both change
+		 * the words written into FAC local memory): the feedback pair
+		 * is NEGATED at decode (the FAC adds the feedback term, UM
+		 * p.1505 eq.(35-2); the wire contract subtracts it), and all
+		 * five coefficients are scaled down by the section's headroom
+		 * exponent g with p.ipr = g buying the factor back.  Q31 is
+		 * inside [-1, 1) by construction so g = 0.  max|coeff| >= 128
+		 * refuses the whole config (sticky, surfaced via stream_read
+		 * as RANGE). */
 		int16_t        b[3], a[2];
+		uint8_t        g = 0u;
+		float          fv[5];
 		const uint8_t *c = &st->data[BRIDGE_DSP_STAGE_HDR_BYTES];
-		for (uint8_t k = 0u; k < 3u; ++k)
-			b[k] = adc_dsp_coeff_q15(fmt, &c[k * 4u]);
-		for (uint8_t k = 0u; k < 2u; ++k)
-			a[k] = adc_dsp_coeff_q15(fmt, &c[(3u + k) * 4u]);
+		for (uint8_t k = 0u; k < 5u; ++k) {
+			const uint32_t w = (uint32_t)c[k * 4u] | ((uint32_t)c[k * 4u + 1u] << 8) |
+			                   ((uint32_t)c[k * 4u + 2u] << 16) | ((uint32_t)c[k * 4u + 3u] << 24);
+			if (fmt == 1u) { /* Q31 */
+				const int16_t v = (int16_t)((int32_t)w >> 16);
+				if (k < 3u) {
+					b[k] = v;
+				} else {
+					a[k - 3u] = adc_dsp_neg_q15(v);
+				}
+			} else { /* F32 */
+				__builtin_memcpy(&fv[k], &w, sizeof(fv[k]));
+			}
+		}
+		if (fmt != 1u) {
+			const float max = adc_dsp_f32_max_abs(fv, 5u);
+			if (max < 0.0f) return false; /* >= 128: out of FAC range */
+			g = adc_dsp_headroom_exp(max);
+			for (uint8_t k = 0u; k < 3u; ++k)
+				b[k] = adc_dsp_f32_to_q15(fv[k], g);
+			for (uint8_t k = 0u; k < 2u; ++k)
+				a[k] = adc_dsp_neg_q15(adc_dsp_f32_to_q15(fv[3u + k], g));
+		}
 		p.coeff_addr       = 0u;
 		p.coeff_size       = 5u; /* b0..b2,a1,a2 */
 		p.input_addr       = 5u;
@@ -854,11 +1110,13 @@ static bool adc_dsp_fac_config(const adc_stream_state_t *s)
 		pl.output_size = 0u;
 		fac_fixed_buffer_preload(&pl);
 
-		/* IPP = feed-forward count (3), IPQ = feedback count (2). */
+		/* IPP = feed-forward count (3), IPQ = feedback count (2).
+		 * IPR = g: the accumulator gain 2^g buys the decode scaling
+		 * back (UM p.1505; vendor Iir_dma main.c:205 iir_gain = 1). */
 		p.func = FUNC_IIR_DIRECT_FORM_1;
 		p.ipp  = 3u;
 		p.ipq  = 2u;
-		p.ipr  = 0u;
+		p.ipr  = g;
 		fac_function_config(&p);
 		fac_start();
 		return true;
@@ -874,44 +1132,142 @@ static bool adc_dsp_fac_config(const adc_stream_state_t *s)
 static void adc_dsp_pump_stream(uint8_t sid)
 {
 	adc_stream_state_t *s = &adc_streams[sid];
+	if (s->dma_error_count != 0u) return;
 
 	if (adc_dsp_fac_owner != (int8_t)sid) {
-		if (!adc_dsp_fac_config(s)) return; /* unsupported chain -> stay idle */
-		adc_dsp_fac_owner = (int8_t)sid;
+		if (!adc_dsp_owner_claim_config(&adc_dsp_fac_owner, sid, s, false)) return;
+		if (!adc_dsp_fac_config(s)) {
+			(void)adc_dsp_owner_release(&adc_dsp_fac_owner, sid);
+			/* gh#35: a config refusal is no longer silent.  The
+			 * chain passed bind's shape checks but its
+			 * coefficients are out of the FAC's realisable range
+			 * (max|coeff| >= 128).  Mark the stream so
+			 * stream_read answers RANGE instead of letting the
+			 * pump idle forever on a bound chain that will never
+			 * produce -- the #69 silent-starvation shape.  Sticky
+			 * until stream_end: no auto-retry, the coefficients
+			 * cannot change without a new chain_open. */
+			s->dsp_cfg_bad = true;
+			return;
+		}
+		if (!adc_dsp_owner_commit_config(&adc_dsp_fac_owner, sid, s, false)) {
+			/* Config may have resumed and called fac_start() after an ISR-side
+			 * release stopped the block. Leave revoked/ended sessions stopped. */
+			fac_stop();
+			return;
+		}
 	}
 
-	const uint32_t laps          = s->lap_count;
-	const uint16_t w             = adc_stream_write_index(s);
-	const uint32_t total_written = laps * BRIDGE_ADC_STREAM_RING_SAMPLES + (uint32_t)w;
+	/* Same corrected total the read path uses (gh#149): the pump is
+	 * the raw ring's other consumer and owns its own position tracker
+	 * (s->pump_pos), so a coalesced lap the prio-3 ISR never counted
+	 * cannot silently stale the pump's backlog either.  The pump runs
+	 * at base level and can be preempted by the lap ISR mid-call; the
+	 * tracker update inside adc_stream_total_written() is safe under
+	 * that preemption because lap_count is the only shared field read
+	 * (volatile) and the tracker itself is pump-private. */
+	const uint32_t total_written = adc_stream_total_written(s, &s->pump_pos);
 	int32_t        avail         = (int32_t)(total_written - s->pump_raw_read);
 	if (avail <= 0) return;
 	if ((uint32_t)avail >= BRIDGE_ADC_STREAM_RING_SAMPLES) {
 		/* The pump fell a full ring behind the DMA -- drop the corrupt
-		 * backlog and resync so the next batch is gap-free (the host
-		 * sees this as a proc-ring gap, same as a raw overrun). */
-		s->pump_raw_read = total_written;
+		 * backlog and resync so the next batch is gap-free (proc_gap makes
+		 * stream_read answer BUSY, same as a raw overrun). */
+		const uint32_t irq_state = bridge_irq_lock();
+		if (adc_dsp_owner_live_locked(&adc_dsp_fac_owner, (int8_t)sid, s, false)) {
+			s->pump_raw_read = total_written;
+			s->proc_gap      = true; /* stream_read answers BUSY once (gh#18 B9) */
+		}
+		bridge_irq_unlock(irq_state);
 		return;
 	}
 
+	/* gh#253: bias/scale generalised off the stream's OWN bit width
+	 * (s->full_scale, snapshotted at stream_begin) instead of a
+	 * hardcoded 12-bit mid-scale -- a 10/8/6-bit stream no longer
+	 * rails on every sample. */
+	const int32_t mid   = (int32_t)((s->full_scale + 1u) / 2u);
+	const uint8_t shift = adc_dsp_bias_shift(s->full_scale);
+
 	while (avail-- > 0) {
+		/* gh#272: this section runs once per sample, up to the 100 kHz
+		 * cap.  It was reviewed for "is this a place to do work" per
+		 * bridge_critical.h's own rule: every statement inside is
+		 * either the liveness re-check (must run before ANY FAC MMIO,
+		 * since END can deinit the block between samples) or a single
+		 * FAC register access (poll/write/poll/read/poll/poll) --
+		 * bounded, no loop, no wait, nothing that can itself block.
+		 * The raw-sample fetch (ridx/code/x) and the processed-sample
+		 * publish (proc_ring/proc_write) stay INSIDE the same section
+		 * on purpose: moving them out was tried and reverted -- it let
+		 * a sample get marked "consumed" (pump_raw_read advanced)
+		 * without ever reaching the FAC when END preempted between the
+		 * fetch and the liveness check, silently dropping it instead
+		 * of leaving it for the replacement session
+		 * (test_fac_post_commit_preemption_cannot_drain_replacement
+		 * pins exactly this).  No bench measurement of this section's
+		 * cycle cost against SPI reply latency has been taken (no
+		 * hardware access this pass) -- that bench step is still
+		 * owed; this comment records the static-analysis case that
+		 * the section is small and further shrinking it costs a real
+		 * correctness property, not laziness. */
+		const uint32_t irq_state = bridge_irq_lock();
+		if (!adc_dsp_owner_live_locked(&adc_dsp_fac_owner, (int8_t)sid, s, false)) {
+			bridge_irq_unlock(irq_state);
+			return;
+		}
+		/* FAC input saturated: leave the sample in the ring for the next
+		 * tick instead of consuming it un-filtered (gh#18 A23). */
+		if (fac_flag_get(FAC_FLAG_X0BFF) == SET) {
+			bridge_irq_unlock(irq_state);
+			break;
+		}
 		const uint16_t ridx = (uint16_t)(s->pump_raw_read % BRIDGE_ADC_STREAM_RING_SAMPLES);
-		const uint16_t code = (uint16_t)(s->ring[ridx] & 0x0FFFu); /* 12-bit */
+		const uint16_t code = (uint16_t)(s->ring[ridx] & 0x0FFFu); /* 12-bit raw ring word */
 		s->pump_raw_read++;
 
-		/* Unipolar ADC code (0..4095) -> Q15 positive (0..~1.0): <<3.
-		 * A unity-DC-gain filter (sum(taps) ~ 1.0) preserves the offset;
-		 * the reverse (>>3) returns a code the existing mv math scales. */
-		const int16_t x = (int16_t)(code << 3);
-		if (fac_flag_get(FAC_FLAG_X0BFF) == SET) break; /* FAC input saturated */
+		/* gh#35 fix 3 / gh#253: bias the input around mid-scale BEFORE
+		 * the shift.  The old non-negative mapping (code << 3) was
+		 * reasoned only about a unity-DC-gain low-pass; for any high-
+		 * pass, band-pass or DC-blocking biquad the output is
+		 * legitimately negative for about half the samples, and the
+		 * old output clamp (c < 0 -> 0) half-wave-rectified the served
+		 * stream -- a large spurious DC term and harmonics the signal
+		 * never contained, delivered with STATUS_OK.  With the bias, x
+		 * is a signed q1.15 in [-1, 0.9995) centred on 0, the FAC
+		 * output is signed symmetric, and the mid re-bias below maps a
+		 * mid-scale-centred swing back onto the unipolar code plane
+		 * WITHOUT discarding the negative half. */
+		const int16_t x = (int16_t)(((int32_t)code - mid) << shift);
 		fac_fixed_data_write(x);
 
 		if (fac_flag_get(FAC_FLAG_YBEF) == RESET) {
-			int32_t c = (int32_t)fac_fixed_data_read() >> 3;
+			/* Re-bias the signed q1.15 output back onto the unipolar
+			 * code plane (the shift undoes the encode shift, mid undoes
+			 * the mid-scale subtraction above).  Swings beyond one
+			 * code half-range clip here -- the processed plane's own
+			 * headroom; genuine FAC saturation is flagged via dsp_sat
+			 * below, so a clipped or railed series is never reported
+			 * as STATUS_OK. */
+			int32_t c = (((int32_t)fac_fixed_data_read()) >> shift) + mid;
 			if (c < 0) c = 0;
-			if (c > 4095) c = 4095;
+			if (c > (int32_t)s->full_scale) c = (int32_t)s->full_scale;
+			/* gh#35: saturation visibility.  Poll the FAC's sticky
+			 * error flags (UM p.1515 FAC_STAT STEF bit 10 = output
+			 * saturation, GSTEF bit 11 = gain saturation) rather
+			 * than arming their interrupt enables (STEIE/GSTEIE,
+			 * p.1514) -- the pump runs at base level, no vector is
+			 * needed, and polling cannot preempt the transports.
+			 * Either flag means the served stream contains railed
+			 * values: mark the stream sticky so stream_read stops
+			 * answering STATUS_OK for it. */
+			if (SET == fac_flag_get(FAC_FLAG_STEF) || SET == fac_flag_get(FAC_FLAG_GSTEF)) {
+				s->dsp_sat = true;
+			}
 			s->proc_ring[s->proc_write % BRIDGE_ADC_STREAM_RING_SAMPLES] = (uint16_t)c;
 			s->proc_write++;
 		}
+		bridge_irq_unlock(irq_state);
 	}
 }
 
@@ -941,9 +1297,22 @@ void bridge_hw_dsp_pump(void)
  * stage), reduces to the requested output format, bumps a frame seq, and
  * refills.  The host pulls the latest frame with CMD_ADC_SPECTRUM_READ.
  * ===================================================================== */
-#define ADC_DSP_FFT_MAX_POINTS 1024u
+/* F3 (review of #69/#70): this is a compile-time ALIAS of
+ * BRIDGE_DSP_MAX_FFT_POINTS (adc_dsp_chain.h), not an independently-
+ * maintained copy.  Before this fix the two were separately-defined
+ * constants that happened to agree (both 1024) -- raising
+ * BRIDGE_DSP_MAX_FFT_POINTS alone would have let chain_bind accept an
+ * n_points the FFT buffers below are not sized for, so adc_dsp_fft_config
+ * would then always fail post-bind and CMD_ADC_SPECTRUM_READ would
+ * answer IO forever: the #69 silent-starvation shape, regenerated
+ * through this one limit.  Aliasing makes that divergence impossible;
+ * bumping the point cap is now a single-macro edit that resizes these
+ * buffers automatically. */
+#define ADC_DSP_FFT_MAX_POINTS BRIDGE_DSP_MAX_FFT_POINTS
 
-static int8_t            adc_dsp_fft_owner = -1;
+/* Active stream ID, negative configuration/publication token, or
+ * idle. */
+static volatile int8_t   adc_dsp_fft_owner = ADC_DSP_OWNER_NONE;
 static uint16_t          adc_dsp_fft_points;
 static uint8_t           adc_dsp_fft_outfmt; /* 0 complex / 1 mag / 2 mag-onesided */
 static uint16_t          adc_dsp_fft_fill;
@@ -953,6 +1322,18 @@ static float             adc_dsp_fft_real[ADC_DSP_FFT_MAX_POINTS];
 static float             adc_dsp_fft_out[ADC_DSP_FFT_MAX_POINTS * 2u]; /* re,im */
 static float             adc_dsp_fft_wcoef[ADC_DSP_FFT_MAX_POINTS];
 static float             adc_dsp_fft_bins[ADC_DSP_FFT_MAX_POINTS * 2u]; /* published */
+
+/* Start a new FFT publication session. The bins may keep their old bytes,
+ * but seq == 0 gates every read until the new session publishes a complete
+ * frame; keeping these three fields together prevents a lifecycle path from
+ * reporting an old sequence as a readable (but empty) new-session frame
+ * (#140). */
+static void adc_dsp_fft_session_reset(void)
+{
+	adc_dsp_fft_fill  = 0u;
+	adc_dsp_fft_seq   = 0u;
+	adc_dsp_fft_nbins = 0u;
+}
 
 static uint8_t adc_dsp_fft_point_enum(uint16_t n)
 {
@@ -1000,10 +1381,15 @@ static void adc_dsp_fft_make_window(uint8_t shape, uint16_t n)
 }
 
 /* Configure the FFT block + window for stream s's bound FFT chain.
- * Returns false for an unsupported shape (multi-stage beyond WINDOW+FFT). */
+ * chain_bind is now where a FIR/IIR-ahead-of-FFT shape is refused
+ * (BRIDGE_HW_ERR_NOTIMPL, #69) -- the checks below are a defence-in-
+ * depth re-check via the SAME shared predicate chain_bind uses, not
+ * an independent copy of the "WINDOW+FFT only" limit. */
 static bool adc_dsp_fft_config(const adc_stream_state_t *s)
 {
 	const adc_dsp_chain_t *chain = &adc_dsp_chains[s->dsp_chain_id];
+
+	if (!adc_dsp_chain_p1_capable(chain)) return false;
 
 	const adc_dsp_stage_t *fft_st = 0, *win_st = 0;
 	for (uint8_t i = 0u; i < BRIDGE_DSP_MAX_STAGES; ++i) {
@@ -1012,24 +1398,27 @@ static bool adc_dsp_fft_config(const adc_stream_state_t *s)
 			fft_st = &chain->stages[i];
 		else if (chain->stages[i].kind == 2u)
 			win_st = &chain->stages[i];
-		else
-			return false; /* FIR/IIR before an FFT: not a P1 spectrum chain */
+		/* No other kind can be populated here -- guaranteed by the
+		 * capability check above. */
 	}
-	if (fft_st == 0) return false;
+	if (fft_st == 0) return false; /* unreachable post-bind; kept as a defensive guard */
 
 	const uint16_t n   = (uint16_t)(fft_st->data[0] | ((uint16_t)fft_st->data[1] << 8));
 	const uint8_t  ofm = fft_st->data[2];
-	if (n < 32u || n > ADC_DSP_FFT_MAX_POINTS) return false;
+	/* F3 (review of #69/#70): adc_dsp_chain_p1_capable() above now folds
+	 * in this same bound (BRIDGE_DSP_MIN_FFT_POINTS/MAX_FFT_POINTS,
+	 * which ADC_DSP_FFT_MAX_POINTS aliases) -- unreachable post-bind,
+	 * kept as a defensive guard against the two checks drifting apart. */
+	if (n < BRIDGE_DSP_MIN_FFT_POINTS || n > ADC_DSP_FFT_MAX_POINTS) return false;
 
 	adc_dsp_fft_points = n;
 	adc_dsp_fft_outfmt = ofm;
-	adc_dsp_fft_fill   = 0u;
-	adc_dsp_fft_nbins  = 0u;
+	adc_dsp_fft_session_reset();
 
 	const uint8_t shape = (win_st != 0) ? win_st->data[0] : 0u;
 
 	fft_deinit();
-	rcu_periph_clock_enable(RCU_FFT);
+	bridge_rcu_periph_clock_enable(RCU_FFT);
 	fft_parameter_struct f;
 	fft_struct_para_init(&f);
 	f.mode_sel     = FFT_MODE;
@@ -1051,15 +1440,15 @@ static bool adc_dsp_fft_config(const adc_stream_state_t *s)
 	return true;
 }
 
-/* Reduce the FFT block's complex output to the published bins, per the
- * chain's output format, and bump the frame seq. */
-static void adc_dsp_fft_publish(void)
+/* Reduce the FFT block's complex output into the pending bin buffer. The
+ * caller publishes nbins + sequence only after revalidating the owner lease. */
+static uint16_t adc_dsp_fft_prepare_bins(void)
 {
 	const uint16_t n = adc_dsp_fft_points;
 	if (adc_dsp_fft_outfmt == 0u) { /* COMPLEX: re,im interleaved, 2N */
 		for (uint16_t i = 0u; i < n * 2u; ++i)
 			adc_dsp_fft_bins[i] = adc_dsp_fft_out[i];
-		adc_dsp_fft_nbins = (uint16_t)(n * 2u);
+		return (uint16_t)(n * 2u);
 	} else { /* MAGNITUDE (N) or MAGNITUDE_ONESIDED (N/2+1) */
 		const uint16_t nb = (adc_dsp_fft_outfmt == 2u) ? (uint16_t)(n / 2u + 1u) : n;
 		for (uint16_t i = 0u; i < nb; ++i) {
@@ -1067,9 +1456,8 @@ static void adc_dsp_fft_publish(void)
 			const float im      = adc_dsp_fft_out[i * 2u + 1u];
 			adc_dsp_fft_bins[i] = __builtin_sqrtf(re * re + im * im);
 		}
-		adc_dsp_fft_nbins = nb;
+		return nb;
 	}
-	adc_dsp_fft_seq++;
 }
 
 /* Pump the FFT path for stream sid: accumulate new raw samples into the
@@ -1077,55 +1465,138 @@ static void adc_dsp_fft_publish(void)
 static void adc_dsp_pump_fft(uint8_t sid)
 {
 	adc_stream_state_t *s = &adc_streams[sid];
+	if (s->dma_error_count != 0u) return;
 
 	if (adc_dsp_fft_owner != (int8_t)sid) {
-		if (!adc_dsp_fft_config(s)) return;
-		adc_dsp_fft_owner = (int8_t)sid;
-		s->pump_raw_read  = s->total_read; /* start the window at the live point */
+		/* A negative configuring token is visible to release but never to
+		 * spectrum_read, so no stale sequence becomes readable before the
+		 * config path resets this session (#140/#184). */
+		if (!adc_dsp_owner_claim_config(&adc_dsp_fft_owner, sid, s, true)) return;
+		if (!adc_dsp_fft_config(s)) {
+			(void)adc_dsp_owner_release(&adc_dsp_fft_owner, sid);
+			return;
+		}
+		if (!adc_dsp_owner_commit_config(&adc_dsp_fft_owner, sid, s, true)) return;
+		/* pump_raw_read is deliberately NOT rewound here (#70).
+		 * chain_bind already seeds it (adc_dsp_chain.c: `s->pump_raw_read
+		 * = s->total_read;`) at the moment this stream's chain was
+		 * bound; re-seeding it again on every ownership flip is what
+		 * converted transient FAC/FFT contention into PERMANENT
+		 * starvation -- total_read never advances for an FFT-bound
+		 * stream (stream_read bails on dsp_terminal == 3u before
+		 * touching it), so this rewind kept resetting the window to the
+		 * same frozen value on every pump tick, which never let
+		 * adc_dsp_fft_seq leave 0.  UNPROVEN HOST-SIDE: whether the
+		 * rewind is needed for a genuine same-stream re-attach (a
+		 * stream_end -> chain_release -> later chain_bind on the SAME
+		 * sid, where chain_bind's own seed already covers it) is a
+		 * question about DMA down-counter semantics and lap-ISR
+		 * interleaving that no host harness reproduces -- confirm on a
+		 * bench before relying on this. */
 	}
 
-	const uint32_t laps          = s->lap_count;
-	const uint16_t w             = adc_stream_write_index(s);
-	const uint32_t total_written = laps * BRIDGE_ADC_STREAM_RING_SAMPLES + (uint32_t)w;
+	/* Same corrected total as the FIR/IIR pump (gh#149, see the
+	 * comment there): the FFT pump is the raw ring's consumer for an
+	 * FFT-bound stream and shares the pump-side position tracker. */
+	const uint32_t total_written = adc_stream_total_written(s, &s->pump_pos);
 	int32_t        avail         = (int32_t)(total_written - s->pump_raw_read);
 	if (avail <= 0) return;
 	if ((uint32_t)avail >= BRIDGE_ADC_STREAM_RING_SAMPLES) {
-		s->pump_raw_read = total_written; /* fell behind -> resync, drop partial window */
-		adc_dsp_fft_fill = 0u;
+		const uint32_t irq_state = bridge_irq_lock();
+		if (adc_dsp_owner_live_locked(&adc_dsp_fft_owner, (int8_t)sid, s, true)) {
+			s->pump_raw_read = total_written; /* fell behind -> resync, drop partial window */
+			adc_dsp_fft_fill = 0u;
+		}
+		bridge_irq_unlock(irq_state);
 		return;
 	}
 
 	while (avail-- > 0) {
+		/* Capture the raw code under the session lease, then perform the
+		 * soft-float conversion with interrupts enabled. The production
+		 * build lowers it to __aeabi_ui2f/__aeabi_fdiv calls, which are far
+		 * too long for the bridge's short PRIMASK sections. */
+		uint32_t irq_state = bridge_irq_lock();
+		if (!adc_dsp_owner_live_locked(&adc_dsp_fft_owner, (int8_t)sid, s, true)) {
+			bridge_irq_unlock(irq_state);
+			return;
+		}
 		const uint16_t ridx = (uint16_t)(s->pump_raw_read % BRIDGE_ADC_STREAM_RING_SAMPLES);
 		const uint16_t code = (uint16_t)(s->ring[ridx] & 0x0FFFu);
-		s->pump_raw_read++;
-		/* code (0..4095) -> float 0..~1.0 */
-		adc_dsp_fft_real[adc_dsp_fft_fill++] = (float)code / 4096.0f;
-		if (adc_dsp_fft_fill >= adc_dsp_fft_points) {
-			fft_calculation_start();
-			uint32_t g = 0u;
-			while (fft_flag_get(FFT_FLAG_CCF) == RESET && ++g < 1000000u) {
-			}
-			if (fft_flag_get(FFT_FLAG_CCF) != RESET) adc_dsp_fft_publish();
-			adc_dsp_fft_fill = 0u;
+		bridge_irq_unlock(irq_state);
+		const float sample = (float)code / 4096.0f;
+
+		irq_state = bridge_irq_lock();
+		if (!adc_dsp_owner_live_locked(&adc_dsp_fft_owner, (int8_t)sid, s, true)) {
+			bridge_irq_unlock(irq_state);
+			return;
 		}
+		s->pump_raw_read++;
+		adc_dsp_fft_real[adc_dsp_fft_fill++] = sample;
+		const bool frame_ready               = adc_dsp_fft_fill >= adc_dsp_fft_points;
+		if (frame_ready) fft_calculation_start();
+		bridge_irq_unlock(irq_state);
+		if (!frame_ready) continue;
+
+		/* The completion wait and bin reduction are intentionally
+		 * interruptible. END revokes the owner first; the two lease checks
+		 * below then prevent this suspended pump from publishing into a
+		 * replacement session that reuses the same stream ID. */
+		uint32_t g = 0u;
+		while (fft_flag_get(FFT_FLAG_CCF) == RESET && ++g < 1000000u) {
+		}
+		const bool complete = fft_flag_get(FFT_FLAG_CCF) != RESET;
+
+		uint32_t publish_irq_state = bridge_irq_lock();
+		if (!complete) {
+			const bool still_live =
+			    adc_dsp_owner_live_locked(&adc_dsp_fft_owner, (int8_t)sid, s, true);
+			if (still_live) adc_dsp_fft_fill = 0u;
+			bridge_irq_unlock(publish_irq_state);
+			if (!still_live) return;
+			continue;
+		}
+
+		/* Make the single bin buffer unreadable before reducing into it.
+		 * END can revoke this transitional token while the long copy/sqrt
+		 * work remains interruptible; spectrum_read reports BUSY instead of
+		 * returning old/new bins under one old sequence (#18/#187). */
+		const int8_t publishing = adc_dsp_owner_transitional(sid);
+		const bool   publishing_claimed =
+		    adc_dsp_owner_live_locked(&adc_dsp_fft_owner, (int8_t)sid, s, true);
+		if (publishing_claimed) adc_dsp_fft_owner = publishing;
+		bridge_irq_unlock(publish_irq_state);
+		if (!publishing_claimed) return;
+
+		const uint16_t nbins  = adc_dsp_fft_prepare_bins();
+		publish_irq_state     = bridge_irq_lock();
+		const bool still_live = adc_dsp_owner_live_locked(&adc_dsp_fft_owner, publishing, s, true);
+		if (still_live) {
+			adc_dsp_fft_nbins = nbins;
+			adc_dsp_fft_seq++;
+			adc_dsp_fft_fill  = 0u;
+			adc_dsp_fft_owner = (int8_t)sid;
+		} else if (adc_dsp_fft_owner == publishing) {
+			adc_dsp_fft_owner = ADC_DSP_OWNER_NONE;
+		}
+		bridge_irq_unlock(publish_irq_state);
+		if (!still_live) return;
 	}
 }
 
 /* Release the FFT block if this stream owned it (stream_end). */
 void adc_dsp_fft_release(uint8_t stream_id)
 {
-	if (adc_dsp_fft_owner == (int8_t)stream_id) {
-		adc_dsp_fft_owner = -1;
-		adc_dsp_fft_fill  = 0u;
-		adc_dsp_fft_nbins = 0u;
+	if (adc_dsp_owner_release(&adc_dsp_fft_owner, stream_id)) {
+		adc_dsp_fft_session_reset();
 	}
 }
 
 /* HAL: read spectrum bins (float32 LE) for a bound FFT stream.  Chunked:
  * the host asks for [bin_offset, bin_offset+max_bins); the reply carries
  * the frame seq so the host detects a frame roll mid-fetch.  Returns
- * NOSUPPORT if the stream isn't FFT-bound, IO before the first frame. */
+ * NOSUPPORT if the stream isn't FFT-bound, BUSY before the first frame, and
+ * IO after its DMA channel reports a transfer error. */
 int bridge_hw_adc_spectrum_read(uint8_t   stream_id,
                                 uint16_t  bin_offset,
                                 uint8_t   max_bins,
@@ -1141,8 +1612,10 @@ int bridge_hw_adc_spectrum_read(uint8_t   stream_id,
 	if (stream_id >= BRIDGE_ADC_STREAM_COUNT) return BRIDGE_HW_ERR_RANGE;
 	adc_stream_state_t *s = &adc_streams[stream_id];
 	if (!s->in_use || !s->dsp_bound || s->dsp_terminal != 3u) return BRIDGE_HW_ERR_NOTIMPL;
+	adc_stream_latch_dma_error(stream_id);
+	if (s->dma_error_count != 0u) return BRIDGE_HW_ERR_IO;
 	if (adc_dsp_fft_owner != (int8_t)stream_id || adc_dsp_fft_seq == 0u) {
-		return BRIDGE_HW_ERR_IO; /* no frame yet */
+		return BRIDGE_HW_ERR_BUSY; /* no frame yet */
 	}
 
 	*seq_out        = adc_dsp_fft_seq;

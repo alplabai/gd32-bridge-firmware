@@ -44,9 +44,22 @@ __attribute__((weak)) void bridge_hw_tick(void)
 {
 }
 
-/* The Cortex-M intrinsic; weakly defined here so the scaffold
- * compiles under hosted toolchains where __WFI() is missing. */
-#ifndef __WFI
+/* The Cortex-M intrinsic.  This TU deliberately does not include
+ * cmsis_gcc.h (CMSIS defines __WFI() as a macro, not a linkable
+ * symbol -- `#ifndef __WFI` in a TU that never saw that header is
+ * always true, so a guard keyed on the macro's definedness silently
+ * always wins and every build, including the real hardware build,
+ * got the empty stub below instead of a real `wfi`).  Key the guard
+ * on the actual compile target instead: on Arm, emit the instruction
+ * directly; the empty stub is kept only for a genuinely hosted
+ * (non-Arm) build of this TU, which no target in this tree currently
+ * performs. */
+#if defined(__arm__)
+static inline void __WFI(void)
+{
+	__asm volatile("wfi" ::: "memory");
+}
+#else
 __attribute__((weak)) void __WFI(void)
 {
 }

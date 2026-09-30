@@ -94,15 +94,39 @@ so prefer an absolute path. That build emits the monolithic
 `0xF0..0xFF` range answers `STATUS_NOSUPPORT`, so the image cannot
 brick itself).
 
+**A flashable image needs the IRC8M clock override, not just a vendor
+tree.** The stock vendor `system_gd32g5x3.c` selects
+`__SYSTEM_CLOCK_216M_PLL_HXTAL`, whose startup spins `while(1){}`
+waiting for `HXTALSTB` — which never sets on this SoM, so the part
+hangs before `main()` and the flashed board looks bricked, with SPI
+and I2C never coming up. `GD32_VENDOR_DIR` must therefore point at a
+tree that also carries `overrides/system_gd32g5x3.c` (selects
+`__SYSTEM_CLOCK_216M_PLL_IRC8M` instead) — an alp-sdk checkout's
+`vendors/gd32_firmware_library/` carries this override; the public
+[`gd32g5x3-firmware-library`](https://github.com/alplabai/gd32g5x3-firmware-library)
+mirror alone does not. Configure fails fast with a clear message if
+the override is missing. **`-DBRIDGE_ALLOW_STOCK_SYSTEM_INIT=ON`**
+silences that failure and links the stock, hanging `SystemInit()`
+instead — it exists only for compile-and-link coverage (CI's `gd32
+backend build` job, which never runs on silicon); never pass it for an
+image you intend to flash.
+
 **`-DBRIDGE_OTA_PARTITIONED=ON`** (requires `BRIDGE_HAL_BACKEND=gd32`)
 arms the in-system upgrade path and emits the partitioned set instead:
 `gd32-bootloader` (32 KB at flash base), `gd32-bridge-slot-a` and
 `gd32-bridge-slot-b` (the app linked per A/B slot, `.ramfunc` FMC loop
 in RAM, `SCB->VTOR` relocated).  First-flash of a partitioned part also
 needs the factory A/B metadata record —
-[`tools/gen_ota_metadata.py`](tools/gen_ota_metadata.py) generates it
-(flash to `0x08008000`); without it the bootloader idles in its
-recovery loop.  The full Path-A wire contract is
+[`tools/gen_ota_metadata.py`](tools/gen_ota_metadata.py) generates it:
+
+```bash
+python3 tools/gen_ota_metadata.py --slot-image build/gd32-bridge-slot-a.bin --out ota-meta-rec0.bin
+```
+
+flash the result to `0x08008000` (`OTA_META_REC0`) alongside the
+bootloader (`0x08000000`) and the slot-A image (`0x0800A000`); without
+it the bootloader idles in its recovery loop.  The full Path-A wire
+contract is
 [`docs/gd32-bridge-protocol.md` (alp-sdk)](https://github.com/alplabai/alp-sdk/blob/main/docs/gd32-bridge-protocol.md) §10.
 
 Validated on silicon 2026-06-04 (bench, protocol v0.6) for the A→B
@@ -125,8 +149,11 @@ Development flashing uses an external SWD probe on `GD32_SWDIO` /
 > `qenc`, `tmu` — silicon-validated; the analog subsystem additionally
 > needed the v0.2.6 internal-VREF bring-up).  The ADC DSP-chain runtime
 > dispatch (FIR/IIR via the FAC, FFT via `CMD_ADC_SPECTRUM_READ`) is
-> wired in `hal/gd32/adc_stream.c`.  The stub backend stays HW-free for
-> host protocol round-trip tests.
+> wired in `hal/gd32/adc_stream.c`; the chain pool and `chain_bind`
+> capability validation (#69, #70) live in the vendor-header-free
+> `hal/gd32/adc_dsp_chain.c`, which a host suite links directly
+> (`tests/unit/adc_dsp/`).  The stub backend stays HW-free for host
+> protocol round-trip tests.
 
 ## Protocol majorset
 
@@ -149,6 +176,77 @@ ADC and encoder maps in `hal/gd32/adc.c` (`adc_channels_map[]`) and
 [`metadata/e1m_modules/v2n/gd32-io-mcu-map.tsv` (alp-sdk)](https://github.com/alplabai/alp-sdk/blob/main/metadata/e1m_modules/v2n/gd32-io-mcu-map.tsv).
 Host code reaches a channel by its logical id; the firmware
 translates internally.
+
+`gpio_pad_map[]` is 21 entries: 18 E1M IO pads (bits 0-17) plus three
+sideband bits (18, 19, 20) that are not E1M pads at all -- `BT_REG_ON`
+(GD32 `PE14`) and `WL_REG_ON` (GD32 `PE15`), the Murata
+LBEE5HY2FY-922 Wi-Fi/BT module's power enables, and `CAN_STBY` (GD32
+`PB13`), the shared standby line for the two on-module TCAN1044
+CAN-FD transceivers (U15/U16). Unlike the E1M pads,
+which boot INPUT, high-Z (no internal pull -- the carrier's own
+pulls define the default; see the boot-loop comment in
+[`hal/gd32/init.c`](hal/gd32/init.c)), these two boot **OUTPUT driven
+LOW** (module off); the module has internal 50 k pull-downs on both,
+so an input pad would leave the module's power state indeterminate.
+Module power is host policy, not a firmware default: a host powers
+the module by writing bits 18/19 high via `CMD_GPIO_WRITE`. `CAN_STBY`
+instead boots **OUTPUT driven HIGH** (both transceivers held in
+standby -- STB HIGH = standby, STB LOW = normal); a host takes the CAN
+bus live by writing bit 20 low via `CMD_GPIO_WRITE`. This table
+(source of truth: `gpio_pad_map[]` in
+[`hal/gd32/gpio.c`](hal/gd32/gpio.c)) is the owner of the bit layout --
+`docs/gd32-bridge-protocol.md` (alp-sdk) links back here instead of
+repeating it:
+
+| Bit | GD32 pad | Signal      |
+|----:|----------|-------------|
+|   0 | PB10     | E1M IO8     |
+|   1 | PA7      | E1M IO9     |
+|   2 | PA12     | E1M IO10    |
+|   3 | PB0      | E1M IO11    |
+|   4 | PC1      | E1M IO12    |
+|   5 | PF1      | E1M IO13    |
+|   6 | PB5      | E1M IO14    |
+|   7 | PC0      | E1M IO16    |
+|   8 | PC14     | E1M IO24    |
+|   9 | PC15     | E1M IO25    |
+|  10 | PB11     | E1M IO27    |
+|  11 | PC2      | E1M IO28    |
+|  12 | PD11     | E1M IO29    |
+|  13 | PD10     | E1M IO30    |
+|  14 | PE12     | E1M IO31    |
+|  15 | PD2      | E1M IO32    |
+|  16 | PD8      | E1M IO34    |
+|  17 | PD1      | E1M IO35    |
+|  18 | PE14     | BT_REG_ON   |
+|  19 | PE15     | WL_REG_ON   |
+|  20 | PB13     | CAN_STBY    |
+
+Bits 8/9 (`PC14`/`PC15`, E1M IO24/IO25) are not ordinary pads: they are
+supplied through the backup-domain power switch together with SE_RST
+(`PC13`, the OPTIGA Trust M reset line), sharing a typical 3 mA source
+budget, capped at 2 MHz output toggle rate with a 30 pF max load
+(GD32G553xx Datasheet Rev2.0 p.130 Table 4-29 footnote 2; GD32G553 User
+Manual Rev1.2 p.133 §3.3.1). `GPIO_OSPEED_12MHZ` is already the slowest
+speed class the part offers, so the 2 MHz cap cannot be met by a
+firmware register change -- the host must not toggle IO24/IO25 faster
+than 2 MHz or load them beyond 30 pF, and current drawn through them
+competes with the milliamps holding SE_RST released. A carrier or host
+that ignores this budget can sag SE_RST below the OPTIGA's released
+threshold without either side seeing why.
+
+Any GD32 reset (WDT, fault, OTA A/B swap, SE reset) drops both REG_ON
+lines low and drives CAN_STBY high again -- the boot-time defaults in
+[`hal/gd32/init.c`](hal/gd32/init.c) apply on every reset, not just
+cold power-on, so the Wi-Fi/BT module gets power-cycled and the CAN
+bus goes back to standby along with it. The host must re-assert bits
+18/19/20 after any GD32 reset; `CMD_RESET_REASON` is how a host
+detects one happened. Firmware v0.10 and earlier silently ignore
+writes to bits 18/19 and still return `STATUS_OK` (bits did not exist
+yet); firmware v0.12 and earlier do the same for bit 20. A host
+relying on bits 18/19 must require `PROTOCOL_VERSION_MINOR >= 11`,
+and on bit 20 must require `PROTOCOL_VERSION_MINOR >= 13` (both via
+`GET_VERSION`), before trusting that the write actually took effect.
 
 ## Cross-link
 

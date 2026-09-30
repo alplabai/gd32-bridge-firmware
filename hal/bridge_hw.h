@@ -2,7 +2,7 @@
  * Copyright 2026 Alp Lab AB
  * SPDX-License-Identifier: Apache-2.0
  *
- * Hardware-abstraction shim consumed by firmware/gd32-bridge/src/protocol.c.
+ * Hardware-abstraction shim consumed by src/protocol.c.
  * Each function maps an opcode-level operation onto the GigaDevice
  * firmware library (timer / GPIO / ADC / DAC / etc.).
  *
@@ -45,11 +45,9 @@
 /*   owner is adopted alongside a CI-enforced single-writer rule.   */
 /*                                                                  */
 /* * Both DMA controllers (DMA0 + DMA1, 7 channels each) are        */
-/*   available -- bind one ADC stream's DMA to DMA0 channel 1 and   */
-/*   the other to DMA1 channel 1 so they can run truly concurrently.*/
-/*   The bridge transports themselves (SPI / I2C) can also DMA-back */
-/*   their RX/TX FIFOs to free the CPU during bridge handler        */
-/*   bodies.                                                         */
+/*   available.  As built, ADC stream 0 owns DMA0 CH0 and stream 1  */
+/*   owns DMA1 CH0, so they run concurrently; the SPI transport owns */
+/*   DMA0 CH2 (TX) and CH3 (RX), while I2C remains interrupt-driven. */
 /* --------------------------------------------------------------- */
 
 /* Negative return values from any bridge_hw_* call.  Positive return
@@ -65,6 +63,10 @@
  * window (e.g. a max-length TRNG pull while the conditioning round
  * is mid-flight).  Maps to STATUS_BUSY -- hosts retry. */
 #define BRIDGE_HW_ERR_BUSY -5
+/* A valid, active operation has no result available yet.  Unlike BUSY,
+ * retrying later is expected to produce a result without changing the
+ * operation's ownership or configuration.  Maps to STATUS_NOT_READY. */
+#define BRIDGE_HW_ERR_NOT_READY -6
 
 /* --------------------------------------------------------------- */
 /* Reset-cause                                                       */
@@ -80,17 +82,40 @@ uint8_t bridge_hw_reset_reason(void);
 /* --------------------------------------------------------------- */
 
 /* Read the GD32's pad levels under @p mask.  Output @p levels has
- * bit i set iff (mask bit i set) and (pad reads high). */
+ * bit i set iff (mask bit i set) and (pad reads high).  This is
+ * always the MEASURED pad level (the input path stays live in
+ * output mode), never the level a prior bridge_hw_gpio_write()
+ * commanded (gh#62).  For a pad the caller has promoted to output,
+ * this means a shorted, contended, or open net now reads back
+ * whatever the pad is actually doing rather than an echo of the
+ * last write -- a genuine disagreement is a real fault, not a
+ * transport error. */
 int bridge_hw_gpio_read(uint32_t mask, uint32_t *levels);
 
-/* Atomically set/clear the pad outputs selected by @p mask to the
- * corresponding bit in @p levels. */
+/* Set/clear the pad outputs selected by @p mask to the corresponding
+ * bit in @p levels.  Pins on the same physical GPIO port change in one
+ * atomic GPIOx_BOP write; requests spanning ports commit one port at a
+ * time.  IO24/IO25 (GD32 PC14/PC15) share a backup-domain power switch
+ * with SE_RST (PC13, see
+ * bridge_hw_se_reset()) budgeted at 3 mA / 2 MHz / 30 pF (GD32G553xx
+ * Datasheet Rev2.0 p.130 Table 4-29 footnote 2; UM Rev1.2 p.133
+ * §3.3.1).  Nothing on this line enforces that budget -- the HOST
+ * must not command those two pads faster than 2 MHz or load them
+ * beyond 30 pF, and current drawn through them competes with the
+ * milliamps holding SE_RST released (gh#60). */
 int bridge_hw_gpio_write(uint32_t mask, uint32_t levels);
 
 /* --------------------------------------------------------------- */
 /* PWM                                                              */
 /* --------------------------------------------------------------- */
 
+/* period_ns > 0 required (BRIDGE_HW_ERR_RANGE otherwise); duty_ns must not
+ * exceed period_ns (BRIDGE_HW_ERR_INVAL).  A period or duty that does not fit
+ * the timer's 16-bit ARR/compare registers answers BRIDGE_HW_ERR_RANGE before
+ * any timer register is changed; requests are never silently clamped.  If the
+ * timer is halted and currently drives an enabled bridge_hw_timer_sync route,
+ * the forced preload transfer would trigger its slave, so the call returns
+ * BRIDGE_HW_ERR_BUSY without changing PWM state. */
 int bridge_hw_pwm_set(uint8_t channel, uint32_t period_ns, uint32_t duty_ns);
 
 /* Report what the channel's pad is ACTUALLY generating by reading the
@@ -120,11 +145,12 @@ int bridge_hw_adc_read(uint8_t channel, uint8_t samples, uint16_t *mv);
 
 /* v0.3: sticky ADC tuning.  oversample_ratio is one of
  * 1/2/4/8/16/32/64/128/256 (rounded down to nearest power-of-two
- * by the firmware).  sample_cycles is one of the eight datasheet
- * values (2/6/12/24/47/92/247/640 cycles, GD32G553 §16.4.6) -- the
- * firmware rounds down.  resolution is 6/8/10/12/14/16 bits (the
- * latter two require oversampling >= 4 / 16 respectively per the
- * datasheet's effective-resolution table). */
+ * by the firmware).  sample_cycles is a raw ADC-clock cycle count:
+ * zero selects the 240-cycle firmware default, while non-zero values
+ * are clamped to the vendor-supported 2..638 range.  resolution is
+ * 6/8/10/12 bits.  The 14- and 16-bit effective-resolution modes are
+ * not implemented and return BRIDGE_HW_ERR_NOTIMPL (wire STATUS_NOSUPPORT).
+ */
 int bridge_hw_adc_configure(uint8_t  channel,
                             uint16_t oversample_ratio,
                             uint16_t sample_cycles,
@@ -162,7 +188,9 @@ int bridge_hw_adc_stream_end(uint8_t stream_id);
  * from @p bin_offset; *seq_out is the frame counter (host detects a
  * mid-fetch roll), *total_bins_out the frame's bin count, *got_bins_out
  * how many were written.  BRIDGE_HW_ERR_NOTIMPL if the stream isn't
- * FFT-bound, BRIDGE_HW_ERR_IO before the first frame completes. */
+ * FFT-bound, BRIDGE_HW_ERR_BUSY before the current bound session's first
+ * frame completes, and BRIDGE_HW_ERR_IO when its acquisition DMA channel
+ * has faulted. */
 int bridge_hw_adc_spectrum_read(uint8_t   stream_id,
                                 uint16_t  bin_offset,
                                 uint8_t   max_bins,
@@ -195,7 +223,18 @@ int bridge_hw_trng_read(uint8_t *dest, size_t len);
  * the same format as the inputs -- the firmware does NOT cast or
  * scale on the caller's behalf.  Returns BRIDGE_HW_ERR_RANGE for
  * inputs outside the function's domain (e.g. sqrt(negative) in Q31)
- * and BRIDGE_HW_ERR_IO if the TMU flags a hardware fault. */
+ * and BRIDGE_HW_ERR_IO if the TMU flags a hardware fault.
+ *
+ * Q31 (format 0) is narrower than the IEEE-754 form for four modes,
+ * because it is full-scale +-1.0 with no exponent/factor field on the
+ * wire (alp-sdk docs/gd32-bridge-protocol.md SS3.12).  SQRT returns
+ * BRIDGE_HW_ERR_RANGE outside the manual's documented 0.027 < x < 1
+ * Q31 interval.  SINH and LOG (ln) return BRIDGE_HW_ERR_RANGE when the
+ * operand's real result would not fit in signed Q31 -- |x| >= asinh(1)
+ * (~0.8814) for sinh, x <= e^-1 (~0.3679) for ln.  These restrictions
+ * do not affect F32.  BRIDGE_TMU_FN_COSH returns BRIDGE_HW_ERR_NOTIMPL
+ * in Q31 unconditionally: cosh(x) >= 1 for every x, so no Q31 operand
+ * ever produces a representable result (F32 cosh is unaffected). */
 int bridge_hw_tmu_compute(uint8_t   function,
                           uint8_t   format,
                           uint32_t  in_a,
@@ -207,10 +246,20 @@ int bridge_hw_tmu_compute(uint8_t   function,
 /* --------------------------------------------------------------- */
 
 /* Set the @p channel DAC output to @p value_mv (millivolts).  The
- * firmware rounds to its hardware-achievable resolution. */
+ * firmware rounds to its hardware-achievable resolution, AND clamps
+ * into the output buffer's achievable window -- 200 mV to (VREF_mV -
+ * 200 mV) on the GD32G5x3's buffered DAC channels (Datasheet Rev2.0
+ * p.136 Table 4-42) -- before programming the code, so a request
+ * outside that window is answered STATUS_OK but programs the nearest
+ * reachable edge, not the requested value.  bridge_hw_dac_get is the
+ * only way the host learns that happened (gd32-bridge-firmware#45). */
 int bridge_hw_dac_set(uint8_t channel, uint16_t value_mv);
 
-/* Read back the currently-programmed @p channel DAC output in mV. */
+/* Read back the currently-programmed @p channel DAC output in mV --
+ * the digital code the DAC is converting (User Manual Rev1.2 p.484
+ * DAC_OUTx_DO), not a measurement of the pad.  Reflects any clamp
+ * bridge_hw_dac_set applied, so this is how the host discovers that a
+ * requested value_mv landed outside the buffer's achievable window. */
 int bridge_hw_dac_get(uint8_t channel, uint16_t *value_mv);
 
 /* --------------------------------------------------------------- */
@@ -248,9 +297,10 @@ int bridge_hw_counter_read(uint8_t counter, uint32_t *ticks);
  * path to the PMIC), so this returns the 0xFF sentinel unconditionally
  * (schematic-verified 2026-06-04).  The packing is reserved for a
  * future HW rev that mirrors the nets onto GD32 inputs.  Today the
- * host samples the pins directly (chips/da9292 da9292_get_fault_pins(),
+ * host samples the pins directly (alp-sdk chips/da9292,
+ * da9292_get_fault_pins(),
  * same packing) and reads PMC_STATUS_00 etc. over BRD_I2C via
- * chips/da9292. */
+ * alp-sdk chips/da9292. */
 uint8_t bridge_hw_da9292_status_cached(void);
 
 /* --------------------------------------------------------------- */
@@ -264,7 +314,12 @@ uint8_t bridge_hw_da9292_status_cached(void);
  * Returns BRIDGE_HW_ERR_INVAL for an out-of-range @p assert.  The
  * recovery for a BRD_I2C bus the SE has clock-stretched low is a pulse
  * -- assert, wait, release -- sequenced by the host (the OPTIGA needs
- * ~15 ms after release before it answers I2C again). */
+ * ~15 ms after release before it answers I2C again).  PC13 is also a
+ * backup-domain power-switch pad, sharing the same 3 mA / 2 MHz / 30 pF
+ * budget as IO24/IO25 (see bridge_hw_gpio_write()) -- pulsing this line
+ * faster than 2 MHz is off the datasheet's characterisation and
+ * competes with the current the switch is using to hold the other two
+ * pads at their commanded level (gh#60). */
 int bridge_hw_se_reset(uint8_t assert);
 
 /* --------------------------------------------------------------- */
@@ -289,7 +344,7 @@ int bridge_hw_pwm_capture_begin(uint8_t channel, uint8_t edge);
  * computed modulo one counter period and are therefore SINGLE-WRAP:
  * a captured signal whose edge spacing meets or exceeds the timer's
  * configured period (CAR + 1 ticks; boot default 65.5 ms) aliases to
- * the remainder with no detection.  BRIDGE_HW_ERR_NOTIMPL if the
+ * the remainder with no detection.  BRIDGE_HW_ERR_NOT_READY if the
  * ring is empty (host should poll); BRIDGE_HW_ERR_INVAL if the
  * channel is not currently in capture mode. */
 int bridge_hw_pwm_capture_read(uint8_t channel, uint32_t *period_ns, uint32_t *pulse_width_ns);
@@ -308,15 +363,40 @@ int bridge_hw_pwm_capture_end(uint8_t channel);
  * to low.  Implemented on the GD32 by setting OPM (one-pulse mode) on
  * the timer + programming period = pulse_ns.  The PWM stays in
  * one-pulse mode until the next bridge_hw_pwm_set call switches it
- * back to continuous output. */
+ * back to continuous output (that call also re-enables the timer if a
+ * prior single pulse left it halted).  Because the GD32's one-pulse mode
+ * and period register belong to the whole timer, this answers
+ * BRIDGE_HW_ERR_BUSY when a sibling channel has a continuous PWM output or
+ * an active capture session.  pulse_ns == 0 answers
+ * BRIDGE_HW_ERR_RANGE; the widest pulse the 16-bit timer can produce is
+ * 65535 us (65535000 ns) -- a wider request answers BRIDGE_HW_ERR_RANGE
+ * rather than silently firing a shorter pulse than commanded.  A timer that
+ * is currently a live bridge_hw_timer_sync master returns BRIDGE_HW_ERR_BUSY:
+ * its required forced preload-transfer event would otherwise trigger the
+ * configured slave. */
 int bridge_hw_pwm_single_pulse(uint8_t channel, uint32_t pulse_ns);
 
-/* Configure master-slave timer sync.  @p master and @p slave name two
- * of TIMER0 / TIMER7 / TIMER19 by integer id; @p mode selects the
- * slave-mode select field (per GD32G553 §17.4.3 SMC bits):
- * 0 = disabled, 1 = reset, 2 = gated, 3 = trigger, 4 = external-clock,
- * 5 = encoder-mode-1 etc.  Used to synchronise multi-channel PWM
- * outputs across the three advanced-timer groups. */
+/* Configure master-slave timer sync.  @p master and @p slave name TIMER0
+ * (wire id 0) or TIMER7 (wire id 1); TIMER19 is not initialised by this
+ * firmware, so its former id 2 returns BRIDGE_HW_ERR_RANGE (#142).
+ * @p mode selects one of
+ * several SYSCFG_TIMERxCFG0/1 TSCFGn slave-mode fields (GD32G553 User
+ * Manual Rev1.2 -- TIMERx_SMCFG has no SMC/TRGS field on this part;
+ * bits 6:4 and 2:0 are Reserved, p.634/p.636):
+ *   0 = disabled           unlink the slave; the selected route remains configured
+ *   1 = reset              TSCFG3, SYSCFG_TIMERxCFG0[20:16], §1.7.21 p.78
+ *   2 = gated              TSCFG4, SYSCFG_TIMERxCFG0[25:21], §1.7.21 p.78
+ *   3 = trigger            TSCFG5, SYSCFG_TIMERxCFG0[30:26], §1.7.21 p.77
+ *   4 = external-clock     TSCFG6, SYSCFG_TIMERxCFG1[4:0],   §1.7.22 p.82
+ *   5 = encoder-mode-1     TSCFG1, SYSCFG_TIMERxCFG0[9:5],   §1.7.21 p.79
+ * Used to synchronise multi-channel PWM outputs across the two initialised
+ * advanced-timer groups.  The internal-
+ * trigger route used for each (master, slave) pair is per GD32G553
+ * User Manual Rev1.2 p.570; a pair the SYSCFG router cannot connect returns
+ * BRIDGE_HW_ERR_INVAL rather than wiring the slave to an unrelated
+ * timer.  While mode is nonzero, forced-update PWM operations on @p master
+ * return BRIDGE_HW_ERR_BUSY rather than emitting a spurious slave trigger;
+ * disable the route before requesting one. */
 int bridge_hw_timer_sync(uint8_t master, uint8_t slave, uint8_t mode);
 
 /* --------------------------------------------------------------- */
@@ -327,9 +407,11 @@ int bridge_hw_timer_sync(uint8_t master, uint8_t slave, uint8_t mode);
  * 1 = sleep, 2 = deep-sleep, 3 = standby.  @p wake_bitmap selects which
  * wake sources the firmware should arm (ALP_POWER_WAKE_* bits;
  * platform-specific).  @p wake_after_ms is a max wall-clock wait, or 0
- * for "no timer wake".  The GD32 prepares the V2N supervisor handshake
- * + signals the Renesas SoC to enter the matching mode, then re-runs
- * the bridge handshake on wakeup so the host can resume bridge calls. */
+ * for "no timer wake".  A bitmap containing any source this backend
+ * cannot arm returns BRIDGE_HW_ERR_NOTIMPL and does not enter the requested
+ * low-power mode.  The GD32 prepares the V2N supervisor handshake + signals
+ * the Renesas SoC to enter the matching mode, then re-runs the bridge
+ * handshake on wakeup so the host can resume bridge calls. */
 int bridge_hw_power_mode_set(uint8_t mode, uint32_t wake_bitmap, uint32_t wake_after_ms);
 
 /* --------------------------------------------------------------- */
@@ -349,11 +431,11 @@ int bridge_hw_adc_dsp_chain_open(uint8_t *chain_id);
  * named chain at @p stage_index.  @p kind is one of FIR=0, IIR=1,
  * WINDOW=2, FFT=3 (mirrors @c alp_dsp_stage_kind_t).  The firmware
  * accumulates chunks at @p chunk_offset byte positions within an
- * internal `[chain_id][stage_index]` buffer of size
- * `GD32G553_BRIDGE_ADC_DSP_MAX_STAGE_BYTES`; the per-stage assembly
- * is complete when the host has covered `[0, chunk_total_size)`.
+ * internal `[chain_id][stage_index]` buffer of 260 bytes
+ * (`BRIDGE_DSP_MAX_STAGE_BYTES` in hal/gd32/adc_stream.c); the per-stage
+ * assembly is complete when the host has covered `[0, chunk_total_size)`.
  * The eventual per-kind layouts the firmware decodes are documented
- * in `docs/gd32-bridge-protocol.md` §3.x. */
+ * in alp-sdk `docs/gd32-bridge-protocol.md` §3.x. */
 int bridge_hw_adc_dsp_stage_push(uint8_t        chain_id,
                                  uint8_t        stage_index,
                                  uint8_t        kind,
@@ -365,10 +447,39 @@ int bridge_hw_adc_dsp_stage_push(uint8_t        chain_id,
 /* Attach a fully-populated chain to a streaming ADC source previously
  * opened with bridge_hw_adc_stream_begin.  After bind, the stream's
  * samples flow through the chain instead of being delivered raw to
- * subsequent bridge_hw_adc_stream_read calls.  Binding fails
- * (BRIDGE_HW_ERR_INVAL) if the chain has unfinished stages or
- * violates the chain-ordering rules (FFT must be terminal; WINDOW
- * must immediately precede FFT). */
+ * subsequent bridge_hw_adc_stream_read calls.  Binding fails with
+ * BRIDGE_HW_ERR_INVAL for any of: the target stream_id doesn't name a
+ * running stream, or that stream already has a chain bound; the
+ * chain_id doesn't name an open chain, or that chain is already bound
+ * to some stream; the chain has unfinished (mid-upload) stages; a populated stage's reassembled
+ * blob fails its per-kind validity check (bad tap/section count,
+ * out-of-range FFT point count, a header/length mismatch -- see
+ * adc_dsp_chain.c's adc_dsp_stage_blob_valid); a gap in the populated
+ * stage list (a populated stage after an empty one); or the chain
+ * violates the ordering rules -- FFT must be the terminal stage,
+ * WINDOW must immediately precede FFT if present, and a bare WINDOW
+ * with no terminating FFT is rejected (undefined in the filtered-
+ * samples data plane).
+ *
+ * Binding also fails (BRIDGE_HW_ERR_NOTIMPL, wire STATUS_NOSUPPORT) if
+ * the chain is well-formed but beyond what the P1 runtime can realise
+ * (#69) -- more than one populated stage on a non-FFT terminal, an IIR
+ * stage with more than one biquad section, or a FIR/IIR stage ahead of
+ * an FFT terminal (bare, or WINDOW+FFT -- P1's FFT block has no
+ * upstream filter path either way) -- or if the stream's target HW
+ * block is already serving another bound stream: the single FAC block
+ * for a non-FFT terminal, or the single FFT block for an FFT terminal
+ * (#70).  Both classes used to bind cleanly and fail silently later,
+ * in the pump; they are refused here instead.
+ *
+ * The two NOTIMPL classes differ in what happens to chain_id
+ * afterwards (see adc_dsp_chain.h's lifecycle note next to
+ * adc_dsp_chain_release): a capability refusal releases the chain
+ * back to the pool -- it can never become realisable by retrying, so
+ * chain_id is no longer valid and a HOST MUST NOT reuse it (open a new
+ * chain instead).  A busy refusal leaves the chain OPEN -- it is
+ * realisable, just contended -- so retrying the SAME chain_id (typically
+ * after the contending stream's STREAM_END) is the supported recovery. */
 int bridge_hw_adc_dsp_chain_bind(uint8_t chain_id, uint8_t stream_id);
 
 #endif /* GD32_BRIDGE_HAL_BRIDGE_HW_H */
