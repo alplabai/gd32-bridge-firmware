@@ -30,6 +30,7 @@
 
 #include <stdint.h>
 
+#include "ota.h"
 #include "protocol.h"
 #include "transport.h"
 
@@ -68,6 +69,11 @@ __attribute__((weak)) void __WFI(void)
 int main(void)
 {
 	bridge_hw_init();
+	/* Reconcile the A/B metadata against the slot we are running BEFORE any
+	 * frame can arrive: decides whether this is an unconfirmed TRIAL boot
+	 * (wire gated BUSY, ota_confirm_tick() waits for a frame) and self-heals
+	 * a rejected candidate.  Needs the FMC HAL from bridge_hw_init(). */
+	ota_boot_init();
 	transport_spi_init();
 	transport_i2c_init();
 
