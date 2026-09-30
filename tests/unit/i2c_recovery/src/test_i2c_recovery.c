@@ -36,4 +36,45 @@ ZTEST(i2c_recovery, test_at_and_beyond_limit_escalates)
 	zassert_true(bridge_i2c_en_clear_spin_exhausted(0xFFFFFFFFu));
 }
 
+/* #315 policy: pure decision, driven with a scripted timeline. */
+ZTEST(i2c_recovery, test_stuck_confirm_idle_wedge_needs_two_polls)
+{
+	bridge_i2c_stuck_t s = { 0 };
+	zassert_false(bridge_i2c_stuck_confirm(&s, true, 0u, false, 10u));
+	zassert_true(bridge_i2c_stuck_confirm(&s, true, 0u, false, 10u));
+	/* Consumed: the next wedge needs a fresh pair. */
+	zassert_false(bridge_i2c_stuck_confirm(&s, true, 0u, false, 10u));
+}
+
+ZTEST(i2c_recovery, test_stuck_confirm_live_stall_never_fires_inside_the_window)
+{
+	bridge_i2c_stuck_t s = { 0 };
+	(void)bridge_i2c_stuck_confirm(&s, false, 7u, true, 100u);
+	for (uint32_t t = 101u; t < 100u + BRIDGE_I2C_STUCK_LIVE_QUIET_TICKS; ++t) {
+		zassert_false(bridge_i2c_stuck_confirm(&s, true, 7u, true, t), "fired at tick %u", t);
+	}
+	zassert_true(
+	    bridge_i2c_stuck_confirm(&s, true, 7u, true, 100u + BRIDGE_I2C_STUCK_LIVE_QUIET_TICKS));
+}
+
+ZTEST(i2c_recovery, test_stuck_confirm_activity_or_clean_sample_restarts)
+{
+	bridge_i2c_stuck_t s = { 0 };
+	(void)bridge_i2c_stuck_confirm(&s, true, 0u, false, 1u);
+	zassert_false(bridge_i2c_stuck_confirm(&s, true, 1u, false, 2u), "activity must cancel");
+	zassert_false(bridge_i2c_stuck_confirm(&s, false, 1u, false, 3u), "clean sample must cancel");
+	zassert_false(bridge_i2c_stuck_confirm(&s, true, 1u, false, 4u));
+	zassert_true(bridge_i2c_stuck_confirm(&s, true, 1u, false, 5u));
+}
+
+ZTEST(i2c_recovery, test_stuck_confirm_survives_counter_wrap)
+{
+	bridge_i2c_stuck_t s = { 0 };
+	(void)bridge_i2c_stuck_confirm(&s, false, 0u, true, 0xFFFFFFFEu);
+	zassert_false(bridge_i2c_stuck_confirm(&s, true, 0u, true, 0xFFFFFFFFu));
+	zassert_false(bridge_i2c_stuck_confirm(&s, true, 0u, true, 1u));
+	zassert_true(bridge_i2c_stuck_confirm(
+	    &s, true, 0u, true, 0xFFFFFFFEu + BRIDGE_I2C_STUCK_LIVE_QUIET_TICKS));
+}
+
 ZTEST_SUITE(i2c_recovery, NULL, NULL, NULL, NULL, NULL);

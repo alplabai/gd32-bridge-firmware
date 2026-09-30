@@ -844,6 +844,12 @@ static void bridge_i2c_force_bus_release(void)
 	I2C_CTL0(BRIDGE_I2C_PERIPH) |= I2C_CTL0_I2CEN; /* Write I2CEN = 1 */
 }
 
+/* Live-transfer facts for the stuck-SDA detector (#315).  Written only by
+ * the I2C0 EV ISR; the base-level poll reads them, so a torn read at worst
+ * delays or cancels one confirmation. */
+static volatile uint32_t i2c_activity; /* bumped once per serviced event */
+static volatile bool     i2c_txn_open; /* ADDSEND seen, STPDET not yet */
+
 /* I2C0 event ISR: address match (direction-aware), RX during a write,
  * STOP, and TX during a read.
  *
@@ -868,9 +874,11 @@ void BRIDGE_I2C_EV_HANDLER(void)
 	    RESET != i2c_interrupt_flag_get(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_STPDET),
 	    RESET != i2c_interrupt_flag_get(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_TI));
 
+	if (event != BRIDGE_I2C_EVENT_NONE) i2c_activity++;
 	if (event == BRIDGE_I2C_EVENT_RBNE) {
 		i2c_slave_rx_byte((uint8_t)i2c_data_receive(BRIDGE_I2C_PERIPH));
 	} else if (event == BRIDGE_I2C_EVENT_ADDSEND) {
+		i2c_txn_open              = true;
 		const bool is_transmitter = (RESET != i2c_flag_get(BRIDGE_I2C_PERIPH, I2C_FLAG_TR));
 		i2c_interrupt_flag_clear(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_ADDSEND);
 		if (is_transmitter) {
@@ -893,6 +901,7 @@ void BRIDGE_I2C_EV_HANDLER(void)
 			i2c_slave_write_start();
 		}
 	} else if (event == BRIDGE_I2C_EVENT_STPDET) {
+		i2c_txn_open = false;
 		i2c_interrupt_flag_clear(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_STPDET);
 		/* The master NACKs the last byte of every read before STOP, so
          * NACKF is routinely set here.  It raises no interrupt now that
@@ -1013,6 +1022,7 @@ void BRIDGE_I2C_ER_HANDLER(void)
 	            I2C_STAT_PECERR | I2C_STAT_TIMEOUT | I2C_STAT_SMBALT);
 
 	if (bus_error) {
+		i2c_txn_open = false;
 		i2c_interrupt_disable(BRIDGE_I2C_PERIPH, I2C_INT_TI);
 		i2c_slave_write_start();
 		/* Drop the tx side too -- see i2c_slave_tx_abort()'s banner.
@@ -1064,6 +1074,16 @@ void BRIDGE_I2C_ER_HANDLER(void)
  * candidate", and only TWO consecutive candidate ticks act (the
  * issue's confirmation rule).
  *
+ * #315: that was still not enough.  A master preempted with SCL high in
+ * the ACK clock phase of a byte (this slave drives the ACK, so SDA is
+ * low) satisfies the burst, and the detector released I2C0 ten times
+ * inside a healthy 65-byte OTA_WRITE_CHUNK write, one byte short of the
+ * end.  A real wedge is SILENT: no event ISR runs.  So any I2C event
+ * since the previous poll cancels the candidate, and while a transaction
+ * is open (ADDSEND, no STPDET) the silence must also outlast
+ * BRIDGE_I2C_STUCK_LIVE_QUIET_TICKS SysTick periods.  The decision is
+ * bridge_i2c_stuck_confirm() in hal/gd32/i2c_recovery.h (host-tested).
+ *
  * AF-mode pads still report the live line state (UM Rev1.2 p.270
  * s7.3.8: "A read access to the port input status register gets the
  * I/O state"), so gpio_input_bit_get() on PB9 is a valid detector.
@@ -1078,7 +1098,10 @@ void BRIDGE_I2C_ER_HANDLER(void)
  * wedge is dropped rather than resumed against a fresh peripheral. */
 #define BRIDGE_I2C_STUCK_SAMPLES 4u
 
-static uint8_t i2c_sda_low_ticks;
+/* 50 ms SysTick period count (hal/gd32/init.c). */
+extern volatile uint32_t bridge_systick_count;
+
+static bridge_i2c_stuck_t i2c_stuck;
 
 void bridge_transport_i2c_stuck_poll(void)
 {
@@ -1103,12 +1126,12 @@ void bridge_transport_i2c_stuck_poll(void)
 			}
 		}
 	}
-	if (!all_low) {
-		i2c_sda_low_ticks = 0u;
+	/* Activity is read AFTER the burst so an event during it cancels. */
+	if (!bridge_i2c_stuck_confirm(
+	        &i2c_stuck, all_low, i2c_activity, i2c_txn_open, bridge_systick_count)) {
 		return;
 	}
-	if (++i2c_sda_low_ticks < 2u) return; /* confirm across two ticks */
-	i2c_sda_low_ticks = 0u;
+	i2c_txn_open = false;
 
 	/* Documented software reset (UM Rev1.2 p.1262 s28.3.5), bounded and
 	 * shared with the ER-vector path -- see bridge_i2c_force_bus_release()

@@ -26,10 +26,15 @@ uint32_t mock_scratch;
 uint32_t mock_dma_chctl;
 uint32_t mock_spi_stat;
 
-static uint32_t pd0;
-static unsigned pd0_accesses;
-static bool     cs_level_high;
-static bool     dma_err_flag;
+static uint32_t   pd0;
+static unsigned   pd0_accesses;
+static bool       cs_level_high;
+static bool       dma_err_flag;
+static bool       sda_high;
+static bool       scl_high;
+static uint32_t   ev_flags;
+static unsigned   releases;
+volatile uint32_t bridge_systick_count;
 
 uint32_t *mock_exti_pd0(void)
 {
@@ -39,8 +44,8 @@ uint32_t *mock_exti_pd0(void)
 
 FlagStatus gpio_input_bit_get(uint32_t port, uint32_t pin)
 {
-	(void)port;
-	(void)pin;
+	if (port == BRIDGE_I2C_SDA_PORT && pin == BRIDGE_I2C_SDA_PIN) return sda_high ? SET : RESET;
+	if (port == BRIDGE_I2C_SCL_PORT && pin == BRIDGE_I2C_SCL_PIN) return scl_high ? SET : RESET;
 	return cs_level_high ? SET : RESET;
 }
 FlagStatus dma_interrupt_flag_get(uint32_t d, uint32_t ch, uint32_t f)
@@ -65,8 +70,7 @@ FlagStatus i2c_flag_get(uint32_t p, uint32_t f)
 FlagStatus i2c_interrupt_flag_get(uint32_t p, uint32_t f)
 {
 	(void)p;
-	(void)f;
-	return RESET;
+	return (ev_flags & f) ? SET : RESET;
 }
 uint32_t dma_transfer_number_get(uint32_t d, uint32_t ch)
 {
@@ -125,6 +129,7 @@ void i2c_slave_rx_byte(uint8_t b)
 }
 void i2c_slave_tx_abort(void)
 {
+	releases++; /* only the stuck poll / ER bus-error arm call this */
 }
 uint8_t i2c_slave_tx_next_byte(void)
 {
@@ -194,4 +199,95 @@ ZTEST(transport_hw_cs_exti, test_cs_rising_spi_overrun_clears_group)
 	mock_spi_stat = SPI_STAT_RXORERR;
 	BRIDGE_SPI_CS_EXTI_HANDLER();
 	expect_group_cleared("spi overrun seam");
+}
+
+/* ---- #315: the stuck-SDA poll must never act on a live transfer --------- */
+/* One base-level tick, `periods` 50 ms SysTick periods after the last. */
+static void poll_after(uint32_t periods)
+{
+	bridge_systick_count += periods;
+	bridge_transport_i2c_stuck_poll();
+}
+
+/* The wedge signature: SDA held low, SCL released high. */
+static void wedge_pads(void)
+{
+	sda_high = false;
+	scl_high = true;
+	ev_flags = 0u;
+	releases = 0u;
+}
+
+/* One serviced I2C0 event, as the real ISR would see it. */
+static void isr_event(uint32_t flag)
+{
+	ev_flags = flag;
+	BRIDGE_I2C_EV_HANDLER();
+	ev_flags = 0u;
+}
+
+/* #296 cold-boot case: idle bus (no transaction), SDA held low, SCL high,
+ * no ISR activity -> released on the second consecutive tick, as before. */
+ZTEST(transport_hw_cs_exti, test_stuck_poll_idle_wedge_still_releases)
+{
+	wedge_pads();
+	poll_after(1u);
+	zassert_equal(releases, 0u, "one candidate tick must not act");
+	poll_after(1u);
+	zassert_equal(releases, 1u, "two silent candidate ticks must release the idle wedge");
+}
+
+/* #315: a write whose last byte's ACK phase has SCL high / SDA low while
+ * the master is preempted.  The transaction is open (ADDSEND, bytes, no
+ * STPDET).  Ticks arrive for 150 ms of that stall; none may release. */
+ZTEST(transport_hw_cs_exti, test_stuck_poll_does_not_release_a_live_write)
+{
+	wedge_pads();
+	isr_event(I2C_INT_FLAG_ADDSEND);
+	for (int i = 0; i < 64; i++)
+		isr_event(I2C_INT_FLAG_RBNE);
+	for (int t = 0; t < 4; t++) {
+		poll_after(1u);
+		zassert_equal(releases, 0u, "released a live transfer (tick %d)", t);
+	}
+}
+
+/* Each byte cancels the candidate: a slow but steady write never releases,
+ * however long it runs. */
+ZTEST(transport_hw_cs_exti, test_stuck_poll_activity_cancels_the_candidate)
+{
+	wedge_pads();
+	isr_event(I2C_INT_FLAG_ADDSEND);
+	for (int t = 0; t < 40; t++) {
+		isr_event(I2C_INT_FLAG_RBNE);
+		poll_after(1u);
+	}
+	zassert_equal(releases, 0u, "a transfer making progress was released");
+}
+
+/* An open transaction that goes silent for good (the erratum wedge can
+ * leave ADDSEND without a STOP) is still recovered, after the live-quiet
+ * window rather than after two ticks. */
+ZTEST(transport_hw_cs_exti, test_stuck_poll_releases_a_silent_open_transaction)
+{
+	wedge_pads();
+	isr_event(I2C_INT_FLAG_ADDSEND);
+	for (int t = 0; t < 4; t++)
+		poll_after(1u);
+	zassert_equal(releases, 0u, "released inside the live-quiet window");
+	for (int t = 0; t < 3; t++)
+		poll_after(1u);
+	zassert_equal(releases, 1u, "silent open transaction was never recovered");
+}
+
+/* A completed transaction (STPDET) is an idle bus again. */
+ZTEST(transport_hw_cs_exti, test_stuck_poll_stop_returns_to_idle_rule)
+{
+	wedge_pads();
+	isr_event(I2C_INT_FLAG_ADDSEND);
+	isr_event(I2C_INT_FLAG_STPDET);
+	poll_after(1u); /* activity seen: candidate restarts */
+	poll_after(1u);
+	poll_after(1u);
+	zassert_equal(releases, 1u, "post-STOP wedge must use the two-tick rule");
 }
