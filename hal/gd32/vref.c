@@ -27,14 +27,34 @@
  * this protocol revision can give.
  *
  * The check self-heals: a buffer that locks LATE (after init's bounded
- * wait expired) is promoted on the first analog op that finds VREFRDY
- * set -- same lazy-readiness shape the TRNG bring-up uses. */
+ * wait expired) is noticed by the first analog op that finds VREFRDY
+ * set and promoted by the next base-level tick (vref_late_tick), which
+ * also derives the runtime reference -- that op and any before the tick
+ * still answer IO. */
 bool vref_ok = false;
 
+/* Set (from any context) when VREFRDY is seen after init's wait expired;
+ * consumed by vref_late_tick() at base level. */
+static volatile bool vref_remeasure_pending = false;
+
+/* Request-path probe.  Runs in the transport ISR, so it only NOTES a late
+ * lock: the VREFINT measurement drives ADC0 with long EOC waits and must
+ * not run here.  vref_ok stays false (analog ops keep answering IO) until
+ * vref_late_tick() has measured and published the reference. */
 bool vref_ready_check(void)
 {
-	if (!vref_ok) {
-		vref_ok = (vref_status_get() == SET);
-	}
+	if (!vref_ok && vref_status_get() == SET) vref_remeasure_pending = true;
 	return vref_ok;
+}
+
+/* Base level (bridge_hw_tick).  Measures under an ADC0 claim, then publishes
+ * vref_ok.  A failed measurement still promotes: the buffer is locked and
+ * adc_vref_mv keeps the ADC_VREF_MV default.  A busy ADC0 retries next tick. */
+void vref_late_tick(void)
+{
+	if (!vref_remeasure_pending || !adc_periph_claim(ADC0)) return;
+	(void)adc_vref_measure();
+	adc_periph_release(ADC0);
+	vref_remeasure_pending = false;
+	vref_ok                = true;
 }

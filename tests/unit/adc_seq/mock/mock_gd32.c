@@ -147,6 +147,12 @@ void adc_enable(uint32_t adc_periph)
 {
 	mock_seq_log("adc_enable", adc_periph, 0u);
 }
+void adc_internal_channel_config(uint32_t adc_periph, uint32_t internal_channel, ControlStatus s)
+{
+	(void)internal_channel;
+	mock_adc_internal_ch_on = (s == ENABLE);
+	mock_seq_log("adc_internal_channel_config", adc_periph, (uint32_t)s);
+}
 void adc_disable(uint32_t adc_periph)
 {
 	mock_seq_log("adc_disable", adc_periph, 0u);
@@ -193,6 +199,9 @@ void adc_external_trigger_config(uint32_t adc_periph, uint8_t adc_sequence, uint
 	(void)adc_sequence;
 	mock_seq_log("adc_external_trigger_config", adc_periph, trigger_mode);
 }
+bool mock_adc_eoc_stuck;
+bool mock_adc_internal_ch_on;
+
 void adc_software_trigger_enable(uint32_t adc_periph, uint8_t adc_sequence)
 {
 	(void)adc_sequence;
@@ -200,7 +209,7 @@ void adc_software_trigger_enable(uint32_t adc_periph, uint8_t adc_sequence)
 	/* A software-triggered conversion completes instantly in this
 	 * mock: mark EOC so the polling loop in bridge_hw_adc_read sees
 	 * a completed conversion on its very first check. */
-	mock_adc_flags[adc_periph] |= ADC_FLAG_EOC;
+	if (!mock_adc_eoc_stuck) mock_adc_flags[adc_periph] |= ADC_FLAG_EOC;
 }
 uint32_t adc_routine_data_read(uint32_t adc_periph)
 {
@@ -594,8 +603,9 @@ void mock_fft_set_poll_hook(mock_hook_t hook)
 
 /* --- gd32_common.h externs the driver needs but this suite doesn't use ---*/
 
-bool vref_ok = true;
-bool vref_ready_check(void)
+/* hal/gd32/vref.c is linked for real; this is its VREFRDY source. */
+bool       mock_vref_ready = true;
+FlagStatus vref_status_get(void)
 {
-	return vref_ok;
+	return mock_vref_ready ? SET : RESET;
 }

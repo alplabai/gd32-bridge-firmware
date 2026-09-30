@@ -91,6 +91,11 @@ typedef enum { RESET = 0, SET = !RESET } FlagStatus;
 #define ADC_CHANNEL_4  ((uint8_t)4u)
 #define ADC_CHANNEL_12 ((uint8_t)12u)
 #define ADC_CHANNEL_13 ((uint8_t)13u)
+#define ADC_CHANNEL_18 ((uint8_t)18u)
+
+typedef enum { DISABLE = 0, ENABLE = !DISABLE } ControlStatus;
+#define ADC_CHANNEL_INTERNAL_VREFINT ((uint32_t)(1u << 24))
+void adc_internal_channel_config(uint32_t adc_periph, uint32_t internal_channel, ControlStatus s);
 
 #define ADC_RESOLUTION_12B 0u
 #define ADC_RESOLUTION_10B 1u
@@ -167,6 +172,11 @@ void       adc_flag_clear(uint32_t adc_periph, uint32_t flag);
  * return value without reaching into the driver's private state. */
 void mock_adc_set_flag(uint32_t periph, uint32_t flag, FlagStatus state);
 void mock_adc_set_routine_data(uint32_t code);
+extern bool
+    mock_adc_internal_ch_on; /* last internal-channel state; the seq log overflows on a timeout */
+extern bool mock_adc_eoc_stuck; /* true: triggers never raise EOC */
+extern bool mock_vref_ready;    /* VREFRDY level seen by vref_status_get() */
+FlagStatus  vref_status_get(void);
 
 /* ------------------------------------------------------------------ */
 /* DMA function surface.                                               */

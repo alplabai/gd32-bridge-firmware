@@ -126,9 +126,10 @@ perturbed) **and** `VREF_CS` reads back `0x0000 0002` post-fix.
 **FAIL:** VREFP floats, reads an unexpected fixed voltage, or does not
 track VDDA. This does not mean #81's *code* is wrong — leaving the internal
 buffer off is still the only branch that's correct regardless of the
-board-tie answer, per #81's own scope note — but it means `ADC_VREF_MV`
-`/DAC_VREF_MV`'s 1800 mV assumption is **unknowable**, not merely unverified,
-and every downstream millivolt figure (#80's calibration check, any DAC
+board-tie answer, per #81's own scope note — but it means the ADC/DAC
+reference is **unknowable**, not merely unverified (the firmware now derives
+it from VREFINT at boot, see below, but that derivation is only as good as a
+working VREFP), and every downstream millivolt figure (#80's calibration check, any DAC
 sweep) has no ground truth to compare against until a schematic/board
 fact resolves it.
 
@@ -146,6 +147,18 @@ read-back; nothing here writes flash or touches a rail the GD32 controls.
 as "tracks VDDA" — treat a reading within the DMM's own accuracy of VDDA as
 a pass and anything else as inconclusive pending a schematic check, since
 neither PR states a numeric band.
+
+**VREFINT-derived scale (#59, SWD-read, no halt):** the firmware derives the
+ADC/DAC reference at boot from the internal VREFINT channel (typical
+1200 mV, not yet datasheet-verified). Read `adc_vrefint_code` (raw average
+code, 0 = measurement failed or never ran; healthy at 1.8 V is about 2730)
+and `adc_vref_mv` (accepted window 1700..1900 mV; the 1800 fallback is used
+outside it). Check `adc_vref_mv` against the VREFP meter reading; a code of
+0 or a reading that disagrees with the meter means the derivation is not
+trustworthy. Before/after: set DAC0 to 900 mV (`DAC_SET`), read it back with
+`ADC_READ` (DAC0-to-ADC loopback if fitted) on the previous firmware and on
+this one; a meter on the DAC pad must agree with the new reading. Do not
+merge #59 before this passes.
 
 ---
 
@@ -462,6 +475,21 @@ image has no wire path to do so; it is installable only via SWD/factory
 programming. None of steps 1-6 below apply to a markerless image: there
 is no COMMIT to observe TRIAL/watchdog behaviour after.
 
+**Anti-rollback floor (#49):** `CMD_OTA_COMMIT` of an image whose declared
+`fw_version` is below the newest confirmed image, and `CMD_OTA_ROLLBACK` to a
+slot below it, fail with `STATUS_INVAL` and `err = BRIDGE_OTA_ERR_BELOW_FLOOR`
+(`0x0A`); nothing is written and no reset happens. The floor is derived from
+the existing metadata record (no layout change): the active slot's version
+once confirmed, or the replaced image's version (not necessarily a confirmed one) while the
+active slot is still TRIAL (so rolling an unconfirmed image back stays
+possible). Version 0
+(legacy 8-byte `OTA_BEGIN`) is "unknown": floor 0, and such an image is refused
+once a non-zero floor exists. Not a security control -- the version is
+host-declared; recovery override is SWD/factory programming. Treat the
+declared version as irreversible: a host that mistakenly declares 255.255.255
+(`0xFFFFFF`) raises the floor permanently once that image confirms, and only
+SWD/factory reprovisioning recovers it.
+
 **Brick-risk precondition -- read before running step 2:** this step's
 bad-image case is the one place in this runbook that DELIBERATELY commits
 an image known not to come up. That is only safe with the NEW bootloader
@@ -585,10 +613,10 @@ the wake-path interaction fixed in review), and I2C0 is disabled with
    end of BRD_I2C under worst-case production loading and confirm
    Fast-mode setup/hold margins.
 4. Halt the part in Deep-sleep and read `I2C_CTL0` bit 0 (`I2CEN`) — must
-   be 0. Wake, halt again, read `I2C_TIMING` — with no PLL relock in this
-   firmware, `CK_APB1` should still read ~8 MHz (IRC8M) and `I2C_TIMING`
-   should show the re-derived values for that clock (`PSC[3:0]`=`0x0`,
-   `SCLDELY[3:0]`=`0x3`, `SDADELY[3:0]`=`0x0`), not the 216 MHz values.
+   be 0. Wake (SPI CS falling edge or the RTC timer), halt again: the wake
+   path restores the PLL before re-initialising I2C0, so `RCU_CFG0.SCSS`
+   should read PLLP and `I2C_TIMING` the 216 MHz values (`PSC[3:0]`=`0xF`,
+   `SCLDELY[3:0]`=`0x5`, `SDADELY[3:0]`=`0x4`).
    Confirm a BRD_I2C transaction issued after wake completes correctly at
    address `0x70`.
 

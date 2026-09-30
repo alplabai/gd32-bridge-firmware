@@ -2,6 +2,7 @@
 
 #include "gd32g5x3.h"
 
+#include <stddef.h>
 #include <stdbool.h>
 
 #include "bridge_hw.h"
@@ -22,7 +23,16 @@ bool           bridge_core_clock_matches;
 mock_scb_t     mock_scb;
 mock_systick_t mock_systick;
 uint32_t       mock_primask;
-int            mock_rtc_clock_config_saw_irq_masked;
+uint32_t       mock_deepsleep_entries, mock_i2c_disables, mock_i2c_inits, mock_primask_at_deepsleep;
+FlagStatus     mock_i2c_busy;
+FlagStatus     mock_cs_level = SET;
+uint64_t       mock_nvic_pending;
+void (*mock_on_settle)(void);
+void (*mock_on_i2c_disable)(void);
+uint32_t mock_i2c_enables, mock_rtc_disables, mock_rtc_flag_clears, mock_exti19_clears;
+uint32_t mock_seq, mock_seq_clock_restore, mock_seq_i2c_init, mock_seq_rtc_disable;
+int      mock_i2c_init_rc;
+int      mock_rtc_clock_config_saw_irq_masked;
 
 void mock_power_reset(void)
 {
@@ -36,6 +46,20 @@ void mock_power_reset(void)
 	mock_systick.VAL             = 0u;
 	mock_scb.SCR                 = 0u;
 	mock_scb.ICSR                = 0u;
+	mock_deepsleep_entries       = 0u;
+	mock_i2c_disables            = 0u;
+	mock_i2c_inits               = 0u;
+	mock_primask_at_deepsleep    = 0u;
+	mock_i2c_busy                = RESET;
+	mock_cs_level                = SET;
+	mock_nvic_pending            = 0u;
+	mock_on_settle               = NULL;
+	mock_on_i2c_disable          = NULL;
+	mock_i2c_enables = mock_rtc_disables = mock_rtc_flag_clears = mock_exti19_clears = 0u;
+	mock_seq = mock_seq_clock_restore = mock_seq_i2c_init = mock_seq_rtc_disable = 0u;
+	mock_i2c_init_rc                                                             = BRIDGE_HW_OK;
+	EXTI_PD0                                                                     = 0u;
+	EXTI_PD1                                                                     = 0u;
 }
 
 void rcu_osci_on(uint32_t osci)
@@ -78,6 +102,8 @@ void rcu_rtc_clock_config(uint32_t source)
 
 ErrStatus rtc_wakeup_disable(void)
 {
+	++mock_rtc_disables;
+	mock_seq_rtc_disable = ++mock_seq;
 	++mock_power_hw_calls;
 	return SUCCESS;
 }
@@ -104,6 +130,15 @@ void rtc_wakeup_enable(void)
 void i2c_disable(uint32_t periph)
 {
 	(void)periph;
+	++mock_i2c_disables;
+	++mock_power_hw_calls;
+	if (mock_on_i2c_disable != NULL) mock_on_i2c_disable();
+}
+
+void i2c_enable(uint32_t periph)
+{
+	(void)periph;
+	++mock_i2c_enables;
 	++mock_power_hw_calls;
 }
 
@@ -111,6 +146,8 @@ void pmu_to_deepsleepmode(uint32_t ldo, uint32_t command)
 {
 	(void)ldo;
 	(void)command;
+	++mock_deepsleep_entries;
+	mock_primask_at_deepsleep = mock_primask;
 	++mock_power_hw_calls;
 }
 
@@ -123,6 +160,7 @@ void pmu_to_standbymode(void)
 void rtc_flag_clear(uint32_t flag)
 {
 	(void)flag;
+	++mock_rtc_flag_clears;
 	++mock_power_hw_calls;
 }
 
@@ -134,7 +172,7 @@ void rtc_interrupt_enable(uint32_t interrupt)
 
 void exti_flag_clear(uint32_t linex)
 {
-	(void)linex;
+	if (linex == EXTI_19) ++mock_exti19_clears;
 	++mock_power_hw_calls;
 }
 
@@ -160,16 +198,26 @@ void nvic_irq_enable(int32_t nvic_irq, uint8_t pre_priority, uint8_t sub_priorit
 	++mock_power_hw_calls;
 }
 
+FlagStatus i2c_flag_get(uint32_t periph, uint32_t flag)
+{
+	(void)periph;
+	(void)flag;
+	return mock_i2c_busy;
+}
+
 int bridge_transport_i2c_hw_init(void)
 {
+	++mock_i2c_inits;
+	mock_seq_i2c_init = ++mock_seq;
 	++mock_power_hw_calls;
-	return BRIDGE_HW_OK;
+	return mock_i2c_init_rc;
 }
 
 void fwdgt_counter_reload(void)
 {
 	++mock_fwdgt_feeds;
 	++mock_power_hw_calls;
+	if (mock_on_settle != NULL) mock_on_settle();
 }
 
 bool ota_trial_unconfirmed(void)
@@ -181,16 +229,16 @@ FlagStatus gpio_input_bit_get(uint32_t gpio_periph, uint32_t pin)
 {
 	(void)gpio_periph;
 	(void)pin;
-	return SET;
+	return mock_cs_level;
 }
 
 uint32_t NVIC_GetPendingIRQ(int32_t irqn)
 {
-	(void)irqn;
-	return 0u;
+	return (uint32_t)((mock_nvic_pending >> (uint32_t)irqn) & 1u);
 }
 
 void SystemCoreClockUpdate(void)
 {
+	mock_seq_clock_restore = ++mock_seq;
 	++mock_system_core_clock_updates;
 }
