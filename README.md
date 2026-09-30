@@ -136,8 +136,9 @@ contract is
 Validated on silicon 2026-06-04 (bench, protocol v0.6) for the A→B
 update + rollback direction only — B→A has **not** been exercised.
 Still HIL-gated: a bad bootloader bricks the part, and this HW
-revision has no host-driven SWD reflash, so recovery needs a bench SWD
-probe on the physical board.
+revision's recovery paths (prebuilt release images, external SWD
+probe, host-driven SWD from the V2N, OTA) are in
+[`docs/RECOVERY.md`](docs/RECOVERY.md); no toolchain is needed.
 
 Development flashing uses an external SWD probe on `GD32_SWDIO` /
 `GD32_SWCLK` (J-Link, ST-Link, OpenOCD).
