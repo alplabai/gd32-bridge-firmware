@@ -36,6 +36,11 @@ openssl dgst -sha256 -verify PUBKEY -signature SHA256SUMS.sig SHA256SUMS
 
 The release notes state `UNSIGNED` when no signing key was configured for that
 build. Then only the checksums apply, and they prove integrity, not who built it.
+Treat an UNSIGNED release as unattested: use it only for a bench or development
+unit you accept the risk on, and for a unit you must trust either wait for a
+signed release or rebuild from the tagged source (`README.md`). A `.sig` that
+fails to verify, or a `sha256sum -c` failure, means stop: re-download, and if it
+still fails do not flash. Never flash an image whose checksum you have not run.
 
 ## 2. Path A: external SWD probe (J-Link or OpenOCD)
 
@@ -88,7 +93,25 @@ README with the resolved pads). Use it, or any SWD master on those pads, to:
 A generic OpenOCD sysfs/libgpiod bit-bang adapter on those pads is untested
 here; prefer the alp-sdk example.
 
-## 4. Verify
+## 4. Path C: over the bridge's own OTA (bridge still answers)
+
+If the bridge still boots and answers on BRD_I2C or SPI, no SWD is needed: use
+the OTA opcodes `0xF0..0xF6` (`OTA_BEGIN`, `OTA_WRITE_CHUNK`, `OTA_VERIFY`,
+`OTA_COMMIT`, `OTA_ROLLBACK`, `OTA_GET_STATE`, `OTA_ABORT`; wire contract in the
+alp-sdk `docs/gd32-bridge-protocol.md` section 10). Stream the release
+`slot-a.bin` or `slot-b.bin` into the inactive slot, then `OTA_VERIFY` and
+`OTA_COMMIT`. Constraints:
+
+- Only a partitioned build has OTA; a `full-flash` image answers
+  `STATUS_NOSUPPORT` for `0xF0..0xFF`.
+- Send the image built for the slot that `OTA_BEGIN` reports as `target_slot`.
+- Anti-rollback: an image whose version is below the newest recorded in the
+  metadata is refused (`OTA_GET_STATE` reports the error cause). To go to an
+  older release, use Path A or B, which rewrites the metadata record.
+- OTA cannot repair the bootloader or a bridge that no longer boots; use Path A
+  or B for those.
+
+## 5. Verify
 
 After reset, read the protocol version over BRD_I2C at 7-bit address `0x70`.
 `CMD_GET_VERSION` is opcode `0x01`. Frame (see `src/transport_i2c.c` and the
