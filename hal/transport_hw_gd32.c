@@ -932,6 +932,16 @@ void BRIDGE_I2C_EV_HANDLER(void)
 	}
 }
 
+/* Bench diagnostics for #315: how often each ER-vector cause fired.  Plain
+ * global (not static) so a SWD mem_rd can read it by map address. */
+struct bridge_i2c_err_diag {
+	uint32_t berr;
+	uint32_t ouerr;
+	uint32_t timeout;
+	uint32_t stuck_release;
+};
+struct bridge_i2c_err_diag bridge_i2c_err_diag;
+
 /* I2C0 error ISR: clear every bus error the enabled group (I2C_INT_ERR,
  * see bridge_transport_i2c_hw_init()) can raise, then resynchronise the
  * slave framing so the transport recovers instead of merely no longer
@@ -960,10 +970,12 @@ void BRIDGE_I2C_ER_HANDLER(void)
 	}
 	if (RESET != i2c_interrupt_flag_get(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_BERR)) {
 		i2c_interrupt_flag_clear(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_BERR);
+		bridge_i2c_err_diag.berr++;
 		bus_error = true;
 	}
 	if (RESET != i2c_interrupt_flag_get(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_OUERR)) {
 		i2c_interrupt_flag_clear(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_OUERR);
+		bridge_i2c_err_diag.ouerr++;
 		bus_error = true;
 	}
 	if (RESET != i2c_interrupt_flag_get(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_TIMEOUT)) {
@@ -973,6 +985,7 @@ void BRIDGE_I2C_ER_HANDLER(void)
 		 * the next address match can append to a transaction that timed out
 		 * while this handler was pre-empted. */
 		i2c_interrupt_flag_clear(BRIDGE_I2C_PERIPH, I2C_INT_FLAG_TIMEOUT);
+		bridge_i2c_err_diag.timeout++;
 		/* #252: clearing the flag only records that the IP saw the
 		 * wedge -- UM SS28.3.9 specifies TIMEOUT as a flag, not an
 		 * automatic slave abort or SCL/SDA release, so a genuinely
@@ -1109,6 +1122,7 @@ void bridge_transport_i2c_stuck_poll(void)
 	}
 	if (++i2c_sda_low_ticks < 2u) return; /* confirm across two ticks */
 	i2c_sda_low_ticks = 0u;
+	bridge_i2c_err_diag.stuck_release++;
 
 	/* Documented software reset (UM Rev1.2 p.1262 s28.3.5), bounded and
 	 * shared with the ER-vector path -- see bridge_i2c_force_bus_release()

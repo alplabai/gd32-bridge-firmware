@@ -65,6 +65,20 @@ static size_t  i2c_tx_cursor;
  * matching write completed. */
 static bool pending_reply_valid;
 
+/* Bench diagnostics for #315 (content-dependent write failure): plain
+ * globals so a SWD mem_rd can read them by map address after a failed
+ * write.  prev_rx_len is the byte count the PREVIOUS addressed write had
+ * captured when the next one began (or when an error resync cut it
+ * short); fail_* describe the last framing/CRC rejection. */
+struct bridge_i2c_rx_diag {
+	uint16_t prev_rx_len;
+	uint16_t fail_rx_len;
+	uint16_t fail_got_crc;
+	uint16_t fail_expect_crc;
+	uint32_t fail_count;
+};
+struct bridge_i2c_rx_diag bridge_i2c_rx_diag;
+
 static void stage_no_pending(void)
 {
 	i2c_tx_buf[0] = STATUS_NO_PENDING;
@@ -97,8 +111,9 @@ static void stage_reply(uint8_t status, const uint8_t *payload, size_t payload_l
 /* Call on START + addressed-write: resets the RX staging buffer. */
 void i2c_slave_write_start(void)
 {
-	i2c_rx_len          = 0u;
-	pending_reply_valid = false;
+	bridge_i2c_rx_diag.prev_rx_len = (uint16_t)i2c_rx_len;
+	i2c_rx_len                     = 0u;
+	pending_reply_valid            = false;
 }
 
 /* Call on a bus-error resync (BRIDGE_I2C_ER_HANDLER's bus_error arm):
@@ -171,6 +186,8 @@ bool i2c_slave_write_end(void)
 
 	/* Smallest valid envelope: reg(1) + cmd(1) + 0-byte payload + crc(2). */
 	if (i2c_rx_len < 4u || i2c_rx_buf[0] != GD32_BRIDGE_I2C_REG_CMD) {
+		bridge_i2c_rx_diag.fail_rx_len = (uint16_t)i2c_rx_len;
+		bridge_i2c_rx_diag.fail_count++;
 		stage_no_pending();
 		return false;
 	}
@@ -180,6 +197,10 @@ bool i2c_slave_write_end(void)
 	/* CRC covers CMD..PAYLOAD (not the leading reg byte). */
 	const uint16_t expect_crc = crc16_ccitt_false(&i2c_rx_buf[1], 1u + payload_len);
 	if (got_crc != expect_crc) {
+		bridge_i2c_rx_diag.fail_rx_len     = (uint16_t)i2c_rx_len;
+		bridge_i2c_rx_diag.fail_got_crc    = got_crc;
+		bridge_i2c_rx_diag.fail_expect_crc = expect_crc;
+		bridge_i2c_rx_diag.fail_count++;
 		stage_no_pending();
 		return false;
 	}

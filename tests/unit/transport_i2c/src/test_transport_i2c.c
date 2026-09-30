@@ -40,6 +40,17 @@
  * real capacity, not a number this file made up. */
 #define I2C_TEST_MAX_WRITE_BYTES (1u + 1u + GD32_BRIDGE_MAX_PAYLOAD_BYTES + 2u)
 
+/* Mirrors src/transport_i2c.c's bench-diagnostics block (#315); the global
+ * is deliberately non-static so a SWD mem_rd, and this test, can see it. */
+struct bridge_i2c_rx_diag {
+	uint16_t prev_rx_len;
+	uint16_t fail_rx_len;
+	uint16_t fail_got_crc;
+	uint16_t fail_expect_crc;
+	uint32_t fail_count;
+};
+extern struct bridge_i2c_rx_diag bridge_i2c_rx_diag;
+
 /* Builds one WRITE-phase byte sequence exactly as the host driver does:
  * reg | CMD | PAYLOAD | CRC(CMD..PAYLOAD) -- the CRC deliberately excludes
  * the leading reg byte (transport_i2c.c: crc16_ccitt_false(&i2c_rx_buf[1],
@@ -269,7 +280,19 @@ ZTEST(gd32_bridge_transport_i2c, test_mangled_request_stages_no_pending)
 	size_t req_len = build_write(req, CMD_PING, NULL, 0u);
 	req[req_len - 1] ^= 0xFFu; /* corrupt the CRC hi byte */
 
+	const uint32_t fails_before = bridge_i2c_rx_diag.fail_count;
+
 	zassert_false(write_phase(req, req_len), "corrupted CRC must not dispatch");
+	/* The bench readout (#315) means what the runbook says it means. */
+	zassert_equal(bridge_i2c_rx_diag.fail_count, fails_before + 1u, "fail_count bumped once");
+	zassert_equal(
+	    bridge_i2c_rx_diag.fail_rx_len, (uint16_t)req_len, "fail_rx_len = captured bytes");
+	zassert_equal(bridge_i2c_rx_diag.fail_expect_crc,
+	              crc16_ccitt_false(&req[1], 1u),
+	              "fail_expect_crc = CRC over CMD..PAYLOAD");
+	zassert_equal(bridge_i2c_rx_diag.fail_got_crc,
+	              (uint16_t)(bridge_i2c_rx_diag.fail_expect_crc ^ 0xFF00u),
+	              "fail_got_crc = the corrupted trailer");
 	read_phase(reply, 3u);
 
 	const uint16_t crc = crc16_ccitt_false(reply, 1u);
@@ -648,6 +671,37 @@ ZTEST(gd32_bridge_transport_i2c, test_init_resets_state_independent_of_order)
 	              "reply from the state dirtied before init");
 	zassert_equal(reply[1], (uint8_t)(crc & 0xFFu), "CRC lo");
 	zassert_equal(reply[2], (uint8_t)(crc >> 8), "CRC hi");
+}
+
+/* #315: the exact 65-byte OTA_WRITE_CHUNK frame (offset 3080) that never
+ * completed over BRD_I2C on the bench.  The transport must capture and
+ * CRC-accept it byte-for-byte (framing/CRC are NOT content-dependent), so
+ * the frame is dispatched (reply is the dispatcher's, never the
+ * STATUS_NO_PENDING the host saw) and no rejection is counted.
+ * If this ever fails, the cause is in the parser; while it passes, the
+ * bench failure is below the seam (I2C0 ISR / bus). */
+ZTEST(gd32_bridge_transport_i2c, test_issue_315_frame_is_accepted_and_dispatched)
+{
+	static const uint8_t frame[] = {
+		0x00, 0xf1, 0x08, 0x0c, 0x00, 0x00, 0x38, 0x04, 0x22, 0x28, 0x46, 0x03, 0x99,
+		0xff, 0xf7, 0x02, 0xff, 0x08, 0x9b, 0x20, 0x46, 0x1a, 0x60, 0xd4, 0xe7, 0x07,
+		0x20, 0xd2, 0xe7, 0x08, 0x20, 0xd0, 0xe7, 0x06, 0x20, 0xce, 0xe7, 0x05, 0x20,
+		0xcc, 0xe7, 0x07, 0x29, 0x08, 0xb5, 0x01, 0xd0, 0x01, 0x20, 0x08, 0xbd, 0x03,
+		0x78, 0x41, 0x78, 0x03, 0x30, 0xff, 0xf7, 0xea, 0xfe, 0x01, 0x2b, 0xab, 0x06,
+	};
+	uint8_t reply[3];
+
+	transport_i2c_init();
+	zassert_equal(sizeof frame, 65u, "issue #315 frame is 65 bytes");
+	const uint32_t fails_before = bridge_i2c_rx_diag.fail_count;
+
+	zassert_true(write_phase(frame, sizeof frame), "frame passes framing + CRC");
+	zassert_equal(bridge_i2c_rx_diag.fail_count, fails_before, "no framing/CRC rejection");
+	/* Second write_end (the STOP after a repeated-START read) must not
+	 * re-dispatch or replace the reply. */
+	zassert_true(i2c_slave_write_end(), "repeat write_end is a no-op");
+	read_phase(reply, sizeof reply);
+	zassert_equal(reply[0], STATUS_NOSUPPORT, "unpartitioned build: OTA opcode -> NOSUPPORT");
 }
 
 ZTEST_SUITE(gd32_bridge_transport_i2c, NULL, NULL, NULL, NULL, NULL);
