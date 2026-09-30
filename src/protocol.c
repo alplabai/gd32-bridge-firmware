@@ -1016,8 +1016,7 @@ typedef gd32_bridge_status_t (*cmd_handler_t)(const uint8_t *, size_t, uint8_t *
  * (higher priority) can pre-empt an SPI CS-EXTI dispatch.  A lock-free
  * atomic flag makes whichever request arrives nested fail fast with
  * STATUS_BUSY before it reaches shared protocol or HAL state (#19). */
-*reaches shared protocol or
-    HAL state(#19).* / static atomic_flag dispatch_in_flight = ATOMIC_FLAG_INIT;
+static atomic_flag dispatch_in_flight = ATOMIC_FLAG_INIT;
 
 /* Two-tier dispatch: a sparse switch on opcode keeps the table size
  * small (vs a dense 256-entry array) without losing the "one handler
