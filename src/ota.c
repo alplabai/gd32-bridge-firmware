@@ -459,6 +459,13 @@ static bool meta_commit(uint8_t  active_slot,
 		}
 	}
 
+	/* Refuse before erasing: a u32 wrap to 0 would rank the new record BELOW the old
+	 * one (bootloader compares a->counter >= b->counter, not field-updatable), so the
+	 * part would boot the old image.  Same ceiling gen_ota_metadata.py enforces. */
+	if (rec.counter >= OTA_META_COUNTER_LIMIT) {
+		return false;
+	}
+
 	if (ota_fmc_erase_range(target, OTA_PAGE_SIZE) != OTA_FMC_RESULT_OK) {
 		return false;
 	}

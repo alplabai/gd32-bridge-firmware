@@ -1635,6 +1635,32 @@ ZTEST(gd32_bridge_ota, test_meta_commit_tie_break_preserves_newest_both_running)
 	zassert_equal(rec1.counter, 6u, "REC1 (lower counter) was rewritten by BEGIN's gh#36 commit");
 }
 
+/* meta_commit must refuse (STATUS_IO) rather than wrap the counter: a wrap to 0 ranks
+ * the new record below the old one and the part would keep booting the old image.
+ * BEGIN's gh#36 demotion bumps 0xFFFFFFEF to the limit, so COMMIT is the refused one. */
+ZTEST(gd32_bridge_ota, test_meta_commit_refuses_counter_wrap)
+{
+	reset_model();
+
+	const uint32_t len[2] = { 4096u, 4096u };
+	write_meta_record(OTA_META_REC0, 0xFFFFFFEFu, TEST_RUNNING_SLOT, 0x03u, len);
+	write_meta_record(OTA_META_REC1, 3u, TEST_RUNNING_SLOT, 0x03u, len);
+
+	drive_to_verified();
+	uint8_t reply[8];
+	size_t  rlen = 0u;
+	zassert_equal(ota_dispatch(CMD_OTA_COMMIT, NULL, 0u, reply, sizeof(reply), &rlen),
+	              STATUS_IO,
+	              "COMMIT must refuse to wrap the metadata counter");
+
+	ota_meta_record_t rec;
+	if (read_meta_at(OTA_META_REC0, &rec)) {
+		zassert_true(rec.counter >= 0xFFFFFFEFu, "counter must never wrap below the old value");
+	}
+	zassert_true(read_meta_at(OTA_META_REC1, &rec), "refusal must not erase a page");
+	zassert_equal(rec.counter, 0xFFFFFFF0u, "REC1 holds BEGIN's demotion record at the limit");
+}
+
 /* Case 5: neither record names the running slot (both name
  * TEST_OTHER_SLOT, equal rank) -- the deliberate degradation to today's
  * preserve-newest behaviour when the running-slot proxy can't

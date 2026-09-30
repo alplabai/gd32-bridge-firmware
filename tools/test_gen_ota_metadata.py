@@ -196,6 +196,15 @@ class CliExitStatus(unittest.TestCase):
         self.assertEqual(proc.returncode, 2)
         self.assertFalse(out_path.exists())
 
+    def test_counter_above_wrap_ceiling_exits_two(self) -> None:
+        # A counter past 0xFFFFFFF0 leaves meta_commit no room to increment.
+        img = _image(GOOD_MSP, GOOD_RESET, pad_to=64)
+        proc, out_path = self._run(img, extra_args=["--counter", "0xFFFFFFF1"])
+        self.assertEqual(proc.returncode, 2)
+        self.assertFalse(out_path.exists())
+        proc, out_path = self._run(img, extra_args=["--counter", "0xFFFFFFF0"])
+        self.assertEqual(proc.returncode, 0)
+
     def test_fw_version_above_u24_exits_two(self) -> None:
         # maj<<24 packing would set a floor no OTA_COMMIT can reach (#49).
         proc, out_path = self._run(_image(GOOD_MSP, GOOD_RESET, pad_to=64),
