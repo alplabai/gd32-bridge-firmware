@@ -169,13 +169,9 @@ static int rtc_wakeup_arm_ms(uint32_t wake_after_ms)
 	exti_flag_clear(EXTI_19);
 	exti_init(EXTI_19, EXTI_INTERRUPT, EXTI_TRIG_RISING);
 
-	/* Priority 0 is mandatory, not cosmetic (gh#53): until gh#63 moves
-	 * the deep-sleep entry out of the CS-EXTI handler, the entry WFI
-	 * runs at preempt priority 1 (BRIDGE_CS_IRQ_PRIO) and can only be
-	 * ended by an interrupt that outranks the active one.  Priority 0
-	 * is also exactly the line the vendor pmu_to_standbymode() leaves
-	 * unmasked (its ICER0 write preserves bit 3), so the same NVIC
-	 * enable serves mode 3's RTC exit. */
+	/* Priority 0 is exactly the line the vendor pmu_to_standbymode()
+	 * leaves unmasked (its ICER0 write preserves bit 3), so the same NVIC
+	 * enable serves mode 3's RTC exit and mode 2's timed wake. */
 	nvic_irq_enable(RTC_WKUP_IRQn, 0U, 0U);
 
 	rtc_wakeup_enable();
@@ -195,7 +191,10 @@ static int rtc_wakeup_arm_ms(uint32_t wake_after_ms)
  * touch here -- the 1.5-RTC-clock spacing rule (UM p.554) is about
  * the gap between the clear and the NEXT WTF set, which is a whole
  * wake_after_ms away.  Do NOT also clear WTF from base level in the
- * same window; rtc_wakeup_arm_ms() clears it once, at arm time. */
+ * same window; rtc_wakeup_arm_ms() clears it once, at arm time.  (The
+ * deep-sleep wake path in bridge_power_tick() does clear it, but only
+ * AFTER rtc_wakeup_disable() has stopped the timer, so no new WTF can
+ * arrive inside that spacing window.) */
 void RTC_WKUP_IRQHandler(void)
 {
 	exti_interrupt_flag_clear(EXTI_19);
@@ -209,15 +208,16 @@ void RTC_WKUP_IRQHandler(void)
  * latch time (register writes, ISR-safe). */
 static volatile uint8_t s_lp_pending_mode;
 
-/* Longest standby wake this firmware accepts while FWDGSPD_STDBY (FMC_OBCTL
- * bit 18) is 1, i.e. while the armed FWDGT keeps counting through Standby.
+/* Longest low-power wake this firmware accepts while the mode's FWDGSPD bit
+ * (FMC_OBCTL bit 18 standby, bit 17 deep-sleep) is 1, i.e. while the armed
+ * FWDGT keeps counting through the mode.
  * The window is 445 ms minimum (hal/gd32/init.c); the requested time can
  * run +14.3% long on a slow IRC32K (see POWER_WAKE_LSB_HZ), so 300 ms ->
  * <= 343 ms actual, plus the ~0.2 ms settle gap, stays inside it.  With the
- * bit at 0 the counter is frozen in Standby and any wake time is safe.  The
+ * bit at 0 the counter is frozen in that mode and any wake time is safe.  The
  * stock option-byte value is not printed in UM Rev1.2, so the bit is read
  * per request instead of assumed. */
-#define POWER_STDBY_FWDGT_MAX_MS 300u
+#define POWER_LP_FWDGT_MAX_MS 300u
 
 /* Watchdog-aware low-power entry gate: feed the FWDGT and honour UM
  * Rev1.2 p.525's spacing rule ("more than 3 IRC32K clock intervals
@@ -230,9 +230,9 @@ static volatile uint8_t s_lp_pending_mode;
  * is then the bootloader's ~32.8 s revert dog, and feeding it from an
  * aborted standby request would push the confirm deadline back.
  *
- * Whether the armed FWDGT keeps COUNTING through Standby is decided by
- * FWDGSPD_STDBY; bridge_hw_power_mode_set() refuses a wake longer than
- * POWER_STDBY_FWDGT_MAX_MS when it does. */
+ * Whether the armed FWDGT keeps COUNTING through Standby / Deep-sleep is
+ * decided by FWDGSPD_STDBY / FWDGSPD_DPSLP; bridge_hw_power_mode_set() refuses a wake longer than
+ * POWER_LP_FWDGT_MAX_MS when it does. */
 static void power_fwdgt_settle_before_lp_entry(void)
 {
 	if (!ota_trial_unconfirmed()) {
@@ -295,26 +295,19 @@ int bridge_hw_power_mode_set(uint8_t mode, uint32_t wake_bitmap, uint32_t wake_a
 		if (wake_after_ms != 0u) return BRIDGE_HW_ERR_INVAL;
 		return BRIDGE_HW_OK;
 	case 2u: /* deep-sleep */
-		/* Deep-sleep can only be left through an EXTI line (UM
-		 * Rev1.2 p.142), and this bridge's I2C slave has NO wake
-		 * path: WUEN is never set, the I2C kernel clock is APB1
-		 * not IRC8M (p.1279: without IRC8M, "IRC8M will not [be]
-		 * switched on after receiving start signal"), and EXTI
-		 * line 31 (I2C0 wakeup, p.213 Table 5-3) is never enabled.
-		 * Disabling I2C0 across the entry (gh#41's UM p.1279
-		 * requirement) therefore means a sleeping bridge can never
-		 * be woken over BRD_I2C -- so while that link is up, mode 2
-		 * is refused outright: the honest option gh#63 names.
-		 * "While the link is up" is unconditionally true on this
-		 * bridge today (bridge_transport_i2c_hw_init() runs at
-		 * boot unconditionally), so mode 2 answers NOSUPPORT
-		 * until the I2C-wake branch lands (BRIDGE_I2C_CK_SRC ->
-		 * IRC8M + WUEN re-arm per entry + EXTI line 31 -- a
-		 * bench-validated change of its own, NOT this PR).
-		 * STATUS_NOSUPPORT (0x06) is the wire answer the host
-		 * already handles for other unsupported wake sources. */
-		return BRIDGE_HW_ERR_NOTIMPL;
 	case 3u: /* standby */
+		/* Deep-sleep wake sources (UM Rev1.2 p.142): any enabled EXTI
+		 * line.  The host-reachable one is the SPI CS line (EXTI 8, both
+		 * edges, always armed by the SPI transport); RTC wakeup (EXTI 19)
+		 * is the bounded fallback.  The I2C slave has NO wake path (WUEN
+		 * unset, kernel clock APB1 not IRC8M, UM p.1279) and I2C0 is
+		 * disabled across the entry, so BRD_I2C-only hosts cannot wake
+		 * the part -- which is why mode 2, like mode 3, REQUIRES an armed
+		 * RTC timer: the sleep is always bounded and a bridge whose host
+		 * never toggles CS still comes back.  Host contract: the CS
+		 * falling edge that wakes the part is served on the IRC8M clock,
+		 * so the frame clocked during that transaction is lost; retry it
+		 * (the reply-read retry / STATUS_IO path recovers).  */
 		bridge_rcu_periph_clock_enable(RCU_PMU);
 		/* Gate the entry: Standby's wake set is exactly five
 		 * sources (UM Rev1.2 p.142 Table 3-1: "1. NRST pin 2. WKUP
@@ -328,10 +321,12 @@ int bridge_hw_power_mode_set(uint8_t mode, uint32_t wake_bitmap, uint32_t wake_a
 		}
 		if (wake_after_ms != 0u || (wake_bitmap & (POWER_WAKE_RTC | POWER_WAKE_TIMER)) != 0u) {
 			const uint32_t ms = (wake_after_ms != 0u) ? wake_after_ms : POWER_WAKE_TIMER_MAX_MS;
-			/* The FWDGT keeps counting through Standby when FWDGSPD_STDBY
-			 * is 1: a longer wake would end in a watchdog reset instead
+			/* The FWDGT keeps counting through the mode when its FWDGSPD
+			 * bit (STDBY for 3, DPSLP for 2) is 1: a longer wake would end in a watchdog reset instead
 			 * of the requested wake.  Refuse before arming anything. */
-			if ((FMC_OBCTL & FMC_OBCTL_FWDGSPD_STDBY) != 0u && ms > POWER_STDBY_FWDGT_MAX_MS) {
+			const uint32_t fwdgspd =
+			    (mode == 2u) ? FMC_OBCTL_FWDGSPD_DPSLP : FMC_OBCTL_FWDGSPD_STDBY;
+			if ((FMC_OBCTL & fwdgspd) != 0u && ms > POWER_LP_FWDGT_MAX_MS) {
 				return BRIDGE_HW_ERR_RANGE;
 			}
 			int rc = rtc_wakeup_arm_ms(ms);
@@ -343,8 +338,10 @@ int bridge_hw_power_mode_set(uint8_t mode, uint32_t wake_bitmap, uint32_t wake_a
 		 * writes, ISR-safe); the bitmap itself needs no deferral
 		 * because nothing at tick time re-reads it.  Standby exits
 		 * through a power-on reset, so the host's "rebooting, then
-		 * re-init and probe" contract applies unchanged. */
-		s_lp_pending_mode = 3u;
+		 * re-init and probe" contract applies unchanged.  Deep-sleep instead
+		 * resumes in place: bridge_power_tick() restores the PLL and I2C0
+		 * on wake, and an RTC timer is mandatory so the sleep is bounded. */
+		s_lp_pending_mode = mode;
 		return BRIDGE_HW_OK;
 	default:
 		return BRIDGE_HW_ERR_INVAL;
@@ -373,7 +370,7 @@ int bridge_hw_power_mode_set(uint8_t mode, uint32_t wake_bitmap, uint32_t wake_a
  * backed out (SCS = IRC8M) so the part is never left half-switched, and
  * SystemCoreClock plus the bridge_core_clock_* telemetry are refreshed on
  * EVERY exit so they always describe the live clock.  Must be called by
- * the (not yet reachable, see bridge_power_tick()) mode-2 wake path
+ * the mode-2 wake path in bridge_power_tick()
  * before the PWM/ADC/DWT users run: PWM_TIMER_CLK_HZ,
  * BRIDGE_ADC_PACE_CLK_HZ and the DWT cycle conversions hardcode 216 MHz.
  * (The I2C timing is NOT one of them -- bridge_transport_i2c_hw_init()
@@ -413,18 +410,68 @@ bool bridge_clock_restore_after_deepsleep(void)
 	return ok;
 }
 
+/* True while an I2C transaction is in flight (i2c_disable() would cut it off). */
+static bool mode_i2c_busy(void)
+{
+	return RESET != i2c_flag_get(BRIDGE_I2C_PERIPH, I2C_FLAG_I2CBSY);
+}
+
+/* Non-zero when the last deep-sleep wake could not bring I2C0 back
+ * (bridge_transport_i2c_hw_init() refused, e.g. after a failed PLL
+ * relock).  bridge_power_tick() retries it on every later tick, so a
+ * transient refusal is not a permanent deaf I2C slave, and a host reading
+ * this over SWD sees the failure instead of a silent NACK.
+ * bridge_transport_i2c_hw_init() re-derives the timing and the stretch
+ * timeout reload from the live APB1 clock on each call. */
+volatile uint8_t bridge_i2c_reinit_pending;
+
+/* Every condition that makes a low-power entry pointless or unsafe.  Shared
+ * by the pre-entry gates (interrupts enabled) and by the re-check under
+ * bridge_irq_lock(), so the two can never drift.  Returns true when the
+ * link is quiet.  A WFI with any enabled pending interrupt returns at once
+ * (architecturally a no-op), so a pending transport vector (CS-EXTI,
+ * I2C0-EV, I2C0-ER -- #262) or the RTC wakeup vector means the sleep would
+ * not happen.  Never clears anything: the under-lock call must not erase
+ * the very edge it is looking for. */
+static bool lp_link_quiet(void)
+{
+	/* CS de-asserted (PA8 high): an asserted CS means a transaction is in
+	 * flight or about to be. */
+	if (SET != gpio_input_bit_get(BRIDGE_SPI_NSS_PORT, BRIDGE_SPI_NSS_PIN)) return false;
+	/* An in-flight I2C transaction would be cut off by i2c_disable(). */
+	if (mode_i2c_busy()) return false;
+	if ((EXTI_PD0 != 0u) || ((EXTI_PD1 & 0x0000007Fu) != 0u)) return false;
+	if (NVIC_GetPendingIRQ(BRIDGE_SPI_CS_EXTI_IRQN) != 0u) return false;
+	if (NVIC_GetPendingIRQ(BRIDGE_I2C_EV_IRQN) != 0u) return false;
+	if (NVIC_GetPendingIRQ(BRIDGE_I2C_ER_IRQN) != 0u) return false;
+	if (NVIC_GetPendingIRQ(RTC_WKUP_IRQn) != 0u) return false;
+	return true;
+}
+
 /* Base-level low-power entry (gh#63): the deferred half of
  * bridge_hw_power_mode_set().  Runs from bridge_hw_tick() -- base level,
  * AFTER the accepted request's reply has drained onto the wire, with
  * no transport state machine mid-transaction.
  *
- * Steps 1-4 below NARROW the entry race but cannot close it -- a CS
- * falling edge landing between the gate and the wfi still defeats the
- * entry -- which is why every gate failure below re-latches the request
- * and retries on the NEXT tick rather than reporting a success that
- * did not happen or silently dropping the request. */
+ * The pre-entry gates below run with interrupts ENABLED and so only
+ * narrow the entry race.  For Deep-sleep the race is closed by taking
+ * bridge_irq_lock() first and re-running the whole gate set under it
+ * (lp_link_quiet()): with PRIMASK set no transport ISR can start or
+ * dispatch a transaction between the re-check and the WFI, and anything
+ * pending at that point is visible in the NVIC / EXTI / GPIO state.  On a
+ * failed re-check the entry is backed out (I2C0 re-enabled, SysTick
+ * restored) and the request stays latched, so the next tick retries.  A
+ * CS edge whose ISR already ran to completion before the lock is a
+ * finished transaction, not an in-flight one.
+ * Every gate failure re-latches the request and retries on the NEXT tick
+ * rather than reporting a success that did not happen or silently dropping
+ * the request. */
 void bridge_power_tick(void)
 {
+	if (bridge_i2c_reinit_pending != 0u && bridge_transport_i2c_hw_init() == BRIDGE_HW_OK) {
+		bridge_i2c_reinit_pending = 0u;
+	}
+
 	if (s_lp_pending_mode == 0u) return;
 
 	/* 1. Only sleep on a quiet link: CS de-asserted (PA8 high).  An
@@ -441,44 +488,86 @@ void bridge_power_tick(void)
 	 *    p.219).  Today only line 8 is enabled so the collateral is
 	 *    nil, but any future EXTI consumer (RTC wakeup line 19,
 	 *    I2C0 line 31, LPTIMER line 35) must be re-examined against
-	 *    this clear. */
+	 *    this clear.  Done ONCE, here: the under-lock re-check must not
+	 *    clear, or it would erase the edge it is looking for. */
 	EXTI_PD0 = 0xFFFFFFFFu;
 	EXTI_PD1 = 0x0000007Fu;
 	__DSB();
 
 	/* 3. Re-read and abort the attempt rather than reporting a sleep
 	 *    that did not happen: a re-pended bit means an edge arrived
-	 *    during the clear -- a transaction is starting. */
-	if ((EXTI_PD0 != 0u) || ((EXTI_PD1 & 0x0000007Fu) != 0u)) return;
-
-	/* 4. A WFI with an enabled interrupt already pending in the NVIC
-	 *    is architecturally a no-op, so the pending set must be clear
-	 *    too (gh#63 step 4).  All three transport vectors this bridge
-	 *    unmasks -- CS-EXTI, I2C0-EV, I2C0-ER -- gate entry: checking
-	 *    only CS-EXTI + I2C0-EV silently dropped the request whenever
-	 *    an I2C0 bus-error interrupt was pending (#262). */
-	if (NVIC_GetPendingIRQ(BRIDGE_SPI_CS_EXTI_IRQN) != 0u) return;
-	if (NVIC_GetPendingIRQ(BRIDGE_I2C_EV_IRQN) != 0u) return;
-	if (NVIC_GetPendingIRQ(BRIDGE_I2C_ER_IRQN) != 0u) return;
+	 *    during the clear -- a transaction is starting.  Also covers
+	 *    the NVIC pending set (gh#63 step 4) and I2CBSY (4b). */
+	if (!lp_link_quiet()) return;
 
 	/* 5. Only now enter. */
 	const uint8_t mode = s_lp_pending_mode;
 
-	if (mode == 3u) {
-		/* Watchdog-aware entry (gh#54): feed + >= 3 IRC32K
-		 * intervals of gap before the wfi (UM p.525). */
-		power_fwdgt_settle_before_lp_entry();
+	/* Watchdog-aware entry (gh#54): feed + >= 3 IRC32K intervals of gap
+	 * before the wfi (UM p.525).  The ~185 us spin runs with interrupts
+	 * still on, which is why Deep-sleep re-checks under the lock below. */
+	power_fwdgt_settle_before_lp_entry();
 
-		/* Stop SysTick across the entry (gh#54): a tick pending or
-		 * firing at the wfi would end it at once (WFI with an
-		 * enabled interrupt pending is a no-op) and the vendor
-		 * helper only masks NVIC IRQs, not this core exception.
-		 * Clearing ENABLE|TICKINT plus PENDSTCLR makes the entry
-		 * see no tick; restored on the abort path below. */
-		const uint32_t systick_ctrl = SysTick->CTRL;
-		SysTick->CTRL &= ~(SysTick_CTRL_ENABLE_Msk | SysTick_CTRL_TICKINT_Msk);
-		SCB->ICSR = SCB_ICSR_PENDSTCLR_Msk;
-		__DSB();
+	/* Stop SysTick across the entry (gh#54): a tick pending or firing at
+	 * the wfi would end it at once (WFI with an enabled interrupt pending
+	 * is a no-op) and the vendor helpers only mask NVIC IRQs, not this
+	 * core exception.  Restored on the abort / wake path. */
+	const uint32_t systick_ctrl = SysTick->CTRL;
+	SysTick->CTRL &= ~(SysTick_CTRL_ENABLE_Msk | SysTick_CTRL_TICKINT_Msk);
+	SCB->ICSR = SCB_ICSR_PENDSTCLR_Msk;
+	__DSB();
+
+	if (mode == 2u) {
+		/* Deep-sleep (gh#12).  PRIMASK is taken BEFORE I2C0 is touched and
+		 * stays set through the wfi: an enabled pending interrupt still
+		 * ends a WFI, but its handler must not run on the post-wake IRC8M
+		 * clock -- restore the PLL first, THEN let the CS-EXTI / RTC
+		 * handlers run. */
+		const uint32_t primask = bridge_irq_lock();
+
+		bool go = lp_link_quiet();
+		if (go) {
+			/* I2C0 off across the entry (UM p.1279).  Re-check once more:
+			 * an address match can land while the peripheral is being
+			 * disabled. */
+			i2c_disable(BRIDGE_I2C_PERIPH);
+			go = lp_link_quiet();
+			if (!go) i2c_enable(BRIDGE_I2C_PERIPH);
+		}
+		if (!go) {
+			/* Back out: I2C0 is enabled again (or was never disabled),
+			 * SysTick restarts its period, and s_lp_pending_mode stays
+			 * latched so the next tick retries.  Whatever is pending runs
+			 * the moment the lock is released. */
+			SysTick->VAL  = 0u;
+			SysTick->CTRL = systick_ctrl;
+			bridge_irq_unlock(primask);
+			return;
+		}
+
+		pmu_to_deepsleepmode(PMU_LDO_LOWPOWER, WFI_CMD);
+		/* ponytail: a failed relock leaves the part on IRC8M (see
+		 * bridge_core_clock_matches telemetry); no retry. */
+		(void)bridge_clock_restore_after_deepsleep();
+		/* A successful init also calls fault_reset_loop_mark_healthy()
+		 * (RTC_BKP7 = 0), so every wake resets the consecutive-fault
+		 * counter.  Benign: the wake proves the transports came back. */
+		if (bridge_transport_i2c_hw_init() != BRIDGE_HW_OK) {
+			bridge_i2c_reinit_pending = 1u; /* retried by later ticks */
+		}
+		/* The timer keeps auto-reloading after a wake; stop it so it
+		 * does not interrupt the run-mode bridge every period. */
+		(void)rtc_wakeup_disable();
+		rtc_flag_clear(RTC_FLAG_WT);
+		exti_flag_clear(EXTI_19);
+		SysTick->VAL      = 0u;
+		SysTick->CTRL     = systick_ctrl;
+		s_lp_pending_mode = 0u;
+		bridge_irq_unlock(primask);
+		return;
+	}
+
+	if (mode == 3u) {
 		pmu_to_standbymode();
 
 		/* Reaching this line means the standby entry ABORTED: the
@@ -503,16 +592,4 @@ void bridge_power_tick(void)
 		SysTick->CTRL     = systick_ctrl;
 		s_lp_pending_mode = 0u; /* drop the failed request */
 	}
-	/* NOTE (future I2C-wake branch): the mode-2 entry lives here --
-	 * quiet-link gate + EXTI_PD clear above, then i2c_disable(),
-	 * pmu_to_deepsleepmode(PMU_LDO_LOWPOWER, WFI_CMD), and
-	 * bridge_clock_restore_after_deepsleep() then
-	 * bridge_transport_i2c_hw_init() on the wake path (the I2C timing
-	 * derivation reads the live clock, so it handles the post-wake IRC8M,
-	 * gh#41; the restore is for the hardcoded 216 MHz PWM/ADC/DWT
-	 * constants, gh#12).  It is
-	 * not reachable until bridge_hw_power_mode_set() stops rejecting
-	 * mode 2 -- see the mode-2 comment there.  That entry must reuse
-	 * the SysTick stop/restore and power_fwdgt_settle_before_lp_entry()
-	 * pair used for standby above. */
 }

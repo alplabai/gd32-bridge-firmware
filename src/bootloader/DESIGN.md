@@ -32,15 +32,32 @@ slot relocation, dual-bank FMC-from-RAM, and the full stream → verify →
 commit → boot-new-slot → rollback cycle proven end-to-end over the 25 MHz
 link, including two GD32 self-reboots through this bootloader.  This run
 exercised the **A→B direction and rollback only** — the B→A direction has
-**not** been exercised, which matters because the slot map's overlap with
-the dual-bank boundary at `0x08040000` bites in that direction.  Still
-HIL-gated: a bad bootloader bricks the part, and this HW revision has no
+**not** been exercised. The bank-aligned map now ends slot A and starts
+slot B at `0x08040000` (#2), with compile/link guards against a future
+crossing, but both directions still require a bench pass. Still HIL-gated:
+a bad bootloader bricks the part, and this HW revision has no
 host-driven SWD reflash, so recovery needs a bench SWD probe on the
 physical board; the default (unarmed) image remains the
 cannot-brick-itself configuration.  First-flash of a partitioned part
 needs the factory metadata record from
 [`../../tools/gen_ota_metadata.py`](../../tools/gen_ota_metadata.py) at
 `0x08008000`.
+
+**Flash map and compatibility (#124).**  `src/ota_layout.h` is the single
+source for the map: slot A `0x0800A000..0x0803FFFF`, slot B
+`0x08040000..0x08075FFF` (216 KiB each), `0x08076000..0x0807FFFF` reserved.
+CMake, the slot linker template, `tools/gen_ota_metadata.py` and the CI
+mutation check all read it; nothing else pins a slot address.  The previous
+slot-B base `0x08045000` is retired without a migration path: no fielded
+partitioned units exist, so a part running the old map is reflashed
+(bootloader + metadata + slot A), not upgraded in place.
+
+**Metadata stays in bank 0 (#37).**  The metadata records
+(`0x08008000`, `0x08008800`) share bank 0 with slot A, so a `meta_commit()`
+from the slot-A image erases the bank it fetches from.  This is accepted:
+the erase/program windows run from RAM (`.ramfunc`) with PRIMASK set around
+each FMC busy span (`hal/fmc_ota.c`, #5), so no interrupt can fetch a vector
+or handler from the busy bank, and the commit ends in a reset.
 
 The bootloader links the same five core-fault handlers as the application
 images. NMI, HardFault, MemManage, BusFault, and UsageFault record their

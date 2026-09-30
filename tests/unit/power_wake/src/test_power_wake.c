@@ -13,6 +13,8 @@
 #include "gd32g5x3.h"
 #include "power_wake.h"
 
+extern void bridge_power_tick(void);
+
 static void expect_rejected_without_hardware(uint32_t wake_bitmap)
 {
 	mock_power_reset();
@@ -53,14 +55,207 @@ ZTEST(power_wake, test_rejects_future_and_mixed_bits)
 	expect_rejected_without_hardware(UINT32_MAX);
 }
 
-ZTEST(power_wake, test_deep_sleep_refused_without_hardware)
+ZTEST(power_wake, test_deep_sleep_without_rtc_wake_is_refused)
 {
-	/* gh#63: mode 2 has no BRD_I2C wake path, so a supported bitmap is
-	 * still refused (NOTIMPL -> STATUS_NOSUPPORT on the wire) before any
-	 * PMU/RTC side effect. */
+	/* gh#12: the I2C slave has no wake path, so mode 2 must always carry
+	 * an RTC timer -- an unbounded sleep for a BRD_I2C-only host would
+	 * strand the bridge. */
 	mock_power_reset();
-	zassert_equal(bridge_hw_power_mode_set(2u, POWER_WAKE_RTC, 100u), BRIDGE_HW_ERR_NOTIMPL);
-	zassert_equal(mock_power_hw_calls, 0u);
+	zassert_equal(bridge_hw_power_mode_set(2u, 0u, 0u), BRIDGE_HW_ERR_INVAL);
+	zassert_equal(mock_deepsleep_entries, 0u);
+}
+
+ZTEST(power_wake, test_deep_sleep_long_wake_refused_when_fwdgt_runs_in_deepsleep)
+{
+	mock_power_reset();
+	FMC_OBCTL = FMC_OBCTL_FWDGSPD_DPSLP;
+	zassert_equal(bridge_hw_power_mode_set(2u, 0u, 301u), BRIDGE_HW_ERR_RANGE);
+	zassert_equal(bridge_hw_power_mode_set(2u, 0u, 300u), BRIDGE_HW_OK);
+	/* The standby bit alone does not restrict deep-sleep. */
+	mock_power_reset();
+	FMC_OBCTL = FMC_OBCTL_FWDGSPD_STDBY;
+	zassert_equal(bridge_hw_power_mode_set(2u, 0u, 30000u), BRIDGE_HW_OK);
+}
+
+/* Latch a deep-sleep request and run the base-level entry; the mock's
+ * pmu_to_deepsleepmode() returns at once, i.e. an immediate wake. */
+ZTEST(power_wake, test_deep_sleep_entry_and_wake_sequence)
+{
+	mock_power_reset();
+	mock_systick.CTRL = SysTick_CTRL_ENABLE_Msk | SysTick_CTRL_TICKINT_Msk;
+	mock_systick.VAL  = 1234u;
+	RCU_CTL           = RCU_CTL_PLLSTB;
+	RCU_CFG0          = RCU_SCSS_PLLP;
+	zassert_equal(bridge_hw_power_mode_set(2u, 0u, 100u), BRIDGE_HW_OK);
+	zassert_equal(mock_deepsleep_entries, 0u, "entry is deferred to the base level");
+	bridge_power_tick();
+	zassert_equal(mock_deepsleep_entries, 1u);
+	zassert_equal(mock_i2c_disables, 1u, "I2C0 off across the entry");
+	zassert_equal(mock_primask_at_deepsleep, 1u, "handlers held off until the PLL is back");
+	zassert_equal(mock_primask, 0u, "interrupts re-enabled after the wake");
+	zassert_equal(mock_system_core_clock_updates > 0u, true, "clock restore ran");
+	zassert_equal(mock_i2c_inits, 1u, "I2C re-initialised after the wake");
+	zassert_equal(mock_fwdgt_feeds, 1u);
+	zassert_equal(mock_systick.CTRL, SysTick_CTRL_ENABLE_Msk | SysTick_CTRL_TICKINT_Msk);
+	zassert_equal(mock_systick.VAL, 0u);
+	/* The request is consumed: a second tick is a no-op. */
+	bridge_power_tick();
+	zassert_equal(mock_deepsleep_entries, 1u);
+}
+
+ZTEST(power_wake, test_deep_sleep_waits_for_idle_i2c)
+{
+	mock_power_reset();
+	zassert_equal(bridge_hw_power_mode_set(2u, 0u, 100u), BRIDGE_HW_OK);
+	mock_i2c_busy = SET;
+	bridge_power_tick();
+	zassert_equal(mock_deepsleep_entries, 0u, "no entry mid-I2C-transaction");
+	mock_i2c_busy = RESET;
+	bridge_power_tick();
+	zassert_equal(mock_deepsleep_entries, 1u, "request retained and retried");
+}
+
+/* Order + timer-stop assertions for the wake path: PLL relock first, then
+ * the I2C re-init, then the RTC timer stop and the WTF / EXTI-19 clears. */
+ZTEST(power_wake, test_deep_sleep_wake_order_and_timer_stop)
+{
+	mock_power_reset();
+	RCU_CTL  = RCU_CTL_PLLSTB;
+	RCU_CFG0 = RCU_SCSS_PLLP;
+	zassert_equal(bridge_hw_power_mode_set(2u, 0u, 100u), BRIDGE_HW_OK);
+	uint32_t clears0 = mock_rtc_flag_clears, exti0 = mock_exti19_clears, dis0 = mock_rtc_disables;
+	bridge_power_tick();
+	zassert_equal(mock_deepsleep_entries, 1u);
+	zassert_true(mock_seq_clock_restore != 0u && mock_seq_clock_restore < mock_seq_i2c_init,
+	             "PLL relock before the I2C re-init");
+	zassert_true(mock_seq_i2c_init < mock_seq_rtc_disable, "I2C re-init before the timer stop");
+	zassert_equal(mock_rtc_disables, dis0 + 1u, "RTC wakeup timer stopped");
+	zassert_true(mock_rtc_flag_clears > clears0, "WTF cleared after the stop");
+	zassert_true(mock_exti19_clears > exti0, "EXTI 19 pending cleared after the stop");
+	zassert_equal(mock_i2c_enables, 0u, "no back-out on a clean entry");
+}
+
+/* Relock failure: the part stays on IRC8M, the I2C re-init refuses; the failure is
+ * recorded and retried on later ticks, and the request is still consumed. */
+ZTEST(power_wake, test_deep_sleep_wake_with_failed_relock_and_i2c_reinit_retries)
+{
+	extern volatile uint8_t bridge_i2c_reinit_pending;
+
+	mock_power_reset();
+	RCU_CTL          = 0u; /* PLLSTB never sets */
+	RCU_CFG0         = 0u;
+	mock_i2c_init_rc = BRIDGE_HW_ERR_RANGE;
+	SystemCoreClock  = 8000000u; /* the live clock after a failed relock */
+	zassert_equal(bridge_hw_power_mode_set(2u, 0u, 100u), BRIDGE_HW_OK);
+	bridge_power_tick();
+	zassert_equal(mock_deepsleep_entries, 1u);
+	zassert_false(bridge_core_clock_matches, "telemetry shows the failed relock");
+	zassert_equal(bridge_i2c_reinit_pending, 1u, "I2C re-init failure recorded");
+	zassert_equal(mock_primask, 0u);
+
+	uint32_t inits = mock_i2c_inits;
+	bridge_power_tick();
+	zassert_equal(mock_i2c_inits, inits + 1u, "retried on the next tick");
+	zassert_equal(bridge_i2c_reinit_pending, 1u, "still failing");
+	mock_i2c_init_rc = BRIDGE_HW_OK;
+	bridge_power_tick();
+	zassert_equal(bridge_i2c_reinit_pending, 0u, "recovered");
+	bridge_power_tick();
+	zassert_equal(mock_i2c_inits, inits + 2u, "no further retries once recovered");
+}
+
+ZTEST(power_wake, test_deep_sleep_rtc_bit_without_time_refused_under_dpslp_cap)
+{
+	/* RTC bit + wake_after_ms == 0 arms POWER_WAKE_TIMER_MAX_MS, far above the cap. */
+	mock_power_reset();
+	FMC_OBCTL = FMC_OBCTL_FWDGSPD_DPSLP;
+	zassert_equal(bridge_hw_power_mode_set(2u, POWER_WAKE_RTC, 0u), BRIDGE_HW_ERR_RANGE);
+}
+
+static void assert_backed_out_then_retries(uint32_t systick_ctrl, uint32_t expect_i2c_disables)
+{
+	zassert_equal(mock_deepsleep_entries, 0u, "no deep-sleep entry");
+	zassert_equal(mock_i2c_disables, expect_i2c_disables);
+	zassert_equal(mock_i2c_enables, expect_i2c_disables, "I2C0 re-enabled on back-out");
+	zassert_equal(mock_primask, 0u, "lock released");
+	zassert_equal(mock_systick.CTRL, systick_ctrl, "SysTick restored");
+	zassert_equal(mock_i2c_inits, 0u, "wake path did not run");
+
+	/* The request is still latched: with the event gone the next tick sleeps. */
+	mock_cs_level     = SET;
+	mock_nvic_pending = 0u;
+	mock_on_settle = mock_on_i2c_disable = NULL;
+	RCU_CTL                              = RCU_CTL_PLLSTB;
+	RCU_CFG0                             = RCU_SCSS_PLLP;
+	bridge_power_tick();
+	zassert_equal(mock_deepsleep_entries, 1u, "request retained, retried");
+}
+
+static void inject_cs_low(void)
+{
+	mock_cs_level = RESET;
+}
+
+static void inject_i2c_ev_pending(void)
+{
+	mock_nvic_pending |= (uint64_t)1u << I2C0_EV_WKUP_IRQn;
+}
+
+static void inject_exti_pd(void)
+{
+	EXTI_PD0 = 1u << 8;
+}
+
+static void inject_rtc_pending(void)
+{
+	mock_nvic_pending |= (uint64_t)1u << RTC_WKUP_IRQn;
+}
+
+static void inject_i2c_busy(void)
+{
+	mock_i2c_busy = SET;
+}
+
+/* The ~185 us settle window has interrupts enabled: an event landing there
+ * (after the entry gates passed) must be caught by the re-check under the
+ * lock and abort the entry cleanly. */
+ZTEST(power_wake, test_deep_sleep_backs_out_on_event_in_settle_window)
+{
+	static void (*const injectors[])(
+	    void) = { inject_cs_low, inject_i2c_ev_pending, inject_rtc_pending, inject_i2c_busy };
+	for (size_t i = 0; i < sizeof(injectors) / sizeof(injectors[0]); ++i) {
+		mock_power_reset();
+		const uint32_t ctrl = SysTick_CTRL_ENABLE_Msk | SysTick_CTRL_TICKINT_Msk;
+		mock_systick.CTRL   = ctrl;
+		zassert_equal(bridge_hw_power_mode_set(2u, 0u, 100u), BRIDGE_HW_OK);
+		mock_on_settle = injectors[i];
+		bridge_power_tick();
+		/* Caught before I2C0 was ever disabled. */
+		zassert_equal(mock_deepsleep_entries, 0u, "injector %u", (unsigned)i);
+		zassert_equal(mock_i2c_disables, 0u, "I2C0 untouched, injector %u", (unsigned)i);
+		zassert_equal(mock_primask, 0u);
+		zassert_equal(mock_systick.CTRL, ctrl, "SysTick restored");
+		mock_i2c_busy = RESET;
+		assert_backed_out_then_retries(ctrl, 0u);
+	}
+}
+
+/* An event landing while I2C0 is being disabled (after the lock, after the
+ * first re-check) is caught by the second re-check: I2C0 comes back. */
+ZTEST(power_wake, test_deep_sleep_backs_out_on_event_during_i2c_disable)
+{
+	static void (*const injectors[])(
+	    void) = { inject_cs_low, inject_i2c_ev_pending, inject_exti_pd, inject_rtc_pending };
+	for (size_t i = 0; i < sizeof(injectors) / sizeof(injectors[0]); ++i) {
+		mock_power_reset();
+		const uint32_t ctrl = SysTick_CTRL_ENABLE_Msk | SysTick_CTRL_TICKINT_Msk;
+		mock_systick.CTRL   = ctrl;
+		zassert_equal(bridge_hw_power_mode_set(2u, 0u, 100u), BRIDGE_HW_OK);
+		mock_on_i2c_disable = injectors[i];
+		bridge_power_tick();
+		EXTI_PD0 = 0u;
+		assert_backed_out_then_retries(ctrl, 1u);
+	}
 }
 
 ZTEST(power_wake, test_standby_without_rtc_wake_is_refused)
@@ -104,8 +299,6 @@ ZTEST(power_wake, test_run_and_sleep_reject_nonzero_wake_after_ms)
 	zassert_equal(bridge_hw_power_mode_set(0u, 0u, 0u), BRIDGE_HW_OK);
 	zassert_equal(bridge_hw_power_mode_set(1u, 0u, 0u), BRIDGE_HW_OK);
 }
-
-extern void bridge_power_tick(void);
 
 ZTEST(power_wake, test_standby_long_wake_refused_when_fwdgt_runs_in_standby)
 {

@@ -72,6 +72,15 @@ set(GD32_BRIDGE_SOURCES
 # on silicon 2026-06-04; a fresh B->A update remains untested and HIL-gated.
 option(BRIDGE_OTA_PARTITIONED "Arm the OTA Path-A flash path (HIL-gated)" OFF)
 
+# Opt-in DWT cycle-counter stats for the SPI round trip (issue #104): per
+# transaction cycles for request CRC / protocol_dispatch / reply stage / CS-edge
+# to reply-staged, in the RAM struct `bridge_timing_stats` (layout:
+# docs/timing-stats.md).  OFF adds no code and no data to the image.
+option(BRIDGE_TIMING_STATS "Record SPI round-trip DWT cycle stats in RAM (bench only)" OFF)
+if(BRIDGE_TIMING_STATS)
+    list(APPEND GD32_BRIDGE_SOURCES src/timing_stats.c)
+endif()
+
 if(BRIDGE_HAL_BACKEND STREQUAL "stub")
     list(APPEND GD32_BRIDGE_SOURCES hal/bridge_hw_stub.c)
 elseif(BRIDGE_HAL_BACKEND STREQUAL "gd32")
@@ -251,6 +260,9 @@ function(gd32_firmware_target tgt linker_script)
     # deleted; the version rides inside the build-id.
     target_compile_definitions(${tgt} PRIVATE GD32_BRIDGE_HAVE_BUILD_ID_HEADER)
     add_dependencies(${tgt} gd32-build-id)
+    if(BRIDGE_TIMING_STATS)
+        target_compile_definitions(${tgt} PRIVATE BRIDGE_TIMING_STATS=1)
+    endif()
     # -Os pinned directly here (not via CMAKE_BUILD_TYPE) so it applies
     # unconditionally to every target and can't be silently lost by an
     # invocation that sets no build type -- which is exactly what both

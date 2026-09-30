@@ -32,4 +32,58 @@ static inline bool bridge_i2c_en_clear_spin_exhausted(uint32_t spins_taken)
 	return spins_taken >= BRIDGE_I2C_EN_CLEAR_SPIN_LIMIT;
 }
 
+/* Register/reset access the timeout recovery needs, behind function pointers
+ * so the sequence is host-testable with a mock.  On silicon
+ * transport_hw_gd32.c passes a `static const` table of static functions, so
+ * the always_inline helpers below fold to the same register accesses the ISR
+ * used to spell out inline (no behaviour change, #150 follow-up). */
+typedef struct {
+	void (*en_clear)(void);        /* I2C_CTL0.I2CEN = 0 */
+	bool (*en_is_set)(void);       /* I2C_CTL0.I2CEN reads back set */
+	void (*en_set)(void);          /* I2C_CTL0.I2CEN = 1 */
+	void (*rcu_reset)(void);       /* RCU_I2C0RST pulse */
+	void (*reinit)(void);          /* bridge_transport_i2c_hw_init() */
+	bool (*timeout_pending)(void); /* I2C_INT_FLAG_TIMEOUT set */
+	void (*timeout_clear)(void);   /* clear I2C_INT_FLAG_TIMEOUT */
+} bridge_i2c_recovery_ops_t;
+
+/* Documented software reset; escalates to an RCU reset + re-init when the
+ * I2CEN=0 read-back spin is exhausted.  Returns true when it escalated. */
+static inline __attribute__((always_inline)) bool
+bridge_i2c_bus_release(const bridge_i2c_recovery_ops_t *ops)
+{
+	ops->en_clear();
+	uint32_t spins = 0u;
+	while (ops->en_is_set()) {
+		if (bridge_i2c_en_clear_spin_exhausted(++spins)) {
+			ops->rcu_reset();
+			ops->reinit();
+			return true;
+		}
+	}
+	ops->en_set();
+	return false;
+}
+
+/* ER-vector TIMEOUT arm: if TIMEOUT is pending, clear it and force the bus
+ * release.  Returns true when it ran, i.e. the caller must resynchronise the
+ * slave framing.  Never touches the peripheral when no timeout is pending, so
+ * a healthy in-flight transfer is left alone.  `recoveries` / `escalations`
+ * are the SWD-readable counters. */
+static inline __attribute__((always_inline)) bool
+bridge_i2c_timeout_service(const bridge_i2c_recovery_ops_t *ops,
+                           volatile uint32_t               *recoveries,
+                           volatile uint32_t               *escalations)
+{
+	if (!ops->timeout_pending()) {
+		return false;
+	}
+	ops->timeout_clear();
+	(*recoveries)++;
+	if (bridge_i2c_bus_release(ops)) {
+		(*escalations)++;
+	}
+	return true;
+}
+
 #endif /* GD32_BRIDGE_HAL_GD32_I2C_RECOVERY_H */
