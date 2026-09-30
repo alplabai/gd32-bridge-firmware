@@ -155,6 +155,36 @@ static inline bool ota_slot_base_checked(uint8_t slot, uint32_t *base_out)
 	return false;
 }
 
+/* Anti-rollback floor (#49 fix b): the lowest firmware version OTA_COMMIT /
+ * OTA_ROLLBACK will accept, DERIVED from the metadata record -- no new
+ * on-flash field.  The bootloader is not field-updatable and rejects any
+ * struct_version other than OTA_META_STRUCT_VER, so widening the record
+ * (or bumping the version) would strand every deployed bootloader; the
+ * record layout therefore stays v2 byte for byte.
+ *
+ * The floor is the version of the newest image known to have run: the
+ * active slot's fw_version once it is CONFIRMED (TRIAL cleared), or -- while
+ * the active slot is still an unconfirmed TRIAL -- the other slot's, i.e.
+ * the image it replaced.  A new commit or a rollback below it is refused.
+ * Raising it therefore needs no extra write: it rises when the TRIAL flag
+ * is cleared.  fw_version 0 means "unknown" (legacy 8-byte BEGIN) and gives
+ * floor 0, i.e. unconstrained; an unknown-version image cannot pass while a
+ * non-zero floor is set.  A record with a corrupt active_slot gives 0.
+ *
+ * Not a security control: the version is host-declared and images are
+ * unauthenticated (SECURITY.md, #50).  It only stops an ACCIDENTAL
+ * downgrade.  Recovery override: SWD/factory programming, which rewrites
+ * the metadata. */
+static inline uint32_t ota_version_floor(const ota_meta_record_t *r)
+{
+	if (r->active_slot != OTA_SLOT_A && r->active_slot != OTA_SLOT_B) {
+		return 0u;
+	}
+	const uint8_t src =
+	    ((r->flags & OTA_META_FLAG_TRIAL) != 0u) ? (uint8_t)(r->active_slot ^ 1u) : r->active_slot;
+	return r->fw_version[src];
+}
+
 /* Boot-time trial/confirm gate: a TRIAL candidate that already ran a
  * watchdog reset on this power cycle must not be re-tried -- it hung
  * before confirming once and the fallback slot is the safe choice.
