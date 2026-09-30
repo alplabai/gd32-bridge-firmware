@@ -1457,4 +1457,24 @@ ZTEST(gd32_adc_seq, test_vref_late_lock_failed_measure_still_promotes)
 	zassert_equal(adc_vrefint_code, 0u, "code 0 marks the failed measurement");
 }
 
+/* A late-lock measurement runs after reads may have left ADC0 at a lower
+ * resolution / oversampling: it must reset the format (ADCON low), then
+ * enable and calibrate before its first trigger. */
+ZTEST(gd32_adc_seq, test_vref_measure_forces_12bit_no_oversample_and_recalibrates)
+{
+	adc_seq_reset();
+	mock_seq_reset();
+	mock_adc_set_routine_data(2730u);
+	zassert_true(adc_vref_measure(), "measurement completes");
+	const int dis = mock_seq_find_from("adc_disable", ADC0, 0);
+	const int res = mock_seq_find_from("adc_resolution_config", ADC0, 0);
+	const int ovs = mock_seq_find_from("adc_oversample_mode_disable", ADC0, 0);
+	const int ena = mock_seq_find_from("adc_enable", ADC0, 0);
+	const int trg = mock_seq_find_from("adc_software_trigger_enable", ADC0, 0);
+	zassert_true(dis >= 0 && res > dis && ovs > dis, "format applied with ADCON low");
+	zassert_true(ena > res && ena > ovs, "converter re-enabled after the format");
+	zassert_true(trg > ena, "first trigger only after re-enable + calibration");
+	zassert_equal(adc_vref_mv, 1800u, "code 2730 -> 1800 mV");
+}
+
 ZTEST_SUITE(gd32_adc_seq, NULL, NULL, NULL, NULL, NULL);

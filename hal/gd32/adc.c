@@ -105,7 +105,27 @@ bool adc_vref_measure(void)
 	for (volatile uint32_t d = 0u; d < 4096u; ++d) {
 		/* VREFINT settle */
 	}
+	/* Own the converter format: a late-lock run happens after single-shot
+	 * reads may have left ADC0 at a cached 10/8/6-bit resolution or with
+	 * oversampling on, which would skew the code against the 4095 full
+	 * scale used below.  Format and rank latch only with ADCON == 0, and
+	 * the ADCON toggle drops the calibration, so redo the tSTAB dwell and
+	 * the bounded calibration exactly like bridge_hw_adc_read.  Every
+	 * later read/stream re-applies its own format, so nothing to restore. */
+	adc_disable(ADC0);
+	adc_resolution_config(ADC0, ADC_RESOLUTION_12B);
+	adc_oversample_mode_disable(ADC0);
 	adc_routine_channel_config(ADC0, 0u, ADC_CHANNEL_18, ADC_DEFAULT_SAMPLE_CYCLES);
+	adc_enable(ADC0);
+	for (volatile uint32_t d = 0u; d < 4096u; ++d) {
+		/* tSTAB dwell after ADCON */
+	}
+	if (!adc_calibrate_bounded(ADC0)) {
+		adc_internal_channel_config(ADC0, ADC_CHANNEL_INTERNAL_VREFINT, DISABLE);
+		adc_vref_publish(0u, adc_vref_mv);
+		return false;
+	}
+	adc_flag_clear(ADC0, ADC_FLAG_EOC); /* drop a stale EOC from an earlier timeout */
 	for (uint32_t i = 0u; i < N; ++i) {
 		adc_software_trigger_enable(ADC0, ADC_ROUTINE_CHANNEL);
 		uint32_t to = 100000u;
