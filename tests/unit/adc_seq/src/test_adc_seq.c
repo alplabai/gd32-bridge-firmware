@@ -82,7 +82,11 @@ static void adc_seq_reset(void)
 	}
 	mock_adc_set_flag(BRIDGE_ADC_CH0_PERIPH, ADC_FLAG_ROVF, RESET);
 	mock_adc_set_flag(BRIDGE_ADC_CH0_PERIPH, ADC_FLAG_EOC, RESET);
-	vref_ok = true;
+	vref_ok            = true;
+	adc_vref_mv        = ADC_VREF_MV;
+	adc_vrefint_code   = 0u;
+	mock_adc_eoc_stuck = false;
+	mock_vref_ready    = true;
 }
 
 /* ---------------------------------------------------------------------
@@ -1364,6 +1368,93 @@ ZTEST(gd32_adc_seq, test_fft_publish_commit_preemption_cannot_expose_stale_frame
 	              "replacement publishes its own frame on the next tick");
 	zassert_equal(seq, 1u, "replacement publication starts at sequence one");
 	zassert_equal(bridge_hw_adc_stream_end(0u), BRIDGE_HW_OK, "replacement stream ends cleanly");
+}
+
+/* ---------------------------------------------------------------------
+ * #59 -- runtime ADC/DAC reference derived from VREFINT.
+ * --------------------------------------------------------------------- */
+
+ZTEST(gd32_adc_seq, test_vref_from_code_math_and_clamp)
+{
+	zassert_equal(adc_vref_mv_from_code(2730u), 1800u, "1.2 V @ 1.8 V ref");
+	zassert_equal(adc_vref_mv_from_code(2600u), 1890u, "1.2 V @ 1.89 V ref");
+	zassert_equal(adc_vref_mv_from_code(2400u), ADC_VREF_MV, "2048 mV is above the window");
+	zassert_equal(adc_vref_mv_from_code(0u), ADC_VREF_MV, "code 0 falls back");
+	zassert_equal(adc_vref_mv_from_code(4095u), ADC_VREF_MV, "1200 mV ref is below the window");
+	zassert_equal(adc_vref_mv_from_code(1000u), ADC_VREF_MV, "4914 mV ref is above the window");
+}
+
+ZTEST(gd32_adc_seq, test_vref_measure_latches_and_scales_reads)
+{
+	uint16_t mv[1];
+
+	adc_seq_reset();
+	mock_adc_set_routine_data(2600u);
+	zassert_true(adc_vref_measure(), "measurement completes");
+	zassert_equal(adc_vrefint_code, 2600u, "raw VREFINT code latched");
+	zassert_equal(adc_vref_mv, 1890u, "runtime reference latched");
+	zassert_true(mock_seq_find_from("adc_internal_channel_config", 0u, 0) >= 0,
+	             "VREFINT channel enabled on ADC0");
+
+	mock_adc_set_routine_data(ADC_FULL_SCALE);
+	zassert_equal(bridge_hw_adc_read(0u, 1u, mv), BRIDGE_HW_OK, "read ok");
+	zassert_equal(mv[0], 1890u, "full-scale code maps to the runtime reference");
+}
+
+ZTEST(gd32_adc_seq, test_vref_measure_eoc_timeout_keeps_default)
+{
+	adc_seq_reset();
+	mock_adc_eoc_stuck = true;
+	zassert_false(adc_vref_measure(), "EOC never arrives");
+	zassert_equal(adc_vref_mv, ADC_VREF_MV, "default kept");
+	zassert_equal(adc_vrefint_code, 0u, "code 0 marks a failed measurement");
+	zassert_false(mock_adc_internal_ch_on, "VREFINT channel disabled again");
+}
+
+/* Late VREF lock: the ISR-context probe must not touch ADC0 or publish
+ * vref_ok; the base-level tick measures under an ADC0 claim, then publishes. */
+ZTEST(gd32_adc_seq, test_vref_late_lock_measures_at_base_level_under_claim)
+{
+	adc_seq_reset();
+	vref_ok         = false;
+	mock_vref_ready = false;
+	mock_adc_set_routine_data(2600u);
+
+	zassert_false(vref_ready_check(), "not locked yet");
+	vref_late_tick();
+	zassert_equal(adc_vrefint_code, 0u, "no measurement without a lock");
+
+	mock_vref_ready = true;
+	mock_seq_reset();
+	zassert_false(vref_ready_check(), "ISR probe only notes the lock");
+	zassert_equal(
+	    mock_seq_find_from("adc_internal_channel_config", 0u, 0), -1, "probe must not drive ADC0");
+	zassert_equal(adc_vrefint_code, 0u, "nothing measured in the probe");
+
+	zassert_true(adc_periph_claim(ADC0), "a stream/read owns ADC0");
+	vref_late_tick();
+	zassert_false(vref_ok, "busy ADC0: no measurement, still not ready");
+	zassert_equal(adc_vrefint_code, 0u, "no measurement while ADC0 is claimed");
+	adc_periph_release(ADC0);
+
+	vref_late_tick();
+	zassert_true(vref_ok, "published after the measurement");
+	zassert_equal(adc_vrefint_code, 2600u, "raw code latched");
+	zassert_equal(adc_vref_mv, 1890u, "runtime reference published");
+	zassert_true(adc_periph_claim(ADC0), "ADC0 claim released again");
+	adc_periph_release(ADC0);
+}
+
+ZTEST(gd32_adc_seq, test_vref_late_lock_failed_measure_still_promotes)
+{
+	adc_seq_reset();
+	vref_ok            = false;
+	mock_adc_eoc_stuck = true;
+	(void)vref_ready_check();
+	vref_late_tick();
+	zassert_true(vref_ok, "locked buffer promotes on the default reference");
+	zassert_equal(adc_vref_mv, ADC_VREF_MV, "default kept");
+	zassert_equal(adc_vrefint_code, 0u, "code 0 marks the failed measurement");
 }
 
 ZTEST_SUITE(gd32_adc_seq, NULL, NULL, NULL, NULL, NULL);

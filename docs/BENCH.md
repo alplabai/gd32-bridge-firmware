@@ -127,9 +127,10 @@ perturbed) **and** `VREF_CS` reads back `0x0000 0002` post-fix.
 **FAIL:** VREFP floats, reads an unexpected fixed voltage, or does not
 track VDDA. This does not mean #81's *code* is wrong — leaving the internal
 buffer off is still the only branch that's correct regardless of the
-board-tie answer, per #81's own scope note — but it means `ADC_VREF_MV`
-`/DAC_VREF_MV`'s 1800 mV assumption is **unknowable**, not merely unverified,
-and every downstream millivolt figure (#80's calibration check, any DAC
+board-tie answer, per #81's own scope note — but it means the ADC/DAC
+reference is **unknowable**, not merely unverified (the firmware now derives
+it from VREFINT at boot, see below, but that derivation is only as good as a
+working VREFP), and every downstream millivolt figure (#80's calibration check, any DAC
 sweep) has no ground truth to compare against until a schematic/board
 fact resolves it.
 
@@ -147,6 +148,18 @@ read-back; nothing here writes flash or touches a rail the GD32 controls.
 as "tracks VDDA" — treat a reading within the DMM's own accuracy of VDDA as
 a pass and anything else as inconclusive pending a schematic check, since
 neither PR states a numeric band.
+
+**VREFINT-derived scale (#59, SWD-read, no halt):** the firmware derives the
+ADC/DAC reference at boot from the internal VREFINT channel (typical
+1200 mV, not yet datasheet-verified). Read `adc_vrefint_code` (raw average
+code, 0 = measurement failed or never ran; healthy at 1.8 V is about 2730)
+and `adc_vref_mv` (accepted window 1700..1900 mV; the 1800 fallback is used
+outside it). Check `adc_vref_mv` against the VREFP meter reading; a code of
+0 or a reading that disagrees with the meter means the derivation is not
+trustworthy. Before/after: set DAC0 to 900 mV (`DAC_SET`), read it back with
+`ADC_READ` (DAC0-to-ADC loopback if fitted) on the previous firmware and on
+this one; a meter on the DAC pad must agree with the new reading. Do not
+merge #59 before this passes.
 
 ---
 

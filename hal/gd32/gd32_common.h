@@ -225,13 +225,13 @@ _Static_assert(GPIO_PAD_CAN_STBY < GPIO_PAD_MAP_COUNT,
 /* Shared analog + timer constants.                                   */
 /* ----------------------------------------------------------------- */
 
-/* VREF for the ADC's right-aligned code -> millivolt conversion.
- * V2N's analog supply is 1.8 V (maintainer-confirmed against the
- * schematic).  This is the SOLE definition of that figure -- dac.c's
- * DAC_VREF_MV is `#define`d from this macro rather than repeating the
- * literal, so the ADC and DAC sides of the bridge cannot drift apart
- * on the reference voltage (they did once; alp-sdk-internal
- * gd32-bridge-firmware#59).  ADC_FULL_SCALE is the 12-bit default;
+/* Boot default / fallback VREF for the ADC's right-aligned code ->
+ * millivolt conversion.  V2N's analog supply is 1.8 V
+ * (maintainer-confirmed against the schematic).  The value actually used
+ * by every conversion is the runtime adc_vref_mv (block below), which
+ * starts at this default; dac.c aliases DAC_VREF_MV to adc_vref_mv so the
+ * ADC and DAC sides cannot drift apart (they did once;
+ * alp-sdk-internal gd32-bridge-firmware#59).  ADC_FULL_SCALE is the 12-bit default;
  * when a channel is reconfigured to a lower resolution via
  * bridge_hw_adc_configure the code range shrinks (10b -> 1023, 8b ->
  * 255, 6b -> 63), so the read paths divide by adc_full_scale_for_bits()
@@ -241,6 +241,24 @@ _Static_assert(GPIO_PAD_CAN_STBY < GPIO_PAD_MAP_COUNT,
  * normalises the accumulator), so full-scale tracks resolution alone. */
 #define ADC_VREF_MV    1800u
 #define ADC_FULL_SCALE 4095u
+
+/* Runtime ADC/DAC reference (gd32-bridge-firmware#59).  ADC_VREF_MV above
+ * is only the BOOT DEFAULT / fallback: adc_vref_measure() (adc.c) reads
+ * the internal VREFINT channel once at boot and derives the real
+ * reference from it, clamped to [ADC_VREF_MIN_MV, ADC_VREF_MAX_MV].
+ * Every code<->mV conversion (adc.c, adc_stream.c, dac.c) uses
+ * adc_vref_mv, never the macro.  Read-only diagnostic: SWD-read the
+ * `adc_vref_mv` symbol (uint16_t, mV) and `adc_vrefint_code` (uint16_t
+ * raw average VREFINT code, 0 = measurement failed).  The GD32G553 exposes NO factory
+ * VREFINT calibration word (only the temperature-sensor ones), so the
+ * derivation uses the datasheet-typical VREFINT figure below. */
+/* Datasheet-typical VREFINT, not yet checked against the datasheet table
+ * or silicon; its tolerance is the accuracy ceiling of the derived
+ * reference.  Cite the table here once verified (bench step in
+ * docs/BENCH.md 0.1). */
+#define ADC_VREFINT_TYP_MV 1200u
+#define ADC_VREF_MIN_MV    1700u
+#define ADC_VREF_MAX_MV    1900u
 
 /* Resolution + oversample bounds honoured by bridge_hw_adc_configure. */
 #define ADC_RES_BITS_DEFAULT     12u
@@ -425,15 +443,20 @@ extern bool                vref_ok;                              /* vref.c */
 
 bool trng_start(void);       /* trng.c */
 bool trng_poll_ready(void);  /* trng.c */
-bool vref_ready_check(void); /* vref.c */
+bool vref_ready_check(void); /* vref.c, ISR-safe: only notes a late lock */
+void vref_late_tick(void);   /* vref.c, base level: measure + publish vref_ok */
 /* Boot-only sequence: reset all converters, set the two shared clock domains
  * once (ADC0 covers ADC0/1/2; ADC3 covers itself), then initialise each
  * converter.  Request paths must use adc_periph_restore() instead so a
  * sibling stream never sees a shared-clock rewrite. */
-void adc_periph_boot_reset_all(void);       /* adc.c */
-void adc_shared_clock_init(void);           /* adc.c */
-bool adc_periph_boot_init(uint32_t periph); /* adc.c */
-bool adc_periph_restore(uint32_t periph);   /* adc.c */
+void            adc_periph_boot_reset_all(void);              /* adc.c */
+void            adc_shared_clock_init(void);                  /* adc.c */
+bool            adc_periph_boot_init(uint32_t periph);        /* adc.c */
+extern uint16_t adc_vrefint_code;                             /* adc.c */
+extern uint16_t adc_vref_mv;                                  /* adc.c */
+uint16_t        adc_vref_mv_from_code(uint32_t vrefint_code); /* adc.c, pure */
+bool            adc_vref_measure(void);              /* adc.c, boot / base level, ADC0 claimed */
+bool            adc_periph_restore(uint32_t periph); /* adc.c */
 
 /* Bounded RSTCLB/CLB calibration cycle (UM Rev1.2 17.4.1, p.424-425),
  * shared with the stream path: any ADCON toggle invalidates the

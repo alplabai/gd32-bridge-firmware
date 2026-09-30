@@ -651,7 +651,7 @@ void bridge_hw_init(void)
      * loopback then tracks 1:1 (DAC 2730 -> ADC 2730).  The reference
      * cancels ratiometrically in that loop, so correctness is
      * independent of the exact railed reference value; the absolute mV
-     * scale (ADC_VREF_MV / DAC_VREF_MV) tracks the railed VDDA.
+     * scale is measured from VREFINT below (adc_vref_mv).
      *
 	 * VREFRDY wait is BOUNDED (boot-time; the gh#54 SysTick is armed
 	 * only at the END of bridge_hw_init, after this block): a spin
@@ -675,7 +675,7 @@ void bridge_hw_init(void)
      * false and every ADC/DAC op answers IO instead of serving
      * garbage referenced to a dead node (the exact silent failure the
      * VREF bring-up exists to cure).  vref_ready_check() re-probes on
-     * each analog op, so a late lock self-promotes. */
+     * each analog op and vref_late_tick() promotes a late lock. */
 	vref_ok = (vref_status_get() == SET);
 
 	/* ADC bring-up: configure 8 pads as analog, enable all four ADC
@@ -706,6 +706,11 @@ void bridge_hw_init(void)
 	(void)adc_periph_boot_init(ADC1);
 	(void)adc_periph_boot_init(ADC2);
 	(void)adc_periph_boot_init(ADC3);
+	/* Derive the real ADC/DAC reference from VREFINT (#59); a failed
+	 * measurement keeps the 1.8 V default.  Skipped when the buffer never
+	 * locked (dead reference node); vref_late_tick() measures on a late
+	 * lock instead. */
+	if (vref_ok) (void)adc_vref_measure();
 	for (size_t i = 0; i < ADC_CHANNEL_MAP_COUNT; ++i) {
 		adc_sample_cycles_cache[i]    = ADC_DEFAULT_SAMPLE_CYCLES;
 		adc_resolution_bits_cache[i]  = ADC_RES_BITS_DEFAULT;
@@ -896,6 +901,7 @@ extern bool ota_trial_unconfirmed(void);
 void bridge_hw_tick(void)
 {
 	bridge_hw_dsp_pump();
+	vref_late_tick();
 	ota_erase_tick();
 	ota_confirm_tick();
 	bridge_transport_i2c_stuck_poll();
