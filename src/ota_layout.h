@@ -106,7 +106,7 @@ enum { OTA_SLOT_A = 0u, OTA_SLOT_B = 1u };
  * the later CONFIRM.  h_begin therefore refuses a record above OTA_META_BEGIN_MAX_COUNTER,
  * and tools/gen_ota_metadata.py caps --counter at that same value, so a BEGIN that is
  * accepted can always run through to its CONFIRM. */
-#define OTA_META_COUNTER_LIMIT 0xFFFFFFF0u
+#define OTA_META_COUNTER_LIMIT     0xFFFFFFF0u
 #define OTA_META_BEGIN_MAX_COUNTER (OTA_META_COUNTER_LIMIT - 3u)
 
 typedef struct {

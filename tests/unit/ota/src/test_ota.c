@@ -1645,7 +1645,8 @@ ZTEST(gd32_bridge_ota, test_meta_commit_refuses_counter_wrap)
 	reset_model();
 
 	const uint32_t len[2] = { 4096u, 4096u };
-	write_meta_record(OTA_META_REC0, OTA_META_BEGIN_MAX_COUNTER + 1u, TEST_RUNNING_SLOT, 0x03u, len);
+	write_meta_record(
+	    OTA_META_REC0, OTA_META_BEGIN_MAX_COUNTER + 1u, TEST_RUNNING_SLOT, 0x03u, len);
 
 	uint8_t req[8];
 	wr_u32(&req[0], 64u);
