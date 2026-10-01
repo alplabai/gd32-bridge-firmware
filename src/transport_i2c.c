@@ -64,6 +64,8 @@ static size_t  i2c_tx_cursor;
  * protocol doc.  Set when a read transaction comes in before any
  * matching write completed. */
 static bool pending_reply_valid;
+/* Set once a write's frame failed framing/CRC; cleared by write_start(). */
+static bool frame_rejected;
 
 /* Bench diagnostics for #315 (content-dependent write failure): plain
  * globals so a SWD mem_rd can read them by map address after a failed
@@ -114,6 +116,7 @@ void i2c_slave_write_start(void)
 	bridge_i2c_rx_diag.prev_rx_len = (uint16_t)i2c_rx_len;
 	i2c_rx_len                     = 0u;
 	pending_reply_valid            = false;
+	frame_rejected                 = false;
 }
 
 /* Call on a bus-error resync (BRIDGE_I2C_ER_HANDLER's bus_error arm):
@@ -148,7 +151,7 @@ void i2c_slave_rx_byte(uint8_t b)
  * staged in its place so the next read still gets a valid envelope). */
 bool i2c_slave_write_end(void)
 {
-	if (pending_reply_valid) {
+	if (pending_reply_valid || frame_rejected) {
 		/* Already decoded + dispatched for this addressed write.  The
 	     * EV ISR calls this function unconditionally from both the
 	     * repeated-START read arm and the STPDET arm (see the module
@@ -177,17 +180,23 @@ bool i2c_slave_write_end(void)
 	     * pattern forever instead of the documented STATUS_NO_PENDING
 	     * sentinel.  A reply that has only been PARTIALLY drained is
 	     * left alone (falls through to the plain no-op below) -- an
-	     * early-STOP mid-read is not the case this guards. */
-		if (i2c_tx_cursor >= i2c_tx_len) {
+	     * early-STOP mid-read is not the case this guards.  A rejected
+	     * write is the exception: its staged reply is always NO_PENDING,
+	     * so re-staging is harmless and heals a partly-drained tail. */
+		if (frame_rejected || i2c_tx_cursor >= i2c_tx_len) {
 			stage_no_pending();
 		}
-		return true;
+		return pending_reply_valid;
 	}
 
 	/* Smallest valid envelope: reg(1) + cmd(1) + 0-byte payload + crc(2). */
 	if (i2c_rx_len < 4u || i2c_rx_buf[0] != GD32_BRIDGE_I2C_REG_CMD) {
-		bridge_i2c_rx_diag.fail_rx_len = (uint16_t)i2c_rx_len;
-		bridge_i2c_rx_diag.fail_count++;
+		/* rx_len == 0 is a bare read poll, not a failed write. */
+		if (i2c_rx_len != 0u) {
+			bridge_i2c_rx_diag.fail_rx_len = (uint16_t)i2c_rx_len;
+			bridge_i2c_rx_diag.fail_count++;
+		}
+		frame_rejected = true;
 		stage_no_pending();
 		return false;
 	}
@@ -201,6 +210,7 @@ bool i2c_slave_write_end(void)
 		bridge_i2c_rx_diag.fail_got_crc    = got_crc;
 		bridge_i2c_rx_diag.fail_expect_crc = expect_crc;
 		bridge_i2c_rx_diag.fail_count++;
+		frame_rejected = true;
 		stage_no_pending();
 		return false;
 	}
@@ -239,6 +249,7 @@ void transport_i2c_init(void)
 	i2c_tx_len          = 0u;
 	i2c_tx_cursor       = 0u;
 	pending_reply_valid = false;
+	frame_rejected      = false;
 	/* I2C0 slave bring-up (PA15/PB9, addr GD32_BRIDGE_DEFAULT_I2C_ADDR)
      * lives in the gd32 HAL backend (hal/transport_hw_gd32.c); the stub
      * backend's weak no-op keeps this hardware-free for host tests.

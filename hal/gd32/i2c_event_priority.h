@@ -22,7 +22,10 @@ typedef enum {
 /* Selects the one event this ISR invocation services.  RBNE comes first:
  * on a combined write/repeated-START read, the final write byte can remain
  * pending at the same time as ADDSEND.  It must enter the framing seam before
- * ADDSEND calls i2c_slave_write_end(). */
+ * ADDSEND calls i2c_slave_write_end().  STPDET then outranks ADDSEND: an
+ * unserviced STOP is always older than a pending address match (ADDSEND
+ * stretches SCL, so no STOP can follow it), and servicing it after the
+ * read arm would disable TI and flush TBE on a read that just started. */
 bridge_i2c_event_t bridge_i2c_event_select(bool rbne, bool addsend, bool stpdet, bool ti);
 
 #endif /* GD32_BRIDGE_HAL_GD32_I2C_EVENT_PRIORITY_H */

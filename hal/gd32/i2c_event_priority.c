@@ -8,8 +8,8 @@
 bridge_i2c_event_t bridge_i2c_event_select(bool rbne, bool addsend, bool stpdet, bool ti)
 {
 	if (rbne) return BRIDGE_I2C_EVENT_RBNE;
-	if (addsend) return BRIDGE_I2C_EVENT_ADDSEND;
 	if (stpdet) return BRIDGE_I2C_EVENT_STPDET;
+	if (addsend) return BRIDGE_I2C_EVENT_ADDSEND;
 	if (ti) return BRIDGE_I2C_EVENT_TI;
 	return BRIDGE_I2C_EVENT_NONE;
 }
