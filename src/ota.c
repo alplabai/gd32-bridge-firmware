@@ -459,6 +459,16 @@ static bool meta_commit(uint8_t  active_slot,
 		}
 	}
 
+	/* Refuse before erasing: a u32 wrap to 0 would rank the new record BELOW the old
+	 * one (bootloader compares a->counter >= b->counter, not field-updatable), so the
+	 * part would boot the old image.  A TRIAL-setting write (flags != 0) must leave one
+	 * increment for the confirm write that clears TRIAL, so it refuses one step earlier;
+	 * the confirm itself may land up to OTA_META_COUNTER_LIMIT.  Same ceiling
+	 * gen_ota_metadata.py enforces. */
+	if (rec.counter >= (flags != 0u ? OTA_META_COUNTER_LIMIT - 1u : OTA_META_COUNTER_LIMIT)) {
+		return false;
+	}
+
 	if (ota_fmc_erase_range(target, OTA_PAGE_SIZE) != OTA_FMC_RESULT_OK) {
 		return false;
 	}
@@ -745,6 +755,12 @@ h_begin(const uint8_t *req, size_t len, uint8_t *reply, size_t cap, size_t *rlen
 		ota_meta_record_t cur;
 		uint32_t          which = 0u;
 		if (meta_current(&cur, &which)) {
+			/* Counter headroom: BEGIN demotion + COMMIT (TRIAL) + CONFIRM are three
+			 * increments; refuse up front rather than strand the cycle at COMMIT. */
+			if (cur.counter > OTA_META_BEGIN_MAX_COUNTER) {
+				ota_session_reject(BRIDGE_OTA_ERR_META_DEMOTE_FAILED);
+				return STATUS_IO;
+			}
 			/* #266: refuse at the state machine, not the funnel.  A BEGIN
 			 * landing while a PREVIOUS session's base-level
 			 * ota_erase_tick() still owns the FMC funnel would otherwise

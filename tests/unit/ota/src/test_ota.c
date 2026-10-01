@@ -1635,6 +1635,71 @@ ZTEST(gd32_bridge_ota, test_meta_commit_tie_break_preserves_newest_both_running)
 	zassert_equal(rec1.counter, 6u, "REC1 (lower counter) was rewritten by BEGIN's gh#36 commit");
 }
 
+/* A full OTA spends three counter increments: BEGIN's demotion commit (h_begin writes
+ * one whenever a valid record exists, regardless of the inactive slot's own state),
+ * COMMIT (TRIAL) and the later CONFIRM.  Above OTA_META_BEGIN_MAX_COUNTER BEGIN must
+ * refuse (STATUS_IO) and leave the flash untouched, rather than burn a step and strand
+ * the cycle at COMMIT; a wrap would rank the new record below the old one. */
+ZTEST(gd32_bridge_ota, test_meta_commit_refuses_counter_wrap)
+{
+	reset_model();
+
+	const uint32_t len[2] = { 4096u, 4096u };
+	write_meta_record(
+	    OTA_META_REC0, OTA_META_BEGIN_MAX_COUNTER + 1u, TEST_RUNNING_SLOT, 0x03u, len);
+
+	uint8_t req[8];
+	wr_u32(&req[0], 64u);
+	wr_u32(&req[4], 0u);
+	uint8_t reply[8];
+	size_t  rlen = 0u;
+	zassert_equal(ota_dispatch(CMD_OTA_BEGIN, req, sizeof(req), reply, sizeof(reply), &rlen),
+	              STATUS_IO,
+	              "BEGIN must refuse when BEGIN+COMMIT+CONFIRM cannot all increment");
+
+	ota_meta_record_t rec;
+	zassert_true(read_meta_at(OTA_META_REC0, &rec), "refusal must not erase a page");
+	zassert_equal(rec.counter, OTA_META_BEGIN_MAX_COUNTER + 1u, "REC0 must be untouched");
+	zassert_false(read_meta_at(OTA_META_REC1, &rec), "refusal must not write the other page");
+}
+
+/* Walk the counter to the ceiling through BEGIN -> COMMIT (TRIAL) -> CONFIRM.  From
+ * OTA_META_BEGIN_MAX_COUNTER (0xFFFFFFED): BEGIN demotes to 0xFFFFFFEE on the OTHER
+ * page, COMMIT lands TRIAL at 0xFFFFFFEF, CONFIRM lands 0xFFFFFFF0 (the limit). */
+ZTEST(gd32_bridge_ota, test_trial_commit_leaves_room_for_confirm)
+{
+	reset_model();
+
+	const uint32_t len[2] = { 4096u, 4096u };
+	write_meta_record(OTA_META_REC0, OTA_META_BEGIN_MAX_COUNTER, TEST_RUNNING_SLOT, 0x03u, len);
+	drive_to_verified();
+
+	ota_meta_record_t rec;
+	zassert_true(read_meta_at(OTA_META_REC1, &rec), "BEGIN's demotion writes the other page");
+	zassert_equal(rec.counter, 0xFFFFFFEEu, "BEGIN consumes one step");
+
+	uint8_t reply[8];
+	size_t  rlen = 0u;
+	zassert_equal(ota_dispatch(CMD_OTA_COMMIT, NULL, 0u, reply, sizeof(reply), &rlen),
+	              STATUS_OK,
+	              "TRIAL COMMIT must fit under the limit");
+	zassert_true(read_meta_at(OTA_META_REC0, &rec), "COMMIT lands on the page BEGIN left older");
+	zassert_equal(rec.counter, 0xFFFFFFEFu, "COMMIT consumes one step");
+	zassert_true((rec.flags & OTA_META_FLAG_TRIAL) != 0u, "COMMIT is a TRIAL record");
+
+	/* Reboot into the candidate: the committed record, as the running slot sees it. */
+	reset_model();
+	write_meta_record_flags(
+	    OTA_META_REC0, 0xFFFFFFEFu, TEST_RUNNING_SLOT, 0x03u, len, OTA_META_FLAG_TRIAL);
+	ota_boot_init();
+	ota_note_frame();
+	ota_confirm_tick();
+	zassert_equal(g_reset_calls, 1u, "confirm must land at the limit");
+	zassert_true(read_meta_at(OTA_META_REC0, &rec), "CONFIRM rewrites the TRIAL record's own page");
+	zassert_equal(rec.counter, OTA_META_COUNTER_LIMIT, "CONFIRM consumes the last step");
+	zassert_equal(rec.flags, 0u, "CONFIRM clears TRIAL");
+}
+
 /* Case 5: neither record names the running slot (both name
  * TEST_OTHER_SLOT, equal rank) -- the deliberate degradation to today's
  * preserve-newest behaviour when the running-slot proxy can't

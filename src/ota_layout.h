@@ -99,6 +99,16 @@ enum { OTA_SLOT_A = 0u, OTA_SLOT_B = 1u };
  * instead of repeating the bench incident. */
 #define OTA_META_FLAG_TRIAL 0x01u
 
+/* meta_commit refuses to increment a record at or above this counter (one step earlier
+ * for a TRIAL-setting write, which must leave room for its confirm), so it can never
+ * wrap (a wrap ranks below the old record).  A full OTA cycle spends THREE increments:
+ * BEGIN's demotion commit (h_begin, whenever a valid record exists), COMMIT (TRIAL) and
+ * the later CONFIRM.  h_begin therefore refuses a record above OTA_META_BEGIN_MAX_COUNTER,
+ * and tools/gen_ota_metadata.py caps --counter at that same value, so a BEGIN that is
+ * accepted can always run through to its CONFIRM. */
+#define OTA_META_COUNTER_LIMIT     0xFFFFFFF0u
+#define OTA_META_BEGIN_MAX_COUNTER (OTA_META_COUNTER_LIMIT - 3u)
+
 typedef struct {
 	uint32_t magic;          /* OTA_META_MAGIC */
 	uint32_t struct_version; /* OTA_META_STRUCT_VER */

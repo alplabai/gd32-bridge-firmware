@@ -196,6 +196,15 @@ class CliExitStatus(unittest.TestCase):
         self.assertEqual(proc.returncode, 2)
         self.assertFalse(out_path.exists())
 
+    def test_counter_above_wrap_ceiling_exits_two(self) -> None:
+        # Past 0xFFFFFFED there is no room for BEGIN's demotion, the TRIAL commit and its confirm.
+        img = _image(GOOD_MSP, GOOD_RESET, pad_to=64)
+        proc, out_path = self._run(img, extra_args=["--counter", "0xFFFFFFEE"])
+        self.assertEqual(proc.returncode, 2)
+        self.assertFalse(out_path.exists())
+        proc, out_path = self._run(img, extra_args=["--counter", "0xFFFFFFED"])
+        self.assertEqual(proc.returncode, 0)
+
     def test_fw_version_above_u24_exits_two(self) -> None:
         # maj<<24 packing would set a floor no OTA_COMMIT can reach (#49).
         proc, out_path = self._run(_image(GOOD_MSP, GOOD_RESET, pad_to=64),
