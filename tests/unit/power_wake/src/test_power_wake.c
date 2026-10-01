@@ -135,6 +135,17 @@ ZTEST(power_wake, test_deep_sleep_wake_order_and_timer_stop)
 	zassert_equal(mock_i2c_enables, 0u, "no back-out on a clean entry");
 }
 
+/* Let a pending relock succeed and its I2C re-init run, so the file-static
+ * latch in power.c does not leak into the next test. */
+static void drain_pending_relock(void)
+{
+	mock_i2c_init_rc = BRIDGE_HW_OK;
+	RCU_CTL          = RCU_CTL_PLLSTB;
+	RCU_CFG0         = RCU_SCSS_PLLP;
+	for (unsigned i = 0u; i < 8u; i++)
+		bridge_power_tick();
+}
+
 /* Relock failure: the part stays on IRC8M, the I2C re-init refuses; the failure is
  * recorded and retried on later ticks, and the request is still consumed. */
 ZTEST(power_wake, test_deep_sleep_wake_with_failed_relock_and_i2c_reinit_retries)
@@ -162,6 +173,47 @@ ZTEST(power_wake, test_deep_sleep_wake_with_failed_relock_and_i2c_reinit_retries
 	zassert_equal(bridge_i2c_reinit_pending, 0u, "recovered");
 	bridge_power_tick();
 	zassert_equal(mock_i2c_inits, inits + 2u, "no further retries once recovered");
+	drain_pending_relock();
+}
+
+/* A wake that never locks latches the relock: retried sparsely while it keeps
+ * failing, and once it holds the I2C0 is disabled and re-initialised in the
+ * same tick. */
+ZTEST(power_wake, test_failed_relock_is_retried_then_arms_i2c_reinit)
+{
+	extern volatile uint8_t bridge_i2c_reinit_pending;
+
+	mock_power_reset();
+	RCU_CTL                        = 0u; /* PLLSTB never sets */
+	RCU_CFG0                       = 0u;
+	SystemCoreClock                = 8000000u;
+	mock_system_core_clock_updates = 0u;
+	zassert_equal(bridge_hw_power_mode_set(2u, 0u, 100u), BRIDGE_HW_OK);
+	bridge_power_tick();
+	zassert_equal(mock_system_core_clock_updates, 1u, "the wake itself relocks once");
+
+	bridge_power_tick();
+	zassert_equal(mock_system_core_clock_updates, 2u, "first retry on the next tick");
+	for (unsigned i = 0u; i < 7u; i++)
+		bridge_power_tick();
+	zassert_equal(mock_system_core_clock_updates, 2u, "backed off between retries");
+	bridge_power_tick();
+	zassert_equal(mock_system_core_clock_updates, 3u, "latched while the PLL stays dead");
+
+	RCU_CTL           = RCU_CTL_PLLSTB;
+	RCU_CFG0          = RCU_SCSS_PLLP;
+	uint32_t inits    = mock_i2c_inits;
+	uint32_t disables = mock_i2c_disables;
+	for (unsigned i = 0u; i < 7u; i++)
+		bridge_power_tick();
+	zassert_equal(mock_system_core_clock_updates, 3u, "still backed off");
+	bridge_power_tick();
+	zassert_equal(mock_system_core_clock_updates, 4u, "retry succeeds");
+	zassert_equal(mock_i2c_disables, disables + 1u, "I2C0 disabled before the re-init");
+	zassert_equal(mock_i2c_inits, inits + 1u, "re-init in the same tick");
+	zassert_equal(bridge_i2c_reinit_pending, 0u);
+	bridge_power_tick();
+	zassert_equal(mock_system_core_clock_updates, 4u, "latch cleared");
 }
 
 ZTEST(power_wake, test_deep_sleep_rtc_bit_without_time_refused_under_dpslp_cap)
@@ -392,6 +444,8 @@ ZTEST(power_wake, test_clock_restore_bounded_when_pll_never_locks)
 	zassert_equal(mock_system_core_clock_updates, 1u);
 	zassert_equal(bridge_core_clock_hz, 8000000u);
 	zassert_false(bridge_core_clock_matches);
+	/* 50 ms at 8 MHz, not the boot-clock reload that would outlast FWDGT. */
+	zassert_equal(SysTick->LOAD, 8000000u / 20u - 1u);
 }
 
 /* PLL locks but SCSS never reports PLLP: the switch must be backed out
