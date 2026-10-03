@@ -52,10 +52,11 @@
 /* mode), pwm_channels[] (hal/gd32/pwm.c: PA11, PB1, PB14, PC5, PC10, */
 /* PC11, PC12, PD0, AF mode), qenc_map[] (hal/gd32/qenc.c: PA0, PB3,  */
 /* PC6, PC7, PB6, PB7, PB2, PA1, AF mode).  None overlap today (bits  */
-/* 18/19 below, PE14/PE15, bit 20, PB13, and bits 21/22, PB4/PC2, checked too).  All       */
-/* five tables ARE visible together at compile time -- gd32_common.h  */
-/* externs each one and init.c includes it -- so TU visibility is not */
-/* why a C _Static_assert can't do this cross-check.  The real reason */
+/* 18/19 below, PE14/PE15, bit 20, PB13, and bits 21/22, PB4/PC2,    */
+/* checked too).  All five tables ARE visible together at compile    */
+/* time -- gd32_common.h externs each one and init.c includes it --   */
+/* so TU visibility is not why a C _Static_assert can't do this      */
+/* cross-check.  The real reason */
 /* is that a _Static_assert condition must be an integer constant     */
 /* expression, and subscripting a `const`-qualified array object --   */
 /* gpio_pad_map[i] et al -- is not one in C, visible or not; a        */
@@ -117,7 +118,8 @@ const gd32_gpio_pad_t gpio_pad_map[] = {
 	 * CMD_GPIO_WRITE. */
 	{ GPIOB, GPIO_PIN_13 }, /* bit 20 = CAN_STBY */
 	/* E1M pads added after the sideband block, so no earlier bit moves.
-	 * Both boot parked (analog), like every other E1M pad. */
+	 * Both boot parked (analog), like every other E1M pad -- PB4 is
+	 * parked explicitly in init.c because it resets as JTAG NJTRST. */
 	{ GPIOB, GPIO_PIN_4 }, /* bit 21 = E1M IO15 */
 	{ GPIOC, GPIO_PIN_2 }, /* bit 22 = E1M IO26 */
 };

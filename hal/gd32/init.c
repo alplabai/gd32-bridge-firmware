@@ -485,7 +485,10 @@ void bridge_hw_init(void)
 	/* Pad map parking (gh#66): leave every entry in `gpio_pad_map`
 	 * at its CTLy = 0b11 ANALOG reset state -- input buffer and both
 	 * pull resistors disabled (UM Rev1.2 p.270 §7.3.7), which is what
-	 * all twenty-three pads already reset to (p.275).  The old INPUT +
+	 * twenty-two of the twenty-three pads already reset to (p.275);
+	 * PB4 (bit 21) is parked explicitly below because on GD32 parts
+	 * it resets as the JTAG NJTRST pin (AF + pull-up), not analog.
+	 * The old INPUT +
 	 * PULL_UP park sank 1.8 V / 40 kΩ = 45 µA per pad continuously
 	 * from boot into every pad a carrier holds LOW (Datasheet
 	 * Rev2.0 p.128 Table 4-28: RPU = 40 kΩ, "value guaranteed by
@@ -520,6 +523,14 @@ void bridge_hw_init(void)
 	for (size_t i = 0; i < GPIO_PAD_MAP_COUNT; ++i) {
 		gpio_is_output[i] = false;
 	}
+
+	/* PB4 (bit 21, E1M IO15): unlike the other pads it is not analog at
+	 * reset -- the JTAG NJTRST function is selected with an internal
+	 * pull-up.  Park it analog / no pull so it is a plain high-Z pad
+	 * like the rest (the carrier's own pull owns the level) and the
+	 * JTAG reset function is off.  Debug here is SWD only (PA13/PA14),
+	 * which this does not touch. */
+	gpio_mode_set(GPIOB, GPIO_MODE_ANALOG, GPIO_PUPD_NONE, GPIO_PIN_4);
 
 	/* Murata LBEE5HY2FY-922 Wi-Fi/BT REG_ON lines (bits 18/19): boot
      * OUTPUT driven LOW = module OFF.  Power policy belongs to the

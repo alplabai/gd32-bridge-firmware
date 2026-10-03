@@ -229,6 +229,10 @@ repeating it:
 |  21 | PB4      | E1M IO15    |
 |  22 | PC2      | E1M IO26    |
 
+Bit 21 (`PB4`) is the JTAG NJTRST pin at reset on GD32 parts (AF mode with
+a pull-up), so `bridge_hw_init` parks it analog / no pull at boot; debug
+access on this board is SWD only.
+
 Bits 8/9 (`PC14`/`PC15`, E1M IO24/IO25) are not ordinary pads: they are
 supplied through the backup-domain power switch together with SE_RST
 (`PC13`, the OPTIGA Trust M reset line), sharing a typical 3 mA source
