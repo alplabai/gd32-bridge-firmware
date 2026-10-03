@@ -485,7 +485,7 @@ void bridge_hw_init(void)
 	/* Pad map parking (gh#66): leave every entry in `gpio_pad_map`
 	 * at its CTLy = 0b11 ANALOG reset state -- input buffer and both
 	 * pull resistors disabled (UM Rev1.2 p.270 §7.3.7), which is what
-	 * all twenty-one pads already reset to (p.275).  The old INPUT +
+	 * all twenty-three pads already reset to (p.275).  The old INPUT +
 	 * PULL_UP park sank 1.8 V / 40 kΩ = 45 µA per pad continuously
 	 * from boot into every pad a carrier holds LOW (Datasheet
 	 * Rev2.0 p.128 Table 4-28: RPU = 40 kΩ, "value guaranteed by

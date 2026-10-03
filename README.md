@@ -182,7 +182,7 @@ ADC and encoder maps in `hal/gd32/adc.c` (`adc_channels_map[]`) and
 Host code reaches a channel by its logical id; the firmware
 translates internally.
 
-`gpio_pad_map[]` is 21 entries: 18 E1M IO pads (bits 0-17) plus three
+`gpio_pad_map[]` is 23 entries: 20 E1M IO pads (bits 0-17, 21, 22) plus three
 sideband bits (18, 19, 20) that are not E1M pads at all -- `BT_REG_ON`
 (GD32 `PE14`) and `WL_REG_ON` (GD32 `PE15`), the Murata
 LBEE5HY2FY-922 Wi-Fi/BT module's power enables, and `CAN_STBY` (GD32
@@ -216,7 +216,7 @@ repeating it:
 |   8 | PC14     | E1M IO24    |
 |   9 | PC15     | E1M IO25    |
 |  10 | PB11     | E1M IO27    |
-|  11 | PC2      | E1M IO28    |
+|  11 | PE9      | E1M IO28    |
 |  12 | PD11     | E1M IO29    |
 |  13 | PD10     | E1M IO30    |
 |  14 | PE12     | E1M IO31    |
@@ -226,6 +226,8 @@ repeating it:
 |  18 | PE14     | BT_REG_ON   |
 |  19 | PE15     | WL_REG_ON   |
 |  20 | PB13     | CAN_STBY    |
+|  21 | PB4      | E1M IO15    |
+|  22 | PC2      | E1M IO26    |
 
 Bits 8/9 (`PC14`/`PC15`, E1M IO24/IO25) are not ordinary pads: they are
 supplied through the backup-domain power switch together with SE_RST
@@ -252,6 +254,10 @@ yet); firmware v0.12 and earlier do the same for bit 20. A host
 relying on bits 18/19 must require `PROTOCOL_VERSION_MINOR >= 11`,
 and on bit 20 must require `PROTOCOL_VERSION_MINOR >= 13` (both via
 `GET_VERSION`), before trusting that the write actually took effect.
+Bits 21/22 (E1M IO15/IO26) likewise need `PROTOCOL_VERSION_MINOR >= 15`;
+older firmware ignores them and still returns `STATUS_OK`. Like the other
+E1M pads they have no boot-time drive; the first host read/write promotes
+them. `PC14` (bit 8) is untouched and `LXTAL` stays disabled.
 
 ## Cross-link
 

@@ -56,7 +56,11 @@
  * the wire; the reply already decodes by opcode) -- an older host that
  * only reads the first 5 bytes keeps working unchanged, so this is a
  * MINOR bump ("adding an opcode/payload field = MINOR"), not MAJOR. */
-#define PROTOCOL_VERSION_MINOR 14u
+/* v0.15: the GPIO mask grew from 21 to 23 bits -- bit 21 is E1M IO15
+ * (GD32 PB4), bit 22 is E1M IO26 (GD32 PC2).  Hosts relying on bits
+ * 21/22 must require MINOR >= 15; older firmware ignores them and
+ * still answers STATUS_OK. */
+#define PROTOCOL_VERSION_MINOR 15u
 #define PROTOCOL_VERSION_PATCH 0u
 
 /* v0.7: opt-in link features negotiated via CMD_LINK_FEATURES.
@@ -127,7 +131,10 @@ typedef enum {
      * v0.13: grew again, 20 to 21 bits -- bit 20 is CAN_STBY, the
      * shared standby line for the two on-module TCAN1044 CAN-FD
      * transceivers (sideband, not an E1M pad; GPIO_PAD_CAN_STBY).
-     * Hosts relying on bit 20 must require MINOR >= 13. */
+     * Hosts relying on bit 20 must require MINOR >= 13.
+     * v0.15: grew again, 21 to 23 bits -- bits 21/22 are E1M IO15
+     * (PB4) and IO26 (PC2).  Hosts relying on them must require
+     * MINOR >= 15. */
 	CMD_PWM_SET = 0x20,
 	CMD_PWM_GET = 0x21,
 	/* v0.3: sticky per-channel PWM tuning (align mode, dead time, fault
