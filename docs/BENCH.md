@@ -1138,9 +1138,10 @@ new frequency (8 MHz x108 -> 24.576 MHz would be ~664 MHz).
    PASS = no switch, `bridge_clock_source` = 0, `bridge_clock_fallback` = 6 (or 2
    for 32.768 kHz, where `HXTALSTB` does not set), SYSCLK never left the IRC8M
    PLL (probe a PWM period before and after: unchanged). Do NOT feed 25 MHz as a
-   test: it is refused unless the IRC8M is more than 1.4% fast (see README). Also confirm TIMER14 is idle again (`RCU_APB2EN.TIMER14EN` clear)
+   test: it is refused unless the IRC8M is more than 0.7% fast (see README); SE2 may only be
+   programmed by the alp-sdk U-Boot fixup. Also confirm TIMER14 is idle again (`RCU_APB2EN.TIMER14EN` clear)
    after every attempt. If a good 24.576 MHz clock always reports 6, either the
-   unit IRC8M is more than ~1% off (the -1% / +0.3% band refuses a slow IRC8M by design) or the
+   unit IRC8M is more than ~1% off (the +-1% band refuses an IRC8M further off than that by design) or the
    HXTAL/32 -> TIMER14 routing needs a closer look: it is taken from the vendor
    header and has not run on silicon.
 5. **OSCOUT stays a GPIO.** With HXTAL up, drive E1M IO13 (PF1) high and low with
@@ -1186,7 +1187,8 @@ new frequency (8 MHz x108 -> 24.576 MHz would be ~664 MHz).
 **What the firmware cannot catch.** A frequency that changes after the switch
 (the clock monitor only sees a stop), and an SE2 frequency that falls inside the
 acceptance band of a table entry (25 MHz is taken for 24.576 MHz when the IRC8M
-is more than 1.4% fast; it must never be fed). The frequency check itself replaces the earlier "cannot measure it"
+is more than 0.7% fast; it must never be fed, and SE2 must only ever be programmed by
+the alp-sdk U-Boot fixup). The frequency check itself replaces the earlier "cannot measure it"
 limit: it counts HXTAL/32 against the IRC8M-derived core clock (accuracy of that
 reference is the datasheet IRC8M tolerance, to be confirmed). The `RTC_BKP9`
 marker only helps if a misclock faults or resets AND the backup domain survives.

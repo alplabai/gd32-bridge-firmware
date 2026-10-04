@@ -184,7 +184,7 @@ The sequence (`clock_hw.c`, sequencing in `clock_source.c`):
 | 12 MHz | 375 kHz | /3 (2) | 108 | 4 MHz | 432 MHz | 216 MHz | +-3% |
 | 16 MHz | 500 kHz | /4 (3) | 108 | 4 MHz | 432 MHz | 216 MHz | +-3% |
 | 20 MHz | 625 kHz | /5 (4) | 108 | 4 MHz | 432 MHz | 216 MHz | +-3% |
-| 24.576 MHz | 768 kHz | /6 (5) | 105 | 4.096 MHz | 430.08 MHz | 215.04 MHz (-0.44%) | -1% / +0.3% |
+| 24.576 MHz | 768 kHz | /6 (5) | 105 | 4.096 MHz | 430.08 MHz | 215.04 MHz (-0.44%) | +-1% |
 
 PLLP is /2 (field 0) throughout. There is no 24.000 MHz entry (no board feeds
 it). Every tuple stays at (or, for 24.576 MHz, next to) the IRC8M path proven
@@ -198,18 +198,19 @@ band has to hold the IRC8M own error plus quantisation (<= 0.2%). The IRC8M
 datasheet figure is not in this tree and must be checked, so the bands are a
 safety choice, not a measurement. The band is on the HXTAL/32 COUNT: a fast
 IRC8M gives a LOW count and a slow one a HIGH count. 24.576 MHz, the only real
-source, is asymmetric, -1% / +0.3%: an IRC8M up to 1% fast is tolerated, one
-more than 0.3% slow is refused (`FB_HXTAL_FREQ`, stays on IRC8M; the safe
-direction, at the cost of never switching on such a unit). The unused
+source, is +-1%: an IRC8M within 1% either way switches, one further off
+refuses (`FB_HXTAL_FREQ`, stays on IRC8M; the safe direction). The unused
 8/12/16/20 MHz entries keep +-3%. The bands do not overlap (closest pair, 20 and
 24.576 MHz, is 23% apart), so a match is unambiguous.
 
 **25 MHz must never be fed.** It has no tuple (it needs PLLPSC * PLLP to be a
 multiple of 25) and is 1.7% above 24.576 MHz. With a true timebase it is
-refused; it takes an IRC8M that is MORE THAN 1.4% FAST to pull it into the
--1% / +0.3% band, and it would then be taken for 24.576 MHz (SYSCLK 218.75 MHz,
-+1.3% over 216). The part cannot prevent that, because the only reference is
-the IRC8M.
+refused; it takes an IRC8M that is MORE THAN 0.7% FAST to pull it into the +-1%
+band, and it would then be taken for 24.576 MHz (SYSCLK 218.75 MHz, +1.3% over
+216). The part cannot prevent that, because the only reference is the IRC8M, so
+SE2 must only ever be programmed by the alp-sdk U-Boot fixup (DIV4 route,
+24.576 MHz; the next build burns the same setting into the OTP): no other path
+may write the clock generator.
 
 **SYSCLK is not always 216 MHz.** Everything derives from the live clock:
 `SystemCoreClock` comes from `bridge_clock_core_update()` (the vendor

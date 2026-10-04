@@ -77,7 +77,7 @@ typedef enum {
  * PLLP in {2,4,6,8}) and MUST NEVER BE FED.  It is 1.7% above 24.576 MHz, so
  * whether it is refused depends on the IRC8M timebase error e: with the +-1%
  * band it passes as 24.576 MHz (SYSCLK 218.75 MHz, +1.3% over 216) only when
- * the IRC8M reads 0.7% to 2.7% fast, and is refused otherwise.  The IRC8M
+ * the IRC8M reads more than 0.7% fast, and is refused otherwise.  The IRC8M
  * datasheet tolerance is not in this tree, so this cannot be made absolute.
  * A 32.768 kHz OSCIN (the SE2 free-run default) never matches: HXTAL/32 =
  * 1.024 kHz is ~2 counts in the window, and HXTALSTB normally does not set
@@ -121,17 +121,18 @@ const bridge_clock_ref_t *bridge_clock_ref_for(uint32_t in_hz);
  * side of the band absorbs a fast IRC8M and the high side a slow one.  The
  * IRC8M datasheet figure is NOT in this tree and must be checked; the bands are
  * a safety choice, not a measurement.
- *  - 24.576 MHz (the only source on real boards) is asymmetric, -1% / +0.3%:
- *    an IRC8M up to 1% fast is tolerated, one more than 0.3% slow is refused
- *    (FB_HXTAL_FREQ, stay on IRC8M: the safe direction, at the cost of never
- *    switching on such a unit).  25 MHz (+1.7%, no tuple, must never be fed)
- *    then needs an IRC8M more than 1.4% fast to be taken for 24.576 MHz.
+ *  - 24.576 MHz (the only source on real boards) is symmetric, +-1%: an IRC8M
+ *    within 1% either way switches, one further off is refused (FB_HXTAL_FREQ,
+ *    stay on IRC8M: the safe direction).  25 MHz (+1.7%, no tuple) needs an IRC8M
+ *    more than 0.7% fast to be taken for 24.576 MHz.  25 MHz cannot come from any
+ *    alp-sdk path: SE2 is only ever programmed by the alp-sdk U-Boot fixup
+ *    (DIV4 route, 24.576 MHz), and it must never be fed.
  *  - 8/12/16/20 MHz (exact 216, no board feeds them) keep +-3%.
  *  - A true OSCIN deviation of up to band + IRC8M error can pass, so the core
  *    can run that much above its nominal SYSCLK in the worst case.
  * SystemCoreClock is derived from the CLASSIFIED reference. */
 #define BRIDGE_CLOCK_BAND_24P576_LO_PERMILLE 10u
-#define BRIDGE_CLOCK_BAND_24P576_HI_PERMILLE 3u
+#define BRIDGE_CLOCK_BAND_24P576_HI_PERMILLE 10u
 #define BRIDGE_CLOCK_BAND_OTHER_PERMILLE     30u
 
 /* Every HXTAL/PLL wait is bounded by TIME (DWT CYCCNT against the live core

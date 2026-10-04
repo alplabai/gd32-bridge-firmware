@@ -163,13 +163,12 @@ ZTEST(gd32_bridge_clock_source, test_other_references_have_a_three_percent_band)
 	zassert_equal(classify_hz(16000000u, 40), 0u);
 }
 
-ZTEST(gd32_bridge_clock_source, test_24p576_band_is_minus_1_plus_0p3_percent_on_the_count)
+ZTEST(gd32_bridge_clock_source, test_24p576_band_is_plus_minus_one_percent)
 {
-	/* counts LOW (a fast IRC8M) up to 1%, counts HIGH (a slow IRC8M) only 0.3% */
-	zassert_equal(classify_hz(24576000u, -9), BRIDGE_CLOCK_IN_24P576, "-0.9%");
+	zassert_equal(classify_hz(24576000u, -9), BRIDGE_CLOCK_IN_24P576, "-0.9% (fast IRC8M)");
+	zassert_equal(classify_hz(24576000u, 9), BRIDGE_CLOCK_IN_24P576, "+0.9% (slow IRC8M)");
 	zassert_equal(classify_hz(24576000u, -12), 0u, "-1.2% refused");
-	zassert_equal(classify_hz(24576000u, 2), BRIDGE_CLOCK_IN_24P576, "+0.2%");
-	zassert_equal(classify_hz(24576000u, 5), 0u, "+0.5% refused (a slow IRC8M never switches)");
+	zassert_equal(classify_hz(24576000u, 12), 0u, "+1.2% refused");
 }
 
 ZTEST(gd32_bridge_clock_source, test_unsupported_and_dead_clocks_are_refused)
@@ -192,13 +191,14 @@ ZTEST(gd32_bridge_clock_source, test_no_24mhz_entry_and_25mhz_is_refused_with_a_
 	zassert_true(bridge_clock_ref_for(25000000u) == NULL, "no tuple");
 }
 
-/* 25 MHz is +1.7% on the count: it needs an IRC8M more than 1.4% FAST (counts
- * low by that much) to land inside -1% / +0.3%.  25 MHz must never be fed. */
-ZTEST(gd32_bridge_clock_source, test_25mhz_aliases_only_when_the_irc8m_is_fast_by_over_1p4_percent)
+/* 25 MHz is +1.7% on the count: it needs an IRC8M more than 0.7% FAST (counts
+ * low by that much) to land inside +-1%.  25 MHz must never be fed (SE2 is only
+ * programmed by the alp-sdk U-Boot fixup). */
+ZTEST(gd32_bridge_clock_source, test_25mhz_aliases_only_when_the_irc8m_is_fast_by_over_0p7_percent)
 {
-	zassert_equal(classify_hz(25000000u, -10), 0u, "1.0% fast: 25 MHz reads +0.7%, refused");
-	zassert_equal(classify_hz(25000000u, -13), 0u, "1.3% fast: +0.4%, refused");
-	zassert_equal(classify_hz(25000000u, -15), BRIDGE_CLOCK_IN_24P576, "1.5% fast: +0.2%");
+	zassert_equal(classify_hz(25000000u, 0), 0u);
+	zassert_equal(classify_hz(25000000u, -5), 0u, "0.5% fast: 25 MHz reads +1.2%, refused");
+	zassert_equal(classify_hz(25000000u, -8), BRIDGE_CLOCK_IN_24P576, "0.8% fast: +0.9%");
 }
 
 ZTEST(gd32_bridge_clock_source, test_bands_are_disjoint_and_ordered)

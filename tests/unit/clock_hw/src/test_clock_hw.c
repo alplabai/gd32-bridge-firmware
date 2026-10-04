@@ -193,27 +193,27 @@ ZTEST(gd32_bridge_clock_hw, test_24p576_is_unambiguous_and_24mhz_is_refused)
 	zassert_equal(bridge_clock_fallback, BRIDGE_CLOCK_FB_HXTAL_FREQ);
 }
 
-ZTEST(gd32_bridge_clock_hw, test_24p576_tolerates_a_fast_irc8m_but_barely_a_slow_one)
+ZTEST(gd32_bridge_clock_hw, test_24p576_tolerates_an_irc8m_within_one_percent_either_way)
 {
 	reset();
 	mock_scn.oscin_hz           = 24576000u;
-	mock_scn.irc8m_err_permille = 8; /* fast: counts low 0.8%, inside -1% */
+	mock_scn.irc8m_err_permille = 8; /* fast: counts low 0.8% */
 	zassert_true(bridge_clock_try_hxtal());
 
 	reset();
 	mock_scn.oscin_hz           = 24576000u;
-	mock_scn.irc8m_err_permille = -2; /* slow 0.2%: counts high 0.2%, inside +0.3% */
+	mock_scn.irc8m_err_permille = -8; /* slow: counts high 0.8% */
 	zassert_true(bridge_clock_try_hxtal());
 
 	reset();
 	mock_scn.oscin_hz           = 24576000u;
-	mock_scn.irc8m_err_permille = -8; /* slow 0.8%: refused (the safe direction) */
+	mock_scn.irc8m_err_permille = 15; /* fast 1.5%: refused (the safe direction) */
 	zassert_false(bridge_clock_try_hxtal());
 	zassert_equal(bridge_clock_fallback, BRIDGE_CLOCK_FB_HXTAL_FREQ);
 
 	reset();
 	mock_scn.oscin_hz           = 24576000u;
-	mock_scn.irc8m_err_permille = 15; /* fast 1.5%: beyond -1% */
+	mock_scn.irc8m_err_permille = -15; /* slow 1.5% */
 	zassert_false(bridge_clock_try_hxtal());
 	zassert_equal(bridge_clock_fallback, BRIDGE_CLOCK_FB_HXTAL_FREQ);
 }
@@ -778,8 +778,8 @@ ZTEST(gd32_bridge_clock_hw, test_wedged_first_switch_gives_up_at_the_slow_clock_
 	             (unsigned long long)since());
 }
 
-/* 10: the 24.576 MHz band is -1% / +0.3%, so 25 MHz needs a >1.4% fast IRC8M. */
-ZTEST(gd32_bridge_clock_hw, test_25mhz_is_refused_unless_the_irc8m_is_over_1p4_percent_fast)
+/* 10: 25 MHz needs an IRC8M more than 0.7% fast to alias; it must never be fed. */
+ZTEST(gd32_bridge_clock_hw, test_25mhz_is_refused_unless_the_irc8m_is_over_0p7_percent_fast)
 {
 	reset();
 	mock_scn.oscin_hz = 25000000u;
@@ -787,14 +787,13 @@ ZTEST(gd32_bridge_clock_hw, test_25mhz_is_refused_unless_the_irc8m_is_over_1p4_p
 
 	reset();
 	mock_scn.oscin_hz           = 25000000u;
-	mock_scn.irc8m_err_permille = 10; /* 1.0% fast: 25 MHz reads +0.7%: still refused */
+	mock_scn.irc8m_err_permille = 5; /* 0.5% fast: 25 MHz reads +1.2%: refused */
 	zassert_false(bridge_clock_try_hxtal());
 	zassert_equal(bridge_clock_fallback, BRIDGE_CLOCK_FB_HXTAL_FREQ);
 
 	reset();
-	mock_scn.oscin_hz = 25000000u;
-	mock_scn.irc8m_err_permille =
-	    15; /* 1.5% fast: 25 MHz reads +0.2% and is taken (documented limit) */
+	mock_scn.oscin_hz           = 25000000u;
+	mock_scn.irc8m_err_permille = 8; /* 0.8% fast: reads +0.9%, taken (documented limit) */
 	zassert_true(bridge_clock_try_hxtal());
 	zassert_equal(bridge_clock_input_hz, BRIDGE_CLOCK_IN_24P576);
 }
