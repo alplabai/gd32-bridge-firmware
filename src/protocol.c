@@ -165,6 +165,17 @@ static uint32_t get_le32(const uint8_t *p)
 	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
+static uint16_t get_le16(const uint8_t *p)
+{
+	return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
+}
+
+static void put_le16(uint8_t *p, uint16_t v)
+{
+	p[0] = (uint8_t)(v & 0xFFu);
+	p[1] = (uint8_t)((v >> 8) & 0xFFu);
+}
+
 static void put_le32(uint8_t *p, uint32_t v)
 {
 	p[0] = (uint8_t)(v & 0xFFu);
@@ -850,6 +861,9 @@ static gd32_bridge_status_t handle_power_mode_set(const uint8_t *req,
 	(void)reply_cap;
 	if (req_len != 10u) return STATUS_INVAL;
 	if (req[0] > 3u) return STATUS_INVAL; /* mode ∈ {RUN, SLEEP, DEEP_SLEEP, STANDBY} */
+	/* ATTN is driven low before any transition out of RUN (STANDBY is a
+	 * reset, which returns PA14 to SWCLK on its own). */
+	if (req[0] != 0u) bridge_hw_attn_quiesce();
 	/* req[1] is reserved padding. */
 	const uint32_t wake_bitmap   = get_le32(&req[2]);
 	const uint32_t wake_after_ms = get_le32(&req[6]);
@@ -933,15 +947,15 @@ static gd32_bridge_status_t handle_adc_dsp_chain_bind(const uint8_t *req,
 }
 
 /* --------------------------------------------------------------- */
-/* v0.7 -- link-feature negotiation                                  */
+/* v0.7 -- link-feature negotiation (v0.15: u32 word + max_payload)   */
 /* --------------------------------------------------------------- */
 
-/* Armed link features (GD32_BRIDGE_LINK_FEAT_*), ONE ENTRY PER LINK.
- * The negotiation command can arrive over either transport; the SPI
- * transport consults the accessor when it stages replies (the I2C
- * transport never stamps -- STATUS_NO_PENDING owns bit 7 there).  Reset
- * default: everything off = the pre-v0.7 wire, so an un-negotiated link
- * is byte-identical to older firmware.
+/* Armed link features (GD32_BRIDGE_LINK_FEAT_*) and effective payload
+ * ceiling, ONE ENTRY PER LINK.  The negotiation command can arrive over
+ * either transport; the SPI transport consults the accessors when it stages
+ * replies (the I2C transport never stamps -- STATUS_NO_PENDING owns bit 7
+ * there).  Reset default: everything off and max_payload 65 = the pre-v0.7
+ * wire, so an un-negotiated link is byte-identical to older firmware.
  *
  * #130: this was a single process-wide byte.  CMD_LINK_FEATURES sits in
  * the shared dispatch table and is therefore reachable from BOTH
@@ -957,17 +971,59 @@ static gd32_bridge_status_t handle_adc_dsp_chain_bind(const uint8_t *req,
  * `volatile` because the two writers run at different NVIC preemption
  * levels -- CS-EXTI at BRIDGE_CS_IRQ_PRIO (1) can preempt I2C0_EV at
  * BRIDGE_I2C_IRQ_PRIO (2) mid-handler (hal/bridge_board_config.h).
- * Indexing by link means the two levels no longer touch the same byte,
+ * Indexing by link means the two levels no longer touch the same word,
  * so the qualifier is now belt-and-braces rather than load-bearing --
  * but the array is still read from one level and written from another
  * for its own link, and this build sets no -O at all (#26), which is
  * the only reason the pre-#130 miss was not already observable. */
-static volatile uint8_t link_features[GD32_BRIDGE_LINK_COUNT];
+static volatile uint32_t link_features[GD32_BRIDGE_LINK_COUNT];
+static volatile uint16_t link_max_payload[GD32_BRIDGE_LINK_COUNT] = {
+	GD32_BRIDGE_MAX_PAYLOAD_BYTES,
+	GD32_BRIDGE_MAX_PAYLOAD_BYTES,
+};
 
-uint8_t protocol_link_features(gd32_bridge_link_t link)
+uint32_t protocol_link_features(gd32_bridge_link_t link)
 {
 	if ((unsigned)link >= (unsigned)GD32_BRIDGE_LINK_COUNT) return 0u;
 	return link_features[link];
+}
+
+uint16_t protocol_link_max_payload(gd32_bridge_link_t link)
+{
+	if ((unsigned)link >= (unsigned)GD32_BRIDGE_LINK_COUNT) return GD32_BRIDGE_MAX_PAYLOAD_BYTES;
+	return link_max_payload[link];
+}
+
+/* Feature bits this build implements on `link` (design 2.2 step 1).  I2C
+ * only ever echoes STATUS_SEQ, preserving the idempotent `features = 0`
+ * open/close path; SPI adds BIG_FRAME + BATCH everywhere, and ATTN +
+ * ADC_STREAM2 where the HAL backs them. */
+static uint32_t link_supported(gd32_bridge_link_t link)
+{
+	if (link != GD32_BRIDGE_LINK_SPI) return GD32_BRIDGE_LINK_FEAT_STATUS_SEQ;
+	uint32_t supported = GD32_BRIDGE_LINK_FEAT_STATUS_SEQ | GD32_BRIDGE_LINK_FEAT_BIG_FRAME |
+	                     GD32_BRIDGE_LINK_FEAT_BATCH;
+	if (bridge_hw_attn_supported()) supported |= GD32_BRIDGE_LINK_FEAT_ATTN;
+	if (bridge_hw_adc_stream2_supported()) supported |= GD32_BRIDGE_LINK_FEAT_ADC_STREAM2;
+	return supported;
+}
+
+/* Arm `granted`/`mp` on `link`.  The ATTN pin transition runs only when the
+ * ATTN bit actually changes, so re-sending the same `want` causes no pin
+ * activity.  Returns the word actually armed: ATTN is dropped if the HAL
+ * could not switch the pin on. */
+static uint32_t link_arm(gd32_bridge_link_t link, uint32_t granted, uint16_t mp)
+{
+	const bool attn_was = (link_features[link] & GD32_BRIDGE_LINK_FEAT_ATTN) != 0u;
+	const bool attn_now = (granted & GD32_BRIDGE_LINK_FEAT_ATTN) != 0u;
+	if (attn_was != attn_now) {
+		if (bridge_hw_attn_enable(attn_now) != BRIDGE_HW_OK && attn_now) {
+			granted &= ~GD32_BRIDGE_LINK_FEAT_ATTN;
+		}
+	}
+	link_features[link]    = granted;
+	link_max_payload[link] = mp;
+	return granted;
 }
 
 /* The one link-SCOPED handler, so it does not match cmd_handler_t and is
@@ -976,7 +1032,22 @@ uint8_t protocol_link_features(gd32_bridge_link_t link)
  * than parking a "current link" in a file-scope variable the whole table
  * could read -- is deliberate: CS-EXTI at priority 1 preempts I2C0_EV at
  * priority 2, so any such variable would need save/restore discipline at
- * every dispatch to survive nesting.  An argument needs none. */
+ * every dispatch to survive nesting.  An argument needs none.
+ *
+ * Two request forms, chosen by length (design section 2.1):
+ *   1 byte  `features:u8`  legacy.  The link's whole word becomes
+ *           `features & STATUS_SEQ` and max_payload 65, so 0 still means
+ *           "disable everything".  Reply `granted:u8`.
+ *   6 bytes `want:u32 max_payload_req:u16`  v0.15.  Reply 10 bytes
+ *           `granted:u32 supported:u32 max_payload:u16`.
+ * Either way the new state is armed BEFORE the reply is staged -- the
+ * reply to this very command already rides the new framing (the host
+ * treats its stamp as the sequence baseline, and an ATTN-granting reply is
+ * the first ATTN-signalled one).  Armed for THIS link only; STATUS_SEQ has
+ * no effect on the I2C wire either way (that transport never stamps), so
+ * the I2C answer stays truthful rather than STATUS_NOSUPPORT -- which
+ * would break the documented idempotent open/close path that issues
+ * `features = 0` unconditionally. */
 static gd32_bridge_status_t handle_link_features(gd32_bridge_link_t link,
                                                  const uint8_t     *req,
                                                  size_t             req_len,
@@ -984,25 +1055,263 @@ static gd32_bridge_status_t handle_link_features(gd32_bridge_link_t link,
                                                  size_t             reply_cap,
                                                  size_t            *reply_len)
 {
-	if (req_len != 1u) return STATUS_INVAL;
-	if (reply_cap < 1u) return STATUS_NOMEM;
+	if (req_len != 1u && req_len != 6u) return STATUS_INVAL;
 	if ((unsigned)link >= (unsigned)GD32_BRIDGE_LINK_COUNT) return STATUS_INVAL;
-	/* Grant the intersection of the request with what this firmware
-     * implements, and arm it IMMEDIATELY -- the reply to this very
-     * command already rides the new framing (the host treats its
-     * stamp as the sequence baseline).  A request of 0 disables
-     * everything; idempotent in both directions.
-     *
-     * Armed for THIS link only.  A host negotiating on I2C gets an
-     * honest echo of what it asked for and a working per-link record,
-     * but cannot reach the SPI link's framing.  STATUS_SEQ has no
-     * effect on the I2C wire either way (that transport never stamps),
-     * so the I2C answer stays truthful rather than STATUS_NOSUPPORT --
-     * which would break the documented idempotent open/close path that
-     * issues `features = 0` unconditionally. */
-	link_features[link] = (uint8_t)(req[0] & GD32_BRIDGE_LINK_FEAT_STATUS_SEQ);
-	reply[0]            = link_features[link];
-	*reply_len          = 1u;
+
+	if (req_len == 1u) {
+		if (reply_cap < 1u) return STATUS_NOMEM;
+		const uint32_t granted = link_arm(link,
+		                                  (uint32_t)req[0] & GD32_BRIDGE_LINK_FEAT_STATUS_SEQ,
+		                                  GD32_BRIDGE_MAX_PAYLOAD_BYTES);
+		reply[0]               = (uint8_t)granted;
+		*reply_len             = 1u;
+		return STATUS_OK;
+	}
+
+	if (reply_cap < 10u) return STATUS_NOMEM;
+	const uint32_t want      = get_le32(&req[0]);
+	const uint16_t mp_req    = get_le16(&req[4]);
+	const uint32_t supported = link_supported(link);
+	uint32_t       g         = want & supported;
+
+	/* ATTN rides the STATUS_SEQ stamp, and PA14 is SWCLK: never drive it
+	 * while a debugger may be driving it too (design F2). */
+	if ((g & GD32_BRIDGE_LINK_FEAT_ATTN) != 0u &&
+	    ((g & GD32_BRIDGE_LINK_FEAT_STATUS_SEQ) == 0u || bridge_hw_debugger_attached())) {
+		g &= ~GD32_BRIDGE_LINK_FEAT_ATTN;
+	}
+
+	uint16_t mp = GD32_BRIDGE_MAX_PAYLOAD_BYTES;
+	if ((g & GD32_BRIDGE_LINK_FEAT_BIG_FRAME) != 0u) {
+		mp = mp_req;
+		if (mp > GD32_BRIDGE_SPI_BIG_MAX_PAYLOAD_BYTES) mp = GD32_BRIDGE_SPI_BIG_MAX_PAYLOAD_BYTES;
+		if (mp <= GD32_BRIDGE_MAX_PAYLOAD_BYTES) {
+			mp = GD32_BRIDGE_MAX_PAYLOAD_BYTES;
+			g &= ~GD32_BRIDGE_LINK_FEAT_BIG_FRAME;
+		}
+	}
+
+	g = link_arm(link, g, mp);
+	put_le32(&reply[0], g);
+	put_le32(&reply[4], supported);
+	put_le16(&reply[8], mp);
+	*reply_len = 10u;
+	return STATUS_OK;
+}
+
+/* --------------------------------------------------------------- */
+/* v0.15 -- BEGIN2 / READ2 (ADC stream with lossless accounting)       */
+/* --------------------------------------------------------------- */
+
+/* Watermark values BEGIN2 accepts (design 5.1).  0 = no events. */
+static bool begin2_watermark_valid(uint16_t w)
+{
+	return w == 0u || w == 16u || w == 32u || w == 64u || w == 128u || w == 256u || w == 512u;
+}
+
+static gd32_bridge_status_t handle_adc_stream_begin2(const uint8_t *req,
+                                                     size_t         req_len,
+                                                     uint8_t       *reply,
+                                                     size_t         reply_cap,
+                                                     size_t        *reply_len)
+{
+	if (req_len != GD32_BRIDGE_BEGIN2_REQ_BYTES) return STATUS_INVAL;
+	const uint8_t  stream_id   = req[0];
+	const uint8_t  channel     = req[1];
+	const uint8_t  trigger_src = req[2];
+	const uint8_t  trigger_arg = req[3];
+	const uint32_t rate_hz     = get_le32(&req[4]);
+	const uint16_t watermark   = get_le16(&req[8]);
+	const uint16_t reserved    = get_le16(&req[10]);
+	if (stream_id >= GD32_BRIDGE_ADC_STREAM_COUNT) return STATUS_INVAL;
+	/* 0x00 PACE_TIMER is the only trigger this firmware implements.  0x01..0x05
+	 * are reserved (a later minor may implement them) and answer NOSUPPORT;
+	 * anything higher is malformed. */
+	if (trigger_src >= 0x06u) return STATUS_INVAL;
+	if (trigger_src != 0x00u) return STATUS_NOSUPPORT;
+	if (trigger_arg != 0u || reserved != 0u) return STATUS_INVAL;
+	if (rate_hz == 0u) return STATUS_INVAL;
+	if (!begin2_watermark_valid(watermark)) return STATUS_INVAL;
+	if (rate_hz > GD32_BRIDGE_ADC_STREAM2_RATE_MAX_HZ) return STATUS_OUT_OF_RANGE;
+	if (reply_cap < GD32_BRIDGE_BEGIN2_REPLY_BYTES) return STATUS_NOMEM;
+
+	bridge_hw_adc_stream2_info_t info;
+	memset(&info, 0, sizeof(info));
+	const int rv = bridge_hw_adc_stream_begin2(stream_id, channel, rate_hz, watermark, &info);
+	if (rv != BRIDGE_HW_OK) return status_from_hw(rv);
+
+	put_le32(&reply[0], info.tick_hz);
+	put_le32(&reply[4], info.period_ticks);
+	put_le16(&reply[8], info.full_scale);
+	put_le16(&reply[10], info.vref_mv);
+	reply[12] = info.flags;
+	put_le16(&reply[13], info.watermark);
+	put_le16(&reply[15], info.ring_depth);
+	*reply_len = GD32_BRIDGE_BEGIN2_REPLY_BYTES;
+	return STATUS_OK;
+}
+
+/* READ2: reply `first_index:u32 dropped:u32 got:u8 codes[got]` (variable
+ * length, 9 + 2*got).  The capacity check precedes the ring consume: a
+ * request whose worst-case reply does not fit answers NOMEM with the ring
+ * untouched (the legacy handler consumes first). */
+static gd32_bridge_status_t handle_adc_stream_read2(gd32_bridge_link_t link,
+                                                    const uint8_t     *req,
+                                                    size_t             req_len,
+                                                    uint8_t           *reply,
+                                                    size_t             reply_cap,
+                                                    size_t            *reply_len)
+{
+	if (req_len != 2u) return STATUS_INVAL;
+	const uint8_t stream_id   = req[0];
+	const uint8_t max_samples = req[1];
+	if (stream_id >= GD32_BRIDGE_ADC_STREAM_COUNT) return STATUS_INVAL;
+	if (max_samples == 0u) return STATUS_INVAL;
+	const unsigned ceiling =
+	    ((unsigned)protocol_link_max_payload(link) - GD32_BRIDGE_READ2_HDR_BYTES) / 2u;
+	if ((unsigned)max_samples > ceiling) return STATUS_OUT_OF_RANGE;
+	const size_t need = GD32_BRIDGE_READ2_HDR_BYTES + (size_t)max_samples * 2u;
+	if (reply_cap < need) return STATUS_NOMEM;
+
+	uint32_t  first_index = 0u;
+	uint32_t  dropped     = 0u;
+	uint8_t   got         = 0u;
+	const int rv          = bridge_hw_adc_stream_read2(
+	    stream_id, max_samples, &first_index, &dropped, &got, &reply[GD32_BRIDGE_READ2_HDR_BYTES]);
+	if (rv != BRIDGE_HW_OK) return status_from_hw(rv);
+	if (got > max_samples) return STATUS_IO; /* HAL contract violation */
+
+	put_le32(&reply[0], first_index);
+	put_le32(&reply[4], dropped);
+	reply[8]   = got;
+	*reply_len = GD32_BRIDGE_READ2_HDR_BYTES + (size_t)got * 2u;
+	return STATUS_OK;
+}
+
+/* --------------------------------------------------------------- */
+/* v0.15 -- CMD_BATCH                                                   */
+/* --------------------------------------------------------------- */
+
+typedef struct {
+	uint8_t op;
+	uint8_t req_len;   /* fixed request payload length */
+	uint8_t max_reply; /* fixed max reply payload; ignored for READ2 */
+} batch_op_t;
+
+/* The allow-list: bounded, side-effect-local handlers only (design 6.3).
+ * Left out on purpose: ADC_READ (up to 1 ms each), stream BEGIN/END
+ * (calibration can spin ~200000 iterations), TRNG_READ, SE_RESET (needs
+ * host-timed gaps), DSP chain opcodes (setup-time), LINK_FEATURES (would
+ * reframe mid-reply), POWER_MODE_SET, OTA and nested BATCH. */
+static const batch_op_t batch_ops[] = {
+	{ CMD_PING, 0u, 0u },
+	{ CMD_GPIO_READ, 4u, 4u },
+	{ CMD_GPIO_WRITE, 8u, 0u },
+	{ CMD_PWM_SET, 10u, 0u },
+	{ CMD_PWM_GET, 1u, 8u },
+	{ CMD_PWM_CAPTURE_READ, 1u, 8u },
+	{ CMD_ADC_STREAM_READ2, 2u, 0u },
+	{ CMD_DA9292_STATUS_FORWARD, 0u, 1u },
+	{ CMD_DAC_SET, 4u, 0u },
+	{ CMD_DAC_GET, 1u, 2u },
+	{ CMD_QENC_READ, 1u, 4u },
+	{ CMD_QENC_RESET, 1u, 0u },
+	{ CMD_COUNTER_READ, 1u, 4u },
+	{ CMD_TMU_COMPUTE, 12u, 4u },
+};
+
+static const batch_op_t *batch_op_find(uint8_t op)
+{
+	for (size_t i = 0u; i < sizeof(batch_ops) / sizeof(batch_ops[0]); ++i) {
+		if (batch_ops[i].op == op) return &batch_ops[i];
+	}
+	return NULL;
+}
+
+/* Worst-case reply payload of one sub-op; READ2's depends on its
+ * `max_samples` argument (args[1]; the entry length was already checked). */
+static size_t batch_op_max_reply(const batch_op_t *d, const uint8_t *args)
+{
+	if (d->op == CMD_ADC_STREAM_READ2) {
+		return GD32_BRIDGE_READ2_HDR_BYTES + (size_t)args[1] * 2u;
+	}
+	return d->max_reply;
+}
+
+static gd32_bridge_status_t protocol_dispatch_inner(gd32_bridge_link_t link,
+                                                    uint8_t            cmd,
+                                                    const uint8_t     *req_payload,
+                                                    size_t             req_payload_len,
+                                                    uint8_t           *reply_payload,
+                                                    size_t             reply_payload_cap,
+                                                    size_t            *reply_payload_len);
+
+/* Request  : count:u8 (1..16), then count entries {op:u8, len:u8, args[len]}.
+ * Reply    : executed:u8, then per executed op {status:u8, len:u8, payload[len]}.
+ *
+ * Validation runs to completion BEFORE anything executes, so a rejected
+ * batch has no side effects and answers with an empty payload.  The request
+ * length must equal 1 + sum(2 + len_i) exactly: a trailing byte is the
+ * signature of a zero-extended capture and is refused.  Execution then
+ * stops at the first non-OK sub-status (which always has len = 0), and
+ * every sub-op runs through the same handler a standalone request would,
+ * writing its reply in place after the entry header -- no temporary copy.
+ * The outer status is OK whenever validation passed. */
+static gd32_bridge_status_t handle_batch(gd32_bridge_link_t link,
+                                         const uint8_t     *req,
+                                         size_t             req_len,
+                                         uint8_t           *reply,
+                                         size_t             reply_cap,
+                                         size_t            *reply_len)
+{
+	if (req_len < 1u) return STATUS_INVAL;
+	const uint8_t count = req[0];
+	if (count == 0u) return STATUS_INVAL;
+	if (count > GD32_BRIDGE_BATCH_MAX_OPS) return STATUS_OUT_OF_RANGE;
+
+	size_t off   = 1u;
+	size_t worst = 1u; /* executed:u8 */
+	for (uint8_t i = 0u; i < count; ++i) {
+		if (off + 2u > req_len) return STATUS_INVAL;
+		const uint8_t op  = req[off];
+		const uint8_t len = req[off + 1u];
+		if (off + 2u + (size_t)len > req_len) return STATUS_INVAL;
+		const batch_op_t *d = batch_op_find(op);
+		if (d == NULL || len != d->req_len) return STATUS_INVAL;
+		worst += 2u + batch_op_max_reply(d, &req[off + 2u]);
+		off += 2u + (size_t)len;
+	}
+	if (off != req_len) return STATUS_INVAL;
+	if (worst > (size_t)protocol_link_max_payload(link)) return STATUS_OUT_OF_RANGE;
+	if (reply_cap < worst) return STATUS_NOMEM;
+
+	size_t  in       = 1u;
+	size_t  out      = 1u;
+	uint8_t executed = 0u;
+	for (uint8_t i = 0u; i < count; ++i) {
+		const uint8_t        op     = req[in];
+		const uint8_t        len    = req[in + 1u];
+		const uint8_t       *args   = &req[in + 2u];
+		const batch_op_t    *d      = batch_op_find(op);
+		const size_t         maxrep = batch_op_max_reply(d, args);
+		size_t               rl     = 0u;
+		gd32_bridge_status_t st =
+		    protocol_dispatch_inner(link, op, args, len, &reply[out + 2u], maxrep, &rl);
+		if (st == STATUS_OK && rl > maxrep) st = STATUS_IO; /* handler overran its cap */
+		++executed;
+		if (st != STATUS_OK) {
+			reply[out]      = (uint8_t)st;
+			reply[out + 1u] = 0u;
+			out += 2u;
+			break;
+		}
+		reply[out]      = (uint8_t)STATUS_OK;
+		reply[out + 1u] = (uint8_t)rl;
+		out += 2u + rl;
+		in += 2u + (size_t)len;
+	}
+	reply[0]   = executed;
+	*reply_len = out;
 	return STATUS_OK;
 }
 
@@ -1017,6 +1326,34 @@ typedef gd32_bridge_status_t (*cmd_handler_t)(const uint8_t *, size_t, uint8_t *
  * higher-priority nested request fail fast with STATUS_BUSY before it
  * reaches shared protocol or HAL state (#19). */
 static atomic_flag dispatch_in_flight = ATOMIC_FLAG_INIT;
+
+/* Opcodes the I2C link may carry (v0.15 policy; design section 7).  The
+ * kernel gpio-gd32-bridge driver, tools/gd32-ota-host and the BRD_I2C
+ * bring-up example use exactly these. */
+static bool i2c_opcode_allowed(uint8_t cmd)
+{
+	switch (cmd) {
+	case CMD_PING:
+	case CMD_GET_VERSION:
+	case CMD_GET_BUILD_ID:
+	case CMD_RESET_REASON:
+	case CMD_GPIO_READ:
+	case CMD_GPIO_WRITE:
+	case CMD_SE_RESET:
+	case CMD_LINK_FEATURES:
+		return true;
+	default:
+		return cmd >= CMD_OTA_BEGIN;
+	}
+}
+
+volatile uint32_t bridge_i2c_denied_count;
+volatile uint8_t  bridge_i2c_denied_last_cmd;
+
+static bool link_feature_granted(gd32_bridge_link_t link, uint32_t bit)
+{
+	return (protocol_link_features(link) & bit) != 0u;
+}
 
 /* Two-tier dispatch: a sparse switch on opcode keeps the table size
  * small (vs a dense 256-entry array) without losing the "one handler
@@ -1039,6 +1376,17 @@ static gd32_bridge_status_t protocol_dispatch_inner(gd32_bridge_link_t link,
 		ota_note_frame();
 		*reply_payload_len = 0u;
 		return STATUS_BUSY;
+	}
+	/* I2C opcode policy (v0.15, unconditional): the I2C link carries only
+	 * the identity / GPIO / SE-reset / negotiation opcodes plus OTA.  Every
+	 * other opcode is refused here, before its handler can run, with an
+	 * empty NOSUPPORT.  The trial gate above stays first so any CRC-valid
+	 * frame on either link still confirms a trial.  SPI is unrestricted. */
+	if (link == GD32_BRIDGE_LINK_I2C && !i2c_opcode_allowed(cmd)) {
+		bridge_i2c_denied_count++;
+		bridge_i2c_denied_last_cmd = cmd;
+		*reply_payload_len         = 0u;
+		return STATUS_NOSUPPORT;
 	}
 	cmd_handler_t h = NULL;
 	switch (cmd) {
@@ -1135,6 +1483,39 @@ static gd32_bridge_status_t protocol_dispatch_inner(gd32_bridge_link_t link,
 	case CMD_POWER_MODE_SET:
 		h = handle_power_mode_set;
 		break;
+	/* v0.15: each of these needs its link feature granted on THIS link and
+	 * is link-scoped (the per-link max_payload shapes the reply). */
+	case CMD_BATCH:
+		if (!link_feature_granted(link, GD32_BRIDGE_LINK_FEAT_BATCH)) {
+			*reply_payload_len = 0u;
+			return STATUS_NOSUPPORT;
+		}
+		*reply_payload_len = 0u;
+		return handle_batch(link,
+		                    req_payload,
+		                    req_payload_len,
+		                    reply_payload,
+		                    reply_payload_cap,
+		                    reply_payload_len);
+	case CMD_ADC_STREAM_BEGIN2:
+		if (!link_feature_granted(link, GD32_BRIDGE_LINK_FEAT_ADC_STREAM2)) {
+			*reply_payload_len = 0u;
+			return STATUS_NOSUPPORT;
+		}
+		h = handle_adc_stream_begin2;
+		break;
+	case CMD_ADC_STREAM_READ2:
+		if (!link_feature_granted(link, GD32_BRIDGE_LINK_FEAT_ADC_STREAM2)) {
+			*reply_payload_len = 0u;
+			return STATUS_NOSUPPORT;
+		}
+		*reply_payload_len = 0u;
+		return handle_adc_stream_read2(link,
+		                               req_payload,
+		                               req_payload_len,
+		                               reply_payload,
+		                               reply_payload_cap,
+		                               reply_payload_len);
 	case CMD_LINK_FEATURES:
 		/* Link-scoped: called directly, not through the table (#130). */
 		return handle_link_features(link,
@@ -1190,6 +1571,9 @@ gd32_bridge_status_t protocol_dispatch(gd32_bridge_link_t link,
 		return STATUS_BUSY;
 	}
 
+	/* Only a handler that succeeds writes a length; every error answers an
+	 * empty payload, whatever the caller's `*reply_payload_len` held. */
+	*reply_payload_len                = 0u;
 	const gd32_bridge_status_t status = protocol_dispatch_inner(link,
 	                                                            cmd,
 	                                                            req_payload,

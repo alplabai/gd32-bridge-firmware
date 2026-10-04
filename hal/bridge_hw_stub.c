@@ -106,6 +106,36 @@ int bridge_hw_adc_stream_read(uint8_t   stream_id,
 	return BRIDGE_HW_ERR_NOTIMPL;
 }
 
+int bridge_hw_adc_stream_begin2(uint8_t                       stream_id,
+                                uint8_t                       channel,
+                                uint32_t                      sample_rate_hz,
+                                uint16_t                      watermark,
+                                bridge_hw_adc_stream2_info_t *info)
+{
+	(void)stream_id;
+	(void)channel;
+	(void)sample_rate_hz;
+	(void)watermark;
+	(void)info;
+	return BRIDGE_HW_ERR_NOTIMPL;
+}
+
+int bridge_hw_adc_stream_read2(uint8_t   stream_id,
+                               uint8_t   max_samples,
+                               uint32_t *first_index,
+                               uint32_t *dropped,
+                               uint8_t  *got,
+                               uint8_t  *codes_le)
+{
+	(void)stream_id;
+	(void)max_samples;
+	(void)codes_le;
+	if (first_index != 0) *first_index = 0u;
+	if (dropped != 0) *dropped = 0u;
+	if (got != 0) *got = 0u;
+	return BRIDGE_HW_ERR_NOTIMPL;
+}
+
 int bridge_hw_adc_stream_end(uint8_t stream_id)
 {
 	(void)stream_id;
@@ -284,4 +314,40 @@ int bridge_hw_adc_dsp_chain_bind(uint8_t chain_id, uint8_t stream_id)
 	(void)chain_id;
 	(void)stream_id;
 	return BRIDGE_HW_ERR_NOTIMPL;
+}
+
+/* v0.15 link-feature hardware: no ATTN pin, no streaming ADC, no debug unit. */
+bool bridge_hw_attn_supported(void)
+{
+	return false;
+}
+
+bool bridge_hw_adc_stream2_supported(void)
+{
+	return false;
+}
+
+bool bridge_hw_debugger_attached(void)
+{
+	return false;
+}
+
+int bridge_hw_attn_enable(bool enable)
+{
+	(void)enable;
+	return BRIDGE_HW_ERR_NOTIMPL;
+}
+
+void bridge_hw_attn_event_set(uint8_t stream_id)
+{
+	(void)stream_id;
+}
+
+void bridge_hw_attn_event_clear(uint8_t stream_id)
+{
+	(void)stream_id;
+}
+
+void bridge_hw_attn_quiesce(void)
+{
 }

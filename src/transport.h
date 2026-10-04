@@ -27,6 +27,13 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "protocol.h" /* GD32_BRIDGE_SPI_BIG_MAX_PAYLOAD_BYTES */
+
+/* Largest SPI envelope either direction: SOF + CMD/STATUS + the BIG_FRAME
+ * payload ceiling + CRC(2) = 256 bytes.  The HAL's RX/TX DMA staging must
+ * hold at least this (hal/transport_hw_gd32.c asserts it). */
+#define GD32_BRIDGE_SPI_MAX_FRAME_BYTES (1u + 1u + GD32_BRIDGE_SPI_BIG_MAX_PAYLOAD_BYTES + 2u)
+
 /* ---- lifecycle (called from main.c) ---------------------------- */
 void transport_spi_init(void);
 void transport_i2c_init(void);
@@ -54,7 +61,8 @@ void bridge_transport_i2c_stuck_poll(void);
 /* ---- SPI slave seams (defined in transport_spi.c) -------------- */
 void    spi_slave_cs_low(void);          /* CS falling edge: reset RX staging   */
 void    spi_slave_rx_byte(uint8_t b);    /* one received request byte            */
-void    spi_slave_cs_high(void);         /* CS rising edge: decode + dispatch    */
+bool    spi_slave_cs_high(void);         /* CS rising edge: decode + dispatch; true
+                                          * when a FRESH reply was staged (ATTN)   */
 void    spi_slave_transport_error(void); /* discard RX + stage STATUS_IO        */
 uint8_t spi_slave_tx_next_byte(void);    /* next staged reply byte; 0xFF if empty */
 bool    spi_slave_tx_pending(void);      /* true while staged reply has bytes left   */

@@ -70,6 +70,12 @@
 #define OTA_CHUNK_MAX       ((GD32_BRIDGE_MAX_PAYLOAD_BYTES - 5u) & ~(OTA_PROGRAM_GRANULE - 1u))
 _Static_assert(OTA_CHUNK_MAX > 0u && OTA_CHUNK_MAX % OTA_PROGRAM_GRANULE == 0u,
                "chunk_max must be a multiple of the flash program granule");
+/* The OTA wire contract (and tools/gd32-ota-host) is pinned to 56-byte
+ * chunks.  v0.15 widens the SPI frame for BATCH/READ2 only, and
+ * GD32_BRIDGE_MAX_PAYLOAD_BYTES stays the 65-byte base envelope: this
+ * catches anyone who "helpfully" grows it and silently changes the OTA
+ * layout the host paces against. */
+_Static_assert(OTA_CHUNK_MAX == 56u, "OTA_CHUNK_MAX is wire-pinned at 56 bytes");
 
 /* Unit tests pin the final check-and-publish boundary below. Production
  * builds compile this out completely: it is not an OTA wire or HAL seam. */
