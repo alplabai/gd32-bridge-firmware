@@ -793,6 +793,33 @@ static void batch_link(uint16_t mp)
 	              NULL);
 }
 
+ZTEST(protocol, test_v015_batch_rejects_two_read2_on_one_stream)
+{
+	uint8_t       b[CAP];
+	uint8_t       reply[CAP];
+	size_t        n, len;
+	const uint8_t s0[2] = { 0u, 4u };
+	const uint8_t s1[2] = { 1u, 4u };
+
+	batch_link(252u);
+
+	/* Same stream twice: refused at validation, nothing executes. */
+	b[0] = 2u;
+	len  = put_op(b, 1u, CMD_ADC_STREAM_READ2, s0, 2u);
+	len  = put_op(b, len, CMD_ADC_STREAM_READ2, s0, 2u);
+	zassert_equal(disp(GD32_BRIDGE_LINK_SPI, CMD_BATCH, b, len, reply, sizeof reply, &n),
+	              STATUS_INVAL,
+	              "two READ2 on stream 0");
+	zassert_equal(n, 0u);
+
+	/* One READ2 per stream passes validation (stream 0 and 1). */
+	len = put_op(b, 1u, CMD_ADC_STREAM_READ2, s0, 2u);
+	len = put_op(b, len, CMD_ADC_STREAM_READ2, s1, 2u);
+	zassert_equal(disp(GD32_BRIDGE_LINK_SPI, CMD_BATCH, b, len, reply, sizeof reply, &n),
+	              STATUS_OK,
+	              "READ2 on streams 0 and 1");
+}
+
 ZTEST(protocol, test_v015_batch_request_validation)
 {
 	uint8_t b[CAP];
@@ -921,10 +948,11 @@ ZTEST(protocol, test_v015_batch_worst_case_reply_must_fit_max_payload)
 	batch_link(252u);
 	zassert_equal(disp(GD32_BRIDGE_LINK_SPI, CMD_BATCH, b, len, reply, sizeof reply, &n),
 	              STATUS_OK);
-	/* Two do not. */
-	b[0] = 2u;
-	len  = put_op(b, 1u, CMD_ADC_STREAM_READ2, read2_big, 2u);
-	len  = put_op(b, len, CMD_ADC_STREAM_READ2, read2_big, 2u);
+	/* Two do not (streams 0 and 1: one READ2 per stream is allowed). */
+	const uint8_t read2_big_s1[2] = { 1u, 120u };
+	b[0]                          = 2u;
+	len                           = put_op(b, 1u, CMD_ADC_STREAM_READ2, read2_big, 2u);
+	len                           = put_op(b, len, CMD_ADC_STREAM_READ2, read2_big_s1, 2u);
 	zassert_equal(disp(GD32_BRIDGE_LINK_SPI, CMD_BATCH, b, len, reply, sizeof reply, &n),
 	              STATUS_OUT_OF_RANGE);
 

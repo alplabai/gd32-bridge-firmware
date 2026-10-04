@@ -1282,8 +1282,9 @@ static gd32_bridge_status_t handle_batch(gd32_bridge_link_t link,
 	if (count == 0u) return STATUS_INVAL;
 	if (count > GD32_BRIDGE_BATCH_MAX_OPS) return STATUS_OUT_OF_RANGE;
 
-	size_t off   = 1u;
-	size_t worst = 1u; /* executed:u8 */
+	size_t  off        = 1u;
+	size_t  worst      = 1u; /* executed:u8 */
+	uint8_t read2_seen = 0u; /* stream ids already read in this batch */
 	for (uint8_t i = 0u; i < count; ++i) {
 		if (off + 2u > req_len) return STATUS_INVAL;
 		const uint8_t op  = req[off];
@@ -1291,6 +1292,14 @@ static gd32_bridge_status_t handle_batch(gd32_bridge_link_t link,
 		if (off + 2u + (size_t)len > req_len) return STATUS_INVAL;
 		const batch_op_t *d = batch_op_find(op);
 		if (d == NULL || len != d->req_len) return STATUS_INVAL;
+		/* One READ2 per stream: repeated reads of a stream inside one CS ISR
+		 * see a stale lap count (the lap ISR cannot run here) and would trip
+		 * the undercount sentinel on the third read. */
+		if (op == CMD_ADC_STREAM_READ2 && req[off + 2u] < 8u) {
+			const uint8_t bit = (uint8_t)(1u << req[off + 2u]);
+			if (read2_seen & bit) return STATUS_INVAL;
+			read2_seen |= bit;
+		}
 		worst += 2u + batch_op_max_reply(d, &req[off + 2u]);
 		off += 2u + (size_t)len;
 	}
