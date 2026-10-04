@@ -18,7 +18,13 @@ independent checks, plus a third for the HXTAL-bypass clock path
      never set.  With --irc8m-only (the -DBRIDGE_CLOCK_HXTAL=OFF build) the
      inverse holds: the HXTAL bring-up code must be absent.
 
-Usage: check_clock_override.py [--irc8m-only] COMPILE_COMMANDS.json ELF [ELF...]
+Usage: check_clock_override.py [--irc8m-only] [--bootloader ELF]...
+                               COMPILE_COMMANDS.json [APP_ELF...]
+
+The bootloader is named explicitly with --bootloader (repeatable), never
+guessed from a file name: it stays on the SystemInit() clock and must not link
+the HXTAL bring-up in EITHER build, so it is checked for that instead of for the
+HXTAL-bypass path the application images must have.
 """
 import json
 import pathlib
@@ -33,18 +39,28 @@ BYPASS_FN = "hw_hxtal_bypass_enable"
 
 
 def main(argv):
-    irc8m_only = "--irc8m-only" in argv
-    argv = [a for a in argv if a != "--irc8m-only"]
-    if len(argv) < 3:
+    irc8m_only = False
+    bootloaders = []
+    rest = []
+    it = iter(argv[1:])
+    for a in it:
+        if a == "--irc8m-only":
+            irc8m_only = True
+        elif a == "--bootloader":
+            bootloaders.append(next(it, None))
+        else:
+            rest.append(a)
+    if None in bootloaders or len(rest) < 1 or (len(rest) < 2 and not bootloaders):
         print(__doc__)
         return 2
-    cdb, elfs = argv[1], argv[2:]
+    cdb, elfs = rest[0], rest[1:]
     srcs = [e["file"].replace("\\", "/") for e in json.loads(pathlib.Path(cdb).read_text())
             if e["file"].replace("\\", "/").endswith("/" + NAME)]
     if not srcs or any("/overrides/" not in s for s in srcs):
         print(f"FAIL: {NAME} not built from an overrides/ path: {srcs}")
         return 1
-    for elf in elfs:
+    for elf in bootloaders + elfs:
+        is_bootloader = elf in bootloaders
         dis = subprocess.run(["arm-none-eabi-objdump", "-d", "--disassemble=SystemInit", elf],
                              check=True, capture_output=True, text=True).stdout
         if "<SystemInit>:" not in dis:
@@ -56,7 +72,7 @@ def main(argv):
         byp = subprocess.run(["arm-none-eabi-objdump", "-d", f"--disassemble={BYPASS_FN}", elf],
                              check=True, capture_output=True, text=True).stdout
         has_fn = f"<{BYPASS_FN}>:" in byp
-        if "bootloader" in pathlib.Path(elf).name:
+        if is_bootloader:
             # The bootloader stays on the SystemInit() clock; it must not link
             # the HXTAL bring-up at all, in either build.
             if has_fn:

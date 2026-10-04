@@ -146,8 +146,9 @@ jobs:
       - name: verify the linked images use the IRC8M clock override
         run: |
           set -euo pipefail
-          python3 tools/check_clock_override.py build-gd32/compile_commands.json \
-            build-gd32/gd32-bootloader.elf \
+          python3 tools/check_clock_override.py \
+            --bootloader build-gd32/gd32-bootloader.elf \
+            build-gd32/compile_commands.json \
             build-gd32/gd32-bridge-slot-a.elf \
             build-gd32/gd32-bridge-slot-b.elf
           python3 tools/check_clock_override.py build-gd32-flash/compile_commands.json \
