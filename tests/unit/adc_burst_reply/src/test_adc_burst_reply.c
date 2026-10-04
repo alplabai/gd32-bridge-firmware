@@ -244,20 +244,59 @@ ZTEST(adc_burst_reply, test_drain_bound_replaces_a_missing_reply_with_io_and_can
 	zassert_true(frame_crc_ok(f, n), "CRC valid");
 }
 
-ZTEST(adc_burst_reply, test_transport_error_wins_over_a_late_completion)
+ZTEST(adc_burst_reply, test_transport_error_aborts_the_burst_and_wins_over_a_late_completion)
 {
 	uint8_t f[FRAME_CAP];
 
 	reset();
 	adc_read_request(0u, 2u);
+	zassert_true(bridge_hw_fake_adc_async_inflight(), "armed");
 	spi_slave_transport_error(); /* DMA ERRIF / RXORERR on the transaction */
 	zassert_true(spi_slave_tx_pending(), "STATUS_IO staged");
+	zassert_equal(
+	    bridge_hw_fake_adc_async_abort_count(), 1u, "the burst no longer runs for nothing");
+	zassert_false(bridge_hw_fake_adc_async_inflight(), "converter and DMA released");
 
-	bridge_hw_fake_adc_async_complete(BRIDGE_HW_OK); /* the burst finishes anyway */
-	zassert_equal(hook_calls, 0u, "stale completion is dropped, not staged over the error");
+	bridge_hw_fake_adc_async_complete(BRIDGE_HW_OK); /* inert: nothing in flight */
+	zassert_equal(hook_calls, 0u, "no completion is staged over the error");
 	const size_t n = take_reply(f);
 	zassert_equal(f[1], STATUS_IO, "the error reply survives");
 	zassert_true(frame_crc_ok(f, n), "CRC valid");
+}
+
+/* Every other path that replaces the pending reply with STATUS_IO cancels the
+ * burst too: a corrupt request (bad CRC), a mangled one (leading byte neither SOF
+ * nor the all-zero drain), and a truncated one. */
+ZTEST(adc_burst_reply, test_every_error_reply_aborts_a_pending_burst)
+{
+	uint8_t f[FRAME_CAP];
+
+	reset();
+	adc_read_request(0u, 2u);
+	spi_slave_cs_low();
+	spi_slave_rx_byte(GD32_BRIDGE_SOF);
+	spi_slave_rx_byte(CMD_PING);
+	spi_slave_rx_byte(0x00u);
+	spi_slave_rx_byte(0x00u); /* wrong CRC */
+	spi_slave_cs_high();
+	zassert_equal(bridge_hw_fake_adc_async_abort_count(), 1u, "bad CRC cancels the burst");
+	zassert_false(bridge_hw_fake_adc_async_inflight(), "released");
+	zassert_equal(take_reply(f) >= 4u ? f[1] : 0xEEu, STATUS_IO, "STATUS_IO");
+
+	adc_read_request(0u, 2u);
+	spi_slave_cs_low();
+	spi_slave_rx_byte(0x5Au); /* neither SOF nor the all-zero reply drain */
+	spi_slave_rx_byte(0x00u);
+	spi_slave_cs_high();
+	zassert_equal(bridge_hw_fake_adc_async_abort_count(), 2u, "mangled request cancels it");
+
+	adc_read_request(0u, 2u);
+	spi_slave_cs_low();
+	spi_slave_rx_byte(GD32_BRIDGE_SOF);
+	spi_slave_rx_byte(CMD_PING); /* too short for an envelope */
+	spi_slave_cs_high();
+	zassert_equal(bridge_hw_fake_adc_async_abort_count(), 3u, "truncated request cancels it");
+	zassert_false(bridge_hw_fake_adc_async_inflight(), "nothing left running");
 }
 
 ZTEST(adc_burst_reply, test_hal_failure_is_reported_as_its_status)

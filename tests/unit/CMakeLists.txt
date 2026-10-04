@@ -432,6 +432,41 @@ target_compile_options(test_adc_seq PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_adc_seq PRIVATE ztest_shim m)
 add_test(NAME adc_seq COMMAND test_adc_seq)
 
+# --- adc_e2e: CMD_ADC_READ over SPI through the REAL transport + protocol + adc.c --
+#
+# adc_seq tests adc.c against hand-built callbacks; adc_burst_reply tests
+# protocol.c over a fake HAL.  Neither sees the done-callback identity contract
+# between them (protocol_deferred_abort -> bridge_hw_adc_read_abort matches the
+# pointer protocol.c registered).  This target links all three for real over the
+# adc_seq vendor mock.  hal/bridge_hw_stub.c is linked LAST only to satisfy the
+# bridge_hw_* the dispatcher references that are not ADC (GPIO, PWM, ...); where
+# it duplicates a symbol the real ADC objects define, the first (real)
+# definition wins, which is what --allow-multiple-definition keeps quiet about.
+add_executable(test_adc_e2e
+    adc_e2e/src/test_adc_e2e.c
+    adc_seq/mock/mock_gd32.c
+    ${FW}/src/transport_spi.c
+    ${FW}/src/protocol.c
+    ${FW}/src/bootloader/bootloader.c
+    ${FW}/src/ota.c
+    ${FW}/src/crc32.c
+    ${FW}/hal/gd32/adc.c
+    ${FW}/hal/gd32/adc_stream.c
+    ${FW}/hal/gd32/vref.c
+    ${FW}/hal/gd32/adc_dsp_chain.c
+    ${FW}/hal/bridge_hw_stub.c
+)
+target_include_directories(test_adc_e2e PRIVATE
+    ${FW}/src
+    ${FW}/hal
+    ${FW}/hal/gd32
+    ${CMAKE_CURRENT_SOURCE_DIR}/adc_seq/mock
+)
+target_compile_options(test_adc_e2e PRIVATE ${TEST_FLAGS})
+target_link_options(test_adc_e2e PRIVATE -Wl,--allow-multiple-definition)
+target_link_libraries(test_adc_e2e PRIVATE ztest_shim m)
+add_test(NAME adc_e2e COMMAND test_adc_e2e)
+
 # --- fmc_ota_guard: the #79 address guard, header-only, no GD32 register
 # dependency (see hal/fmc_ota_guard.h) -------------------------------------
 add_executable(test_fmc_ota_guard fmc_ota_guard/src/test_fmc_ota_guard.c)
