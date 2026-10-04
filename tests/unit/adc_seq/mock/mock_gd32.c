@@ -270,16 +270,25 @@ uint32_t mock_adc_get_routine_data(void)
 
 /* --- DWT cycle counter + live core clock (burst time bounds) -------------*/
 
-static DWT_Type mock_dwt_regs;
-uint32_t        mock_dwt_cycles;
-uint32_t        mock_dwt_step = 1u;
+static DWT_Type       mock_dwt_regs       = { DWT_CTRL_CYCCNTENA_Msk, 0u };
+static CoreDebug_Type mock_coredebug_regs = { CoreDebug_DEMCR_TRCENA_Msk };
+uint32_t              mock_dwt_cycles;
+uint32_t              mock_dwt_step = 1u;
 /* init.c is not linked here; the live core clock the I2C sync wait scales by. */
 uint32_t bridge_core_clock_hz = 216000000u;
+
+CoreDebug_Type *mock_coredebug_ptr(void)
+{
+	return &mock_coredebug_regs;
+}
 
 DWT_Type *mock_dwt_ptr(void)
 {
 	mock_dwt_regs.CYCCNT = mock_dwt_cycles;
-	mock_dwt_cycles += mock_dwt_step;
+	if ((mock_dwt_regs.CTRL & DWT_CTRL_CYCCNTENA_Msk) != 0u &&
+	    (mock_coredebug_regs.DEMCR & CoreDebug_DEMCR_TRCENA_Msk) != 0u) {
+		mock_dwt_cycles += mock_dwt_step;
+	}
 	return &mock_dwt_regs;
 }
 

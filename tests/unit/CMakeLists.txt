@@ -438,10 +438,10 @@ add_test(NAME adc_seq COMMAND test_adc_seq)
 # protocol.c over a fake HAL.  Neither sees the done-callback identity contract
 # between them (protocol_deferred_abort -> bridge_hw_adc_read_abort matches the
 # pointer protocol.c registered).  This target links all three for real over the
-# adc_seq vendor mock.  hal/bridge_hw_stub.c is linked LAST only to satisfy the
-# bridge_hw_* the dispatcher references that are not ADC (GPIO, PWM, ...); where
-# it duplicates a symbol the real ADC objects define, the first (real)
-# definition wins, which is what --allow-multiple-definition keeps quiet about.
+# adc_seq vendor mock.  hal/bridge_hw_stub.c supplies the non-ADC bridge_hw_*
+# (GPIO, PWM, ...) the dispatcher references, through adc_e2e/stub_no_adc.c, a
+# build of the stub with its ADC entry points compiled out, so the real
+# hal/gd32/adc*.c definitions are the only ones and no linker override is needed.
 add_executable(test_adc_e2e
     adc_e2e/src/test_adc_e2e.c
     adc_seq/mock/mock_gd32.c
@@ -454,7 +454,7 @@ add_executable(test_adc_e2e
     ${FW}/hal/gd32/adc_stream.c
     ${FW}/hal/gd32/vref.c
     ${FW}/hal/gd32/adc_dsp_chain.c
-    ${FW}/hal/bridge_hw_stub.c
+    adc_e2e/stub_no_adc.c
 )
 target_include_directories(test_adc_e2e PRIVATE
     ${FW}/src
@@ -463,9 +463,24 @@ target_include_directories(test_adc_e2e PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/adc_seq/mock
 )
 target_compile_options(test_adc_e2e PRIVATE ${TEST_FLAGS})
-target_link_options(test_adc_e2e PRIVATE -Wl,--allow-multiple-definition)
 target_link_libraries(test_adc_e2e PRIVATE ztest_shim m)
 add_test(NAME adc_e2e COMMAND test_adc_e2e)
+
+# --- status_deferred_guard: STATUS_DEFERRED never goes on the wire ----------
+#
+# Both transports map the dispatcher's internal 0xFE marker to a CRC-valid
+# STATUS_IO at the staging site.  Unreachable through the real dispatcher, so
+# the REAL transport_spi.c + transport_i2c.c run against a fake protocol layer
+# that returns 0xFE on demand.
+add_executable(test_status_deferred_guard
+    status_deferred_guard/src/test_status_deferred_guard.c
+    ${FW}/src/transport_spi.c
+    ${FW}/src/transport_i2c.c
+)
+target_include_directories(test_status_deferred_guard PRIVATE ${FW}/src ${FW}/hal)
+target_compile_options(test_status_deferred_guard PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_status_deferred_guard PRIVATE ztest_shim)
+add_test(NAME status_deferred_guard COMMAND test_status_deferred_guard)
 
 # --- fmc_ota_guard: the #79 address guard, header-only, no GD32 register
 # dependency (see hal/fmc_ota_guard.h) -------------------------------------

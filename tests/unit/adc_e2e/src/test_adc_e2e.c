@@ -51,9 +51,11 @@ static void reset(void)
 	adc_deepsleep_quiesce();
 	mock_seq_reset();
 	mock_dma_reset();
-	mock_dwt_cycles      = 0u;
-	mock_dwt_step        = 1u;
-	bridge_core_clock_hz = 216000000u;
+	mock_dwt_cycles             = 0u;
+	mock_dwt_step               = 1u;
+	bridge_core_clock_hz        = 216000000u;
+	mock_dwt_ptr()->CTRL        = DWT_CTRL_CYCCNTENA_Msk;
+	mock_coredebug_ptr()->DEMCR = CoreDebug_DEMCR_TRCENA_Msk;
 	mock_adc_set_trigger_hook(0); /* the burst runs until the test plays the DMA IRQ */
 	for (uint8_t c = 0u; c < 8u; ++c) {
 		adc_sample_cycles_cache[c]    = ADC_DEFAULT_SAMPLE_CYCLES;
