@@ -123,7 +123,7 @@
 /* Host-visible ring depth ceiling per stream (firmware-side DMA
  * destination; BRIDGE_ADC_STREAM_RING_SAMPLES in hal/gd32/gd32_common.h is
  * the same 1024).  A legacy CMD_ADC_STREAM_BEGIN stream uses the whole
- * ring; a BEGIN2 stream with watermark W uses 2*W of it.  Host polls
+ * ring; a BEGIN2 stream uses the smallest power of two >= max(2*W, 5 ms of samples).  Host polls
  * CMD_ADC_STREAM_READ / _READ2 for batches; a non-empty ring lets the
  * firmware decouple DMA cadence from host poll cadence.  Slots are u16. */
 #define GD32_BRIDGE_ADC_STREAM_RING_SAMPLES 1024u

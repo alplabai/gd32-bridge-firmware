@@ -36,6 +36,7 @@ typedef struct {
 	uint32_t remaining;   /* backlog still queued after this read              */
 	uint32_t next_d;      /* the delivered index D after this read             */
 	bool     sentinel;    /* discontinuity: deliver nothing, report the sentinel */
+	bool     undercount;  /* transient undercount: an empty read, flagged for the next plan */
 } adc_read2_plan_t;
 
 /* Plan one READ2.
@@ -53,19 +54,45 @@ typedef struct {
  * invariant first_index(n) == first_index(n-1) + got(n-1) + dropped(n)
  * (mod 2^32) holds for every non-sentinel read.
  *
- * A backlog within one ring "below zero" (the writer total momentarily one
- * lap short, gh#149) is a transient undercount and plans an empty read, not a
- * discontinuity. */
+ * Undercount rule.  The only mechanism that can leave the writer total
+ * short inside a read is a DMA reload landing between the lap_count snapshot
+ * and the write-index read of that SAME CS-EXTI handler (gh#149) -- at most one
+ * ring, and gone by the next read.  So a backlog that is at most one ring
+ * "below zero" plans ONE empty read (`undercount` set).  A second consecutive
+ * undercount (`undercount_prev`), or any backlog further below zero, means the
+ * cursors disagree for another reason and answers the discontinuity sentinel
+ * (the caller then resyncs to the live position) -- never an empty read that
+ * hides lost samples. */
 void adc_read2_plan(uint32_t          backlog,
                     uint16_t          ring_depth,
                     uint8_t           max_samples,
                     uint32_t          d_prev,
                     bool              discontinuity,
+                    bool              undercount_prev,
                     adc_read2_plan_t *out);
 
-/* Ring length for a watermark W: 2*W, or the whole 1024-sample ring when
- * W == 0 (no events).  Always a power of two for the accepted watermarks. */
-uint16_t adc_stream2_ring_depth(uint16_t watermark);
+/* Minimum time one lap of the raw ring must take, in microseconds.  The
+ * prio-3 lap ISR counts each DMA reload; a reload that lands while its
+ * predecessor's flag is still pending is counted ONCE, so a whole lap is lost
+ * and READ2 would report dropped = 0 with a consistent first_index -- silently
+ * wrong.  The longest prio-1/prio-2 work that can keep that ISR off the CPU is
+ * the ~2 ms ROVF recalibration spin (ADC_READ <= 1 ms, a BATCH ~350 us, I2C OTA
+ * programming at prio 2), so a lap must last at least twice that. */
+#define ADC_STREAM2_LAP_MIN_US 5000u
+
+/* Ring plan for BEGIN2: the smallest power of two >= max(2*W, the samples
+ * produced in ADC_STREAM2_LAP_MIN_US at the REALISED rate tick_hz/period_ticks),
+ * capped at BRIDGE_ADC_STREAM_RING_SAMPLES.  The events fire at ring/2 (DMA
+ * half- and full-transfer), so the GRANTED watermark is ring_depth/2 and may
+ * exceed the requested one.  W == 0 means no events: the whole 1024 ring,
+ * granted watermark 0.  Returns false (BEGIN2 answers OUT_OF_RANGE) when even
+ * the full ring cannot span the minimum lap; no rate up to 100 kHz does that
+ * (500 samples). */
+bool adc_stream2_ring_plan(uint16_t  watermark,
+                           uint32_t  tick_hz,
+                           uint32_t  period_ticks,
+                           uint16_t *ring_depth,
+                           uint16_t *granted_watermark);
 
 /* The pace timer's tick and period for a requested rate: a 1 MHz tick for
  * rates >= 16 Hz and a 10 kHz tick below, period = floor(tick / rate).  The

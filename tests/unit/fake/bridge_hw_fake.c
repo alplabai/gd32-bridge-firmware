@@ -67,6 +67,8 @@ static int      s_attn_supported;
 static int      s_stream2_supported;
 static int      s_debugger_attached;
 static int      s_attn_on;
+static int      s_attn_streams_on;
+static uint32_t s_attn_streams_off_calls;
 static uint32_t s_attn_enable_calls;
 static uint32_t s_attn_quiesce_calls;
 static uint32_t s_attn_ev_set[FAKE_STREAM_COUNT];
@@ -98,6 +100,16 @@ void bridge_hw_fake_set_link_hw(int attn_supported, int stream2_supported)
 void bridge_hw_fake_set_debugger_attached(int attached)
 {
 	s_debugger_attached = attached;
+}
+
+int bridge_hw_fake_attn_streams_enabled(void)
+{
+	return s_attn_streams_on;
+}
+
+uint32_t bridge_hw_fake_attn_streams_off_calls(void)
+{
+	return s_attn_streams_off_calls;
 }
 
 int bridge_hw_fake_attn_enabled(void)
@@ -560,12 +572,14 @@ void bridge_hw_fake_reset(void)
 	memset(s_spectrum, 0, sizeof(s_spectrum));
 
 	/* Looks like the gd32 backend unless a test says otherwise. */
-	s_attn_supported     = 1;
-	s_stream2_supported  = 1;
-	s_debugger_attached  = 0;
-	s_attn_on            = 0;
-	s_attn_enable_calls  = 0u;
-	s_attn_quiesce_calls = 0u;
+	s_attn_supported         = 1;
+	s_stream2_supported      = 1;
+	s_debugger_attached      = 0;
+	s_attn_on                = 0;
+	s_attn_streams_on        = 0;
+	s_attn_streams_off_calls = 0u;
+	s_attn_enable_calls      = 0u;
+	s_attn_quiesce_calls     = 0u;
 	memset(s_attn_ev_set, 0, sizeof(s_attn_ev_set));
 	memset(s_attn_ev_clear, 0, sizeof(s_attn_ev_clear));
 	memset(&s_begin2_info, 0, sizeof(s_begin2_info));
@@ -1011,6 +1025,14 @@ int bridge_hw_attn_enable(bool enable)
 void bridge_hw_attn_event_set(uint8_t stream_id)
 {
 	s_attn_ev_set[stream_id % FAKE_STREAM_COUNT]++;
+}
+
+void bridge_hw_attn_streams_enable(bool enable)
+{
+	s_attn_streams_on = enable ? 1 : 0;
+	if (!enable) {
+		s_attn_streams_off_calls++;
+	}
 }
 
 void bridge_hw_attn_event_clear(uint8_t stream_id)

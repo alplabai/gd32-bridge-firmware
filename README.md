@@ -196,7 +196,7 @@ firmware reader needs:
   [`hal/bridge_board_config.h`](hal/bridge_board_config.h).
 * **`CMD_ADC_STREAM_BEGIN2` / `_READ2`** report the *realised* sample rate
   (`tick_hz / period_ticks`), refuse a rate whose conversion time does not fit
-  the pacing period, size the ring at `2 x watermark`, and report overrun as
+  the pacing period, size the ring for at least a 5 ms lap at the realised rate (at least `2 x watermark`, so the granted watermark can exceed the requested one), and report overrun as
   `dropped` on an `OK` reply (never `BUSY`) with a `first_index` delivered
   index; `dropped = 0xFFFFFFFF` means a gap of unknown length. The
   vendor-header-free arithmetic is `hal/gd32/adc_stream2.c`, host-tested in

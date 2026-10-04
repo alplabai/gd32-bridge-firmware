@@ -383,6 +383,13 @@ void bridge_transport_spi_hw_init(void)
  * PRIMASK lock. */
 static volatile bool    attn_on;
 static volatile uint8_t attn_ev;
+/* Watermark events only matter while ADC_STREAM2 is granted: with READ2
+ * refused there is nothing able to clear them and ATTN would keep rising. */
+static volatile bool attn_streams_on;
+/* Set by POWER_MODE_SET's quiesce: ATTN stays low (events latch but do not
+ * drive) until the next CS edge, so a watermark IRQ cannot re-raise it
+ * during SLEEP / DEEP_SLEEP.  A SPI edge is what wakes the host's exchange. */
+static volatile bool attn_quiesced;
 
 #ifndef BRIDGE_DHCSR
 #define BRIDGE_DHCSR (*(volatile uint32_t *)0xE000EDF0u)
@@ -419,8 +426,9 @@ int bridge_hw_attn_enable(bool enable)
 		gpio_output_options_set(
 		    BRIDGE_ATTN_PORT, GPIO_OTYPE_PP, GPIO_OSPEED_12MHZ, BRIDGE_ATTN_PIN);
 		gpio_mode_set(BRIDGE_ATTN_PORT, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, BRIDGE_ATTN_PIN);
-		attn_ev = 0u;
-		attn_on = true;
+		attn_ev       = 0u;
+		attn_quiesced = false;
+		attn_on       = true;
 	} else if (!enable && attn_on) {
 		/* Drive low, then hand PA14 back to SWD: AF0 with its reset
 		 * pull-down.  Pending events die with the line. */
@@ -437,11 +445,12 @@ int bridge_hw_attn_enable(bool enable)
 void bridge_hw_attn_event_set(uint8_t stream_id)
 {
 	const uint32_t st = bridge_irq_lock();
-	if (attn_on) {
+	if (attn_on && attn_streams_on) {
 		attn_ev = (uint8_t)(attn_ev | (1u << stream_id));
 		/* PA8 high = CS idle; a pending EXTI line-8 bit means an edge this
 		 * handler has not serviced yet, and the CS-rising exit re-evaluates. */
-		if (gpio_input_bit_get(BRIDGE_SPI_NSS_PORT, BRIDGE_SPI_NSS_PIN) != RESET &&
+		if (!attn_quiesced &&
+		    gpio_input_bit_get(BRIDGE_SPI_NSS_PORT, BRIDGE_SPI_NSS_PIN) != RESET &&
 		    (EXTI_PD0 & (1u << 8)) == 0u) {
 			attn_pin_high();
 		}
@@ -456,21 +465,45 @@ void bridge_hw_attn_event_clear(uint8_t stream_id)
 	bridge_irq_unlock(st);
 }
 
+void bridge_hw_attn_streams_enable(bool enable)
+{
+	const uint32_t st = bridge_irq_lock();
+	attn_streams_on   = enable;
+	if (!enable) attn_ev = 0u;
+	bridge_irq_unlock(st);
+}
+
 void bridge_hw_attn_quiesce(void)
 {
-	if (attn_on) attn_pin_low();
+	/* Under the lock, so a prio-3 watermark event either ran before (and is
+	 * pulled low here) or sees the flag and only latches. */
+	const uint32_t st = bridge_irq_lock();
+	if (attn_on) {
+		attn_quiesced = true;
+		attn_pin_low();
+	}
+	bridge_irq_unlock(st);
 }
 
-/* CS falling and CS-rising entry: deassert. */
+/* CS falling and CS-rising entry: deassert.  A CS edge also ends a quiesce. */
 static void attn_cs_low_edge(void)
 {
-	if (attn_on) attn_pin_low();
+	if (attn_on) {
+		attn_quiesced = false;
+		attn_pin_low();
+	}
 }
 
-/* CS-rising exit: `fresh` means a reply was staged AND its TX DMA armed. */
+/* CS-rising exit: `fresh` means a reply was staged AND its TX DMA armed.  The
+ * same CS-idle gate as the event assert: if the host already re-asserted CS
+ * (a coalesced next transaction) the line stays low and the next CS-rising
+ * exit re-evaluates. */
 static void attn_cs_exit(bool fresh)
 {
-	if (attn_on && (fresh || attn_ev != 0u)) attn_pin_high();
+	if (attn_on && (fresh || attn_ev != 0u) &&
+	    gpio_input_bit_get(BRIDGE_SPI_NSS_PORT, BRIDGE_SPI_NSS_PIN) != RESET) {
+		attn_pin_high();
+	}
 }
 
 /* CS edge: PA8 on EXTI8.  Falling = select (reset RX, preload the staged

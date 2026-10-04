@@ -1909,4 +1909,44 @@ ZTEST(gd32_adc_seq, test_read2_rearms_the_event_only_while_a_watermark_remains)
 	zassert_false(adc_streams[0].v2);
 }
 
+/* The ring is sized for a >= 5 ms lap at the realised rate so the prio-3 lap
+ * ISR cannot be starved for a whole lap: 100 kHz with W=16 would be a 320 us
+ * lap; BEGIN2 grants a larger watermark instead and echoes it. */
+ZTEST(gd32_adc_seq, test_begin2_grants_a_larger_watermark_when_the_lap_would_be_short)
+{
+	adc_seq_reset();
+	fac_latch_release();
+	bridge_hw_adc_stream2_info_t info = begin2_ok(0u, 100000u, 16u);
+	zassert_equal(info.ring_depth, 512u, "500 samples per 5 ms -> 512");
+	zassert_equal(info.watermark, 256u, "granted = ring / 2, echoed");
+	zassert_equal(adc_streams[0].watermark, 256u);
+	const int init_i = mock_seq_find_from("dma_init", DMA0, 0);
+	zassert_equal(mock_seq[init_i].arg, 512u, "the DMA ring is the granted depth");
+	bridge_hw_adc_stream_end(0u);
+
+	info = begin2_ok(0u, 1000u, 16u);
+	zassert_equal(info.ring_depth, 32u, "1 kHz W=16 keeps 2W");
+	zassert_equal(info.watermark, 16u);
+	bridge_hw_adc_stream_end(0u);
+}
+
+/* The sentinel resync takes the read index from the SAME total_written as
+ * total_read, not from a second DMA counter read. */
+ZTEST(gd32_adc_seq, test_read2_sentinel_resync_uses_total_written)
+{
+	adc_seq_reset();
+	fac_latch_release();
+	begin2_ok(0u, 1000u, 16u);                       /* depth 32 */
+	mock_dma_set_remaining(DMA0, DMA_CH0, 32u - 5u); /* write index 5, total_written 5 */
+	adc_streams[0].total_read = 100u;                /* far more than a ring ahead */
+	uint32_t first, dropped;
+	uint8_t  got;
+	uint16_t codes[4];
+	zassert_equal(read2_call(0u, 4u, &first, &dropped, &got, codes), BRIDGE_HW_OK);
+	zassert_equal(dropped, 0xFFFFFFFFu, "cursors disagree beyond a ring: the sentinel");
+	zassert_equal(adc_streams[0].total_read, 5u);
+	zassert_equal(adc_streams[0].read_idx, 5u, "total_written & (depth - 1)");
+	bridge_hw_adc_stream_end(0u);
+}
+
 ZTEST_SUITE(gd32_adc_seq, NULL, NULL, NULL, NULL, NULL);

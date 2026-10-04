@@ -220,29 +220,35 @@ void bridge_hw_init(void)
 {
 	/* --- Stack costing + MSPLIM limit (gh#146) -----------------------
 	 *
-	 * THE COSTING (measured, not asserted): a full -Os build of the
-	 * gd32 backend with -fstack-usage (real vendor tree,
+	 * THE COSTING (measured, not asserted; v0.15 numbers): a full -Os
+	 * build of the gd32 backend with -fstack-usage (real vendor tree,
 	 * BRIDGE_OTA_PARTITIONED on) reports the worst single frame in the
-	 * firmware's own TUs at 248 bytes (adc_stream.c's FAC decode: the
-	 * int16 taps[BRIDGE_DSP_MAX_FIR_TAPS] + float fv[] pair, #132's
-	 * bounded stack), then 120 (transport_i2c), then a band of 88-104
-	 * (protocol dispatch frames, adc_stream, tmu, gpio).  The deepest
-	 * executable chains:
+	 * firmware's own TUs at 360 bytes (adc_stream.c's adc_dsp_fac_config:
+	 * the FAC decode's int16 taps[] + float fv[] pair, #132's bounded
+	 * stack), then 208 (ota_boot_init, base level once), 192 (meta_commit),
+	 * 128 (i2c_slave_write_end, adc_stream_begin_common), 112 (ota_dispatch,
+	 * bridge_hw_dsp_pump, handle_adc_spectrum_read) and a band of 88-104
+	 * (protocol_dispatch_inner 88 -- entered TWICE under a BATCH --,
+	 * tmu_compute 104, adc_stream_read2 96).  The deepest chains:
 	 *
-	 *   CS-EXTI (prio 1) -> protocol_dispatch -> worst opcode handler
-	 *     -> adc_stream path .......... <= ~248 + 104 + 88 + frame ~700
-	 *   + nested I2C-EV (prio 2) -> protocol_dispatch -> handler ~300
-	 *   + 2 exception frames (no FPU context: 32 B each) ........ ~64
-	 *   ---------------------------------------------------- approx 1.1 K
+	 *   base-level pump (bridge_hw_dsp_pump -> adc_dsp_fac_config) .. ~500
+	 *   + DMA lap/watermark ISR (prio 3, attn event) ................. ~80
+	 *   + I2C EV (prio 2) -> dispatch -> OTA programming ............ ~650
+	 *   + CS-EXTI (prio 1) in-flight BUSY (dispatch refused) ........ ~140
+	 *   ---------------------------------------------------- approx 1.4 K
+	 *   + a fault / NMI frame on top (no FPU context: 32 B each) .. ~1.5 K
 	 *
-	 * against __stack_size = 2K: roughly 55% of the region on the
-	 * worst legal nesting, which is margin, not slack -- the ring of
-	 * #36's NMI_Handler on top costs another frame, and #132's taps[]
-	 * bound is what keeps the 248 from doubling.  Remeasure after any
-	 * change to adc_stream.c's decode (see the -fstack-usage recipe in
-	 * the commit message: cmake with -DCMAKE_C_FLAGS="-fstack-usage
-	 * -Os", then read the .su files; the bootloader image is measured
-	 * the same way against the SAME 2K).
+	 * Within the CS-EXTI chain itself: SPI OTA (EXTI 32 + cs_high 40 +
+	 * dispatch 40 + inner 88 + ota_dispatch 112 + meta_commit 192 + ...)
+	 * is ~548; BATCH -> READ2 / TMU (two inner frames + the sub handler) is
+	 * ~440; BEGIN2 (handler 64 + begin 16 + begin_common 128) ~410.
+	 *
+	 * against __stack_size = 2K: roughly 70-75% of the region on the worst
+	 * legal nesting, which is margin, not slack -- #132's taps[] bound is
+	 * what keeps the 360 from growing.  Remeasure after any change to
+	 * adc_stream.c's decode or the dispatcher (cmake with
+	 * -DCMAKE_C_FLAGS="-fstack-usage -Os", then read the .su files; the
+	 * bootloader image is measured the same way against the SAME 2K).
 	 *
 	 * The limit is enforced, not just measured: MSPLIM (ARMv8-M,
 	 * ARMv8-M ARM B3.1) turns any excursion below _stack_limit into a

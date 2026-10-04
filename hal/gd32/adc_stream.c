@@ -183,11 +183,17 @@ static uint16_t adc_stream_write_index(const adc_stream_state_t *s)
  * the shortfall self-heals the moment this consumer next observes
  * lap_count move, one ring period later -- until then it is served
  * one-ring-stale samples with BRIDGE_HW_OK, no BRIDGE_HW_ERR_BUSY.
- * That is bounded and self-healing, not silent corruption: for two
- * wraps to land between samples the prio-3 lap vector must be starved
- * for a whole ring period (>= ~10 ms at the 100 kHz cap), which no
- * bounded prio-1/2 work in this tree approaches (the longest is the
- * ROVF recovery's ~2 ms bounded recalibration spin).
+ * That is bounded and self-healing, not silent corruption -- PROVIDED
+ * two wraps cannot land between samples, i.e. the prio-3 lap vector is
+ * never starved for a whole ring period.  A legacy stream's 1024-sample
+ * ring is >= 10.24 ms at the 100 kHz cap; the longest bounded prio-1/2
+ * work is the ROVF recovery's ~2 ms recalibration spin, so that holds.
+ * A BEGIN2 stream with a small watermark would break it (2*W = 32 samples
+ * is 320 us at 100 kHz), and then READ2 would return dropped = 0 with a
+ * consistent first_index over a lost lap: silently wrong.  BEGIN2 therefore
+ * sizes the ring for a lap of at least ADC_STREAM2_LAP_MIN_US (5 ms, twice
+ * the ROVF figure) at the REALISED rate (adc_stream2_ring_plan), granting
+ * a larger watermark when it must.
  *
  * trk is the caller's own tracker (s->rd_pos for the prio-1 read
  * path, s->pump_pos for the base-level pump) -- never lap_count.  The
@@ -250,8 +256,14 @@ static int adc_stream_begin_common(uint8_t                       stream_id,
 	/* The realised pace and, for BEGIN2, the checks that need it. */
 	uint32_t tick_hz, period_ticks;
 	adc_stream2_pace(sample_rate_hz, &tick_hz, &period_ticks);
-	const uint16_t ring_depth =
-	    v2 ? adc_stream2_ring_depth(watermark) : (uint16_t)BRIDGE_ADC_STREAM_RING_SAMPLES;
+	uint16_t ring_depth = (uint16_t)BRIDGE_ADC_STREAM_RING_SAMPLES;
+	if (v2) {
+		/* The granted watermark may exceed the requested one (ring sized for a
+		 * >= 5 ms lap); every later use is the granted value. */
+		if (!adc_stream2_ring_plan(watermark, tick_hz, period_ticks, &ring_depth, &watermark)) {
+			return BRIDGE_HW_ERR_RANGE;
+		}
+	}
 	if (v2) {
 		/* Every timing constant here assumes the 216 MHz core clock. */
 		if (!bridge_core_clock_matches) return BRIDGE_HW_ERR_IO;
@@ -406,18 +418,19 @@ static int adc_stream_begin_common(uint8_t                       stream_id,
 	 * bridge_hw_adc_configure (which only rewrites the cache) can't
 	 * change the divisor under a running stream -- the converter keeps
 	 * the format this begin applied until stream_end. */
-	s->full_scale   = adc_full_scale_for_bits(adc_resolution_bits_cache[channel]);
-	s->ring_depth   = ring_depth;
-	s->watermark    = watermark;
-	s->v2           = v2;
-	s->read2_d      = 0u; /* the delivered index starts at 0 at BEGIN2 */
-	s->read_idx     = 0u;
-	s->total_read   = 0u; /* lap_count zeroed above, pre-arm */
-	s->dsp_chain_id = 0u;
-	s->dsp_bound    = false;
-	s->proc_gap     = false;
-	s->dsp_cfg_bad  = false; /* gh#35 sticky flags: clean slate per session */
-	s->dsp_sat      = false;
+	s->full_scale       = adc_full_scale_for_bits(adc_resolution_bits_cache[channel]);
+	s->ring_depth       = ring_depth;
+	s->watermark        = watermark;
+	s->v2               = v2;
+	s->read2_d          = 0u; /* the delivered index starts at 0 at BEGIN2 */
+	s->read2_undercount = false;
+	s->read_idx         = 0u;
+	s->total_read       = 0u; /* lap_count zeroed above, pre-arm */
+	s->dsp_chain_id     = 0u;
+	s->dsp_bound        = false;
+	s->proc_gap         = false;
+	s->dsp_cfg_bad      = false; /* gh#35 sticky flags: clean slate per session */
+	s->dsp_sat          = false;
 
 	/* Arm the lap counter BEFORE the channel starts: clear any stale
 	 * full-transfer flag from a prior session on this controller, then
@@ -690,7 +703,6 @@ int bridge_hw_adc_stream_read(uint8_t   stream_id,
 	 * harmless: the difference below stays small and modular
 	 * arithmetic keeps it exact. */
 	const uint32_t total_written = adc_stream_total_written(s, &s->rd_pos);
-	const uint16_t w             = adc_stream_write_index(s);
 	const int32_t  backlog       = (int32_t)(total_written - s->total_read);
 	if (backlog <= 0) return BRIDGE_HW_OK; /* empty ring (or transient undercount) */
 
@@ -702,7 +714,7 @@ int bridge_hw_adc_stream_read(uint8_t   stream_id,
 	     * fresh, gap-free samples; answer BUSY so the host learns
 	     * samples were lost (alp-sdk docs/gd32-bridge-protocol.md §3.10: ring
 	     * overrun -> STATUS_BUSY, "poll faster"). */
-		s->read_idx   = (uint16_t)(w % s->ring_depth);
+		s->read_idx   = (uint16_t)(total_written % s->ring_depth);
 		s->total_read = total_written;
 		return BRIDGE_HW_ERR_BUSY;
 	}
@@ -760,7 +772,8 @@ int bridge_hw_adc_stream_read2(uint8_t   stream_id,
 		const bool recal_ok = adc_stream_rovf_recover_and_reanchor(s, ch);
 		bridge_hw_attn_event_clear(stream_id);
 		if (!recal_ok) return BRIDGE_HW_ERR_IO;
-		adc_read2_plan(0u, s->ring_depth, max_samples, s->read2_d, true, &plan);
+		s->read2_undercount = false;
+		adc_read2_plan(0u, s->ring_depth, max_samples, s->read2_d, true, false, &plan);
 		*first_index = plan.first_index;
 		*dropped     = plan.dropped;
 		return BRIDGE_HW_OK;
@@ -781,8 +794,13 @@ int bridge_hw_adc_stream_read2(uint8_t   stream_id,
 			s->proc_read = s->proc_write;
 		}
 		const uint32_t backlog = (uint32_t)(s->proc_write - s->proc_read);
-		adc_read2_plan(
-		    backlog, (uint16_t)BRIDGE_ADC_STREAM_RING_SAMPLES, max_samples, s->read2_d, gap, &plan);
+		adc_read2_plan(backlog,
+		               (uint16_t)BRIDGE_ADC_STREAM_RING_SAMPLES,
+		               max_samples,
+		               s->read2_d,
+		               gap,
+		               false,
+		               &plan);
 		s->proc_read += plan.skip;
 		for (uint32_t i = 0u; i < plan.got; ++i) {
 			uint32_t code = s->proc_ring[s->proc_read % BRIDGE_ADC_STREAM_RING_SAMPLES];
@@ -796,12 +814,15 @@ int bridge_hw_adc_stream_read2(uint8_t   stream_id,
 		 * legacy read uses (gh#149 coalescing recovery included), now against
 		 * this stream's own ring depth. */
 		const uint32_t total_written = adc_stream_total_written(s, &s->rd_pos);
-		const uint16_t w             = adc_stream_write_index(s);
 		const uint32_t backlog       = total_written - s->total_read;
-		adc_read2_plan(backlog, s->ring_depth, max_samples, s->read2_d, false, &plan);
+		adc_read2_plan(
+		    backlog, s->ring_depth, max_samples, s->read2_d, false, s->read2_undercount, &plan);
 		if (plan.sentinel) {
-			/* Cursors disagree beyond recovery: resync to the live position. */
-			s->read_idx   = (uint16_t)(w % s->ring_depth);
+			/* Cursors disagree beyond recovery: resync to the live position.  The
+			 * index comes from the SAME total_written as total_read (ring_depth
+			 * is a power of two), not from a second DMA counter read that a
+			 * reload could have moved. */
+			s->read_idx   = (uint16_t)(total_written & (uint32_t)(s->ring_depth - 1u));
 			s->total_read = total_written;
 		} else {
 			uint32_t idx = ((uint32_t)s->read_idx + (plan.skip % s->ring_depth)) % s->ring_depth;
@@ -817,11 +838,12 @@ int bridge_hw_adc_stream_read2(uint8_t   stream_id,
 		}
 	}
 
-	remaining    = plan.remaining;
-	s->read2_d   = plan.next_d;
-	*first_index = plan.first_index;
-	*dropped     = plan.dropped;
-	*got         = (uint8_t)plan.got;
+	s->read2_undercount = plan.undercount;
+	remaining           = plan.remaining;
+	s->read2_d          = plan.next_d;
+	*first_index        = plan.first_index;
+	*dropped            = plan.dropped;
+	*got                = (uint8_t)plan.got;
 
 	/* ATTN event bookkeeping: this read consumed the event; it stays raised
 	 * when a watermark's worth of backlog is still waiting. */

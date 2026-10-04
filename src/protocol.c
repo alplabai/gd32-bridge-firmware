@@ -1021,6 +1021,19 @@ static uint32_t link_arm(gd32_bridge_link_t link, uint32_t granted, uint16_t mp)
 			granted &= ~GD32_BRIDGE_LINK_FEAT_ATTN;
 		}
 	}
+	/* Watermark events exist only while READ2 is reachable.  On removal clear
+	 * what is pending and stop new ones: nothing could clear them afterwards
+	 * (READ2 answers NOSUPPORT) and ATTN would keep rising. */
+	const bool s2_was = (link_features[link] & GD32_BRIDGE_LINK_FEAT_ADC_STREAM2) != 0u;
+	const bool s2_now = (granted & GD32_BRIDGE_LINK_FEAT_ADC_STREAM2) != 0u;
+	if (link == GD32_BRIDGE_LINK_SPI && s2_was != s2_now) {
+		bridge_hw_attn_streams_enable(s2_now);
+		if (!s2_now) {
+			for (uint8_t sid = 0u; sid < GD32_BRIDGE_ADC_STREAM_COUNT; ++sid) {
+				bridge_hw_attn_event_clear(sid);
+			}
+		}
+	}
 	link_features[link]    = granted;
 	link_max_payload[link] = mp;
 	return granted;

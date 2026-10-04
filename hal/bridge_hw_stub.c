@@ -343,6 +343,11 @@ void bridge_hw_attn_event_set(uint8_t stream_id)
 	(void)stream_id;
 }
 
+void bridge_hw_attn_streams_enable(bool enable)
+{
+	(void)enable;
+}
+
 void bridge_hw_attn_event_clear(uint8_t stream_id)
 {
 	(void)stream_id;

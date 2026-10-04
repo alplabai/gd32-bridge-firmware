@@ -216,7 +216,7 @@ typedef struct {
 	uint16_t full_scale;   /* (1 << res_bits) - 1 captured at BEGIN2 */
 	uint16_t vref_mv;      /* adc_vref_mv captured at BEGIN2 */
 	uint16_t watermark;    /* granted watermark (0 = no events) */
-	uint16_t ring_depth;   /* 2 * watermark, or 1024 when watermark == 0 */
+	uint16_t ring_depth;   /* >= 2 * watermark and >= 5 ms of samples; 1024 when watermark == 0 */
 	uint8_t  flags;        /* BRIDGE_HW_ADC_STREAM2_FLAG_* */
 } bridge_hw_adc_stream2_info_t;
 
@@ -579,10 +579,17 @@ int bridge_hw_attn_enable(bool enable);
  * is idle and no CS edge is pending, drives ATTN high. */
 void bridge_hw_attn_event_set(uint8_t stream_id);
 
+/* Gate the watermark events: true while ADC_STREAM2 is granted on the SPI
+ * link.  Disabling discards pending events and makes bridge_hw_attn_event_set()
+ * a no-op, so ATTN cannot keep rising with nothing able to clear it. */
+void bridge_hw_attn_streams_enable(bool enable);
+
 /* READ2 / STREAM_END consumed or cancelled `stream_id`'s event. */
 void bridge_hw_attn_event_clear(uint8_t stream_id);
 
-/* Drive ATTN low (POWER_MODE_SET transition).  No-op when disabled. */
+/* Drive ATTN low (POWER_MODE_SET transition) and keep it low, under the IRQ
+ * lock, until the next CS edge: watermark events latch but do not drive during
+ * SLEEP / DEEP_SLEEP.  No-op when disabled. */
 void bridge_hw_attn_quiesce(void);
 
 #endif /* GD32_BRIDGE_HAL_BRIDGE_HW_H */

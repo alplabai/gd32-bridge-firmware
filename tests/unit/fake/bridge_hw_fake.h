@@ -173,6 +173,8 @@ void bridge_hw_fake_set_debugger_attached(int attached);
  * was called, how many quiesce calls were made, and per-stream event
  * set/clear call counts. */
 int      bridge_hw_fake_attn_enabled(void);
+int      bridge_hw_fake_attn_streams_enabled(void);
+uint32_t bridge_hw_fake_attn_streams_off_calls(void);
 uint32_t bridge_hw_fake_attn_enable_calls(void);
 uint32_t bridge_hw_fake_attn_quiesce_calls(void);
 uint32_t bridge_hw_fake_attn_event_set_calls(uint8_t stream_id);

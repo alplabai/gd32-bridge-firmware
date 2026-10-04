@@ -37,7 +37,8 @@ static uint32_t pd0;
 static unsigned pd0_accesses;
 static bool     cs_level_high;
 static bool     dma_err_flag;
-static bool     cs_high_fresh; /* what the stubbed spi_slave_cs_high() reports */
+static int      cs_flip_low_after; /* 0 = off */
+static bool     cs_high_fresh;     /* what the stubbed spi_slave_cs_high() reports */
 static bool     transport_err_called;
 
 /* ---- ATTN (PA14) pin-op log ---------------------------------------------- */
@@ -101,7 +102,10 @@ FlagStatus gpio_input_bit_get(uint32_t port, uint32_t pin)
 {
 	(void)port;
 	(void)pin;
-	return cs_level_high ? SET : RESET;
+	const bool level = cs_level_high;
+	/* Model a CS edge landing mid-handler: after N reads the line goes low. */
+	if (cs_flip_low_after > 0 && --cs_flip_low_after == 0) cs_level_high = false;
+	return level ? SET : RESET;
 }
 FlagStatus dma_interrupt_flag_get(uint32_t d, uint32_t ch, uint32_t f)
 {
@@ -212,7 +216,10 @@ static void reset_state(void)
 	mock_dhcsr            = 0u;
 	attn_log_n            = 0u;
 	memset(attn_log, 0, sizeof(attn_log));
+	cs_flip_low_after = 0;
+	attn_quiesced     = false;
 	bridge_hw_attn_enable(false); /* ATTN off, event bits clear, between cases */
+	bridge_hw_attn_streams_enable(true);
 	attn_log_n = 0u;
 }
 
@@ -459,4 +466,68 @@ ZTEST(transport_hw_cs_exti, test_attn_debugger_probe_and_lock_mask)
 	zassert_true(bridge_hw_debugger_attached(), "C_DEBUGEN set = debugger attached");
 	zassert_equal(BRIDGE_GPIOA_LOCK_MASK & (1u << 14), 0u, "PA14 stays out of the lock mask");
 	zassert_equal(BRIDGE_GPIOA_LOCK_MASK, 0x8700u);
+}
+
+/* A fresh reply is armed but the host already re-asserted CS (a coalesced next
+ * transaction): the exit does NOT raise ATTN (same CS-idle gate as the event
+ * assert); the next CS-rising exit re-evaluates. */
+ZTEST(transport_hw_cs_exti, test_attn_exit_stays_low_when_cs_is_asserted_again)
+{
+	static const attn_op_t want[] = { OP_LOW };
+	reset_state();
+	bridge_hw_attn_enable(true);
+	attn_log_n        = 0u;
+	cs_high_fresh     = true;
+	cs_flip_low_after = 1; /* the handler's entry read sees high; the exit read sees low */
+	BRIDGE_SPI_CS_EXTI_HANDLER();
+	expect_log(want, 1u, "fresh stage but CS low at exit");
+}
+
+/* POWER_MODE_SET: ATTN stays low through the sleep -- a watermark IRQ latches
+ * the event but cannot drive the pin -- until the next CS edge. */
+ZTEST(transport_hw_cs_exti, test_attn_quiesce_holds_low_until_the_next_cs_edge)
+{
+	reset_state();
+	bridge_hw_attn_enable(true);
+	cs_level_high = true;
+	pd0           = 0u;
+	attn_log_n    = 0u;
+	bridge_hw_attn_quiesce();
+	bridge_hw_attn_event_set(0u);
+	zassert_equal(attn_log_n, 1u, "only the quiesce's own low");
+	zassert_equal(attn_log[0], OP_LOW);
+	zassert_equal(attn_ev, 1u, "the event is still latched");
+
+	pd0           = 1u << 8;
+	cs_level_high = false; /* host wakes the link: CS falling ends the quiesce */
+	BRIDGE_SPI_CS_EXTI_HANDLER();
+	zassert_false(attn_quiesced);
+
+	attn_log_n    = 0u;
+	cs_level_high = true;
+	pd0           = 0u;
+	bridge_hw_attn_event_set(1u);
+	zassert_equal(attn_log_n, 1u, "events drive again after the edge");
+	zassert_equal(attn_log[0], OP_HIGH);
+}
+
+/* With ADC_STREAM2 not granted there is nothing able to clear a watermark
+ * event, so none is latched and ATTN is not driven for it. */
+ZTEST(transport_hw_cs_exti, test_attn_events_ignored_while_streams_are_disabled)
+{
+	reset_state();
+	bridge_hw_attn_enable(true);
+	bridge_hw_attn_streams_enable(false);
+	cs_level_high = true;
+	pd0           = 0u;
+	attn_log_n    = 0u;
+	bridge_hw_attn_event_set(0u);
+	zassert_equal(attn_log_n, 0u);
+	zassert_equal(attn_ev, 0u);
+
+	bridge_hw_attn_streams_enable(true);
+	bridge_hw_attn_event_set(0u);
+	zassert_equal(attn_log_n, 1u);
+	bridge_hw_attn_streams_enable(false);
+	zassert_equal(attn_ev, 0u, "disabling discards what was pending");
 }

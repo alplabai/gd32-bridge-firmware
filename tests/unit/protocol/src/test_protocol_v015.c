@@ -1046,3 +1046,29 @@ ZTEST(protocol, test_v015_power_mode_transition_quiesces_attn)
 	zassert_equal(bridge_hw_fake_attn_quiesce_calls(), 3u);
 	reset_links();
 }
+
+/* Removing ADC_STREAM2 mutes the watermark events and clears the pending ones:
+ * READ2 would answer NOSUPPORT and nothing else could clear them. */
+ZTEST(protocol, test_v015_removing_adc_stream2_clears_and_mutes_events)
+{
+	uint32_t g, sup;
+	uint16_t mp;
+
+	reset_links();
+	negotiate_ext(GD32_BRIDGE_LINK_SPI, ALL_FEATS, 252u, &g, &sup, &mp);
+	zassert_true(bridge_hw_fake_attn_streams_enabled(), "granted: events live");
+	const uint32_t c0 = bridge_hw_fake_attn_event_clear_calls(0u);
+	const uint32_t c1 = bridge_hw_fake_attn_event_clear_calls(1u);
+
+	negotiate_ext(
+	    GD32_BRIDGE_LINK_SPI, ALL_FEATS & ~GD32_BRIDGE_LINK_FEAT_ADC_STREAM2, 252u, &g, &sup, &mp);
+	zassert_false(bridge_hw_fake_attn_streams_enabled(), "muted");
+	zassert_equal(bridge_hw_fake_attn_event_clear_calls(0u), c0 + 1u, "stream 0 event cleared");
+	zassert_equal(bridge_hw_fake_attn_event_clear_calls(1u), c1 + 1u, "stream 1 event cleared");
+
+	/* re-sending the same want changes nothing */
+	negotiate_ext(
+	    GD32_BRIDGE_LINK_SPI, ALL_FEATS & ~GD32_BRIDGE_LINK_FEAT_ADC_STREAM2, 252u, &g, &sup, &mp);
+	zassert_equal(bridge_hw_fake_attn_event_clear_calls(0u), c0 + 1u);
+	reset_links();
+}

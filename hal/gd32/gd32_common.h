@@ -117,7 +117,7 @@ typedef struct {
 	bool    in_use;
 	uint8_t channel; /* ADC channel index this stream watches */
 	/* v0.15: this stream's raw-ring length (a power of two <= RING_SAMPLES):
-	 * 1024 for a legacy BEGIN stream, 2*W for a BEGIN2 stream with watermark
+	 * 1024 for a legacy BEGIN stream, adc_stream2_ring_plan() for a BEGIN2 stream with watermark
 	 * W (1024 when W == 0).  The DMA count, the write-index maths, every
 	 * lap-based total and the DSP pump's raw-ring indexing use THIS, not the
 	 * array size.  BEGIN2 streams answer only READ2 (v2 == true); legacy
@@ -128,10 +128,11 @@ typedef struct {
 	/* READ2 accounting (hal/gd32/adc_stream2.h): delivered index D (the
 	 * stream-sequence index of the next sample to deliver, mod 2^32). */
 	uint32_t read2_d;
-	uint16_t full_scale;  /* (1<<res_bits)-1 snapshot at begin, mv math */
-	uint32_t dma_periph;  /* DMA0 or DMA1                          */
-	uint8_t  dma_channel; /* dma_channel_enum value                */
-	uint32_t pace_timer;  /* TIMER5 (stream 0) or TIMER6 (stream 1) */
+	bool     read2_undercount; /* the previous READ2 planned a transient-undercount empty read */
+	uint16_t full_scale;       /* (1<<res_bits)-1 snapshot at begin, mv math */
+	uint32_t dma_periph;       /* DMA0 or DMA1                          */
+	uint8_t  dma_channel;      /* dma_channel_enum value                */
+	uint32_t pace_timer;       /* TIMER5 (stream 0) or TIMER6 (stream 1) */
 	uint16_t ring[BRIDGE_ADC_STREAM_RING_SAMPLES];
 	uint16_t read_idx; /* host's consumer cursor                */
 	/* Overrun accounting (adc_stream.c).  lap_count is bumped by the

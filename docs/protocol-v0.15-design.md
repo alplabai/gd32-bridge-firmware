@@ -216,7 +216,7 @@ Both opcodes are SPI-only and need ADC_STREAM2 granted on the link; otherwise th
 | 2 | `trigger_src` | u8 | `0x00` PACE_TIMER: the firmware-programmed "software timer", TIMER5 for stream 0 and TIMER6 for stream 1 (today's behaviour). Reserved: `0x01` TIMER0_CC, `0x02` TIMER7_CC (arg = CC channel 0..3); `0x03` TIMER5_TRGO shared, `0x04` TIMER6_TRGO shared (simultaneous two-stream pacing); `0x05` EXTI (arg = line 0..15). `0x01..0x05` → NOSUPPORT; `≥0x06` → INVAL. |
 | 3 | `trigger_arg` | u8 | must be 0 for PACE_TIMER, else INVAL |
 | 4 | `sample_rate_hz` | u32 | PACE_TIMER: 1..100000. 0 → INVAL; >100000 → OUT_OF_RANGE. |
-| 8 | `watermark` | u16 | one of {0, 16, 32, 64, 128, 256, 512}, else INVAL. 0 = no events. |
+| 8 | `watermark` | u16 | one of {0, 16, 32, 64, 128, 256, 512}, else INVAL. 0 = no events. This is the *requested* watermark: the firmware may grant a larger one (§5.2). |
 | 10 | `reserved` | u16 | must be 0, else INVAL |
 
 ### 5.2 BEGIN2 reply (17 B)
@@ -228,8 +228,8 @@ Both opcodes are SPI-only and need ADC_STREAM2 granted on the link; otherwise th
 | 8 | `full_scale` | u16 | `(1 << res_bits) − 1` captured at BEGIN2 (4095/1023/255/63); oversampling does not change it |
 | 10 | `vref_mv` | u16 | `adc_vref_mv` captured at BEGIN2 |
 | 12 | `flags` | u8 | bit0 `VREF_MEASURED` = `adc_vrefint_code ≠ 0` **and** the derived value lies in [1700, 1900] mV, i.e. it is not the `ADC_VREF_MV` 1800 fallback. Bits 1..7 = 0. |
-| 13 | `watermark` | u16 | granted watermark (echo) |
-| 15 | `ring_depth` | u16 | `2 × watermark`, or 1024 when watermark = 0. This is the overrun budget. |
+| 13 | `watermark` | u16 | **granted** watermark = `ring_depth / 2` (≥ the requested one; 0 stays 0). The host must use this value, not the one it asked for. |
+| 15 | `ring_depth` | u16 | the smallest power of two ≥ max(`2 × watermark`, samples produced in 5 ms at the realised rate), capped at 1024; 1024 when watermark = 0. This is the overrun budget. |
 
 BEGIN2 rules beyond the legacy BEGIN checks (vref dead → IO, slot in use or shared converter → INVAL, converter claimed → BUSY, DMA/calibration failure → IO):
 - **Conversion-time check.** Answer `STATUS_OUT_OF_RANGE` if `ratio × (sample_cycles + 12.5) / 36 MHz ≥ period_ticks / tick_hz`. This is the `ADC_READ` residency model from `hal/gd32/gd32_common.h`. Compute it in 64-bit integer half-cycles using the channel's cached `ADC_CONFIGURE` values. Unlike legacy BEGIN, which silently degrades, BEGIN2 never reports a rate it cannot achieve.
@@ -262,6 +262,8 @@ Framing:
 ### 5.4 READ2 accounting (normative)
 - Each stream keeps a delivered index `D` (u32), 0 at BEGIN2.
 - Backlog = (`total_written − total_read`) mod 2^32. Ring index arithmetic uses the stream's own `ring_depth` (a power of two, so mod-2^32 wraparound stays exact), replacing every `BRIDGE_ADC_STREAM_RING_SAMPLES` in the raw-ring index maths.
+- **Lap safety (ring sizing).** The raw ring's lap count comes from a prio-3 ISR counting each DMA reload. Prio-1/2 work (ROVF recalibration ≈ 2 ms, `ADC_READ` ≤ 1 ms, a ≈ 350 µs BATCH, I2C OTA programming) can keep it off the CPU long enough that a reload is counted once instead of twice; a lost lap would make `READ2` report `dropped = 0` with a consistent `first_index` over wrong data. So BEGIN2 sizes `ring_depth` so that one lap lasts at least 5 ms (`ADC_STREAM2_LAP_MIN_US`, twice the ROVF figure) at the *realised* rate: `ring_depth = pow2ceil(max(2W, ceil(realised_rate × 5 ms)))`. At 100 kHz that is 500 samples, so `W = 16` yields `ring_depth = 512` and a granted watermark of 256; at 1 kHz `W = 16` stays at ring 32 and watermark 16. The events fire at HTF/FTF = `ring_depth / 2`, which is the granted watermark. `W = 0` uses the whole 1024 ring (≥ 10.24 ms at 100 kHz) and raises no events. If even 1024 samples cannot span 5 ms (rates above 204.8 kHz, unreachable since the maximum is 100 kHz) BEGIN2 answers `OUT_OF_RANGE`.
+- **Transient undercount.** A backlog at most one ring "below zero" is the single window in which one CS-EXTI handler's lap snapshot and write-index read straddle a reload; it plans one empty read. A second consecutive undercount, or any backlog further below zero, answers the `0xFFFFFFFF` sentinel and resyncs the read cursor to the live total.
 - **Overrun:** if backlog > `ring_depth − GUARD` (GUARD = 8), then:
   - `skip = backlog − (ring_depth − GUARD)`;
   - advance the read cursor by `skip`;
@@ -464,7 +466,7 @@ Each new regression check must be shown to fail against the 0.14 build first.
 - Q1 OTA: stays reachable on I2C (Linux `tools/gd32-ota-host`); SWD is for factory flashing and recovery. §7 allow-list keeps `0xF0..0xFF`.
 - Q2 P71: TINT-capable (ICU TSSEL `0x31`, inferred from the RZ/V2N TINT table; bench-verify), no core owns P70/P71 today and Linux has no claim. The CM33 owns P71 as input + IRQ.
 - Q3/Q4/Q8/Q10: bench items. Implement per spec; the timing numbers stay provisional constants in one place.
-- Q5 watermark: ring = 2W (spec as written). Revisit only if bench shows the overrun budget is too small.
+- Q5 watermark: ring = 2W as the floor, grown to the smallest power of two spanning a 5 ms lap at the realised rate (lap-safety, §5.4); the granted watermark (`ring_depth / 2`) is echoed in the BEGIN2 reply and may exceed the requested one. Revisit only if bench shows the overrun budget is too small.
 - Q6 discontinuity: keep the `dropped = 0xFFFFFFFF` sentinel (9-byte header).
 - Q7 conversion model: use the code's model in `hal/gd32/gd32_common.h` (`sample_cycles + 12.5`); fix the `src/protocol.h` comment to match.
 - Q9: no per-pad ownership enforcement in 0.15.

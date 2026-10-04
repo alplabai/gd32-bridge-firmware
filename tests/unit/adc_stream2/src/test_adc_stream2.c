@@ -25,7 +25,7 @@ ZTEST_SUITE(gd32_adc_stream2, NULL, NULL, NULL, NULL, NULL);
 static adc_read2_plan_t plan(uint32_t backlog, uint16_t depth, uint8_t max, uint32_t d, bool disc)
 {
 	adc_read2_plan_t p;
-	adc_read2_plan(backlog, depth, max, d, disc, &p);
+	adc_read2_plan(backlog, depth, max, d, disc, false, &p);
 	return p;
 }
 
@@ -169,17 +169,96 @@ ZTEST(gd32_adc_stream2, test_transient_undercount_is_empty_not_lost)
 	zassert_equal(p.dropped, 0u);
 	zassert_equal(p.next_d, 9u);
 
+	zassert_true(p.undercount, "flagged so the next plan can tell a repeat");
+
 	p = plan((uint32_t)(0u - 512u), 512u, 16u, 9u, false); /* a whole ring "negative" */
 	zassert_false(p.sentinel);
 	zassert_equal(p.got, 0u);
 }
 
-ZTEST(gd32_adc_stream2, test_ring_depth_is_two_w_or_the_whole_ring)
+/* The empty read is allowed ONCE: a second consecutive undercount, or one more
+ * than a ring below zero, is cursor disagreement -- the sentinel, not an empty
+ * read that would hide lost samples. */
+ZTEST(gd32_adc_stream2, test_undercount_is_one_shot_and_bounded)
 {
-	zassert_equal(adc_stream2_ring_depth(0u), 1024u, "no watermark: the whole ring");
-	zassert_equal(adc_stream2_ring_depth(16u), 32u);
-	zassert_equal(adc_stream2_ring_depth(256u), 512u);
-	zassert_equal(adc_stream2_ring_depth(512u), 1024u);
+	adc_read2_plan_t p;
+
+	adc_read2_plan(0xFFFFFFFFu, 512u, 16u, 9u, false, true, &p);
+	zassert_true(p.sentinel, "a second consecutive undercount");
+	zassert_equal(p.dropped, 0xFFFFFFFFu);
+	zassert_equal(p.next_d, 9u);
+
+	p = plan((uint32_t)(0u - 513u), 512u, 16u, 9u, false);
+	zassert_true(p.sentinel, "one past a ring below zero");
+	zassert_false(p.undercount);
+
+	/* a healthy read in between resets the one-shot (caller stores plan.undercount) */
+	p = plan(4u, 512u, 16u, 9u, false);
+	zassert_false(p.undercount);
+	zassert_equal(p.got, 4u);
+}
+
+/* The ring spans at least ADC_STREAM2_LAP_MIN_US at the REALISED rate, so the
+ * prio-3 lap ISR cannot be starved for a whole lap by prio-1/2 work; the granted
+ * watermark is ring/2 and may exceed the request. */
+static void ring_plan(uint32_t rate, uint16_t w, uint16_t *ring, uint16_t *granted)
+{
+	uint32_t tick, period;
+
+	adc_stream2_pace(rate, &tick, &period);
+	zassert_true(adc_stream2_ring_plan(w, tick, period, ring, granted), "rate %u", (unsigned)rate);
+}
+
+ZTEST(gd32_adc_stream2, test_ring_plan_sizes_the_ring_for_a_5ms_lap)
+{
+	uint16_t ring, granted;
+
+	zassert_equal(ADC_STREAM2_LAP_MIN_US, 5000u);
+
+	ring_plan(1000u, 16u, &ring, &granted); /* 5 samples per 5 ms: 2W wins */
+	zassert_equal(ring, 32u);
+	zassert_equal(granted, 16u);
+
+	ring_plan(1000u, 256u, &ring, &granted);
+	zassert_equal(ring, 512u);
+	zassert_equal(granted, 256u);
+
+	ring_plan(100000u, 16u, &ring, &granted); /* 500 samples per 5 ms */
+	zassert_equal(ring, 512u, "smallest power of two >= 500");
+	zassert_equal(granted, 256u, "granted watermark exceeds the requested 16");
+
+	ring_plan(100000u, 512u, &ring, &granted);
+	zassert_equal(ring, 1024u);
+	zassert_equal(granted, 512u);
+
+	ring_plan(10000u, 16u, &ring, &granted); /* 50 per 5 ms -> 64 */
+	zassert_equal(ring, 64u);
+	zassert_equal(granted, 32u);
+
+	ring_plan(6000u, 16u, &ring, &granted); /* realised 6024 Hz: 31 per 5 ms <= 2W */
+	zassert_equal(ring, 32u, "no growth beyond 2W");
+	ring_plan(6400u, 16u, &ring, &granted); /* realised 6410 Hz: 33 per 5 ms > 2W */
+	zassert_equal(ring, 64u);
+}
+
+ZTEST(gd32_adc_stream2, test_ring_plan_no_watermark_and_limits)
+{
+	uint16_t ring, granted;
+
+	ring_plan(100000u, 0u, &ring, &granted);
+	zassert_equal(ring, 1024u, "no events: the whole ring (10.24 ms at 100 kHz)");
+	zassert_equal(granted, 0u);
+
+	/* 204.8 kHz is where 1024 samples stop covering 5 ms; 100 kHz max never gets there. */
+	zassert_false(adc_stream2_ring_plan(16u, 1000000u, 4u, &ring, &granted),
+	              "250 kHz: OUT_OF_RANGE");
+	zassert_true(adc_stream2_ring_plan(16u, 1000000u, 5u, &ring, &granted),
+	             "200 kHz: 1000 samples");
+	zassert_equal(ring, 1024u);
+
+	/* a slow stream: the 5 ms floor is below 2W anyway */
+	ring_plan(1u, 16u, &ring, &granted);
+	zassert_equal(ring, 32u);
 }
 
 /* Realised rate = tick_hz / period_ticks exactly. */
