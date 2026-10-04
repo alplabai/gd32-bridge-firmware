@@ -2122,6 +2122,26 @@ ZTEST(gd32_bridge_ota, test_boot_init_gates_a_fresh_trial)
 	zassert_equal(g_reset_calls, 0u, "recognising a trial boot must not itself reset");
 }
 
+/* The FWDGT-vs-trial decision in bridge_hw_init() runs BEFORE ota_boot_init(),
+ * when ota_trial_unconfirmed() is still false: the peek must already see it,
+ * and must not write anything. */
+ZTEST(gd32_bridge_ota, test_trial_peek_sees_a_trial_before_boot_init_without_writing)
+{
+	reset_model();
+	const uint32_t len[2] = { 64u, 64u };
+	write_meta_record_flags(OTA_META_REC0, 1u, TEST_RUNNING_SLOT, 0x03u, len, OTA_META_FLAG_TRIAL);
+
+	zassert_true(ota_trial_peek(), "trial visible before ota_boot_init()");
+	zassert_false(ota_trial_unconfirmed(), "the gate itself is not set yet");
+	ota_boot_init();
+	zassert_true(ota_trial_unconfirmed());
+	zassert_true(ota_trial_peek());
+
+	reset_model();
+	write_meta_record_flags(OTA_META_REC0, 1u, TEST_RUNNING_SLOT, 0x03u, len, 0u);
+	zassert_false(ota_trial_peek(), "a confirmed image is not a trial");
+}
+
 ZTEST(gd32_bridge_ota, test_boot_init_confirmed_image_gate_is_false)
 {
 	reset_model();

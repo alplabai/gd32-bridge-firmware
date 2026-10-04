@@ -133,8 +133,12 @@ extern void (*mock_on_settle)(void);
 extern void (*mock_on_i2c_disable)(void);
 extern uint32_t mock_i2c_enables, mock_rtc_disables, mock_rtc_flag_clears, mock_exti19_clears;
 extern uint32_t mock_seq, mock_seq_clock_restore, mock_seq_i2c_init, mock_seq_rtc_disable;
-extern int      mock_i2c_init_rc;
-void            i2c_enable(uint32_t periph);
+/* The HXTAL hooks around the Deep-sleep clock (hal/gd32/clock_hw.c is not linked). */
+extern int      mock_hxtal_source, mock_hxtal_relock_ok;
+extern uint32_t mock_pre_deepsleeps, mock_relock_prepares, mock_seq_pre_deepsleep,
+    mock_seq_relock_prepare, mock_ctl_pllen_at_relock_prepare, mock_seq_deepsleep;
+extern int mock_i2c_init_rc;
+void       i2c_enable(uint32_t periph);
 /* gh#257: 0 = rcu_rtc_clock_config() never ran, 1 = every call ran with
  * interrupts masked, -1 = some call ran unmasked.  Never reset: the call
  * is latched inside power.c, so it happens once per process. */

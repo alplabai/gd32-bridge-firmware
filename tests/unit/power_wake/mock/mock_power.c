@@ -6,6 +6,7 @@
 #include <stdbool.h>
 
 #include "bridge_hw.h"
+#include "gd32_common.h" /* PWM_TIMER_CLK_HZ */
 
 uint32_t       mock_power_hw_calls;
 uint32_t       FMC_OBCTL;
@@ -56,6 +57,9 @@ void mock_power_reset(void)
 	mock_nvic_pending            = 0u;
 	mock_on_settle               = NULL;
 	mock_on_i2c_disable          = NULL;
+	mock_hxtal_source            = 0;
+	mock_hxtal_relock_ok         = 1;
+	mock_pre_deepsleeps = mock_relock_prepares = 0u;
 	mock_i2c_enables = mock_rtc_disables = mock_rtc_flag_clears = mock_exti19_clears = 0u;
 	mock_seq = mock_seq_clock_restore = mock_seq_i2c_init = mock_seq_rtc_disable = 0u;
 	mock_i2c_init_rc                                                             = BRIDGE_HW_OK;
@@ -148,6 +152,7 @@ void pmu_to_deepsleepmode(uint32_t ldo, uint32_t command)
 	(void)ldo;
 	(void)command;
 	++mock_deepsleep_entries;
+	mock_seq_deepsleep        = ++mock_seq;
 	mock_primask_at_deepsleep = mock_primask;
 	++mock_power_hw_calls;
 }
@@ -244,8 +249,40 @@ void SystemCoreClockUpdate(void)
 	++mock_system_core_clock_updates;
 }
 
-/* clock_hw.c is not linked here; the Deep-sleep relock hook is a no-op so
- * power.c's PLL replay is what the suite exercises (IRC8M-source behaviour). */
+/* clock_hw.c is not linked here.  The three hooks power.c calls around the
+ * Deep-sleep clock are modelled just far enough to pin the ORDER with the PLLEN
+ * replay (see mock_hxtal_* in gd32g5x3.h); with mock_hxtal_source == 0 (the
+ * IRC8M default) they are inert, so the replay is what those cases exercise. */
+int      mock_hxtal_source;        /* 1 = the PLL was running from HXTAL before the sleep */
+int      mock_hxtal_relock_ok = 1; /* the HXTAL restart succeeds (else: fall back to IRC8M) */
+uint32_t mock_pre_deepsleeps, mock_relock_prepares;
+uint32_t mock_seq_pre_deepsleep, mock_seq_relock_prepare, mock_seq_deepsleep;
+uint32_t mock_ctl_pllen_at_relock_prepare;
+
+void bridge_clock_pre_deepsleep(void)
+{
+	++mock_pre_deepsleeps;
+	mock_seq_pre_deepsleep = ++mock_seq;
+}
+
 void bridge_clock_relock_prepare(void)
 {
+	if (!mock_hxtal_source) return;
+	++mock_relock_prepares;
+	mock_seq_relock_prepare          = ++mock_seq;
+	mock_ctl_pllen_at_relock_prepare = RCU_CTL & RCU_CTL_PLLEN;
+	/* HXTAL back (PLL re-pointed on it) or fallen back to IRC8M: either way the
+	 * PLL is configured and DISABLED when this returns; the replay enables it. */
+	(void)mock_hxtal_relock_ok;
+}
+
+/* The live-clock derivation is clock_hw.c's; here SystemCoreClock is set by the test. */
+void bridge_clock_core_update(void)
+{
+	SystemCoreClockUpdate();
+}
+
+bool bridge_clock_core_matches(void)
+{
+	return SystemCoreClock == PWM_TIMER_CLK_HZ;
 }

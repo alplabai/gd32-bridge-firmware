@@ -76,7 +76,7 @@ void pwm_timer_init(uint32_t periph)
 {
 	timer_parameter_struct ip;
 	timer_struct_para_init(&ip);
-	ip.prescaler         = (uint16_t)PWM_TIMER_PRESCALER;
+	ip.prescaler         = (uint16_t)bridge_timer_prescaler(1000000u); /* 1 us tick */
 	ip.alignedmode       = TIMER_COUNTER_EDGE;
 	ip.counterdirection  = TIMER_COUNTER_UP;
 	ip.period            = PWM_TIMER_ARR_MAX; /* 65.5 ms default; per-set */

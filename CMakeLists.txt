@@ -76,10 +76,17 @@ option(BRIDGE_OTA_PARTITIONED "Arm the OTA Path-A flash path (HIL-gated)" OFF)
 # transaction cycles for request CRC / protocol_dispatch / reply stage / CS-edge
 # to reply-staged, in the RAM struct `bridge_timing_stats` (layout:
 # docs/timing-stats.md).  OFF adds no code and no data to the image.
-# System clock: run the PLL from the external 8 MHz (5L35023B SE2 into OSCIN,
-# HXTAL bypass) when it is present and stable, with a bounded fallback to the
-# IRC8M PLL (hal/gd32/clock_hw.c).  OFF selects the IRC8M-only build.
-option(BRIDGE_CLOCK_HXTAL "Use the external 8 MHz clock (HXTAL bypass) when present" ON)
+# System clock: the part boots on the IRC8M 216 MHz PLL.  With HXTAL compiled
+# in (default) it can move to an external clock on OSCIN (5L35023B SE2, HXTAL
+# bypass) when the host asks (bridge_clock_try_hxtal(), hal/gd32/clock_hw.c),
+# after a time-bounded start, an HXTAL/32 frequency check against the supported
+# references, and an IRC8M fallback.  OFF selects the IRC8M-only build.
+option(BRIDGE_CLOCK_HXTAL "Allow switching to the external clock on OSCIN (HXTAL bypass)" ON)
+# Attempt that switch autonomously at boot instead of waiting for the host.
+# Default OFF: on current units SE2 only reaches its final frequency when
+# U-Boot configures the clock generator, AFTER the GD32 has booted, so an
+# early lock could be followed by a frequency change the monitor cannot see.
+option(BRIDGE_CLOCK_HXTAL_AT_BOOT "Attempt the HXTAL switch at boot (SE2 correct from POR only)" OFF)
 
 option(BRIDGE_TIMING_STATS "Record SPI round-trip DWT cycle stats in RAM (bench only)" OFF)
 if(BRIDGE_TIMING_STATS)
@@ -272,6 +279,9 @@ function(gd32_firmware_target tgt linker_script)
     endif()
     if(NOT BRIDGE_CLOCK_HXTAL)
         target_compile_definitions(${tgt} PRIVATE BRIDGE_CLOCK_IRC8M_ONLY=1)
+    endif()
+    if(BRIDGE_CLOCK_HXTAL AND BRIDGE_CLOCK_HXTAL_AT_BOOT)
+        target_compile_definitions(${tgt} PRIVATE BRIDGE_CLOCK_HXTAL_AT_BOOT=1)
     endif()
     # -Os pinned directly here (not via CMAKE_BUILD_TYPE) so it applies
     # unconditionally to every target and can't be silently lost by an

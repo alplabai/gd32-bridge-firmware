@@ -103,6 +103,30 @@ ZTEST(power_wake, test_deep_sleep_entry_and_wake_sequence)
 	zassert_equal(mock_deepsleep_entries, 1u);
 }
 
+/* HXTAL source: the monitor comes off HXTAL before the entry, and the HXTAL
+ * restart runs on the woken (PLL-less) part BEFORE the PLLEN replay -- the
+ * replay then locks on whichever source relock_prepare left configured. */
+ZTEST(power_wake, test_hxtal_relock_runs_between_the_entry_and_the_pllen_replay)
+{
+	mock_power_reset();
+	mock_hxtal_source = 1;
+	RCU_CTL  = RCU_CTL_PLLSTB; /* PLL stopped by the sleep; will report lock once enabled */
+	RCU_CFG0 = RCU_SCSS_PLLP;  /* the mock cannot model SCSS following SCS */
+	zassert_equal(bridge_hw_power_mode_set(2u, 0u, 100u), BRIDGE_HW_OK);
+	bridge_power_tick();
+	zassert_equal(mock_deepsleep_entries, 1u);
+	zassert_equal(mock_pre_deepsleeps, 1u, "CKMEN taken off HXTAL before the entry");
+	zassert_equal(mock_relock_prepares, 1u, "HXTAL restarted after the wake");
+	zassert_true(mock_seq_pre_deepsleep < mock_seq_deepsleep, "pre-sleep hook before the wfi");
+	zassert_true(mock_seq_deepsleep < mock_seq_relock_prepare, "relock after the wake");
+	zassert_true(mock_seq_relock_prepare < mock_seq_clock_restore,
+	             "and before the clock/telemetry refresh");
+	zassert_equal(mock_ctl_pllen_at_relock_prepare, 0u, "PLLEN is still clear when HXTAL restarts");
+	zassert_equal(RCU_CTL & RCU_CTL_PLLEN, RCU_CTL_PLLEN, "the replay then enables the PLL");
+	zassert_equal(RCU_CFG0 & RCU_CFG0_SCS, RCU_CKSYSSRC_PLLP, "and selects it");
+	zassert_equal(mock_primask, 0u);
+}
+
 ZTEST(power_wake, test_deep_sleep_waits_for_idle_i2c)
 {
 	mock_power_reset();

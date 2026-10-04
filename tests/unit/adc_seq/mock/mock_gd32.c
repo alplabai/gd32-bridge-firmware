@@ -133,6 +133,9 @@ void adc_deinit(uint32_t adc_periph)
 {
 	mock_seq_log("adc_deinit", adc_periph, 0u);
 }
+/* adc_stream.c derives the pacing-timer prescaler from the live core clock. */
+uint32_t bridge_core_clock_hz = 216000000u;
+
 void adc_clock_config(uint32_t adc_periph, uint32_t prescaler)
 {
 	(void)prescaler;

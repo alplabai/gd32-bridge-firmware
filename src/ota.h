@@ -47,6 +47,10 @@ void ota_boot_init(void);
  * before touching any opcode. */
 bool ota_trial_unconfirmed(void);
 
+/* The same decision ota_boot_init() will make, readable BEFORE it runs
+ * (ota_trial_unconfirmed() is false until then).  Read-only. */
+bool ota_trial_peek(void);
+
 /* Note that a wire frame arrived (a single store) -- the confirm signal
  * the trial is waiting for.  Safe to call unconditionally; a no-op
  * outside a trial boot. */

@@ -388,11 +388,11 @@ int bridge_hw_adc_stream_begin(uint8_t stream_id, uint8_t channel, uint32_t samp
 	timer_deinit(s->pace_timer);
 	uint32_t psc, period_ticks;
 	if (sample_rate_hz >= 16u) {
-		psc          = (BRIDGE_ADC_PACE_CLK_HZ / 1000000u) - 1u; /* 1 MHz tick  */
-		period_ticks = 1000000u / sample_rate_hz;                /* 10..62500   */
+		psc          = bridge_timer_prescaler(1000000u); /* 1 MHz tick  */
+		period_ticks = 1000000u / sample_rate_hz;        /* 10..62500   */
 	} else {
-		psc          = (BRIDGE_ADC_PACE_CLK_HZ / 10000u) - 1u; /* 10 kHz tick */
-		period_ticks = 10000u / sample_rate_hz;                /* 667..10000  */
+		psc          = bridge_timer_prescaler(10000u); /* 10 kHz tick */
+		period_ticks = 10000u / sample_rate_hz;        /* 667..10000  */
 	}
 	timer_parameter_struct tp;
 	timer_struct_para_init(&tp);

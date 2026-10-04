@@ -207,6 +207,41 @@ target_compile_options(test_clock_source PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_clock_source PRIVATE ztest_shim)
 add_test(NAME clock_source COMMAND test_clock_source)
 
+# --- clock_hw: the real register ops against an RCU/TIMER14 simulation -------
+#
+# clock_hw.c + clock_source.c linked against tests/unit/clock_hw/mock, a
+# register-file simulation that logs the ORDER of bit writes and models
+# HXTALSTB / PLLSTB / SCSS with simulated time (cycle-counter reads advance it).
+# Built three times, like the firmware: default (host-requested HXTAL),
+# HXTAL-at-boot, and IRC8M-only.
+foreach(_variant default at_boot irc8m_only)
+    if(_variant STREQUAL "default")
+        set(_src clock_hw/src/test_clock_hw.c)
+        set(_defs "")
+    elseif(_variant STREQUAL "at_boot")
+        set(_src clock_hw/src/test_clock_hw_variants.c)
+        set(_defs BRIDGE_CLOCK_HXTAL_AT_BOOT=1)
+    else()
+        set(_src clock_hw/src/test_clock_hw_variants.c)
+        set(_defs BRIDGE_CLOCK_IRC8M_ONLY=1)
+    endif()
+    add_executable(test_clock_hw_${_variant}
+        ${_src}
+        clock_hw/mock/mock_hw.c
+        ${FW}/hal/gd32/clock_hw.c
+        ${FW}/hal/gd32/clock_source.c
+    )
+    target_include_directories(test_clock_hw_${_variant} PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/clock_hw/mock
+        ${FW}/hal/gd32
+        ${FW}/hal
+    )
+    target_compile_definitions(test_clock_hw_${_variant} PRIVATE ${_defs})
+    target_compile_options(test_clock_hw_${_variant} PRIVATE ${TEST_FLAGS})
+    target_link_libraries(test_clock_hw_${_variant} PRIVATE ztest_shim)
+    add_test(NAME clock_hw_${_variant} COMMAND test_clock_hw_${_variant})
+endforeach()
+
 # --- fault_diag: CFSR/SYSCFG_STAT -> fault_record_t decode (issue #36) ------
 #
 # Pure logic, no vendor register header (see hal/gd32/fault_diag.h) -- the

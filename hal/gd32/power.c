@@ -416,9 +416,9 @@ bool bridge_clock_restore_after_deepsleep(void)
 	/* SysTick CTRL is preserved across Deep-sleep; LOAD is re-sized below.
 	 * SystemCoreClock and its telemetry mirror are re-derived from the
 	 * live RCU state. */
-	SystemCoreClockUpdate();
+	bridge_clock_core_update();
 	bridge_core_clock_hz      = SystemCoreClock;
-	bridge_core_clock_matches = (SystemCoreClock == PWM_TIMER_CLK_HZ);
+	bridge_core_clock_matches = bridge_clock_core_matches();
 
 	/* SysTick LOAD was sized for the boot clock.  On a failed relock the
 	 * part runs on IRC8M, where that reload stretches the 50 ms tick ~27x
@@ -586,6 +586,8 @@ void bridge_power_tick(void)
 			return;
 		}
 
+		/* HXTAL stops in Deep-sleep: take the clock monitor off it first. */
+		bridge_clock_pre_deepsleep();
 		pmu_to_deepsleepmode(PMU_LDO_LOWPOWER, WFI_CMD);
 		/* A failed relock leaves the part on IRC8M (see the
 		 * bridge_core_clock_matches telemetry); the restore already
