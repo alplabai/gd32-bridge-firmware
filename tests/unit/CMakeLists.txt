@@ -194,6 +194,19 @@ target_compile_options(test_timing_stats PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_timing_stats PRIVATE ztest_shim)
 add_test(NAME timing_stats COMMAND test_timing_stats)
 
+# --- clock_source: HXTAL-bypass / IRC8M-fallback sequencing -----------------
+#
+# Pure logic (no vendor header): the same clock_source.c the device runs,
+# driven through a fake ops table modelling HXTALEN/HXTALBPS/HXTALSTB.
+add_executable(test_clock_source
+    clock_source/src/test_clock_source.c
+    ${FW}/hal/gd32/clock_source.c
+)
+target_include_directories(test_clock_source PRIVATE ${FW}/hal/gd32)
+target_compile_options(test_clock_source PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_clock_source PRIVATE ztest_shim)
+add_test(NAME clock_source COMMAND test_clock_source)
+
 # --- fault_diag: CFSR/SYSCFG_STAT -> fault_record_t decode (issue #36) ------
 #
 # Pure logic, no vendor register header (see hal/gd32/fault_diag.h) -- the

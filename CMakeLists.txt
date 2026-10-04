@@ -76,6 +76,11 @@ option(BRIDGE_OTA_PARTITIONED "Arm the OTA Path-A flash path (HIL-gated)" OFF)
 # transaction cycles for request CRC / protocol_dispatch / reply stage / CS-edge
 # to reply-staged, in the RAM struct `bridge_timing_stats` (layout:
 # docs/timing-stats.md).  OFF adds no code and no data to the image.
+# System clock: run the PLL from the external 8 MHz (5L35023B SE2 into OSCIN,
+# HXTAL bypass) when it is present and stable, with a bounded fallback to the
+# IRC8M PLL (hal/gd32/clock_hw.c).  OFF selects the IRC8M-only build.
+option(BRIDGE_CLOCK_HXTAL "Use the external 8 MHz clock (HXTAL bypass) when present" ON)
+
 option(BRIDGE_TIMING_STATS "Record SPI round-trip DWT cycle stats in RAM (bench only)" OFF)
 if(BRIDGE_TIMING_STATS)
     list(APPEND GD32_BRIDGE_SOURCES src/timing_stats.c)
@@ -100,6 +105,8 @@ elseif(BRIDGE_HAL_BACKEND STREQUAL "gd32")
         hal/gd32/adc_stream.c
         hal/gd32/counter.c
         hal/gd32/dac.c
+        hal/gd32/clock_hw.c
+        hal/gd32/clock_source.c
         hal/gd32/fault_diag.c
         hal/gd32/fault_handlers.c
         hal/gd32/gpio.c
@@ -262,6 +269,9 @@ function(gd32_firmware_target tgt linker_script)
     add_dependencies(${tgt} gd32-build-id)
     if(BRIDGE_TIMING_STATS)
         target_compile_definitions(${tgt} PRIVATE BRIDGE_TIMING_STATS=1)
+    endif()
+    if(NOT BRIDGE_CLOCK_HXTAL)
+        target_compile_definitions(${tgt} PRIVATE BRIDGE_CLOCK_IRC8M_ONLY=1)
     endif()
     # -Os pinned directly here (not via CMAKE_BUILD_TYPE) so it applies
     # unconditionally to every target and can't be silently lost by an

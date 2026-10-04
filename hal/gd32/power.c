@@ -16,6 +16,7 @@
 
 #include "bridge_board_config.h" /* BRIDGE_I2C_PERIPH */
 #include "bridge_critical.h"
+#include "clock_source.h"
 #include "gd32_common.h"
 #include "ota.h" /* ota_trial_unconfirmed() */
 #include "power_wake.h"
@@ -385,6 +386,10 @@ static uint8_t s_clock_relock_tick;
 bool bridge_clock_restore_after_deepsleep(void)
 {
 	bool ok = false;
+
+	/* HXTAL stops in Deep-sleep: restart it (or fall back to the IRC8M PLL)
+	 * so the PLL replay below locks on whichever source is active. */
+	bridge_clock_relock_prepare();
 
 	FMC_WS = (FMC_WS & (~FMC_WS_WSCNT)) | WS_WSCNT(7);
 	RCU_CTL |= RCU_CTL_PLLEN;

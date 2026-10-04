@@ -169,6 +169,7 @@
  * independently; libopt controls declarations, not which driver units link. */
 #include "gd32g5x3.h"
 #include "gd32g5x3_dbg.h"
+#include "clock_source.h"
 #include "gd32_common.h"
 #include "reset_reason.h"
 
@@ -398,6 +399,10 @@ void bridge_hw_init(void)
      * The result is recorded, not acted on.  See the declarations in
      * gd32_common.h for why refusing supervised outputs on a mismatch is
      * a follow-up rather than part of this change. */
+	/* External 8 MHz (HXTAL bypass) when present, IRC8M otherwise; both give
+	 * the same 216 MHz.  Bounded, never hangs.  See hal/gd32/clock_hw.c. */
+	bridge_clock_init();
+
 	SystemCoreClockUpdate();
 	bridge_core_clock_hz      = SystemCoreClock;
 	bridge_core_clock_matches = (SystemCoreClock == PWM_TIMER_CLK_HZ);
@@ -914,6 +919,7 @@ void bridge_hw_tick(void)
 	if (ota_trial_unconfirmed()) return;
 	static bool fwdgt_armed;
 	if (!fwdgt_armed) {
+		bridge_clock_healthy(); /* clears the HXTAL-attempt marker */
 		bridge_fwdgt_arm();
 		fwdgt_armed = true;
 	} else {

@@ -111,6 +111,54 @@ instead — it exists only for compile-and-link coverage (CI's `gd32
 backend build` job, which never runs on silicon); never pass it for an
 image you intend to flash.
 
+### System clock (HXTAL bypass with IRC8M fallback)
+
+The part has no crystal: OSCIN (PF0, pin E9) is driven single-ended by the
+5L35023B SE2 output (nominally 8 MHz, 22 ohm series, net `GD32_OSC`, test
+point TP88); OSCOUT (PF1) is the E1M IO13 pad and is meant to stay a GPIO,
+because bypass mode leaves it unused (a Phase 11 bench check, not something
+the vendor header states). `bridge_hw_init()` (`hal/gd32/clock_hw.c`,
+sequencing in `clock_source.c`) therefore:
+
+1. sets `RCU_CTL_HXTALBPS` with `RCU_CTL_HXTALEN` clear, then `RCU_CTL_HXTALEN`;
+2. polls `RCU_CTL_HXTALSTB` for a bounded `BRIDGE_CLOCK_HXTAL_SPINS` iterations
+   (roughly 15-25 ms at 216 MHz);
+3. on success moves the PLL source to HXTAL (`RCU_PLLSRC_HXTAL`, PLLPSC /2,
+   PLLN 108, PLLP /2: 8 MHz / 2 * 108 / 2 = 216 MHz; same tuple, `FMC_WS`
+   wait states and LDO setting as the IRC8M path) and arms `RCU_CTL_CKMEN`;
+4. on timeout or PLL failure stops HXTAL and rebuilds the IRC8M 216 MHz PLL.
+   A host that has switched SE2 off therefore never bricks the unit.
+
+If the clock monitor later reports HXTAL failure (SE2 reprogrammed by the
+host), the NMI handler (`fault_nmi_entry`, `SYSCFG_STAT_CKMNMIIF` as the only
+set source) stops HXTAL, rebuilds the 216 MHz PLL from IRC8M and RESUMES;
+any other NMI source keeps the record-and-reset policy. The part runs at
+8 MHz inside that NMI until the (bounded) PLL relock completes, and a transfer
+in flight at that instant can fail its CRC.
+
+`RTC_BKP9` holds an attempt marker (`0x48545831`) from just before the HXTAL
+PLL switch until the first healthy `bridge_hw_tick()`; a boot that finds it
+set (the previous HXTAL boot faulted or was reset before getting healthy)
+skips HXTAL once and runs IRC8M.
+
+**Active source.** SWD-readable RAM symbols `bridge_clock_source`
+(`BRIDGE_CLOCK_SRC_IRC8M` = 0, `BRIDGE_CLOCK_SRC_HXTAL` = 1) and
+`bridge_clock_fallback` (0 none, 1 build-disabled, 2 `HXTALSTB` timeout, 3 PLL
+fail, 4 CKM failure, 5 previous boot unhealthy). Nothing is on the wire yet:
+no existing reply has a spare field (`CMD_RESET_REASON` is a 1-byte enum), and
+a new field needs a protocol bump, so a protocol 0.15 field will carry it.
+
+**No frequency measurement.** The GD32G5 vendor library has no clock-measure
+unit and nothing countable independent of SYSCLK, so a clock that locks but is
+not 8 MHz is NOT detected. 8 MHz at TP88 is a bench prerequisite
+(`docs/BENCH.md`, Phase 11).
+
+**IRC8M-only build.** `-DBRIDGE_CLOCK_HXTAL=OFF` compiles the HXTAL path out
+(`BRIDGE_CLOCK_IRC8M_ONLY`); the active source is then always IRC8M with
+fallback 1. `tools/check_clock_override.py` checks both shapes
+(`--irc8m-only` for the OFF build) and that the bootloader never links the
+HXTAL path.
+
 **`-DBRIDGE_TIMING_STATS=ON`** (bench only, default OFF) records per-SPI-transaction
 DWT cycle counts in a RAM struct read over SWD; see
 [`docs/timing-stats.md`](docs/timing-stats.md).  OFF adds nothing to the image.

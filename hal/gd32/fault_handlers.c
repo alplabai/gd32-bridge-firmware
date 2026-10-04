@@ -112,6 +112,7 @@
 #include "gd32g5x3.h"
 
 #include "fault_diag.h"
+#include "clock_source.h"
 #include "fault_handlers.h"
 
 /* Past this many consecutive fault-triggered resets (RTC_BKP7, see file
@@ -254,7 +255,25 @@ _Noreturn void fault_common_handler(uint32_t *frame, uint32_t fault_type)
  * AAPCS integer argument registers, matching fault_common_handler's
  * signature exactly.
  */
-#define FAULT_TRAMPOLINE(name, tag) \
+/* The bootloader links this file but not clock_hw.c; it never arms the HXTAL
+ * monitor, so "not handled" is the right answer there. */
+__attribute__((weak)) bool bridge_clock_nmi_recover(uint32_t syscfg_stat)
+{
+	(void)syscfg_stat;
+	return false;
+}
+
+/* NMI entry.  A lone HXTAL clock-monitor failure (SE2 reprogrammed by the host
+ * after boot) is recoverable: fall back to IRC8M and RESUME.  Every other NMI
+ * source keeps the record-and-reset policy.  Returns through the trampoline's
+ * untouched LR (EXC_RETURN). */
+void fault_nmi_entry(uint32_t *frame, uint32_t fault_type)
+{
+	if (bridge_clock_nmi_recover(SYSCFG_STAT)) return;
+	fault_common_handler(frame, fault_type);
+}
+
+#define FAULT_TRAMPOLINE(name, tag, target) \
 	__attribute__((naked)) void name(void) \
 	{ \
 		__asm volatile("movs r1, %0        \n" \
@@ -265,16 +284,16 @@ _Noreturn void fault_common_handler(uint32_t *frame, uint32_t fault_type)
 		               "mrs  r0, psp       \n" \
 		               "b    2f            \n" \
 		               "1: mrs  r0, msp    \n" \
-		               "2: b    fault_common_handler \n" \
+		               "2: b    " #target "  \n" \
 		               : \
 		               : "i"(tag) \
 		               : "r0", "r1", "r2"); \
 	}
 
-FAULT_TRAMPOLINE(NMI_Handler, FAULT_TYPE_NMI)
-FAULT_TRAMPOLINE(HardFault_Handler, FAULT_TYPE_HARDFAULT)
-FAULT_TRAMPOLINE(MemManage_Handler, FAULT_TYPE_MEMMANAGE)
-FAULT_TRAMPOLINE(BusFault_Handler, FAULT_TYPE_BUSFAULT)
-FAULT_TRAMPOLINE(UsageFault_Handler, FAULT_TYPE_USAGEFAULT)
+FAULT_TRAMPOLINE(NMI_Handler, FAULT_TYPE_NMI, fault_nmi_entry)
+FAULT_TRAMPOLINE(HardFault_Handler, FAULT_TYPE_HARDFAULT, fault_common_handler)
+FAULT_TRAMPOLINE(MemManage_Handler, FAULT_TYPE_MEMMANAGE, fault_common_handler)
+FAULT_TRAMPOLINE(BusFault_Handler, FAULT_TYPE_BUSFAULT, fault_common_handler)
+FAULT_TRAMPOLINE(UsageFault_Handler, FAULT_TYPE_USAGEFAULT, fault_common_handler)
 
 #undef FAULT_TRAMPOLINE

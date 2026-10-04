@@ -1081,6 +1081,58 @@ purpose is to make that less necessary.
 
 ---
 
+## Phase 11 — external 8 MHz clock (HXTAL bypass, SE2) and IRC8M fallback
+
+Needs a scope on **TP88** (net `GD32_OSC`, 5L35023B SE2 through 22 ohm into
+OSCIN/PF0) and an SWD probe. Phase 1 (boot) must already pass on the
+IRC8M-only build (`-DBRIDGE_CLOCK_HXTAL=OFF`) so a failure here is the clock
+work, not the base image.
+
+1. **SE2 level and frequency.** With the host-side 5L35023B configuration that
+   enables SE2, scope TP88. PASS = 8 MHz, 1.8 V swing (a clean single-ended
+   clock, not a crystal sine). FAIL = any other frequency: do NOT flash the
+   default build (the PLL would lock to it and misclock the part; the firmware
+   cannot measure it).
+2. **HXTAL up.** Flash the default build, boot, halt over SWD. PASS =
+   `RCU_CTL` has `HXTALEN` (bit 16), `HXTALSTB` (bit 17), `HXTALBPS` (bit 18)
+   and `CKMEN` (bit 19) set; `RCU_CFG0.SCSS` = PLLP; `RCU_PLL.PLLSEL` (bit 22)
+   = 1; `bridge_clock_source` = 1, `bridge_clock_fallback` = 0;
+   `SystemCoreClock` = 216000000. Then scope a PWM output at a known period
+   and compare it with the host timebase: it must now track SE2, not IRC8M.
+3. **OSCOUT stays a GPIO.** With HXTAL up, drive E1M IO13 (PF1) high and low
+   with `CMD_GPIO_WRITE` and scope the pad. PASS = it follows. FAIL = pinned
+   or loaded: bypass is not leaving OSCOUT free; stop.
+4. **Fallback, SE2 off at boot.** Disable SE2 in the 5L35023B, reset. PASS =
+   boots to a working link, `bridge_clock_source` = 0,
+   `bridge_clock_fallback` = 2, `RCU_CTL.HXTALSTB` = 0 with the HXTAL bits
+   cleared, `SystemCoreClock` = 216000000 from IRC8M. The only added boot time
+   is the bounded wait (roughly 15-25 ms).
+5. **Failure NMI, SE2 off after boot.** Boot with SE2 on (step 2 state), run a
+   PWM plus an SPI/I2C ping loop, then disable SE2 from the host. PASS = the
+   ping loop resumes without a reset, `bridge_clock_source` = 0,
+   `bridge_clock_fallback` = 4, `SYSCFG_STAT.CKMNMIIF` (bit 3) clear, no new
+   fault record (`RTC_BKP0` magic unchanged), PWM period back to nominal. One
+   transfer in flight at that instant may fail its CRC.
+6. **Marker.** After a healthy step 2 run, `RTC_BKP9` = 0. Reset-and-halt, write
+   `RTC_BKP9` = `0x48545831`, resume. PASS = boots on IRC8M with
+   `bridge_clock_fallback` = 5 and `RTC_BKP9` = 0; the next reset runs HXTAL
+   again.
+7. **Cold boot 10x**, SE2 on: power-cycle ten times. PASS = ten times
+   `bridge_clock_source` = 1 and a working link. Repeat ten times with SE2 off:
+   ten times source 0 / fallback 2.
+8. **Deep-sleep wake** (`CMD_POWER_MODE_SET` mode 2), once with SE2 on and once
+   with SE2 switched off during the sleep. PASS = source 1 after the first,
+   source 0 / fallback 2 after the second, link up both times.
+
+**Brick risk.** The one case the firmware cannot catch is SE2 running at a
+frequency other than 8 MHz that still lets the PLL lock: the part would run
+off-spec (no measurement path exists). The `RTC_BKP9` marker only helps if the
+off-spec clock faults or resets and the backup domain survives. Run step 1
+before flashing the default build onto a unit whose 5L35023B configuration is
+unknown. Recovery is the IRC8M-only build over SWD.
+
+---
+
 ## Open questions the bench can answer (not PR validations)
 
 These are not covered by any of the fifteen PRs' own bench sections — they

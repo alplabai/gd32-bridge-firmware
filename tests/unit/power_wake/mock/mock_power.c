@@ -243,3 +243,9 @@ void SystemCoreClockUpdate(void)
 	mock_seq_clock_restore = ++mock_seq;
 	++mock_system_core_clock_updates;
 }
+
+/* clock_hw.c is not linked here; the Deep-sleep relock hook is a no-op so
+ * power.c's PLL replay is what the suite exercises (IRC8M-source behaviour). */
+void bridge_clock_relock_prepare(void)
+{
+}
