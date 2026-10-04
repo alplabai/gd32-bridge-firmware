@@ -21,12 +21,14 @@ static volatile bool s_ckm_pending;
 /* A boot that found the attempt marker refuses HXTAL until the next boot. */
 static bool s_blocked;
 
-#define REF(in, psc, n) { (in), (psc), (n), (in) / (psc) * (n) / BRIDGE_CLOCK_PLL_P }
+#define REF(in, psc, n, band) { (in), (psc), (n), (in) / (psc) * (n) / BRIDGE_CLOCK_PLL_P, (band) }
 
 static const bridge_clock_ref_t k_refs[] = {
-	REF(BRIDGE_CLOCK_IN_8MHZ, 2u, 108u),  REF(BRIDGE_CLOCK_IN_12MHZ, 3u, 108u),
-	REF(BRIDGE_CLOCK_IN_16MHZ, 4u, 108u), REF(BRIDGE_CLOCK_IN_20MHZ, 5u, 108u),
-	REF(BRIDGE_CLOCK_IN_24MHZ, 6u, 108u), REF(BRIDGE_CLOCK_IN_24P576, 6u, 105u),
+	REF(BRIDGE_CLOCK_IN_8MHZ, 2u, 108u, BRIDGE_CLOCK_BAND_OTHER_PERMILLE),
+	REF(BRIDGE_CLOCK_IN_12MHZ, 3u, 108u, BRIDGE_CLOCK_BAND_OTHER_PERMILLE),
+	REF(BRIDGE_CLOCK_IN_16MHZ, 4u, 108u, BRIDGE_CLOCK_BAND_OTHER_PERMILLE),
+	REF(BRIDGE_CLOCK_IN_20MHZ, 5u, 108u, BRIDGE_CLOCK_BAND_OTHER_PERMILLE),
+	REF(BRIDGE_CLOCK_IN_24P576, 6u, 105u, BRIDGE_CLOCK_BAND_24P576_PERMILLE),
 };
 
 /* Field ranges from gd32g5x3_rcu.h (PLLPSC /1../16, PLLN 8..180) and the
@@ -35,7 +37,6 @@ _Static_assert(BRIDGE_CLOCK_IN_8MHZ / 2u * 108u / 2u == BRIDGE_CLOCK_CORE_HZ, "8
 _Static_assert(BRIDGE_CLOCK_IN_12MHZ / 3u * 108u / 2u == BRIDGE_CLOCK_CORE_HZ, "12 MHz");
 _Static_assert(BRIDGE_CLOCK_IN_16MHZ / 4u * 108u / 2u == BRIDGE_CLOCK_CORE_HZ, "16 MHz");
 _Static_assert(BRIDGE_CLOCK_IN_20MHZ / 5u * 108u / 2u == BRIDGE_CLOCK_CORE_HZ, "20 MHz");
-_Static_assert(BRIDGE_CLOCK_IN_24MHZ / 6u * 108u / 2u == BRIDGE_CLOCK_CORE_HZ, "24 MHz");
 _Static_assert(BRIDGE_CLOCK_IN_24P576 / 6u * 105u / 2u == 215040000u, "24.576 MHz");
 _Static_assert(BRIDGE_CLOCK_IN_24P576 % 6u == 0u, "24.576 MHz divides exactly by PLLPSC 6");
 
@@ -50,20 +51,14 @@ const bridge_clock_ref_t *bridge_clock_ref_for(uint32_t in_hz)
 uint32_t bridge_clock_classify_div32(uint32_t counts, uint32_t window_us)
 {
 	if (window_us == 0u) return 0u;
-	const uint64_t            f    = (uint64_t)counts * 1000000u / window_us; /* HXTAL/32, Hz */
-	const bridge_clock_ref_t *best = 0;
+	const uint64_t f = (uint64_t)counts * 1000000u / window_us; /* HXTAL/32, Hz */
+	/* The bands do not overlap (tests/unit/clock_source), so the first match wins. */
 	for (unsigned i = 0u; i < sizeof k_refs / sizeof k_refs[0]; i++) {
 		const uint64_t nominal = k_refs[i].in_hz / BRIDGE_CLOCK_DIV32_PRESC;
 		const uint64_t dev     = f > nominal ? f - nominal : nominal - f;
-		if (dev * 100u > nominal * BRIDGE_CLOCK_FREQ_TOL_PERCENT) continue;
-		/* Overlapping bands: keep the lower PLL gain (PLLN / PLLPSC), the
-		 * entry that errs towards a LOWER SYSCLK if the pick is wrong. */
-		if (best == 0 ||
-		    (uint64_t)k_refs[i].pll_n * best->pll_psc < (uint64_t)best->pll_n * k_refs[i].pll_psc) {
-			best = &k_refs[i];
-		}
+		if (dev * 1000u <= nominal * k_refs[i].band_permille) return k_refs[i].in_hz;
 	}
-	return best != 0 ? best->in_hz : 0u;
+	return 0u;
 }
 
 static void fall_back(const bridge_clock_ops_t *ops, bridge_clock_fallback_t why, bool repoint_pll)

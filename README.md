@@ -119,14 +119,15 @@ The part has no crystal: OSCIN (PF0, pin E9) is driven single-ended by the
 leaves it unused (a Phase 11 bench check, not something the vendor header
 states). The shipped OTP image has SE2 free-running 32.768 kHz, which is why
 `HXTALSTB` never set under the stock path; the plan is to route SE2 from a PLL
-divider via U-Boot volatile register writes, and the next SoM revision feeds
-24 MHz.
+divider (DIV4, 24.576 MHz) via U-Boot volatile register writes, and the next
+build burns the same setting into the clock generator OTP. 24.576 MHz is the
+only source on any board.
 
 **Boot is always the IRC8M 216 MHz PLL, exactly as before.** On current units
 SE2 only reaches its final frequency when U-Boot configures the clock
 generator, after the GD32 has booted, so locking the PLL to HXTAL
 autonomously could be followed by a frequency change (e.g. locked at 8 MHz x
-108, then SE2 moves to 24 MHz = a 648 MHz overclock). The switch to the
+108, then SE2 moves to 24.576 MHz = a ~664 MHz overclock). The switch to the
 external clock therefore happens only when the host asks:
 
 - `bridge_clock_try_hxtal()` (`hal/gd32/clock_hw.c`) is the internal seam the
@@ -161,31 +162,35 @@ The sequence (`clock_hw.c`, sequencing in `clock_source.c`):
    SYSCLK back to PLLP, then `CKMEN` armed;
 5. on any failure HXTAL is stopped and the IRC8M 216 MHz PLL is rebuilt.
 
-| OSCIN | HXTAL/32 | PLLPSC (field) | PLLN | PLL in | VCO | SYSCLK |
-|---|---|---|---|---|---|---|
-| 8 MHz | 250 kHz | /2 (1) | 108 | 4 MHz | 432 MHz | 216 MHz |
-| 12 MHz | 375 kHz | /3 (2) | 108 | 4 MHz | 432 MHz | 216 MHz |
-| 16 MHz | 500 kHz | /4 (3) | 108 | 4 MHz | 432 MHz | 216 MHz |
-| 20 MHz | 625 kHz | /5 (4) | 108 | 4 MHz | 432 MHz | 216 MHz |
-| 24 MHz | 750 kHz | /6 (5) | 108 | 4 MHz | 432 MHz | 216 MHz |
-| 24.576 MHz | 768 kHz | /6 (5) | 105 | 4.096 MHz | 430.08 MHz | 215.04 MHz (-0.44%) |
+| OSCIN | HXTAL/32 | PLLPSC (field) | PLLN | PLL in | VCO | SYSCLK | band |
+|---|---|---|---|---|---|---|---|
+| 8 MHz | 250 kHz | /2 (1) | 108 | 4 MHz | 432 MHz | 216 MHz | +-3% |
+| 12 MHz | 375 kHz | /3 (2) | 108 | 4 MHz | 432 MHz | 216 MHz | +-3% |
+| 16 MHz | 500 kHz | /4 (3) | 108 | 4 MHz | 432 MHz | 216 MHz | +-3% |
+| 20 MHz | 625 kHz | /5 (4) | 108 | 4 MHz | 432 MHz | 216 MHz | +-3% |
+| 24.576 MHz | 768 kHz | /6 (5) | 105 | 4.096 MHz | 430.08 MHz | 215.04 MHz (-0.44%) | +-1% |
 
-PLLP is /2 (field 0) throughout. Every tuple stays at (or, for 24.576 MHz, next
-to) the IRC8M path proven 4 MHz / 432 MHz input and VCO: the vendor header gives
-only the field ranges (PLLPSC /1../16, PLLN 8..180, PLLP /2../8), not input/VCO
-limits. 25 MHz has no tuple (it needs PLLPSC * PLLP to be a multiple of 25) and
-is not an entry. A 32.768 kHz OSCIN never matches (`HXTALSTB` normally does not
-set inside the budget; if it did, the count is ~2).
+PLLP is /2 (field 0) throughout. There is no 24.000 MHz entry (no board feeds
+it). Every tuple stays at (or, for 24.576 MHz, next to) the IRC8M path proven
+4 MHz / 432 MHz input and VCO: the vendor header gives only the field ranges
+(PLLPSC /1../16, PLLN 8..180, PLLP /2../8), not input/VCO limits. A 32.768 kHz
+OSCIN never matches (`HXTALSTB` normally does not set inside the budget; if it
+did, the count is ~2).
 
-**Tolerance.** The count is taken against the IRC8M-derived core clock, so the
-acceptance band is +-3% of an entry: IRC8M error plus quantisation (<= 0.2%).
-The datasheet IRC8M figure is not in this tree and must be checked; if the real
-tolerance is tighter the band can shrink. Consequences: 24.000 and 24.576 MHz
-are 2.4% apart, closer than the band, so they cannot be told apart (the
-lower-gain 24.576 entry wins, so a wrong pick errs towards a LOWER SYSCLK: 24 MHz
-run as /6 x105 gives 210 MHz, while `SystemCoreClock` then reports 215.04 MHz);
-25 MHz, 1.7% above 24.576, is taken for it (218.75 MHz). A unit whose IRC8M
-measures outside the band is refused (`FB_HXTAL_FREQ`), the safe direction.
+**Tolerance.** The count is taken against the IRC8M-derived core clock, so a
+band has to hold the IRC8M own error plus quantisation (<= 0.2%). The IRC8M
+datasheet figure is not in this tree and must be checked, so the bands are a
+safety choice, not a measurement. 24.576 MHz, the only real source, is +-1%:
+tight, so a unit whose IRC8M is more than about 1% off refuses the switch
+(`FB_HXTAL_FREQ`, stays on IRC8M; the safe direction). The unused 8/12/16/20 MHz
+entries keep +-3%. The bands do not overlap (closest pair, 20 and 24.576 MHz,
+is 23% apart), so a match is unambiguous.
+
+**25 MHz must never be fed.** It has no tuple (it needs PLLPSC * PLLP to be a
+multiple of 25) and is 1.7% above 24.576 MHz. With a true timebase it is refused;
+but if the IRC8M reads 0.7% to 2.7% fast it falls inside the +-1% band and is
+taken for 24.576 MHz (SYSCLK 218.75 MHz, +1.3% over 216). The part cannot
+prevent that, because the only reference is the IRC8M.
 
 **SYSCLK is not always 216 MHz.** Everything derives from the live clock:
 `SystemCoreClock` comes from `bridge_clock_core_update()` (the vendor
@@ -234,8 +239,7 @@ a healthy tick is not caught by it (the frequency check covers part of that).
 **Active source.** SWD-readable RAM symbols `bridge_clock_source`
 (`BRIDGE_CLOCK_SRC_IRC8M` = 0, `BRIDGE_CLOCK_SRC_HXTAL` = 1),
 `bridge_clock_input_hz` (0 = unknown / not in use, else the classified
-reference: 8000000, 12000000, 16000000, 20000000, 24000000 or 24576000; a
-24.000 MHz input reads as 24576000) and `bridge_clock_fallback` (0 none,
+reference: 8000000, 12000000, 16000000, 20000000 or 24576000) and `bridge_clock_fallback` (0 none,
 1 build-disabled, 2 `HXTALSTB` timeout, 3 PLL fail, 4 CKM failure, 5 previous
 attempt unhealthy, 6 frequency matches no reference, 7 the IRC8M PLL itself
 would not relock (left on bare 8 MHz), 8 not requested yet). Nothing is on the

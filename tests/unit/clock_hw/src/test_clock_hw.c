@@ -172,16 +172,43 @@ ZTEST(gd32_bridge_clock_hw, test_timer_prescalers_follow_the_live_clock)
 	zassert_equal(bridge_timer_prescaler(1000000u), 7u);
 }
 
-ZTEST(gd32_bridge_clock_hw, test_24mhz_input_lands_on_the_lower_gain_tuple_and_telemetry_says_so)
+ZTEST(gd32_bridge_clock_hw, test_24p576_is_unambiguous_and_24mhz_is_refused)
 {
 	reset();
-	mock_scn.oscin_hz = 24000000u;
+	mock_scn.oscin_hz = 24576000u;
 	zassert_true(bridge_clock_try_hxtal());
-	zassert_equal(bridge_clock_input_hz, BRIDGE_CLOCK_IN_24P576, "indistinguishable from 24.576");
-	/* Software believes 24.576 MHz; the silicon runs 24.000 / 6 * 105 / 2 = 210 MHz, 2.4% LOW
-	 * (the safe side).  Nothing in the part can tell the two references apart. */
-	zassert_equal(SystemCoreClock, 215040000u, "what software derives from the classification");
-	zassert_equal(mock_sim_sysclk_hz(), 210000000u, "what the hardware really runs");
+	zassert_equal(bridge_clock_input_hz, BRIDGE_CLOCK_IN_24P576);
+	zassert_equal(mock_sim_sysclk_hz(), SystemCoreClock, "software and hardware agree");
+
+	reset();
+	mock_scn.oscin_hz = 24000000u; /* no board feeds it: -2.3%, outside the band */
+	zassert_false(bridge_clock_try_hxtal());
+	zassert_equal(bridge_clock_fallback, BRIDGE_CLOCK_FB_HXTAL_FREQ);
+	zassert_equal(SystemCoreClock, 216000000u);
+
+	reset();
+	mock_scn.oscin_hz = 25000000u; /* must never be fed; refused with a true timebase */
+	zassert_false(bridge_clock_try_hxtal());
+	zassert_equal(bridge_clock_fallback, BRIDGE_CLOCK_FB_HXTAL_FREQ);
+}
+
+ZTEST(gd32_bridge_clock_hw, test_24p576_tolerates_a_small_irc8m_error_only)
+{
+	reset();
+	mock_scn.oscin_hz           = 24576000u;
+	mock_scn.irc8m_err_permille = 8;
+	zassert_true(bridge_clock_try_hxtal());
+
+	reset();
+	mock_scn.oscin_hz           = 24576000u;
+	mock_scn.irc8m_err_permille = -8;
+	zassert_true(bridge_clock_try_hxtal());
+
+	reset();
+	mock_scn.oscin_hz           = 24576000u;
+	mock_scn.irc8m_err_permille = 15; /* beyond +-1%: refused, stay on IRC8M */
+	zassert_false(bridge_clock_try_hxtal());
+	zassert_equal(bridge_clock_fallback, BRIDGE_CLOCK_FB_HXTAL_FREQ);
 }
 
 /* ---- refusals ---- */

@@ -61,21 +61,27 @@ typedef enum {
  * neighbourhood (4 MHz in / 432 MHz VCO) except 24.576 MHz, whose 4.096 MHz /
  * 430.08 MHz is the closest point to it.
  *
- *   OSCIN        HXTAL/32   PLLPSC (field)  PLLN  PLL in     VCO         SYSCLK
- *    8     MHz   250   kHz  /2  (1)        108   4     MHz   432    MHz  216     MHz
- *   12     MHz   375   kHz  /3  (2)        108   4     MHz   432    MHz  216     MHz
- *   16     MHz   500   kHz  /4  (3)        108   4     MHz   432    MHz  216     MHz
- *   20     MHz   625   kHz  /5  (4)        108   4     MHz   432    MHz  216     MHz
- *   24     MHz   750   kHz  /6  (5)        108   4     MHz   432    MHz  216     MHz
- *   24.576 MHz   768   kHz  /6  (5)        105   4.096 MHz   430.08 MHz  215.04  MHz (-0.44%)
+ *   OSCIN        HXTAL/32   PLLPSC (field)  PLLN  PLL in     VCO         SYSCLK     band
+ *    8     MHz   250   kHz  /2  (1)        108   4     MHz   432    MHz  216     MHz   +-3%
+ *   12     MHz   375   kHz  /3  (2)        108   4     MHz   432    MHz  216     MHz   +-3%
+ *   16     MHz   500   kHz  /4  (3)        108   4     MHz   432    MHz  216     MHz   +-3%
+ *   20     MHz   625   kHz  /5  (4)        108   4     MHz   432    MHz  216     MHz   +-3%
+ *   24.576 MHz   768   kHz  /6  (5)        105   4.096 MHz   430.08 MHz  215.04  MHz   +-1%
+ *                                                                        (-0.44%)
  *
- * 25 MHz has no tuple: PLLN * 25 MHz / PLLPSC = 216 MHz * PLLP needs
- * PLLPSC * PLLP to be a multiple of 25, impossible with PLLPSC <= 16 and PLLP
- * in {2,4,6,8}.  It is not a table entry.  It is only 1.7% above 24.576 MHz,
- * though, so the band below accepts it AS 24.576 MHz (SYSCLK 218.75 MHz,
- * +1.3% over 216): the band cannot be both IRC8M-tolerant and 25 MHz-proof.  A 32.768 kHz OSCIN (the SE2 free-run
- * default) never matches: HXTAL/32 = 1.024 kHz is ~2 counts in the window, and
- * HXTALSTB normally does not set inside the startup budget either.
+ * There is NO 24.000 MHz entry: every board feeds 24.576 MHz (SE2 DIV4 route,
+ * and the same setting burned into the clock generator OTP).  The bands do not
+ * overlap (the closest pair, 20 and 24.576 MHz, is 23% apart), so a match is
+ * unambiguous.  25 MHz has no tuple (PLLN * 25 MHz / PLLPSC = 216 MHz * PLLP
+ * needs PLLPSC * PLLP to be a multiple of 25, impossible with PLLPSC <= 16 and
+ * PLLP in {2,4,6,8}) and MUST NEVER BE FED.  It is 1.7% above 24.576 MHz, so
+ * whether it is refused depends on the IRC8M timebase error e: with the +-1%
+ * band it passes as 24.576 MHz (SYSCLK 218.75 MHz, +1.3% over 216) only when
+ * the IRC8M reads 0.7% to 2.7% fast, and is refused otherwise.  The IRC8M
+ * datasheet tolerance is not in this tree, so this cannot be made absolute.
+ * A 32.768 kHz OSCIN (the SE2 free-run default) never matches: HXTAL/32 =
+ * 1.024 kHz is ~2 counts in the window, and HXTALSTB normally does not set
+ * inside the startup budget either.
  *
  * SYSCLK therefore is NOT always 216 MHz.  Nothing may assume it: every timing
  * derivation reads the live clock (SystemCoreClock / bridge_core_clock_hz,
@@ -86,7 +92,6 @@ typedef enum {
 #define BRIDGE_CLOCK_IN_12MHZ    12000000u
 #define BRIDGE_CLOCK_IN_16MHZ    16000000u
 #define BRIDGE_CLOCK_IN_20MHZ    20000000u
-#define BRIDGE_CLOCK_IN_24MHZ    24000000u
 #define BRIDGE_CLOCK_IN_24P576   24576000u
 #define BRIDGE_CLOCK_PLL_IN_HZ   4000000u /* the IRC8M path's PLL input */
 #define BRIDGE_CLOCK_PLL_N       108u     /* the IRC8M path's PLLN */
@@ -99,33 +104,30 @@ _Static_assert(BRIDGE_CLOCK_PLL_IN_HZ *BRIDGE_CLOCK_PLL_N / BRIDGE_CLOCK_PLL_P =
                "the IRC8M-path PLL tuple must yield 216 MHz");
 
 typedef struct {
-	uint32_t in_hz;     /* OSCIN */
-	uint32_t pll_psc;   /* PLLPSC divider (field = pll_psc - 1) */
-	uint32_t pll_n;     /* PLLN */
-	uint32_t sysclk_hz; /* in_hz / pll_psc * pll_n / BRIDGE_CLOCK_PLL_P */
+	uint32_t in_hz;         /* OSCIN */
+	uint32_t pll_psc;       /* PLLPSC divider (field = pll_psc - 1) */
+	uint32_t pll_n;         /* PLLN */
+	uint32_t sysclk_hz;     /* in_hz / pll_psc * pll_n / BRIDGE_CLOCK_PLL_P */
+	uint32_t band_permille; /* acceptance band around in_hz / 32, +- this many per mille */
 } bridge_clock_ref_t;
 
 /* The table entry for an OSCIN frequency returned by the classifier, or NULL. */
 const bridge_clock_ref_t *bridge_clock_ref_for(uint32_t in_hz);
 
-/* Acceptance band around each table entry, in percent.  The count is taken
- * against the core clock, i.e. the IRC8M (or its PLL), so the band has to hold
- * the IRC8M's own error plus +-1 count of quantisation (<= 0.2% at the 2 ms
- * window).  3% is the minimum this firmware assumes for the IRC8M; the
- * datasheet figure is NOT in this tree and must be checked -- it is not a
- * +-1% measurement.  Consequences:
+/* Acceptance band per table entry (bridge_clock_ref_t.band_permille).  The
+ * count is taken against the core clock, i.e. the IRC8M (or its PLL), so a band
+ * has to hold the IRC8M own error plus +-1 count of quantisation (<= 0.2% at
+ * the 2 ms window).  The IRC8M datasheet figure is NOT in this tree and must be
+ * checked; the bands are a safety choice, not a measurement.
+ *  - 24.576 MHz (the only source on real boards) is +-1%: tight, so a wrong
+ *    clock is refused, at the cost of refusing (FB_HXTAL_FREQ, stay on IRC8M)
+ *    a unit whose IRC8M is more than ~1% off.  That is the safe direction.
+ *  - 8/12/16/20 MHz (exact 216, no board feeds them) keep +-3%.
  *  - A true OSCIN deviation of up to band + IRC8M error can pass, so the core
- *    can run up to ~(3% + IRC8M error) above its nominal SYSCLK worst case.
- *  - 24.000 and 24.576 MHz are only 2.4% apart, i.e. closer than the band:
- *    they cannot be told apart.  Where both match, the entry with the LOWER
- *    PLL gain (PLLN / PLLPSC, i.e. 24.576 MHz) wins: if it is wrong, SYSCLK
- *    errs low (24 MHz read as 24.576 -> 210 MHz) instead of high (24.576 MHz
- *    read as 24 -> 221.2 MHz).  Either way SystemCoreClock is derived from
- *    the CLASSIFIED reference, so after a 24.000 MHz input software reports
- *    215.04 MHz while the silicon runs 210 MHz.
- *  - A fast-IRC8M unit that measures outside the band is refused
- *    (FB_HXTAL_FREQ): the safe direction. */
-#define BRIDGE_CLOCK_FREQ_TOL_PERCENT 3u
+ *    can run that much above its nominal SYSCLK in the worst case.
+ * SystemCoreClock is derived from the CLASSIFIED reference. */
+#define BRIDGE_CLOCK_BAND_24P576_PERMILLE 10u
+#define BRIDGE_CLOCK_BAND_OTHER_PERMILLE  30u
 
 /* Every HXTAL/PLL wait is bounded by TIME (DWT CYCCNT against the live core
  * clock, clock_hw.c), never by an iteration count: the same loop is 27x slower
@@ -182,8 +184,7 @@ extern volatile bridge_clock_fallback_t bridge_clock_fallback;
 extern volatile uint32_t                bridge_clock_input_hz;
 
 /* HXTAL/32 count over `window_us` -> the matching BRIDGE_CLOCK_IN_* frequency
- * when within BRIDGE_CLOCK_FREQ_TOL_PERCENT of a table entry (lowest PLL gain
- * wins where several match), else 0. */
+ * when within that entry band (no two bands overlap), else 0. */
 uint32_t bridge_clock_classify_div32(uint32_t counts, uint32_t window_us);
 
 /* Boot-time selection.  An attempt marker left by a previous HXTAL attempt

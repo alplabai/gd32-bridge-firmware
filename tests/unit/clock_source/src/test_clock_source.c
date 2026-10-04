@@ -150,13 +150,10 @@ ZTEST(gd32_bridge_clock_source, test_each_reference_is_recognised)
 	zassert_equal(classify_hz(12000000u, 0), BRIDGE_CLOCK_IN_12MHZ);
 	zassert_equal(classify_hz(16000000u, 0), BRIDGE_CLOCK_IN_16MHZ);
 	zassert_equal(classify_hz(20000000u, 0), BRIDGE_CLOCK_IN_20MHZ);
-	zassert_equal(classify_hz(24000000u, 0),
-	              BRIDGE_CLOCK_IN_24P576,
-	              "24.000 and 24.576 MHz overlap; the lower-PLL-gain entry wins");
 	zassert_equal(classify_hz(24576000u, 0), BRIDGE_CLOCK_IN_24P576);
 }
 
-ZTEST(gd32_bridge_clock_source, test_band_is_three_percent_and_rejects_beyond)
+ZTEST(gd32_bridge_clock_source, test_other_references_have_a_three_percent_band)
 {
 	zassert_equal(classify_hz(8000000u, 29), BRIDGE_CLOCK_IN_8MHZ, "+2.9% (slow IRC8M)");
 	zassert_equal(classify_hz(8000000u, -29), BRIDGE_CLOCK_IN_8MHZ, "-2.9%");
@@ -164,6 +161,14 @@ ZTEST(gd32_bridge_clock_source, test_band_is_three_percent_and_rejects_beyond)
 	zassert_equal(classify_hz(8000000u, -40), 0u);
 	zassert_equal(classify_hz(16000000u, 29), BRIDGE_CLOCK_IN_16MHZ);
 	zassert_equal(classify_hz(16000000u, 40), 0u);
+}
+
+ZTEST(gd32_bridge_clock_source, test_24p576_has_a_one_percent_band)
+{
+	zassert_equal(classify_hz(24576000u, 9), BRIDGE_CLOCK_IN_24P576, "+0.9%");
+	zassert_equal(classify_hz(24576000u, -9), BRIDGE_CLOCK_IN_24P576, "-0.9%");
+	zassert_equal(classify_hz(24576000u, 12), 0u, "+1.2% is refused (safe direction)");
+	zassert_equal(classify_hz(24576000u, -12), 0u);
 }
 
 ZTEST(gd32_bridge_clock_source, test_unsupported_and_dead_clocks_are_refused)
@@ -177,23 +182,39 @@ ZTEST(gd32_bridge_clock_source, test_unsupported_and_dead_clocks_are_refused)
 	zassert_equal(bridge_clock_classify_div32(500u, 0u), 0u, "zero window");
 }
 
-ZTEST(gd32_bridge_clock_source, test_25mhz_has_no_tuple_and_aliases_to_24p576_inside_the_band)
+ZTEST(gd32_bridge_clock_source, test_no_24mhz_entry_and_25mhz_is_refused_with_a_true_timebase)
 {
-	/* 25 MHz is 1.7% above 24.576: inside the 3% band, so it is taken for it.  The
-	 * result (SYSCLK 218.75 MHz, +1.3% over 216) is the documented cost of the band. */
-	zassert_equal(classify_hz(25000000u, 0), BRIDGE_CLOCK_IN_24P576);
-	zassert_true(bridge_clock_ref_for(25000000u) == NULL, "not a table entry");
+	zassert_equal(classify_hz(24000000u, 0), 0u, "24.000 MHz is not a supported source (-2.3%)");
+	zassert_true(bridge_clock_ref_for(24000000u) == NULL);
+	zassert_equal(classify_hz(25000000u, 0), 0u, "25 MHz is 1.7% above 24.576: outside +-1%");
+	zassert_equal(classify_hz(25000000u, 10), 0u);
+	zassert_true(bridge_clock_ref_for(25000000u) == NULL, "no tuple");
 }
 
-ZTEST(gd32_bridge_clock_source, test_overlap_between_24_and_24p576_errs_towards_lower_sysclk)
+/* The documented limit: with an IRC8M timebase reading ~1% fast (fewer counts),
+ * 25 MHz lands inside the +-1% band.  Nothing in the part can prevent that;
+ * 25 MHz must never be fed. */
+ZTEST(gd32_bridge_clock_source,
+      test_25mhz_aliases_only_when_the_irc8m_is_fast_by_over_point_7_percent)
 {
-	/* 24.3 MHz is within 3% of both; the pick must be the lower-gain 24.576. */
-	zassert_equal(classify_hz(24300000u, 0), BRIDGE_CLOCK_IN_24P576);
-	const bridge_clock_ref_t *r = bridge_clock_ref_for(BRIDGE_CLOCK_IN_24P576);
-	zassert_true(r != NULL);
-	zassert_equal(r->pll_psc, 6u);
-	zassert_equal(r->pll_n, 105u);
-	zassert_equal(r->sysclk_hz, 215040000u);
+	zassert_equal(classify_hz(25000000u, -10), BRIDGE_CLOCK_IN_24P576);
+	zassert_equal(classify_hz(25000000u, -5), 0u, "0.5% fast: still refused");
+}
+
+ZTEST(gd32_bridge_clock_source, test_bands_are_disjoint_and_ordered)
+{
+	/* Scan every HXTAL/32 count the window can produce: a match must never go
+	 * back to a lower reference, and every reference band must be one run. */
+	uint32_t last = 0u;
+	for (uint32_t c = 0u; c <= 4000u; c++) {
+		const uint32_t r = bridge_clock_classify_div32(c, BRIDGE_CLOCK_FREQ_WINDOW_US);
+		if (r == 0u) continue;
+		zassert_true(r >= last, "bands interleave at %u counts", (unsigned)c);
+		last = r;
+	}
+	zassert_equal(last, BRIDGE_CLOCK_IN_24P576);
+	/* The closest pair: 20 MHz upper edge vs 24.576 MHz lower edge cannot meet. */
+	zassert_true(20000000ull * 1030u / 1000u < 24576000ull * 990u / 1000u);
 }
 
 ZTEST(gd32_bridge_clock_source, test_table_tuples)
@@ -203,7 +224,7 @@ ZTEST(gd32_bridge_clock_source, test_table_tuples)
 	} want[] = {
 		{ 8000000u, 2u, 108u, 216000000u },  { 12000000u, 3u, 108u, 216000000u },
 		{ 16000000u, 4u, 108u, 216000000u }, { 20000000u, 5u, 108u, 216000000u },
-		{ 24000000u, 6u, 108u, 216000000u }, { 24576000u, 6u, 105u, 215040000u },
+		{ 24576000u, 6u, 105u, 215040000u },
 	};
 	for (unsigned i = 0; i < sizeof want / sizeof want[0]; i++) {
 		const bridge_clock_ref_t *r = bridge_clock_ref_for(want[i].in);
@@ -249,9 +270,9 @@ ZTEST(gd32_bridge_clock_source, test_attempt_ok_runs_pll_from_hxtal_in_order)
 ZTEST(gd32_bridge_clock_source, test_pll_tuple_follows_the_measured_frequency)
 {
 	fake_reset();
-	f.counts = COUNTS_8MHZ(BRIDGE_CLOCK_FREQ_WINDOW_US) * 3u; /* 24 MHz */
+	f.counts = 1536u; /* 24.576 MHz: 768 kHz over 2 ms */
 	zassert_true(bridge_clock_attempt_hxtal(&ops));
-	zassert_equal(f.pll_in_hz, BRIDGE_CLOCK_IN_24P576, "24 MHz picks the lower-gain overlap entry");
+	zassert_equal(f.pll_in_hz, BRIDGE_CLOCK_IN_24P576);
 	zassert_equal(bridge_clock_input_hz, BRIDGE_CLOCK_IN_24P576);
 
 	fake_reset();

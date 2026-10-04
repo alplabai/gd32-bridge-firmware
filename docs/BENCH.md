@@ -1100,11 +1100,11 @@ the IRC8M PLL and switches only when asked. The switch is triggered over SWD
 for now: write `1` to `bridge_clock_hxtal_request` (the protocol opcode
 belongs to the 0.15 work). **Never reprogram SE2 after the switch**: the clock
 monitor detects a stopped clock, not a changed one, and the PLL would follow the
-new frequency (8 MHz x108 -> 24 MHz would be 648 MHz).
+new frequency (8 MHz x108 -> 24.576 MHz would be ~664 MHz).
 
 1. **SE2 level, frequency and VDD.** With the host-side 5L35023B configuration
-   that enables SE2, scope TP88. PASS = the intended frequency (8 MHz on current
-   units once U-Boot has configured it; 24 MHz on the next SoM revision) with a
+   that enables SE2, scope TP88. PASS = the intended frequency (24.576 MHz, the SE2 DIV4 route, on every board once U-Boot has configured
+   it; the next build burns the same setting into the clock generator OTP) with a
    1.8 V swing (a clean single-ended clock, not a crystal sine), AND the GD32
    VDD measures 1.8 V on the same session (a 1.8 V swing into a part powered at
    another voltage is not a valid reading). FAIL = any other frequency: do not
@@ -1125,17 +1125,19 @@ new frequency (8 MHz x108 -> 24 MHz would be 648 MHz).
    PWM output at a known period and compare it with the host timebase: it must
    now track SE2, not IRC8M. Request the switch BEFORE starting PWM / ADC
    streaming: timers configured earlier keep their old prescaler.
-4. **Frequency classification.** Repeat step 3 with SE2 set to each reference
-   the bench can produce: 8, 12, 16, 20, 24, 24.576 MHz. PASS = each lands on its
-   table entry (24.000 reads as 24576000 and runs at 210 MHz; note it). With a
-   non-reference frequency (e.g. 10 MHz, 28 MHz) and with SE2 at 32.768 kHz:
+4. **Frequency classification.** Repeat step 3 with SE2 set to whatever the
+   bench can produce. PASS = 24.576 MHz lands on its entry (PLLPSC field 5,
+   PLLN 105, 215040000); 8, 12, 16 and 20 MHz (if producible) land on theirs
+   (216000000). Non-sources (e.g. 10 MHz, 24.000 MHz, 28 MHz) and 32.768 kHz:
    PASS = no switch, `bridge_clock_source` = 0, `bridge_clock_fallback` = 6 (or 2
    for 32.768 kHz, where `HXTALSTB` does not set), SYSCLK never left the IRC8M
-   PLL (probe a PWM period before and after: unchanged). Also confirm TIMER14 is
-   idle again (`RCU_APB2EN.TIMER14EN` clear) after every attempt. If the
-   frequency check always reports 6 on a good clock, the HXTAL/32 -> TIMER14
-   routing needs a closer look: it is taken from the vendor header and has not
-   run on silicon.
+   PLL (probe a PWM period before and after: unchanged). Do NOT feed 25 MHz as a
+   test: it is only refused while the IRC8M timebase is within about 0.7% (see
+   README). Also confirm TIMER14 is idle again (`RCU_APB2EN.TIMER14EN` clear)
+   after every attempt. If a good 24.576 MHz clock always reports 6, either the
+   unit IRC8M is more than ~1% off (the +-1% band refuses it by design) or the
+   HXTAL/32 -> TIMER14 routing needs a closer look: it is taken from the vendor
+   header and has not run on silicon.
 5. **OSCOUT stays a GPIO.** With HXTAL up, drive E1M IO13 (PF1) high and low with
    `CMD_GPIO_WRITE` and scope the pad. PASS = it follows. FAIL = pinned or
    loaded: bypass is not leaving OSCOUT free; stop.
@@ -1175,8 +1177,8 @@ new frequency (8 MHz x108 -> 24 MHz would be 648 MHz).
 
 **What the firmware cannot catch.** A frequency that changes after the switch
 (the clock monitor only sees a stop), and an SE2 frequency that falls inside the
-3% acceptance band of the wrong reference (24.000 vs 24.576 MHz; 25 MHz is taken
-for 24.576). The frequency check itself replaces the earlier "cannot measure it"
+acceptance band of a table entry (25 MHz is taken for 24.576 MHz when the IRC8M
+reads 0.7%-2.7% fast; it must never be fed). The frequency check itself replaces the earlier "cannot measure it"
 limit: it counts HXTAL/32 against the IRC8M-derived core clock (accuracy of that
 reference is the datasheet IRC8M tolerance, to be confirmed). The `RTC_BKP9`
 marker only helps if a misclock faults or resets AND the backup domain survives.
