@@ -234,10 +234,7 @@ int bridge_hw_adc_stream_begin(uint8_t stream_id, uint8_t channel, uint32_t samp
 	/* DMAMUX request: route the channel to this ADC instance.  Without
      * this the request id is left uninitialised and the channel triggers
      * on the wrong (or no) source. */
-	init.request = (ch->periph == ADC1)   ? DMA_REQUEST_ADC1
-	               : (ch->periph == ADC2) ? DMA_REQUEST_ADC2
-	               : (ch->periph == ADC3) ? DMA_REQUEST_ADC3
-	                                      : DMA_REQUEST_ADC0;
+	init.request = adc_dma_request_id(ch->periph);
 	dma_init(s->dma_periph, (dma_channel_enum)s->dma_channel, &init);
 
 	/* Circular mode -- DMA reloads `number` after each cycle so the
@@ -270,7 +267,12 @@ int bridge_hw_adc_stream_begin(uint8_t stream_id, uint8_t channel, uint32_t samp
      * converter and must not race a sibling read. */
 	if (!adc_periph_claim(ch->periph)) return BRIDGE_HW_ERR_BUSY;
 
+	adc_format_invalidate(ch->periph); /* reprogrammed below: the burst must redo its format */
 	adc_disable(ch->periph);
+	/* A single-shot burst may have left scan mode and a longer routine
+	 * sequence on this converter; the stream runs one conversion per trigger. */
+	adc_special_function_config(ch->periph, ADC_SCAN_MODE, DISABLE);
+	adc_channel_length_config(ch->periph, ADC_ROUTINE_CHANNEL, 1u);
 	/* Apply the channel's cached resolution + oversample while the
 	 * converter is disabled (DRES/OVSAMPCTL only latch with ADCON==0).
 	 * In oversampling mode each pacing-timer trigger runs all `ratio`
@@ -310,18 +312,18 @@ int bridge_hw_adc_stream_begin(uint8_t stream_id, uint8_t channel, uint32_t samp
 	}
 	/* Recalibrate after the ADCON toggle above -- see the disable/
      * enable comment at the top of this bracket (#34).  Bounded, cost
-     * ~25 us (adc.c's bridge_hw_adc_read carries the full derivation);
+     * ~25 us (the applied-format comment in adc.c carries the derivation);
      * a false return means the calibration FSM never finished, so
      * fail the begin rather than arm a stream on an unproven
      * converter -- the DMA channel + lap ISR are not armed yet at
      * this point, so there is no live stream state to unwind.
      *
      * DISCLOSURE (#34 review): this is one of three request-path call
-     * sites (the others: bridge_hw_adc_read in adc.c, and
-     * adc_stream_recover_rovf below) that now pay calibration's
+     * sites (the others: the burst read's format miss in adc.c, and
+     * adc_stream_recover_rovf below) that pay calibration's
      * ~200000-iteration wedged-FSM worst case on every invocation,
-     * not just once at boot -- see adc.c's bridge_hw_adc_read for the
-     * full disclosure and the decision not to shorten the bound. */
+     * not just once at boot.  The bound is deliberately not shortened: it
+     * is a CPU-iteration count with no verified tCAL conversion. */
 	if (!adc_calibrate_bounded(ch->periph)) {
 		/* Release the converter claim before bailing (#133 x #80).
          * Neither change has this hazard alone -- #80 added this early
@@ -428,8 +430,8 @@ int bridge_hw_adc_stream_begin(uint8_t stream_id, uint8_t channel, uint32_t samp
  * DISCLOSURE (#34 review): this is the third of three request-path
  * call sites that now pay adc_calibrate_bounded's ~200000-iteration
  * wedged-FSM worst case on every invocation rather than once at boot
- * -- see adc.c's bridge_hw_adc_read for the full disclosure and the
- * decision not to shorten the bound.
+ * -- the bound is deliberately not shortened (see
+ * bridge_hw_adc_stream_begin).
  *
  * The DMA full-transfer-finish (FTF) interrupt flag is cleared as
  * part of step 3's "reinit DMA module": ROVF and a ring-wrap FTF can
@@ -445,8 +447,9 @@ int bridge_hw_adc_stream_begin(uint8_t stream_id, uint8_t channel, uint32_t samp
  * CHEN does not clear it, so it needs its own clear here. */
 static bool adc_stream_recover_rovf(adc_stream_state_t *s, const gd32_adc_ch_t *ch)
 {
-	adc_dma_mode_disable(ch->periph); /* 1. Clear DMA bit of ADC_CTL1. */
-	adc_disable(ch->periph);          /* 2. Clear ADCON bit of ADC_CTL1. */
+	adc_format_invalidate(ch->periph); /* ADCON is toggled below */
+	adc_dma_mode_disable(ch->periph);  /* 1. Clear DMA bit of ADC_CTL1. */
+	adc_disable(ch->periph);           /* 2. Clear ADCON bit of ADC_CTL1. */
 
 	/* 3. Clear CHEN bit of DMA_CHxCTL, reinit the DMA module.  The
 	 * count register is reloaded to the full ring length explicitly:
@@ -549,9 +552,8 @@ int bridge_hw_adc_stream_read(uint8_t   stream_id,
 		const uint16_t pavail = (uint16_t)pbacklog;
 		const uint16_t emit   = (pavail < max_samples) ? pavail : max_samples;
 		for (uint16_t i = 0u; i < emit; ++i) {
-			uint32_t code = s->proc_ring[s->proc_read % BRIDGE_ADC_STREAM_RING_SAMPLES];
-			if (code > s->full_scale) code = s->full_scale;
-			mv[i] = (uint16_t)((code * (uint32_t)adc_vref_mv) / s->full_scale);
+			mv[i] = adc_code_to_mv(s->proc_ring[s->proc_read % BRIDGE_ADC_STREAM_RING_SAMPLES],
+			                       s->full_scale);
 			s->proc_read++;
 		}
 		*got_samples = (uint8_t)emit;
@@ -601,9 +603,7 @@ int bridge_hw_adc_stream_read(uint8_t   stream_id,
 
 	uint16_t to_emit = (avail < max_samples) ? avail : max_samples;
 	for (uint16_t i = 0u; i < to_emit; ++i) {
-		uint32_t code = s->ring[s->read_idx];
-		if (code > s->full_scale) code = s->full_scale;
-		mv[i]       = (uint16_t)((code * (uint32_t)adc_vref_mv) / s->full_scale);
+		mv[i]       = adc_code_to_mv(s->ring[s->read_idx], s->full_scale);
 		s->read_idx = (uint16_t)((s->read_idx + 1u) % BRIDGE_ADC_STREAM_RING_SAMPLES);
 	}
 	s->total_read += to_emit;

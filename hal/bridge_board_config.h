@@ -123,6 +123,39 @@
 #define BRIDGE_I2C_IRQ_SUBPRIO         0u
 #define BRIDGE_ADC_STREAM_LAP_IRQ_PRIO 3u
 
+/* ADC burst-read DMA (CMD_ADC_READ, hal/gd32/adc.c).  Its transfer-complete IRQ
+ * stages the SPI reply, so it runs at the CS EXTI's preemption priority: the
+ * two cannot preempt each other, which is what makes the staged-reply buffer
+ * safe between them with no critical section (src/transport_spi.c).  The
+ * sub-priority only orders simultaneous pendings; 0 services a finished burst
+ * before a CS edge that arrived in the same window.  It must still preempt the
+ * I2C ISR, whose blocking ADC_READ waits on it. */
+#define BRIDGE_ADC_BURST_IRQ_PRIO    BRIDGE_CS_IRQ_PRIO
+#define BRIDGE_ADC_BURST_IRQ_SUBPRIO 0u
+
+/* DMA channel map (GD32G553: DMA0 + DMA1, 7 channels each; the DMAMUX channel
+ * serving DMA0 CHn is n, serving DMA1 CHn is n + 7).  Every user in the tree:
+ *
+ *   DMA0 CH0  ADC stream 0 ring       (hal/gd32/adc_stream.c, DMAMUX 0)
+ *   DMA0 CH2  SPI1 TX                 (hal/transport_hw_gd32.c, DMAMUX 2)
+ *   DMA0 CH3  SPI1 RX                 (hal/transport_hw_gd32.c, DMAMUX 3)
+ *   DMA1 CH0  ADC stream 1 ring       (hal/gd32/adc_stream.c, DMAMUX 7)
+ *   DMA1 CH1  ADC burst read          (hal/gd32/adc.c,        DMAMUX 8)  <- this
+ *
+ * The burst takes DMA1 so it never queues behind the ULTRA_HIGH SPI channels
+ * on DMA0, and a channel no stream can claim (streams only ever use CH0), so
+ * a running stream cannot collide with it.  Free: DMA0 CH1/CH4..CH6,
+ * DMA1 CH2..CH6. */
+#define BRIDGE_ADC_BURST_DMA       DMA1
+#define BRIDGE_ADC_BURST_DMA_RCU   RCU_DMA1
+#define BRIDGE_ADC_BURST_DMA_CH    DMA_CH1
+#define BRIDGE_ADC_BURST_DMAMUX_CH 8u
+#define BRIDGE_ADC_BURST_DMA_IRQN  DMA1_Channel1_IRQn
+
+_Static_assert(BRIDGE_ADC_BURST_IRQ_PRIO == BRIDGE_CS_IRQ_PRIO,
+               "ADC burst completion must share the CS EXTI preemption priority");
+_Static_assert(BRIDGE_ADC_BURST_IRQ_PRIO < BRIDGE_I2C_IRQ_PRIO,
+               "ADC burst completion must preempt the I2C ISR that blocks on it");
 _Static_assert(BRIDGE_CS_IRQ_PRIO < 4u, "PRE2_SUB2 has two preemption bits");
 _Static_assert(BRIDGE_I2C_IRQ_PRIO < 4u, "PRE2_SUB2 has two preemption bits");
 _Static_assert(BRIDGE_ADC_STREAM_LAP_IRQ_PRIO < 4u, "PRE2_SUB2 has two preemption bits");

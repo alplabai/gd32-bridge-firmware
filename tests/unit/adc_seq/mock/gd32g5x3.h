@@ -26,7 +26,7 @@
 /* Event log -- the register-sequence gate's data source.              */
 /* ------------------------------------------------------------------ */
 
-#define MOCK_SEQ_MAX 256
+#define MOCK_SEQ_MAX 512
 
 typedef struct {
 	const char *name;   /* event tag, e.g. "adc_enable"            */
@@ -108,6 +108,9 @@ void adc_internal_channel_config(uint32_t adc_periph, uint32_t internal_channel,
 #define EXTERNAL_TRIGGER_DISABLE 0u
 #define EXTERNAL_TRIGGER_RISING  1u
 
+#define ADC_SCAN_MODE ((uint32_t)(1u << 8))
+void adc_special_function_config(uint32_t adc_periph, uint32_t function, ControlStatus newvalue);
+
 #define ADC_FLAG_EOC  ((uint32_t)(1u << 0))
 #define ADC_FLAG_ROVF ((uint32_t)(1u << 1))
 
@@ -170,8 +173,9 @@ void       adc_flag_clear(uint32_t adc_periph, uint32_t flag);
 /* Test-only hooks (not part of any real vendor header) -- let a test
  * drive the mocked ADC_FLAG_ROVF bit and control adc_routine_data_read's
  * return value without reaching into the driver's private state. */
-void mock_adc_set_flag(uint32_t periph, uint32_t flag, FlagStatus state);
-void mock_adc_set_routine_data(uint32_t code);
+void     mock_adc_set_flag(uint32_t periph, uint32_t flag, FlagStatus state);
+void     mock_adc_set_routine_data(uint32_t code);
+uint32_t mock_adc_get_routine_data(void);
 extern bool
     mock_adc_internal_ch_on; /* last internal-channel state; the seq log overflows on a timeout */
 extern bool mock_adc_eoc_stuck; /* true: triggers never raise EOC */
@@ -182,7 +186,8 @@ FlagStatus  vref_status_get(void);
 /* DMA function surface.                                               */
 /* ------------------------------------------------------------------ */
 
-typedef enum { DMA_CH0 = 0 } dma_channel_enum;
+typedef enum { DMA_CH0 = 0, DMA_CH1 = 1 } dma_channel_enum;
+#define MOCK_DMA_CH_COUNT 2u
 
 #define DMA_PERIPHERAL_TO_MEMORY    0u
 #define DMA_PERIPH_INCREASE_DISABLE 0u
@@ -190,6 +195,7 @@ typedef enum { DMA_CH0 = 0 } dma_channel_enum;
 #define DMA_PERIPHERAL_WIDTH_16BIT  0u
 #define DMA_MEMORY_WIDTH_16BIT      0u
 #define DMA_PRIORITY_MEDIUM         0u
+#define DMA_PRIORITY_HIGH           1u
 #define DMA_REQUEST_ADC0            0u
 #define DMA_REQUEST_ADC1            1u
 #define DMA_REQUEST_ADC2            2u
@@ -253,6 +259,13 @@ void     mock_dma_set_interrupt_flag(uint32_t         dma_periph,
  * test, not a vendor-header interface. */
 void DMA0_Channel0_IRQHandler(void);
 void DMA1_Channel0_IRQHandler(void);
+/* Burst-read completion IRQ, supplied by the production adc.c. */
+void DMA1_Channel1_IRQHandler(void);
+
+/* Test-only: called from adc_software_trigger_enable() (after the usual EOC
+ * model).  Lets a test play the hardware finishing a burst -- fill the DMA
+ * destination, raise FTF, run the IRQ -- or leave it to run later by hand. */
+void mock_adc_set_trigger_hook(mock_hook_t hook);
 /* One-shot callback from dma_transfer_number_get(), after the old count is
  * snapshotted but before it is returned. Models an ISR pre-empting the DSP
  * pump after owner commit and before its first data-plane mutation. */
@@ -312,7 +325,7 @@ void timer_disable(uint32_t timer_periph);
 /* NVIC -- logged only.                                                */
 /* ------------------------------------------------------------------ */
 
-typedef enum { DMA0_Channel0_IRQn = 0, DMA1_Channel0_IRQn = 1 } IRQn_Type;
+typedef enum { DMA0_Channel0_IRQn = 0, DMA1_Channel0_IRQn = 1, DMA1_Channel1_IRQn = 2 } IRQn_Type;
 
 void nvic_irq_enable(IRQn_Type nvic_irq,
                      uint8_t   nvic_irq_pre_priority,

@@ -90,6 +90,9 @@ ZTEST(power_wake, test_deep_sleep_entry_and_wake_sequence)
 	zassert_equal(mock_deepsleep_entries, 0u, "entry is deferred to the base level");
 	bridge_power_tick();
 	zassert_equal(mock_deepsleep_entries, 1u);
+	zassert_equal(mock_adc_quiesce_calls_at_deepsleep,
+	              1u,
+	              "ADC burst cancelled + formats invalidated BEFORE the entry");
 	zassert_equal(mock_i2c_disables, 1u, "I2C0 off across the entry");
 	zassert_equal(mock_primask_at_deepsleep, 1u, "handlers held off until the PLL is back");
 	zassert_equal(mock_primask, 0u, "interrupts re-enabled after the wake");

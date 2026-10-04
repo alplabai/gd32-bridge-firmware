@@ -12,6 +12,14 @@ bytes; keep `magic`/`layout` so a later read still proves the struct is
 initialised).  `count == 0` means no sample; `timing_stats_init()` clears the
 whole struct and stamps the header at boot.
 
+`CMD_ADC_READ` on the SPI link is a **deferred** command: `protocol_dispatch()`
+only arms the conversion burst and returns, and the burst's DMA-complete
+interrupt stages the reply later.  Such a transaction is therefore **not
+recorded** (no `reply_stage`/`total` sample is taken, because there is no staged
+reply at the end of the CS-release branch), and the conversion and staging time
+is not in any stat.  For the interval from the request's CS release to the reply
+being armed, measure on the wire instead.  Every other opcode is unchanged.
+
 ## Layout (`bridge_timing_stats_t`, 76 bytes, little-endian, no padding)
 
 | Offset | Field | Meaning |

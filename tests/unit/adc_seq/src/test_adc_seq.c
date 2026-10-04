@@ -64,8 +64,29 @@ extern void adc_dsp_fac_release(uint8_t stream_id); /* adc_stream.c */
  * (forward-declared so the earlier tests' resets can call it too). */
 static void fac_latch_release(void);
 
+/* Default trigger behaviour: the hardware finishes the whole burst at once --
+ * every code is the mock's routine-data value, FTF is raised, and the burst
+ * DMA IRQ runs before bridge_hw_adc_read_start() returns.  That is what lets
+ * the blocking bridge_hw_adc_read (I2C path) run to completion on the host.
+ * Tests of the asynchronous behaviour clear it with mock_adc_set_trigger_hook(0)
+ * and play the interrupt themselves. */
+static void burst_autocomplete(void)
+{
+	if (adc_burst.state != ADC_BURST_RUNNING) return;
+	for (uint8_t i = 0u; i < adc_burst.samples; ++i) {
+		adc_burst.codes[i] = (uint16_t)mock_adc_get_routine_data();
+	}
+	mock_dma_set_interrupt_flag(DMA1, DMA_CH1, DMA_INT_FLAG_FTF, SET);
+	DMA1_Channel1_IRQHandler();
+}
+
 static void adc_seq_reset(void)
 {
+	/* A burst left running by a previous case would keep the converter claim and
+	 * the DMA slot; quiesce it (and every recorded format) before the log and
+	 * the mock state are cleared. */
+	adc_deepsleep_quiesce();
+	mock_adc_set_trigger_hook(burst_autocomplete);
 	/* The owner bytes are file-local production state. Release both stream
 	 * IDs before zeroing the visible arrays so a failed prior case cannot
 	 * contaminate the next case; clear the resulting mock log afterward. */
@@ -82,6 +103,13 @@ static void adc_seq_reset(void)
 	}
 	mock_adc_set_flag(BRIDGE_ADC_CH0_PERIPH, ADC_FLAG_ROVF, RESET);
 	mock_adc_set_flag(BRIDGE_ADC_CH0_PERIPH, ADC_FLAG_EOC, RESET);
+	/* The per-channel format caches persist across cases; start every case from
+	 * what bridge_hw_init seeds so an earlier configure cannot leak forward. */
+	for (uint8_t c = 0u; c < 8u; ++c) {
+		adc_sample_cycles_cache[c]    = ADC_DEFAULT_SAMPLE_CYCLES;
+		adc_resolution_bits_cache[c]  = ADC_RES_BITS_DEFAULT;
+		adc_oversample_ratio_cache[c] = 1u;
+	}
 	vref_ok            = true;
 	adc_vref_mv        = ADC_VREF_MV;
 	adc_vrefint_code   = 0u;
@@ -1201,7 +1229,7 @@ ZTEST(gd32_adc_seq, test_fac_pump_does_not_overwrite_unread_proc_ring_before_com
 	zassert_equal(read_hook_got, 8u, "reader drains a full request");
 	for (uint16_t i = 0u; i < 8u; ++i) {
 		zassert_equal(read_hook_mv[i],
-		              (uint16_t)(((uint32_t)i * ADC_VREF_MV) / s->full_scale),
+		              adc_code_to_mv(i, s->full_scale),
 		              "slot %u still holds its original sample, not a newer overwrite",
 		              (unsigned)i);
 	}
@@ -1475,6 +1503,496 @@ ZTEST(gd32_adc_seq, test_vref_measure_forces_12bit_no_oversample_and_recalibrate
 	zassert_true(ena > res && ena > ovs, "converter re-enabled after the format");
 	zassert_true(trg > ena, "first trigger only after re-enable + calibration");
 	zassert_equal(adc_vref_mv, 1800u, "code 2730 -> 1800 mV");
+}
+
+/* ---------------------------------------------------------------------
+ * ADC_READ burst: DMA-completed hardware sequence, cached converter format.
+ * --------------------------------------------------------------------- */
+
+static unsigned burst_done_calls;
+static int      burst_done_rv;
+static uint8_t  burst_done_samples;
+static uint16_t burst_done_mv[8];
+
+static void burst_done(int rv, const uint16_t *mv, uint8_t samples)
+{
+	burst_done_calls++;
+	burst_done_rv      = rv;
+	burst_done_samples = samples;
+	if (rv == BRIDGE_HW_OK) memcpy(burst_done_mv, mv, (size_t)samples * sizeof(uint16_t));
+}
+
+/* Async variant of the reset: the trigger no longer finishes the burst, so the
+ * test plays the DMA-complete interrupt itself. */
+static void burst_manual_reset(void)
+{
+	adc_seq_reset();
+	mock_adc_set_trigger_hook(0);
+	burst_done_calls   = 0u;
+	burst_done_rv      = 12345;
+	burst_done_samples = 0u;
+}
+
+/* The hardware finishing: DMA has written `codes`, raises FTF; run the IRQ. */
+static void burst_hw_finish(const uint16_t *codes, uint8_t n)
+{
+	for (uint8_t i = 0u; i < n; ++i) {
+		adc_burst.codes[i] = codes[i];
+	}
+	mock_dma_set_interrupt_flag(DMA1, DMA_CH1, DMA_INT_FLAG_FTF, SET);
+	DMA1_Channel1_IRQHandler();
+}
+
+static int count_events(const char *name, uint32_t periph)
+{
+	int n = 0;
+	for (int i = 0; i < mock_seq_n; ++i) {
+		if (strcmp(mock_seq[i].name, name) == 0 &&
+		    (periph == MOCK_ANY_PERIPH || mock_seq[i].periph == periph)) {
+			n++;
+		}
+	}
+	return n;
+}
+
+/* A burst that took the slow path: converter disabled, re-enabled, recalibrated
+ * (calibration strictly after the enable, trigger strictly after calibration). */
+static void expect_full_reconfigure(const char *what)
+{
+	const int dis = mock_seq_find_from("adc_disable", MOCK_ANY_PERIPH, 0);
+	const int ena = mock_seq_find_from("adc_enable", MOCK_ANY_PERIPH, 0);
+	const int cal = mock_seq_find_from("ADC_CTL1_TOUCH", MOCK_ANY_PERIPH, 0);
+	const int trg = mock_seq_find_from("adc_software_trigger_enable", MOCK_ANY_PERIPH, 0);
+	zassert_true(dis >= 0, "%s: converter disabled for the reformat", what);
+	zassert_true(ena > dis, "%s: re-enabled after the disable", what);
+	zassert_true(cal > ena, "%s: calibration must follow the enable", what);
+	zassert_true(trg > cal, "%s: trigger only after calibration", what);
+}
+
+/* A burst that hit the cache: the converter is never disabled or recalibrated. */
+static void expect_no_reconfigure(const char *what)
+{
+	zassert_equal(count_events("adc_disable", MOCK_ANY_PERIPH), 0, "%s: no disable", what);
+	zassert_equal(count_events("adc_enable", MOCK_ANY_PERIPH), 0, "%s: no re-enable", what);
+	zassert_equal(count_events("ADC_CTL1_TOUCH", MOCK_ANY_PERIPH), 0, "%s: no recalibration", what);
+	zassert_equal(
+	    count_events("adc_resolution_config", MOCK_ANY_PERIPH), 0, "%s: no reformat", what);
+	zassert_equal(
+	    count_events("adc_software_trigger_enable", MOCK_ANY_PERIPH), 1, "%s: one trigger", what);
+}
+
+/* Rounding: nearest, ties up, clamped, never above the reference. */
+ZTEST(gd32_adc_seq, test_code_to_mv_rounds_to_nearest)
+{
+	adc_seq_reset();
+	adc_vref_mv = 1800u;
+
+	zassert_equal(adc_code_to_mv(0u, 4095u), 0u, "zero");
+	zassert_equal(adc_code_to_mv(4095u, 4095u), 1800u, "full scale is the reference");
+	zassert_equal(adc_code_to_mv(5000u, 4095u), 1800u, "above full scale clamps to Vref");
+	zassert_equal(adc_code_to_mv(1u, 4095u), 0u, "0.44 mV rounds down");
+	zassert_equal(adc_code_to_mv(2u, 4095u), 1u, "0.88 mV rounds UP (truncation gave 0)");
+	zassert_equal(adc_code_to_mv(1u, 63u), 29u, "6-bit: 28.57 mV rounds up (truncation gave 28)");
+	zassert_equal(adc_code_to_mv(128u, 255u), 904u, "8-bit: 903.53 mV rounds up (truncated 903)");
+	zassert_equal(adc_code_to_mv(1u, 3600u), 1u, "an exact half rounds up");
+	adc_vref_mv = 1890u;
+	zassert_equal(adc_code_to_mv(4095u, 4095u), 1890u, "tracks the measured reference");
+	zassert_equal(adc_code_to_mv(1u, 0u), 0u, "a zero full scale cannot divide");
+}
+
+/* The same rounding through the real burst path. */
+ZTEST(gd32_adc_seq, test_burst_result_is_rounded)
+{
+	uint16_t mv[2];
+
+	adc_seq_reset();
+	mock_adc_set_routine_data(1u);
+	zassert_equal(bridge_hw_adc_configure(BRIDGE_ADC_CH0, 1u, 0u, 6u), BRIDGE_HW_OK, "6-bit");
+	zassert_equal(bridge_hw_adc_read(BRIDGE_ADC_CH0, 2u, mv), BRIDGE_HW_OK, "read ok");
+	zassert_equal(mv[0], 29u, "1/63 of 1800 mV, rounded");
+	zassert_equal(mv[1], 29u, "second sample too");
+}
+
+ZTEST(gd32_adc_seq, test_format_cache_hit_skips_disable_enable_and_recalibration)
+{
+	uint16_t mv[4];
+
+	adc_seq_reset();
+	zassert_equal(bridge_hw_adc_read(BRIDGE_ADC_CH0, 4u, mv), BRIDGE_HW_OK, "first read");
+	expect_full_reconfigure("first read (cold record)");
+
+	mock_seq_reset();
+	zassert_equal(bridge_hw_adc_read(BRIDGE_ADC_CH0, 4u, mv), BRIDGE_HW_OK, "repeat read");
+	expect_no_reconfigure("repeat read");
+
+	mock_seq_reset();
+	zassert_equal(bridge_hw_adc_read(BRIDGE_ADC_CH0, 4u, mv), BRIDGE_HW_OK, "third read");
+	expect_no_reconfigure("third read");
+}
+
+/* Every field of the record is part of the key: change one, miss. */
+ZTEST(gd32_adc_seq, test_format_cache_misses_on_each_key_field)
+{
+	uint16_t mv[8];
+
+	adc_seq_reset();
+	zassert_equal(bridge_hw_adc_read(BRIDGE_ADC_CH0, 4u, mv), BRIDGE_HW_OK, "prime");
+
+	mock_seq_reset();
+	zassert_equal(bridge_hw_adc_read(BRIDGE_ADC_CH0, 5u, mv), BRIDGE_HW_OK, "sequence length");
+	expect_full_reconfigure("sample count changed");
+	zassert_equal(count_events("adc_channel_length_config", ADC3), 1, "length programmed");
+
+	mock_seq_reset();
+	zassert_equal(bridge_hw_adc_read(BRIDGE_ADC_CH0 + 1u, 5u, mv), BRIDGE_HW_OK, "sibling");
+	expect_full_reconfigure("sibling channel on the same converter");
+
+	mock_seq_reset();
+	zassert_equal(bridge_hw_adc_configure(BRIDGE_ADC_CH0 + 1u, 1u, 0u, 10u), BRIDGE_HW_OK, "10b");
+	zassert_equal(bridge_hw_adc_read(BRIDGE_ADC_CH0 + 1u, 5u, mv), BRIDGE_HW_OK, "resolution");
+	expect_full_reconfigure("resolution changed");
+
+	mock_seq_reset();
+	zassert_equal(bridge_hw_adc_configure(BRIDGE_ADC_CH0 + 1u, 16u, 0u, 10u), BRIDGE_HW_OK, "x16");
+	zassert_equal(bridge_hw_adc_read(BRIDGE_ADC_CH0 + 1u, 5u, mv), BRIDGE_HW_OK, "oversample");
+	expect_full_reconfigure("oversample changed");
+
+	mock_seq_reset();
+	zassert_equal(
+	    bridge_hw_adc_configure(BRIDGE_ADC_CH0 + 1u, 16u, 100u, 10u), BRIDGE_HW_OK, "cycles");
+	zassert_equal(bridge_hw_adc_read(BRIDGE_ADC_CH0 + 1u, 5u, mv), BRIDGE_HW_OK, "sample cycles");
+	expect_full_reconfigure("sample cycles changed");
+
+	/* A ratio the hardware floors to the same power of two is NOT a different
+	 * format: 17 runs as 16. */
+	mock_seq_reset();
+	zassert_equal(
+	    bridge_hw_adc_configure(BRIDGE_ADC_CH0 + 1u, 17u, 100u, 10u), BRIDGE_HW_OK, "x17");
+	zassert_equal(bridge_hw_adc_read(BRIDGE_ADC_CH0 + 1u, 5u, mv), BRIDGE_HW_OK, "floored ratio");
+	expect_no_reconfigure("ratio 17 floors to the programmed 16");
+}
+
+/* Records are per converter: a read on ADC2 must not disturb ADC3's. */
+ZTEST(gd32_adc_seq, test_format_cache_is_per_converter)
+{
+	uint16_t mv[2];
+
+	adc_seq_reset();
+	zassert_equal(bridge_hw_adc_read(BRIDGE_ADC_CH0, 2u, mv), BRIDGE_HW_OK, "ADC3");
+	zassert_equal(bridge_hw_adc_read(BRIDGE_ADC_CH2, 2u, mv), BRIDGE_HW_OK, "ADC2");
+	mock_seq_reset();
+	zassert_equal(bridge_hw_adc_read(BRIDGE_ADC_CH0, 2u, mv), BRIDGE_HW_OK, "ADC3 again");
+	expect_no_reconfigure("ADC3 untouched by ADC2's read");
+}
+
+/* ---- every invalidation path ---- */
+
+static void prime_burst_format(void)
+{
+	uint16_t mv[4];
+
+	adc_seq_reset();
+	zassert_equal(bridge_hw_adc_read(BRIDGE_ADC_CH0, 4u, mv), BRIDGE_HW_OK, "prime");
+	mock_seq_reset();
+	zassert_equal(bridge_hw_adc_read(BRIDGE_ADC_CH0, 4u, mv), BRIDGE_HW_OK, "prime check");
+	expect_no_reconfigure("primed record is live");
+	mock_seq_reset();
+}
+
+static void expect_next_read_reformats(const char *what)
+{
+	uint16_t mv[4];
+
+	mock_seq_reset();
+	zassert_equal(bridge_hw_adc_read(BRIDGE_ADC_CH0, 4u, mv), BRIDGE_HW_OK, "%s: read", what);
+	expect_full_reconfigure(what);
+}
+
+ZTEST(gd32_adc_seq, test_format_invalidated_by_stream_begin_and_end)
+{
+	prime_burst_format();
+	zassert_equal(bridge_hw_adc_stream_begin(0u, BRIDGE_ADC_CH0, 1000u), BRIDGE_HW_OK, "begin");
+
+	/* stream_begin drops the scan mode and the longer sequence the burst left. */
+	const int len = mock_seq_find_from("adc_channel_length_config", ADC3, 0);
+	const int scn = mock_seq_find_from("adc_special_function_config", ADC3, 0);
+	zassert_true(len >= 0 && mock_seq[len].arg == 1u, "stream runs a one-rank sequence");
+	zassert_true(scn >= 0 && mock_seq[scn].arg == (uint32_t)DISABLE,
+	             "scan mode off for the stream");
+
+	zassert_equal(bridge_hw_adc_stream_end(0u), BRIDGE_HW_OK, "end");
+	expect_next_read_reformats("after stream begin/end");
+}
+
+ZTEST(gd32_adc_seq, test_format_invalidated_by_vref_measure)
+{
+	uint16_t mv[4];
+
+	adc_seq_reset();
+	zassert_equal(bridge_hw_adc_read(6u, 4u, mv), BRIDGE_HW_OK, "prime ADC0 (bridge channel 6)");
+	mock_seq_reset();
+	zassert_equal(bridge_hw_adc_read(6u, 4u, mv), BRIDGE_HW_OK, "hit");
+	expect_no_reconfigure("ADC0 record is live");
+
+	mock_seq_reset();
+	mock_adc_set_routine_data(2730u);
+	zassert_true(adc_vref_measure(), "VREFINT measurement reprograms ADC0");
+	/* it also takes the converter back to one conversion per trigger, no DMA */
+	zassert_true(count_events("adc_dma_mode_disable", ADC0) >= 1, "DMA request off");
+	const int len = mock_seq_find_from("adc_channel_length_config", ADC0, 0);
+	zassert_true(len >= 0 && mock_seq[len].arg == 1u, "one-rank sequence for VREFINT");
+
+	mock_seq_reset();
+	zassert_equal(bridge_hw_adc_read(6u, 4u, mv), BRIDGE_HW_OK, "read after VREFINT");
+	zassert_true(mock_seq_find_from("adc_disable", ADC0, 0) >= 0, "ADC0 reformatted");
+	zassert_true(mock_seq_find_from("ADC_CTL1_TOUCH", ADC0, 0) >= 0, "and recalibrated");
+}
+
+ZTEST(gd32_adc_seq, test_format_invalidated_by_deepsleep_quiesce)
+{
+	prime_burst_format();
+	adc_deepsleep_quiesce();
+	expect_next_read_reformats("after deep-sleep entry");
+}
+
+ZTEST(gd32_adc_seq, test_format_invalidated_by_converter_reinit)
+{
+	prime_burst_format();
+	zassert_true(adc_periph_restore(ADC3), "restore (stream end / error recovery)");
+	expect_next_read_reformats("after adc_periph_restore");
+
+	prime_burst_format();
+	zassert_true(adc_periph_boot_init(ADC3), "boot init");
+	expect_next_read_reformats("after adc_periph_boot_init");
+}
+
+/* ---- burst lifecycle: arm, complete via DMA IRQ, never poll ---- */
+
+ZTEST(gd32_adc_seq, test_burst_completes_via_dma_callback_without_polling)
+{
+	burst_manual_reset();
+	mock_adc_set_routine_data(2048u);
+
+	zassert_equal(bridge_hw_adc_read_start(BRIDGE_ADC_CH0, 4u, burst_done),
+	              BRIDGE_HW_OK,
+	              "start arms the burst");
+
+	/* Armed, not finished: nothing delivered, burst owns the converter + DMA. */
+	zassert_equal(burst_done_calls, 0u, "completion is the DMA IRQ's job, not start()'s");
+	zassert_equal(adc_burst.state, ADC_BURST_RUNNING, "burst in flight");
+	zassert_false(adc_periph_claim(ADC3), "converter is held for the burst");
+	zassert_equal(dma_transfer_number_get(DMA1, DMA_CH1), 4u, "DMA moves N codes");
+	zassert_equal(mock_dmamux_request_get(8u), DMA_REQUEST_ADC3, "DMA1 CH1 = DMAMUX 8 -> ADC3");
+	zassert_true((*mock_dma_chctl_ref(DMA1, DMA_CH1) & DMA_CHXCTL_CHEN) != 0u, "channel armed");
+
+	/* The sequence: scan, N ranks of the same pad, DMA mode, ONE trigger, armed
+	 * BEFORE the trigger -- and not a single EOC poll or data-register read. */
+	zassert_equal(count_events("adc_channel_length_config", ADC3), 1, "sequence length set");
+	zassert_equal(
+	    mock_seq[mock_seq_find_from("adc_channel_length_config", ADC3, 0)].arg, 4u, "N=4");
+	int ranks = 0;
+	for (int i = 0; i < mock_seq_n; ++i) {
+		if (strcmp(mock_seq[i].name, "adc_routine_channel_config") == 0) {
+			zassert_equal(mock_seq[i].arg >> 8, (uint32_t)ranks, "ranks programmed in order");
+			zassert_equal(mock_seq[i].arg & 0xFFu, (uint32_t)ADC_CHANNEL_12, "all the same pad");
+			ranks++;
+		}
+	}
+	zassert_equal(ranks, 4, "one rank per sample");
+	zassert_equal(
+	    count_events("adc_software_trigger_enable", ADC3), 1, "one trigger for the burst");
+	zassert_true(mock_seq_find_from("dma_channel_enable", DMA1, 0) <
+	                 mock_seq_find_from("adc_software_trigger_enable", ADC3, 0),
+	             "DMA armed before the conversions start");
+	for (int i = 0; i < mock_seq_n; ++i) {
+		zassert_false(strcmp(mock_seq[i].name, "adc_flag_get") == 0 &&
+		                  mock_seq[i].arg == ADC_FLAG_EOC,
+		              "no EOC polling");
+		zassert_true(strcmp(mock_seq[i].name, "adc_routine_data_read") != 0, "DMA reads RDATA");
+	}
+
+	/* The hardware finishes: FTF -> IRQ -> done(). */
+	const uint16_t codes[4] = { 0u, 2048u, 4095u, 1u };
+	burst_hw_finish(codes, 4u);
+	zassert_equal(burst_done_calls, 1u, "delivered exactly once");
+	zassert_equal(burst_done_rv, BRIDGE_HW_OK, "success");
+	zassert_equal(burst_done_samples, 4u, "N samples");
+	zassert_equal(burst_done_mv[0], 0u, "code 0");
+	zassert_equal(burst_done_mv[1], 900u, "mid-scale 2048 -> 900 mV (rounded: 900.2)");
+	zassert_equal(burst_done_mv[2], 1800u, "full scale");
+	zassert_equal(burst_done_mv[3], 0u, "code 1 -> 0.44 mV");
+
+	/* Torn down: converter + DMA free again, request released, further IRQ is inert. */
+	zassert_equal(adc_burst.state, ADC_BURST_IDLE, "idle");
+	zassert_false((*mock_dma_chctl_ref(DMA1, DMA_CH1) & DMA_CHXCTL_CHEN) != 0u, "channel off");
+	zassert_equal(mock_dmamux_request_get(8u), 0u, "DMAMUX request released");
+	zassert_true(adc_periph_claim(ADC3), "converter claim released");
+	adc_periph_release(ADC3);
+	DMA1_Channel1_IRQHandler();
+	zassert_equal(burst_done_calls, 1u, "a stale IRQ delivers nothing");
+}
+
+/* The result is delivered only AFTER the DMA IRQ: nothing before. */
+ZTEST(gd32_adc_seq, test_burst_result_not_delivered_before_dma_complete)
+{
+	burst_manual_reset();
+	zassert_equal(bridge_hw_adc_read_start(BRIDGE_ADC_CH0, 8u, burst_done), BRIDGE_HW_OK, "start");
+	DMA1_Channel1_IRQHandler(); /* spurious vector entry, no FTF */
+	zassert_equal(burst_done_calls, 0u, "no FTF, no completion");
+	zassert_equal(adc_burst.state, ADC_BURST_RUNNING, "still converting");
+}
+
+ZTEST(gd32_adc_seq, test_burst_is_exclusive_across_converters)
+{
+	burst_manual_reset();
+	zassert_equal(bridge_hw_adc_read_start(BRIDGE_ADC_CH0, 2u, burst_done), BRIDGE_HW_OK, "first");
+	zassert_equal(bridge_hw_adc_read_start(BRIDGE_ADC_CH0, 2u, burst_done),
+	              BRIDGE_HW_ERR_BUSY,
+	              "same converter while converting");
+	zassert_equal(bridge_hw_adc_read_start(BRIDGE_ADC_CH2, 2u, burst_done),
+	              BRIDGE_HW_ERR_BUSY,
+	              "other converter: the one burst DMA channel is taken");
+	zassert_equal(bridge_hw_adc_stream_begin(0u, BRIDGE_ADC_CH0, 1000u),
+	              BRIDGE_HW_ERR_BUSY,
+	              "a stream cannot reprogram a converter mid-burst");
+
+	const uint16_t codes[2] = { 1u, 2u };
+	burst_hw_finish(codes, 2u);
+	zassert_equal(bridge_hw_adc_read_start(BRIDGE_ADC_CH2, 2u, burst_done), BRIDGE_HW_OK, "after");
+}
+
+ZTEST(gd32_adc_seq, test_burst_start_rejects_without_arming)
+{
+	burst_manual_reset();
+	zassert_equal(
+	    bridge_hw_adc_read_start(BRIDGE_ADC_CH0, 0u, burst_done), BRIDGE_HW_ERR_INVAL, "0");
+	zassert_equal(
+	    bridge_hw_adc_read_start(BRIDGE_ADC_CH0, 9u, burst_done), BRIDGE_HW_ERR_RANGE, "9");
+	zassert_equal(bridge_hw_adc_read_start(8u, 1u, burst_done), BRIDGE_HW_ERR_RANGE, "channel");
+	zassert_equal(bridge_hw_adc_read_start(BRIDGE_ADC_CH0, 1u, 0), BRIDGE_HW_ERR_INVAL, "no cb");
+	vref_ok         = false;
+	mock_vref_ready = false;
+	zassert_equal(
+	    bridge_hw_adc_read_start(BRIDGE_ADC_CH0, 1u, burst_done), BRIDGE_HW_ERR_IO, "vref");
+	zassert_equal(adc_burst.state, ADC_BURST_IDLE, "nothing armed, nothing claimed");
+	zassert_equal(count_events("dma_channel_enable", DMA1), 0, "DMA never touched");
+}
+
+ZTEST(gd32_adc_seq, test_burst_abort_cancels_without_callback_and_restores_converter)
+{
+	burst_manual_reset();
+	zassert_equal(bridge_hw_adc_read_start(BRIDGE_ADC_CH0, 4u, burst_done), BRIDGE_HW_OK, "start");
+
+	bridge_hw_adc_read_abort(0); /* not our callback: no-op */
+	zassert_equal(adc_burst.state, ADC_BURST_RUNNING, "null callback cancels nothing");
+	bridge_hw_adc_read_abort(burst_done);
+	zassert_equal(adc_burst.state, ADC_BURST_IDLE, "aborted");
+	zassert_equal(burst_done_calls, 0u, "an abort never calls back");
+	zassert_false((*mock_dma_chctl_ref(DMA1, DMA_CH1) & DMA_CHXCTL_CHEN) != 0u, "DMA stopped");
+	zassert_true(mock_seq_find_from("adc_disable", ADC3, 0) >= 0,
+	             "ADCON cleared: sequence stopped");
+	zassert_true(adc_periph_claim(ADC3), "claim released");
+	adc_periph_release(ADC3);
+
+	/* a late FTF from the dead burst delivers nothing */
+	const uint16_t codes[4] = { 1u, 2u, 3u, 4u };
+	burst_hw_finish(codes, 4u);
+	zassert_equal(burst_done_calls, 0u, "no delivery after the abort");
+
+	/* and the converter's record was dropped: the next burst reformats */
+	mock_adc_set_trigger_hook(burst_autocomplete);
+	uint16_t mv[4];
+	mock_seq_reset();
+	zassert_equal(bridge_hw_adc_read(BRIDGE_ADC_CH0, 4u, mv), BRIDGE_HW_OK, "next read");
+	expect_full_reconfigure("after an abort");
+}
+
+ZTEST(gd32_adc_seq, test_burst_dma_error_reports_io_and_recovers)
+{
+	burst_manual_reset();
+	zassert_equal(bridge_hw_adc_read_start(BRIDGE_ADC_CH0, 4u, burst_done), BRIDGE_HW_OK, "start");
+	mock_dma_set_interrupt_flag(DMA1, DMA_CH1, DMA_INT_FLAG_ERR, SET);
+	DMA1_Channel1_IRQHandler();
+
+	zassert_equal(burst_done_calls, 1u, "failure is reported once");
+	zassert_equal(burst_done_rv, BRIDGE_HW_ERR_IO, "as IO");
+	zassert_equal(adc_burst.state, ADC_BURST_IDLE, "burst released");
+	zassert_true(adc_periph_claim(ADC3), "claim released");
+	adc_periph_release(ADC3);
+	mock_dma_set_interrupt_flag(DMA1, DMA_CH1, DMA_INT_FLAG_ERR, RESET);
+
+	mock_adc_set_trigger_hook(burst_autocomplete);
+	uint16_t mv[4];
+	mock_seq_reset();
+	zassert_equal(bridge_hw_adc_read(BRIDGE_ADC_CH0, 4u, mv), BRIDGE_HW_OK, "next read works");
+	expect_full_reconfigure("after a DMA error");
+}
+
+ZTEST(gd32_adc_seq, test_burst_overrun_flag_fails_the_burst)
+{
+	burst_manual_reset();
+	zassert_equal(bridge_hw_adc_read_start(BRIDGE_ADC_CH0, 2u, burst_done), BRIDGE_HW_OK, "start");
+	mock_adc_set_flag(ADC3, ADC_FLAG_ROVF, SET); /* a code was lost: the buffer is not trusted */
+	const uint16_t codes[2] = { 1u, 2u };
+	burst_hw_finish(codes, 2u);
+	zassert_equal(burst_done_rv, BRIDGE_HW_ERR_IO, "overrun -> IO, never half-trusted data");
+}
+
+ZTEST(gd32_adc_seq, test_burst_watchdog_tears_down_a_burst_that_never_completes)
+{
+	burst_manual_reset();
+	zassert_equal(bridge_hw_adc_read_start(BRIDGE_ADC_CH0, 4u, burst_done), BRIDGE_HW_OK, "start");
+
+	adc_burst_tick();
+	zassert_equal(adc_burst.state, ADC_BURST_RUNNING, "one tick (< 50 ms) is not a stall");
+	adc_burst_tick();
+	zassert_equal(adc_burst.state, ADC_BURST_IDLE, "second tick: torn down");
+	zassert_equal(burst_done_calls, 0u, "base level never stages a reply (it would race the ISR)");
+	zassert_true(adc_periph_claim(ADC3), "converter and DMA come back");
+	adc_periph_release(ADC3);
+
+	adc_burst_tick(); /* idle: no-op, no spurious restore */
+	zassert_equal(adc_burst.state, ADC_BURST_IDLE, "idle stays idle");
+}
+
+ZTEST(gd32_adc_seq, test_burst_watchdog_age_restarts_with_each_burst)
+{
+	burst_manual_reset();
+	zassert_equal(bridge_hw_adc_read_start(BRIDGE_ADC_CH0, 1u, burst_done), BRIDGE_HW_OK, "start");
+	adc_burst_tick();
+	const uint16_t one = 7u;
+	burst_hw_finish(&one, 1u);
+	zassert_equal(bridge_hw_adc_read_start(BRIDGE_ADC_CH0, 1u, burst_done), BRIDGE_HW_OK, "again");
+	adc_burst_tick();
+	zassert_equal(adc_burst.state, ADC_BURST_RUNNING, "the earlier tick does not count against it");
+}
+
+/* The blocking path (I2C): same burst, bounded wait, abort on expiry. */
+ZTEST(gd32_adc_seq, test_blocking_read_times_out_aborts_and_reports_io)
+{
+	uint16_t mv[2];
+
+	burst_manual_reset(); /* trigger completes nothing */
+	zassert_equal(bridge_hw_adc_read(BRIDGE_ADC_CH0, 2u, mv), BRIDGE_HW_ERR_IO, "timed out");
+	zassert_equal(adc_burst.state, ADC_BURST_IDLE, "burst aborted, not leaked");
+	zassert_true(adc_periph_claim(ADC3), "claim released");
+	adc_periph_release(ADC3);
+}
+
+static void other_done(int rv, const uint16_t *mv, uint8_t samples)
+{
+	(void)rv;
+	(void)mv;
+	(void)samples;
+}
+
+/* The two readers share the burst slot but must not abort each other's burst. */
+ZTEST(gd32_adc_seq, test_abort_only_cancels_the_callers_own_burst)
+{
+	burst_manual_reset();
+	zassert_equal(bridge_hw_adc_read_start(BRIDGE_ADC_CH0, 2u, burst_done), BRIDGE_HW_OK, "start");
+	bridge_hw_adc_read_abort(other_done);
+	zassert_equal(adc_burst.state, ADC_BURST_RUNNING, "someone else's callback: untouched");
 }
 
 ZTEST_SUITE(gd32_adc_seq, NULL, NULL, NULL, NULL, NULL);

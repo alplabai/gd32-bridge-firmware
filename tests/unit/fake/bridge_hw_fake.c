@@ -161,9 +161,12 @@ void bridge_hw_fake_pwm_capture_seed(uint8_t ch, uint32_t period_ns, uint32_t pu
 
 /* ---- ADC single-shot ------------------------------------------------- */
 
-static uint16_t s_adc_queue[GD32_BRIDGE_FAKE_ADC_QUEUE_CAP];
-static size_t   s_adc_queue_len;
-static size_t   s_adc_queue_head;
+static bridge_hw_adc_read_done_fn s_adc_async_done;
+static uint8_t                    s_adc_async_samples;
+static unsigned                   s_adc_async_abort_count;
+static uint16_t                   s_adc_queue[GD32_BRIDGE_FAKE_ADC_QUEUE_CAP];
+static size_t                     s_adc_queue_len;
+static size_t                     s_adc_queue_head;
 
 static struct {
 	uint8_t  channel;
@@ -453,8 +456,11 @@ void bridge_hw_fake_reset(void)
 		s_pwm_timer_period_ns[g] = FAKE_PWM_BOOT_PERIOD_NS;
 	}
 
-	s_adc_queue_len  = 0u;
-	s_adc_queue_head = 0u;
+	s_adc_async_done        = NULL;
+	s_adc_async_samples     = 0u;
+	s_adc_async_abort_count = 0u;
+	s_adc_queue_len         = 0u;
+	s_adc_queue_head        = 0u;
 	memset(&s_adc_last_configure, 0, sizeof(s_adc_last_configure));
 
 	memset(s_stream, 0, sizeof(s_stream));
@@ -550,6 +556,49 @@ int bridge_hw_adc_read(uint8_t channel, uint8_t samples, uint16_t *mv)
 		if (mv) mv[i] = v;
 	}
 	return BRIDGE_HW_OK;
+}
+
+/* Asynchronous burst: arming records the callback; the test plays the DMA
+ * interrupt by calling bridge_hw_fake_adc_read_complete(). */
+
+int bridge_hw_adc_read_start(uint8_t channel, uint8_t samples, bridge_hw_adc_read_done_fn done)
+{
+	(void)channel;
+	int rv = 0;
+	if (forced(FAKE_FN_ADC_READ, &rv)) return rv;
+	if (s_adc_async_done != NULL) return BRIDGE_HW_ERR_BUSY;
+	s_adc_async_done    = done;
+	s_adc_async_samples = samples;
+	return BRIDGE_HW_OK;
+}
+
+void bridge_hw_adc_read_abort(bridge_hw_adc_read_done_fn done)
+{
+	if (s_adc_async_done == NULL || s_adc_async_done != done) return;
+	s_adc_async_done = NULL;
+	s_adc_async_abort_count++;
+}
+
+bool bridge_hw_fake_adc_async_inflight(void)
+{
+	return s_adc_async_done != NULL;
+}
+
+unsigned bridge_hw_fake_adc_async_abort_count(void)
+{
+	return s_adc_async_abort_count;
+}
+
+void bridge_hw_fake_adc_async_complete(int rv)
+{
+	bridge_hw_adc_read_done_fn done = s_adc_async_done;
+	uint16_t                   mv[BRIDGE_HW_ADC_READ_MAX_SAMPLES];
+	if (done == NULL) return;
+	s_adc_async_done = NULL;
+	for (uint8_t i = 0; i < s_adc_async_samples; i++) {
+		mv[i] = adc_queue_pop_or_zero();
+	}
+	done(rv, mv, s_adc_async_samples);
 }
 
 int bridge_hw_adc_configure(uint8_t  channel,

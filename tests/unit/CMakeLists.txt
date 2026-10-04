@@ -442,6 +442,33 @@ target_compile_options(test_fmc_ota_guard PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_fmc_ota_guard PRIVATE ztest_shim)
 add_test(NAME fmc_ota_guard COMMAND test_fmc_ota_guard)
 
+# --- adc_burst_reply: CMD_ADC_READ over SPI is DEFERRED ----------------------
+#
+# The CS-rising path only arms the conversion burst; the burst's DMA-complete
+# interrupt stages the reply.  Links the REAL transport_spi.c + protocol.c over
+# the fake HAL, whose bridge_hw_fake_adc_async_complete() plays that interrupt,
+# to pin: nothing (not even the previous command's reply) is served while the
+# burst runs, the staged reply is whole and matches the synchronous one, and a
+# newer request / transport error / drain bound / HAL failure each leave one
+# coherent reply and no stranded burst.  The HAL half is the adc_seq suite.
+add_executable(test_adc_burst_reply
+    adc_burst_reply/src/test_adc_burst_reply.c
+    ${FW}/src/transport_spi.c
+    ${FW}/src/protocol.c
+    ${FW}/src/bootloader/bootloader.c
+    ${FW}/src/ota.c
+    ${FW}/src/crc32.c
+    fake/bridge_hw_fake.c
+)
+target_include_directories(test_adc_burst_reply PRIVATE
+    ${FW}/src
+    ${FW}/hal
+    ${CMAKE_CURRENT_SOURCE_DIR}/fake
+)
+target_compile_options(test_adc_burst_reply PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_adc_burst_reply PRIVATE ztest_shim)
+add_test(NAME adc_burst_reply COMMAND test_adc_burst_reply)
+
 # --- transport_i2c: transport + dispatcher over the injectable fake HAL ----
 add_executable(test_transport_i2c
     transport_i2c/src/test_transport_i2c.c

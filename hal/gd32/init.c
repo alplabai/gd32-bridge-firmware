@@ -901,6 +901,7 @@ extern bool ota_trial_unconfirmed(void);
 void bridge_hw_tick(void)
 {
 	bridge_hw_dsp_pump();
+	adc_burst_tick(); /* before vref_late_tick: frees a stuck burst's ADC0 claim first */
 	vref_late_tick();
 	ota_erase_tick();
 	ota_confirm_tick();
