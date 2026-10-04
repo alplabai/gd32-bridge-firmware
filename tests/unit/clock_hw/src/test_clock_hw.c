@@ -28,6 +28,7 @@ static void reset(void)
 	bridge_clock_fallback      = BRIDGE_CLOCK_FB_NONE;
 	bridge_clock_input_hz      = 0u;
 	bridge_clock_hxtal_request = 0u;
+	bridge_clock_switch_status = BRIDGE_CLOCK_SW_IDLE;
 	bridge_clock_init(true); /* default build: stays on IRC8M, marker handled */
 	mock_log_clear();
 	mock_fwdgt_feeds = 0u;
@@ -192,21 +193,27 @@ ZTEST(gd32_bridge_clock_hw, test_24p576_is_unambiguous_and_24mhz_is_refused)
 	zassert_equal(bridge_clock_fallback, BRIDGE_CLOCK_FB_HXTAL_FREQ);
 }
 
-ZTEST(gd32_bridge_clock_hw, test_24p576_tolerates_a_small_irc8m_error_only)
+ZTEST(gd32_bridge_clock_hw, test_24p576_tolerates_a_fast_irc8m_but_barely_a_slow_one)
 {
 	reset();
 	mock_scn.oscin_hz           = 24576000u;
-	mock_scn.irc8m_err_permille = 8;
+	mock_scn.irc8m_err_permille = 8; /* fast: counts low 0.8%, inside -1% */
 	zassert_true(bridge_clock_try_hxtal());
 
 	reset();
 	mock_scn.oscin_hz           = 24576000u;
-	mock_scn.irc8m_err_permille = -8;
+	mock_scn.irc8m_err_permille = -2; /* slow 0.2%: counts high 0.2%, inside +0.3% */
 	zassert_true(bridge_clock_try_hxtal());
 
 	reset();
 	mock_scn.oscin_hz           = 24576000u;
-	mock_scn.irc8m_err_permille = 15; /* beyond +-1%: refused, stay on IRC8M */
+	mock_scn.irc8m_err_permille = -8; /* slow 0.8%: refused (the safe direction) */
+	zassert_false(bridge_clock_try_hxtal());
+	zassert_equal(bridge_clock_fallback, BRIDGE_CLOCK_FB_HXTAL_FREQ);
+
+	reset();
+	mock_scn.oscin_hz           = 24576000u;
+	mock_scn.irc8m_err_permille = 15; /* fast 1.5%: beyond -1% */
 	zassert_false(bridge_clock_try_hxtal());
 	zassert_equal(bridge_clock_fallback, BRIDGE_CLOCK_FB_HXTAL_FREQ);
 }
@@ -377,7 +384,7 @@ ZTEST(gd32_bridge_clock_hw, test_wake_relock_restarts_hxtal_with_ckmen_cleared_f
 	zassert_true(RCU_CTL & RCU_CTL_CKMEN);
 	mock_log_clear();
 	mark();
-	bridge_clock_relock_prepare();
+	zassert_true(bridge_clock_relock_prepare(), "PLL running and selected: no replay needed");
 	(void)RCU_CTL; /* flush: the last write is only logged by the next access */
 	zassert_true(mock_in_order("CKM-",
 	                           "HXEN+",
@@ -525,18 +532,36 @@ ZTEST(gd32_bridge_clock_hw, test_nmi_status_mask_ignores_single_bit_ecc_but_not_
 
 /* ---- the request seam ---- */
 
+/* Tick until a latched request has been decided (RUNNING is internal to a tick). */
+static unsigned settle(void)
+{
+	unsigned n = 0u;
+	do {
+		bridge_clock_tick();
+		n++;
+	} while (bridge_clock_switch_status == BRIDGE_CLOCK_SW_PENDING && n < 400u);
+	return n;
+}
+
 ZTEST(gd32_bridge_clock_hw,
-      test_swd_trigger_variable_and_request_latch_run_the_switch_from_the_tick)
+      test_swd_trigger_variable_and_request_latch_run_the_switch_after_quiet_ticks)
 {
 	reset();
 	bridge_clock_tick();
 	zassert_equal(bridge_clock_source, BRIDGE_CLOCK_SRC_IRC8M, "no request, no switch");
+	zassert_equal(bridge_clock_switch_status, BRIDGE_CLOCK_SW_IDLE);
 
 	bridge_clock_request_hxtal(); /* the ISR-safe seam */
 	zassert_equal(bridge_clock_hxtal_request, 1u);
 	bridge_clock_tick();
-	zassert_equal(bridge_clock_source, BRIDGE_CLOCK_SRC_HXTAL);
 	zassert_equal(bridge_clock_hxtal_request, 0u, "consumed");
+	zassert_equal(bridge_clock_switch_status, BRIDGE_CLOCK_SW_PENDING);
+	zassert_equal(bridge_clock_source, BRIDGE_CLOCK_SRC_IRC8M, "not before the buses were quiet");
+	bridge_clock_tick();
+	zassert_equal(bridge_clock_switch_status, BRIDGE_CLOCK_SW_PENDING);
+	bridge_clock_tick(); /* third consecutive quiet tick */
+	zassert_equal(bridge_clock_switch_status, BRIDGE_CLOCK_SW_DONE_HXTAL);
+	zassert_equal(bridge_clock_source, BRIDGE_CLOCK_SRC_HXTAL);
 	zassert_equal(RTC_BKP9, BRIDGE_CLOCK_ATTEMPT_MAGIC, "healthy-tick clear is the NEXT tick");
 	bridge_clock_tick();
 	zassert_equal(RTC_BKP9, 0u);
@@ -544,9 +569,37 @@ ZTEST(gd32_bridge_clock_hw,
 	reset();
 	mock_scn.oscin_hz          = 0u;
 	bridge_clock_hxtal_request = 1u; /* the bench pokes the variable over SWD */
-	bridge_clock_tick();
+	(void)settle();
 	zassert_equal(bridge_clock_fallback, BRIDGE_CLOCK_FB_HXTAL_TIMEOUT);
+	zassert_equal(bridge_clock_switch_status, BRIDGE_CLOCK_SW_DONE_FALLBACK, "reason in fallback");
 	zassert_equal(bridge_clock_hxtal_request, 0u);
+}
+
+ZTEST(gd32_bridge_clock_hw, test_a_busy_bus_resets_the_quiet_count_and_a_dead_bus_gives_up)
+{
+	reset();
+	bridge_clock_request_hxtal();
+	bridge_clock_tick();
+	bridge_clock_tick();       /* 2 quiet ticks */
+	mock_scn.link_busy = true; /* a CS low / I2C match */
+	bridge_clock_tick();
+	mock_scn.link_busy = false;
+	bridge_clock_tick();
+	bridge_clock_tick();
+	zassert_equal(bridge_clock_switch_status, BRIDGE_CLOCK_SW_PENDING, "count restarted");
+	bridge_clock_tick();
+	zassert_equal(bridge_clock_switch_status, BRIDGE_CLOCK_SW_DONE_HXTAL);
+
+	reset();
+	mock_scn.link_busy = true;
+	bridge_clock_request_hxtal();
+	(void)settle();
+	zassert_equal(bridge_clock_switch_status, BRIDGE_CLOCK_SW_REFUSED_BUSY, "never quiet");
+	zassert_equal(bridge_clock_source, BRIDGE_CLOCK_SRC_IRC8M);
+	mock_scn.link_busy = false;
+	for (unsigned i = 0u; i < 10u; i++)
+		bridge_clock_tick();
+	zassert_equal(bridge_clock_source, BRIDGE_CLOCK_SRC_IRC8M, "nothing stayed latched");
 }
 
 ZTEST(gd32_bridge_clock_hw, test_marker_left_by_an_unhealthy_attempt_blocks_the_next_boot_once)
@@ -585,4 +638,163 @@ ZTEST(gd32_bridge_clock_hw, test_live_clock_readers_use_the_measured_oscin_not_t
 	RCU_CFG0 = RCU_CKSYSSRC_IRC8M | RCU_SCSS_IRC8M;
 	bridge_clock_core_update();
 	zassert_equal(SystemCoreClock, 8000000u);
+}
+
+/* ---- review round 3 ---- */
+
+/* 1: a WFI that returned without sleeping leaves HXTAL and its PLL live. */
+ZTEST(gd32_bridge_clock_hw, test_a_wfi_that_did_not_sleep_only_rearms_the_monitor)
+{
+	reset();
+	zassert_true(bridge_clock_try_hxtal());
+	bridge_clock_pre_deepsleep(); /* CKMEN off ahead of the entry */
+	mock_log_clear();
+	/* ... WFI returned at once: no mock_hw_deepsleep(). */
+	zassert_true(bridge_clock_relock_prepare());
+	(void)RCU_CTL;
+	zassert_false(
+	    mock_log_has("HXEN-"), "HXTALEN never cleared under a live PLL: %s", mock_log_text());
+	zassert_false(mock_log_has("BPS-"));
+	zassert_false(mock_log_has("PLLEN-"));
+	zassert_false(mock_log_has("SCS0"));
+	zassert_false(mock_log_has("T14ON"), "no frequency re-check either");
+	zassert_true(mock_log_has("CKM+"), "monitor re-armed");
+	zassert_equal(RCU_CTL & (RCU_CTL_HXTALEN | RCU_CTL_PLLEN | RCU_CTL_CKMEN),
+	              RCU_CTL_HXTALEN | RCU_CTL_PLLEN | RCU_CTL_CKMEN);
+	zassert_equal(RCU_CFG0 & RCU_CFG0_SCSS, RCU_SCSS_PLLP);
+	zassert_equal(bridge_clock_source, BRIDGE_CLOCK_SRC_HXTAL);
+}
+
+/* 1: even if a restart is attempted, bypass_enable must not clear HXTALEN
+ * while the PLL runs from HXTAL.  Without the guard HXTALEN falls and rises again
+ * (HXEN- then HXEN+) before the startup wait; with it HXTALEN never rises. */
+ZTEST(gd32_bridge_clock_hw, test_bypass_enable_refuses_to_clear_hxtalen_under_a_live_hxtal_pll)
+{
+	reset();
+	zassert_true(bridge_clock_try_hxtal());
+	mock_scn.oscin_hz = 0u; /* HXTALSTB drops while the PLL registers still say HXTAL */
+	bridge_clock_pre_deepsleep();
+	mock_log_clear();
+	(void)bridge_clock_relock_prepare(); /* takes the restart path: HXTALSTB is clear */
+	(void)RCU_CTL;
+	zassert_false(mock_log_has("HXEN+"), "HXTALEN was never cleared first: %s", mock_log_text());
+	zassert_equal(bridge_clock_fallback, BRIDGE_CLOCK_FB_HXTAL_TIMEOUT);
+}
+
+/* 2: no switch while a supervised output or stream is live. */
+ZTEST(gd32_bridge_clock_hw, test_switch_is_refused_while_pwm_or_adc_is_active_and_touches_nothing)
+{
+	reset();
+	mock_scn.pwm_active = true;
+	zassert_false(bridge_clock_try_hxtal());
+	zassert_equal(bridge_clock_switch_status, BRIDGE_CLOCK_SW_REFUSED_BUSY);
+	zassert_equal(strlen(mock_log_text()), 0u, "no register written: %s", mock_log_text());
+	zassert_equal(RCU_CFG0 & RCU_CFG0_SCSS, RCU_SCSS_PLLP);
+	zassert_equal(mock_primask_max_ns, 0u, "never even took PRIMASK");
+
+	/* Through the request path: refused at latch time, nothing stays latched. */
+	reset();
+	mock_scn.pwm_active = true;
+	bridge_clock_request_hxtal();
+	bridge_clock_tick();
+	zassert_equal(bridge_clock_switch_status, BRIDGE_CLOCK_SW_REFUSED_BUSY);
+	mock_scn.pwm_active = false;
+	for (unsigned i = 0u; i < 10u; i++)
+		bridge_clock_tick();
+	zassert_equal(bridge_clock_source, BRIDGE_CLOCK_SRC_IRC8M, "the refused request is gone");
+
+	reset();
+	mock_scn.adc_active = true;
+	zassert_false(bridge_clock_try_hxtal());
+	zassert_equal(bridge_clock_switch_status, BRIDGE_CLOCK_SW_REFUSED_BUSY);
+
+	/* Started WHILE pending: dropped at the next tick, still nothing touched. */
+	reset();
+	bridge_clock_request_hxtal();
+	bridge_clock_tick();
+	zassert_equal(bridge_clock_switch_status, BRIDGE_CLOCK_SW_PENDING);
+	mock_scn.pwm_active = true;
+	bridge_clock_tick();
+	zassert_equal(bridge_clock_switch_status, BRIDGE_CLOCK_SW_REFUSED_BUSY);
+	zassert_equal(RCU_CFG0 & RCU_CFG0_SCSS, RCU_SCSS_PLLP);
+	zassert_false(mock_log_has("SCS0"));
+}
+
+/* 2: after a switch a timer started later gets the live prescaler (checked with
+ * the 24.576 MHz tuple elsewhere); here the refusal clears once PWM stops. */
+ZTEST(gd32_bridge_clock_hw, test_switch_proceeds_once_the_output_is_gone)
+{
+	reset();
+	mock_scn.pwm_active = true;
+	zassert_false(bridge_clock_try_hxtal());
+	mock_scn.pwm_active = false;
+	zassert_true(bridge_clock_try_hxtal());
+	zassert_equal(bridge_clock_switch_status, BRIDGE_CLOCK_SW_DONE_HXTAL);
+}
+
+/* 3: the window is measured with the cycle counter, not assumed. */
+ZTEST(gd32_bridge_clock_hw,
+      test_div32_window_is_measured_so_call_overhead_at_8mhz_does_not_misclassify)
+{
+	reset();
+	zassert_true(bridge_clock_try_hxtal());
+	bridge_clock_pre_deepsleep();
+	mock_hw_deepsleep(); /* core is now 8 MHz: 2 ms is 16000 cycles */
+	/* 800 cycles (5% of the window) spent inside timer_counter_read() before the
+	 * value latches: the counter ran 5% longer than the nominal window. */
+	mock_scn.timer_read_overhead_cycles = 800u;
+	zassert_true(bridge_clock_relock_prepare());
+	zassert_equal(bridge_clock_source, BRIDGE_CLOCK_SRC_HXTAL, "normalised by elapsed cycles");
+	zassert_equal(bridge_clock_input_hz, BRIDGE_CLOCK_IN_8MHZ);
+}
+
+/* 4: CAR is set explicitly; with the reset value 0 the timer would not count. */
+ZTEST(gd32_bridge_clock_hw, test_timer14_autoreload_is_programmed_before_the_timer_runs)
+{
+	reset();
+	zassert_true(bridge_clock_try_hxtal());
+	zassert_true(mock_in_order("T14DEINIT", "CAR14", "T14ON", NULL), "%s", mock_log_text());
+	zassert_equal(bridge_clock_source, BRIDGE_CLOCK_SRC_HXTAL, "so it counted and classified");
+}
+
+/* 13b: a stalled cycle counter ends the waits instead of hanging under PRIMASK. */
+ZTEST(gd32_bridge_clock_hw, test_stalled_dwt_ends_every_wait_promptly_and_fails_safe)
+{
+	reset();
+	mock_scn.cyccnt_stalled = true;
+	zassert_false(bridge_clock_try_hxtal(), "returns (does not hang)");
+	zassert_equal(bridge_clock_source, BRIDGE_CLOCK_SRC_IRC8M);
+}
+
+/* 13a: the first-switch SCSS wait is budgeted with the post-switch clock. */
+ZTEST(gd32_bridge_clock_hw, test_wedged_first_switch_gives_up_at_the_slow_clock_budget)
+{
+	reset();
+	mock_scn.scs_refuses_irc8m = true;
+	mark();
+	zassert_false(bridge_clock_try_hxtal());
+	zassert_true(since() <= 3500000ull,
+	             "no 2 ms wait at 54 MHz-sized budgets: %llu ns",
+	             (unsigned long long)since());
+}
+
+/* 10: the 24.576 MHz band is -1% / +0.3%, so 25 MHz needs a >1.4% fast IRC8M. */
+ZTEST(gd32_bridge_clock_hw, test_25mhz_is_refused_unless_the_irc8m_is_over_1p4_percent_fast)
+{
+	reset();
+	mock_scn.oscin_hz = 25000000u;
+	zassert_false(bridge_clock_try_hxtal());
+
+	reset();
+	mock_scn.oscin_hz           = 25000000u;
+	mock_scn.irc8m_err_permille = 10; /* 1.0% fast: 25 MHz reads +0.7%: still refused */
+	zassert_false(bridge_clock_try_hxtal());
+	zassert_equal(bridge_clock_fallback, BRIDGE_CLOCK_FB_HXTAL_FREQ);
+
+	reset();
+	mock_scn.oscin_hz = 25000000u;
+	mock_scn.irc8m_err_permille =
+	    15; /* 1.5% fast: 25 MHz reads +0.2% and is taken (documented limit) */
+	zassert_true(bridge_clock_try_hxtal());
+	zassert_equal(bridge_clock_input_hz, BRIDGE_CLOCK_IN_24P576);
 }

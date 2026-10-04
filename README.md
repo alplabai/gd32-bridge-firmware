@@ -131,12 +131,28 @@ autonomously could be followed by a frequency change (e.g. locked at 8 MHz x
 external clock therefore happens only when the host asks:
 
 - `bridge_clock_try_hxtal()` (`hal/gd32/clock_hw.c`) is the internal seam the
-  protocol layer will call; the wire opcode belongs to the protocol 0.15 work
-  and is deliberately not invented here. It is base-level only (it holds
-  PRIMASK for up to ~23 ms; a transfer in flight can fail its CRC).
-  `bridge_clock_request_hxtal()` is the ISR-safe latch and `bridge_clock_tick()`
-  (from `bridge_hw_tick()`) runs it. For the bench, writing 1 to the SWD
-  variable `bridge_clock_hxtal_request` does the same.
+  protocol layer will call; the wire opcode (and the status fields) belong to
+  the protocol 0.15 work, tracked in alplabai/gd32-bridge-firmware#330, and are
+  deliberately not invented here. It is base-level only (it holds PRIMASK for
+  up to ~23 ms). `bridge_clock_request_hxtal()` is the ISR-safe latch and
+  `bridge_clock_tick()` (from `bridge_hw_tick()`) advances it. For the bench,
+  writing 1 to the SWD variable `bridge_clock_hxtal_request` does the same.
+- **Bus-quiet contract.** The switch runs only after the request has been
+  latched AND both transports have been idle (CS high, no I2C transaction or
+  address match pending) for 3 consecutive 50 ms ticks; a request that never
+  gets quiet buses ends after ~10 s. The host must keep BOTH buses idle from the
+  request until the status leaves RUNNING: the core clock stretches ~27x while
+  the PLL is rebuilt and a transfer in flight can fail its CRC.
+  `bridge_clock_switch_status` (SWD-readable now, the field the 0.15 opcode will
+  report) is 0 IDLE, 1 PENDING, 2 RUNNING, 3 DONE_HXTAL, 4 DONE_FALLBACK (reason
+  in `bridge_clock_fallback`), 5 REFUSED_BUSY.
+- **Refused while supervised outputs run.** The switch is refused (status 5,
+  nothing latched, no register touched) while any PWM channel (output or
+  capture) or ADC stream is active, so no supervised output ever sees the
+  period stretch; anything started after a successful switch uses the live
+  prescaler. The quadrature encoders are not a blocker: they count external
+  edges with no SYSCLK-derived period (only the input-filter time scales with
+  the clock), are enabled at boot and have no session.
 - `-DBRIDGE_CLOCK_HXTAL_AT_BOOT=ON` (default OFF) attempts it in
   `bridge_hw_init()` instead, for an SoM whose SE2 is right from POR via the
   clock generator OTP image. That attempt runs with the FWDGT already armed
@@ -168,7 +184,7 @@ The sequence (`clock_hw.c`, sequencing in `clock_source.c`):
 | 12 MHz | 375 kHz | /3 (2) | 108 | 4 MHz | 432 MHz | 216 MHz | +-3% |
 | 16 MHz | 500 kHz | /4 (3) | 108 | 4 MHz | 432 MHz | 216 MHz | +-3% |
 | 20 MHz | 625 kHz | /5 (4) | 108 | 4 MHz | 432 MHz | 216 MHz | +-3% |
-| 24.576 MHz | 768 kHz | /6 (5) | 105 | 4.096 MHz | 430.08 MHz | 215.04 MHz (-0.44%) | +-1% |
+| 24.576 MHz | 768 kHz | /6 (5) | 105 | 4.096 MHz | 430.08 MHz | 215.04 MHz (-0.44%) | -1% / +0.3% |
 
 PLLP is /2 (field 0) throughout. There is no 24.000 MHz entry (no board feeds
 it). Every tuple stays at (or, for 24.576 MHz, next to) the IRC8M path proven
@@ -180,17 +196,20 @@ did, the count is ~2).
 **Tolerance.** The count is taken against the IRC8M-derived core clock, so a
 band has to hold the IRC8M own error plus quantisation (<= 0.2%). The IRC8M
 datasheet figure is not in this tree and must be checked, so the bands are a
-safety choice, not a measurement. 24.576 MHz, the only real source, is +-1%:
-tight, so a unit whose IRC8M is more than about 1% off refuses the switch
-(`FB_HXTAL_FREQ`, stays on IRC8M; the safe direction). The unused 8/12/16/20 MHz
-entries keep +-3%. The bands do not overlap (closest pair, 20 and 24.576 MHz,
-is 23% apart), so a match is unambiguous.
+safety choice, not a measurement. The band is on the HXTAL/32 COUNT: a fast
+IRC8M gives a LOW count and a slow one a HIGH count. 24.576 MHz, the only real
+source, is asymmetric, -1% / +0.3%: an IRC8M up to 1% fast is tolerated, one
+more than 0.3% slow is refused (`FB_HXTAL_FREQ`, stays on IRC8M; the safe
+direction, at the cost of never switching on such a unit). The unused
+8/12/16/20 MHz entries keep +-3%. The bands do not overlap (closest pair, 20 and
+24.576 MHz, is 23% apart), so a match is unambiguous.
 
 **25 MHz must never be fed.** It has no tuple (it needs PLLPSC * PLLP to be a
-multiple of 25) and is 1.7% above 24.576 MHz. With a true timebase it is refused;
-but if the IRC8M reads 0.7% to 2.7% fast it falls inside the +-1% band and is
-taken for 24.576 MHz (SYSCLK 218.75 MHz, +1.3% over 216). The part cannot
-prevent that, because the only reference is the IRC8M.
+multiple of 25) and is 1.7% above 24.576 MHz. With a true timebase it is
+refused; it takes an IRC8M that is MORE THAN 1.4% FAST to pull it into the
+-1% / +0.3% band, and it would then be taken for 24.576 MHz (SYSCLK 218.75 MHz,
++1.3% over 216). The part cannot prevent that, because the only reference is
+the IRC8M.
 
 **SYSCLK is not always 216 MHz.** Everything derives from the live clock:
 `SystemCoreClock` comes from `bridge_clock_core_update()` (the vendor
@@ -201,10 +220,11 @@ re-sized after every change, and the PWM / ADC-pacing timer prescalers use
 `bridge_core_clock_matches` now means "SYSCLK is what the active selection is
 meant to produce". The 216 MHz literals left in `gd32_common.h`
 (`PWM_TIMER_CLK_HZ`, `BRIDGE_ADC_PACE_CLK_HZ`, `ADC_READ_ADCCK_HZ`) are nominal
-IRC8M-path values and program no hardware. Timers configured before a switch
-keep their old prescaler, so the host should request the switch before PWM or
-ADC streaming starts. `bridge_hw_counter_read()` returns raw core-clock ticks
-(the host converts with the live core clock).
+IRC8M-path values and program no hardware. A timer configured before a switch
+keeps its old prescaler, which is why the switch is refused while PWM or ADC
+streaming is active. `bridge_hw_counter_read()` returns raw core-clock ticks;
+the core clock is not on the wire yet (#330), so a host that converts them
+assumes 216 MHz and is 0.44% off after a 24.576 MHz switch.
 
 **The host must never reprogram SE2 after the switch.** The clock monitor only
 detects a STOPPED clock, not a changed one. The U-Boot sequence comes first;
@@ -226,7 +246,10 @@ IRC8M, keeps the record-and-reset policy. The part runs at 8 MHz inside that NMI
 until the (bounded) PLL relock completes, and a transfer in flight at that
 instant can fail its CRC. A CKM NMI that lands while a switch is in flight only
 records; the thread side performs the fallback. `CKMEN` is cleared before
-Deep-sleep entry and at the start of every restart, and the active source is
+Deep-sleep entry and at the start of every restart (never HXTALEN, though,
+while the PLL runs from it: a WFI that returns without sleeping leaves HXTAL and
+its PLL live and only re-arms the monitor, and a restart that does happen leaves
+the PLL locked and selected so the wake path skips its PLLEN replay), and the active source is
 recorded before `CKMEN` is armed.
 
 **Attempt marker.** `RTC_BKP9` holds `0x48545831` from just before an HXTAL PLL

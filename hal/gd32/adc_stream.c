@@ -24,6 +24,14 @@
 /* Stream slots; layout + sizing doc in gd32_common.h. */
 adc_stream_state_t adc_streams[BRIDGE_ADC_STREAM_COUNT];
 
+bool adc_stream_any_active(void)
+{
+	for (unsigned i = 0u; i < BRIDGE_ADC_STREAM_COUNT; i++) {
+		if (adc_streams[i].in_use) return true;
+	}
+	return false;
+}
+
 /* NVIC priority for the per-stream DMA "lap" ISR (full-transfer-
  * finish).  Below every transport ISR (SPI/CS = 1, I2C = 2 -- see
  * bridge_board_config.h): a lap tick fires once per ring period

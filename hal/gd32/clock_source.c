@@ -21,14 +21,35 @@ static volatile bool s_ckm_pending;
 /* A boot that found the attempt marker refuses HXTAL until the next boot. */
 static bool s_blocked;
 
-#define REF(in, psc, n, band) { (in), (psc), (n), (in) / (psc) * (n) / BRIDGE_CLOCK_PLL_P, (band) }
+#define REF(in, psc, n, lo, hi) \
+	{ (in), (psc), (n), (in) / (psc) * (n) / BRIDGE_CLOCK_PLL_P, (lo), (hi) }
 
 static const bridge_clock_ref_t k_refs[] = {
-	REF(BRIDGE_CLOCK_IN_8MHZ, 2u, 108u, BRIDGE_CLOCK_BAND_OTHER_PERMILLE),
-	REF(BRIDGE_CLOCK_IN_12MHZ, 3u, 108u, BRIDGE_CLOCK_BAND_OTHER_PERMILLE),
-	REF(BRIDGE_CLOCK_IN_16MHZ, 4u, 108u, BRIDGE_CLOCK_BAND_OTHER_PERMILLE),
-	REF(BRIDGE_CLOCK_IN_20MHZ, 5u, 108u, BRIDGE_CLOCK_BAND_OTHER_PERMILLE),
-	REF(BRIDGE_CLOCK_IN_24P576, 6u, 105u, BRIDGE_CLOCK_BAND_24P576_PERMILLE),
+	REF(BRIDGE_CLOCK_IN_8MHZ,
+	    2u,
+	    108u,
+	    BRIDGE_CLOCK_BAND_OTHER_PERMILLE,
+	    BRIDGE_CLOCK_BAND_OTHER_PERMILLE),
+	REF(BRIDGE_CLOCK_IN_12MHZ,
+	    3u,
+	    108u,
+	    BRIDGE_CLOCK_BAND_OTHER_PERMILLE,
+	    BRIDGE_CLOCK_BAND_OTHER_PERMILLE),
+	REF(BRIDGE_CLOCK_IN_16MHZ,
+	    4u,
+	    108u,
+	    BRIDGE_CLOCK_BAND_OTHER_PERMILLE,
+	    BRIDGE_CLOCK_BAND_OTHER_PERMILLE),
+	REF(BRIDGE_CLOCK_IN_20MHZ,
+	    5u,
+	    108u,
+	    BRIDGE_CLOCK_BAND_OTHER_PERMILLE,
+	    BRIDGE_CLOCK_BAND_OTHER_PERMILLE),
+	REF(BRIDGE_CLOCK_IN_24P576,
+	    6u,
+	    105u,
+	    BRIDGE_CLOCK_BAND_24P576_LO_PERMILLE,
+	    BRIDGE_CLOCK_BAND_24P576_HI_PERMILLE),
 };
 
 /* Field ranges from gd32g5x3_rcu.h (PLLPSC /1../16, PLLN 8..180) and the
@@ -55,8 +76,10 @@ uint32_t bridge_clock_classify_div32(uint32_t counts, uint32_t window_us)
 	/* The bands do not overlap (tests/unit/clock_source), so the first match wins. */
 	for (unsigned i = 0u; i < sizeof k_refs / sizeof k_refs[0]; i++) {
 		const uint64_t nominal = k_refs[i].in_hz / BRIDGE_CLOCK_DIV32_PRESC;
-		const uint64_t dev     = f > nominal ? f - nominal : nominal - f;
-		if (dev * 1000u <= nominal * k_refs[i].band_permille) return k_refs[i].in_hz;
+		const uint64_t band =
+		    f >= nominal ? k_refs[i].band_hi_permille : k_refs[i].band_lo_permille;
+		const uint64_t dev = f >= nominal ? f - nominal : nominal - f;
+		if (dev * 1000u <= nominal * band) return k_refs[i].in_hz;
 	}
 	return 0u;
 }
@@ -132,9 +155,9 @@ bool bridge_clock_attempt_hxtal(const bridge_clock_ops_t *ops)
 	ops->marker_set(BRIDGE_CLOCK_ATTEMPT_MAGIC);
 	if (!bridge_clock_external_start(ops, false)) {
 		ops->marker_set(0u); /* failed cleanly on IRC8M: nothing to remember */
-		return false;
 	}
-	return true;
+	/* An NMI after external_start() returned may already have fallen back. */
+	return bridge_clock_source == BRIDGE_CLOCK_SRC_HXTAL;
 }
 
 bridge_clock_source_t bridge_clock_boot(const bridge_clock_ops_t *ops, bool attempt_hxtal)

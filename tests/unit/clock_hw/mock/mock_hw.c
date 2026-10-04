@@ -42,6 +42,7 @@ static uint32_t syscfg_t14[3];
 static uint32_t clk_mask;
 static uint32_t trigsel_src;
 static bool     t14_trgsel_iti14, t14_slave_ext0, t14_enabled;
+static uint32_t t14_car; /* reset value 0: a timer with CAR 0 does not count */
 
 static void logf_(const char *fmt, ...)
 {
@@ -113,6 +114,7 @@ uint32_t mock_sim_sysclk_hz(void)
 		const uint32_t n   = (r_pll >> 6) & 0xFFu;
 		const uint32_t p   = (((r_pll >> 16) & 3u) + 1u) << 1;
 		hz                 = in / psc * n / p;
+		if (hz == 0u) hz = irc8m_hz(); /* a dead HXTAL: the monitor would have moved SYSCLK */
 	}
 	static const uint8_t exp[16] = { 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 6, 7, 8, 9 };
 	return hz >> exp[(r_cfg0 >> 4) & 0xFu];
@@ -262,14 +264,35 @@ uint32_t mock_stat_flags(void)
 
 /* ---- time ---- */
 
-uint32_t mock_cyccnt(void)
+static void burn(uint32_t n)
 {
 	sync();
-	const uint32_t hz = mock_sim_sysclk_hz();
-	cycles += mock_scn.step_cycles;
-	now_ps += (uint64_t)mock_scn.step_cycles * 1000000000000ull / hz;
+	now_ps += (uint64_t)n * 1000000000000ull / mock_sim_sysclk_hz();
+	cycles += n;
 	sync();
+}
+
+uint32_t mock_cyccnt(void)
+{
+	if (mock_scn.cyccnt_stalled) {
+		sync();
+		return cycles; /* the counter is not running */
+	}
+	burn(mock_scn.step_cycles);
 	return cycles;
+}
+
+bool pwm_any_claimed(void)
+{
+	return mock_scn.pwm_active;
+}
+bool adc_stream_any_active(void)
+{
+	return mock_scn.adc_active;
+}
+bool bridge_link_quiet(void)
+{
+	return !mock_scn.link_busy;
 }
 
 void mock_dwt_ensure(void)
@@ -330,6 +353,7 @@ void timer_deinit(uint32_t timer)
 {
 	(void)timer;
 	t14_trgsel_iti14 = t14_slave_ext0 = t14_enabled = false;
+	t14_car                                         = 0u;
 	logf_("T14DEINIT");
 }
 void timer_input_trigger_source_select(uint32_t timer, uint32_t intrigger)
@@ -344,6 +368,16 @@ void timer_slave_mode_select(uint32_t timer, uint32_t slavemode)
 	(void)timer;
 	t14_slave_ext0 = (slavemode == TIMER_SLAVE_MODE_EXTERNAL0);
 	logf_("EXT0");
+}
+void timer_autoreload_value_config(uint32_t timer, uint32_t autoreload)
+{
+	(void)timer;
+	t14_car = autoreload;
+	logf_("CAR14");
+}
+uint32_t mock_timer14_car(void)
+{
+	return t14_car;
 }
 void timer_counter_value_config(uint32_t timer, uint32_t counter)
 {
@@ -366,15 +400,17 @@ void timer_disable(uint32_t timer)
 uint32_t timer_counter_read(uint32_t timer)
 {
 	(void)timer;
+	burn(mock_scn.timer_read_overhead_cycles); /* the call itself costs time before the latch */
 	sync();
 	const bool routed = (trigsel_src == TRIGSEL_INPUT_HXTAL_DIV32_TRIG) && t14_trgsel_iti14 &&
 	                    t14_slave_ext0 && t14_enabled && (clk_mask & RCU_TIMER14) &&
 	                    (clk_mask & RCU_TRIGSEL);
 	const bool hxtal_running = (r_ctl & RCU_CTL_HXTALEN) && mock_scn.oscin_hz != 0u &&
 	                           (!mock_scn.require_bypass || (r_ctl & RCU_CTL_HXTALBPS));
-	if (!routed || !hxtal_running) return 0u;
+	if (!routed || !hxtal_running || t14_car == 0u) return 0u;
 	const uint64_t d_ns = now_ns - timer_en_ns;
-	return (uint32_t)(d_ns * (mock_scn.oscin_hz / 32u) / 1000000000ull) & 0xFFFFu;
+	const uint64_t n    = d_ns * (mock_scn.oscin_hz / 32u) / 1000000000ull;
+	return (uint32_t)(n > t14_car ? t14_car : n);
 }
 uint32_t mock_syscfg_timer14_cfg(void)
 {
@@ -439,6 +475,7 @@ void mock_hw_reset(void)
 	clk_mask         = 0u;
 	trigsel_src      = 0u;
 	t14_trgsel_iti14 = t14_slave_ext0 = t14_enabled = false;
+	t14_car                                         = 0u;
 	mock_primask                                    = 0u;
 	mock_primask_max_ns                             = 0u;
 	mock_fwdgt_feeds                                = 0u;

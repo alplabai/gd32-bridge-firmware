@@ -59,7 +59,7 @@ void mock_power_reset(void)
 	mock_on_i2c_disable          = NULL;
 	mock_hxtal_source            = 0;
 	mock_hxtal_relock_ok         = 1;
-	mock_pre_deepsleeps = mock_relock_prepares = 0u;
+	mock_pre_deepsleeps = mock_relock_prepares = mock_relock_noops = 0u;
 	mock_i2c_enables = mock_rtc_disables = mock_rtc_flag_clears = mock_exti19_clears = 0u;
 	mock_seq = mock_seq_clock_restore = mock_seq_i2c_init = mock_seq_rtc_disable = 0u;
 	mock_i2c_init_rc                                                             = BRIDGE_HW_OK;
@@ -265,15 +265,26 @@ void bridge_clock_pre_deepsleep(void)
 	mock_seq_pre_deepsleep = ++mock_seq;
 }
 
-void bridge_clock_relock_prepare(void)
+uint32_t mock_relock_noops;
+
+/* Mirrors clock_hw.c: a PLL that is still running and selected (the WFI returned
+ * without sleeping) is left alone; otherwise HXTAL is restarted and the PLL is
+ * left LOCKED and SELECTED (true: the caller must not replay it), or the restart
+ * "fails" (false: the caller replays the PLL as for IRC8M). */
+bool bridge_clock_relock_prepare(void)
 {
-	if (!mock_hxtal_source) return;
+	if (!mock_hxtal_source) return false;
+	if ((RCU_CFG0 & RCU_CFG0_SCSS) == RCU_SCSS_PLLP && (RCU_CTL & RCU_CTL_PLLSTB) != 0u) {
+		++mock_relock_noops;
+		return true;
+	}
 	++mock_relock_prepares;
 	mock_seq_relock_prepare          = ++mock_seq;
 	mock_ctl_pllen_at_relock_prepare = RCU_CTL & RCU_CTL_PLLEN;
-	/* HXTAL back (PLL re-pointed on it) or fallen back to IRC8M: either way the
-	 * PLL is configured and DISABLED when this returns; the replay enables it. */
-	(void)mock_hxtal_relock_ok;
+	if (!mock_hxtal_relock_ok) return false;
+	RCU_CTL |= RCU_CTL_PLLEN | RCU_CTL_PLLSTB;
+	RCU_CFG0 = (RCU_CFG0 & ~(RCU_CFG0_SCS | RCU_CFG0_SCSS)) | RCU_CKSYSSRC_PLLP | RCU_SCSS_PLLP;
+	return true;
 }
 
 /* The live-clock derivation is clock_hw.c's; here SystemCoreClock is set by the test. */

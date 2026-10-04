@@ -104,30 +104,35 @@ _Static_assert(BRIDGE_CLOCK_PLL_IN_HZ *BRIDGE_CLOCK_PLL_N / BRIDGE_CLOCK_PLL_P =
                "the IRC8M-path PLL tuple must yield 216 MHz");
 
 typedef struct {
-	uint32_t in_hz;         /* OSCIN */
-	uint32_t pll_psc;       /* PLLPSC divider (field = pll_psc - 1) */
-	uint32_t pll_n;         /* PLLN */
-	uint32_t sysclk_hz;     /* in_hz / pll_psc * pll_n / BRIDGE_CLOCK_PLL_P */
-	uint32_t band_permille; /* acceptance band around in_hz / 32, +- this many per mille */
+	uint32_t in_hz;            /* OSCIN */
+	uint32_t pll_psc;          /* PLLPSC divider (field = pll_psc - 1) */
+	uint32_t pll_n;            /* PLLN */
+	uint32_t sysclk_hz;        /* in_hz / pll_psc * pll_n / BRIDGE_CLOCK_PLL_P */
+	uint32_t band_lo_permille; /* accepted this far BELOW in_hz / 32 (per mille) */
+	uint32_t band_hi_permille; /* accepted this far ABOVE in_hz / 32 (per mille) */
 } bridge_clock_ref_t;
 
 /* The table entry for an OSCIN frequency returned by the classifier, or NULL. */
 const bridge_clock_ref_t *bridge_clock_ref_for(uint32_t in_hz);
 
-/* Acceptance band per table entry (bridge_clock_ref_t.band_permille).  The
- * count is taken against the core clock, i.e. the IRC8M (or its PLL), so a band
- * has to hold the IRC8M own error plus +-1 count of quantisation (<= 0.2% at
- * the 2 ms window).  The IRC8M datasheet figure is NOT in this tree and must be
- * checked; the bands are a safety choice, not a measurement.
- *  - 24.576 MHz (the only source on real boards) is +-1%: tight, so a wrong
- *    clock is refused, at the cost of refusing (FB_HXTAL_FREQ, stay on IRC8M)
- *    a unit whose IRC8M is more than ~1% off.  That is the safe direction.
+/* Acceptance band per table entry (band_lo/hi_permille, measured on the
+ * HXTAL/32 COUNT).  The count is taken against the core clock, i.e. the IRC8M
+ * (or its PLL): an IRC8M that is fast by e gives a count LOW by e, so the low
+ * side of the band absorbs a fast IRC8M and the high side a slow one.  The
+ * IRC8M datasheet figure is NOT in this tree and must be checked; the bands are
+ * a safety choice, not a measurement.
+ *  - 24.576 MHz (the only source on real boards) is asymmetric, -1% / +0.3%:
+ *    an IRC8M up to 1% fast is tolerated, one more than 0.3% slow is refused
+ *    (FB_HXTAL_FREQ, stay on IRC8M: the safe direction, at the cost of never
+ *    switching on such a unit).  25 MHz (+1.7%, no tuple, must never be fed)
+ *    then needs an IRC8M more than 1.4% fast to be taken for 24.576 MHz.
  *  - 8/12/16/20 MHz (exact 216, no board feeds them) keep +-3%.
  *  - A true OSCIN deviation of up to band + IRC8M error can pass, so the core
  *    can run that much above its nominal SYSCLK in the worst case.
  * SystemCoreClock is derived from the CLASSIFIED reference. */
-#define BRIDGE_CLOCK_BAND_24P576_PERMILLE 10u
-#define BRIDGE_CLOCK_BAND_OTHER_PERMILLE  30u
+#define BRIDGE_CLOCK_BAND_24P576_LO_PERMILLE 10u
+#define BRIDGE_CLOCK_BAND_24P576_HI_PERMILLE 3u
+#define BRIDGE_CLOCK_BAND_OTHER_PERMILLE     30u
 
 /* Every HXTAL/PLL wait is bounded by TIME (DWT CYCCNT against the live core
  * clock, clock_hw.c), never by an iteration count: the same loop is 27x slower
@@ -222,20 +227,57 @@ void bridge_clock_mark_healthy(const bridge_clock_ops_t *ops);
  * waits.  Call before bridge_clock_core_update(). */
 void bridge_clock_init(bool fwdgt_running);
 
+/* Switch status, SWD-readable now and the field the protocol 0.15 opcode will
+ * report later (alplabai/gd32-bridge-firmware#330 tracks that wire opcode and
+ * the fields).  `bridge_clock_fallback` carries the reason once DONE_*.
+ *   IDLE           nothing requested (or the last result was consumed by a new request)
+ *   PENDING        request latched; waiting for both transports to be quiet
+ *   RUNNING        the sequence is executing (PRIMASK held, <= ~23 ms)
+ *   DONE_HXTAL     the PLL runs from HXTAL
+ *   DONE_FALLBACK  refused by the sequence (see bridge_clock_fallback); on IRC8M
+ *   REFUSED_BUSY   not attempted: a PWM channel or ADC stream is active, or the
+ *                  buses were never quiet; NOTHING stays latched
+ * Bus-quiet contract: the switch runs only after the request has been latched
+ * AND both transports have been idle (CS high, no I2C transaction or address
+ * match pending) for BRIDGE_CLOCK_QUIET_TICKS consecutive 50 ms ticks.  The host
+ * must keep BOTH buses idle from the request until the status leaves RUNNING:
+ * the core clock stretches ~27x while the PLL is rebuilt and a transfer in flight
+ * can fail its CRC.  A request that cannot get quiet buses within
+ * BRIDGE_CLOCK_PENDING_MAX_TICKS ends REFUSED_BUSY. */
+typedef enum {
+	BRIDGE_CLOCK_SW_IDLE          = 0,
+	BRIDGE_CLOCK_SW_PENDING       = 1,
+	BRIDGE_CLOCK_SW_RUNNING       = 2,
+	BRIDGE_CLOCK_SW_DONE_HXTAL    = 3,
+	BRIDGE_CLOCK_SW_DONE_FALLBACK = 4,
+	BRIDGE_CLOCK_SW_REFUSED_BUSY  = 5,
+} bridge_clock_switch_status_t;
+extern volatile bridge_clock_switch_status_t bridge_clock_switch_status;
+#define BRIDGE_CLOCK_QUIET_TICKS       3u
+#define BRIDGE_CLOCK_PENDING_MAX_TICKS 200u /* ~10 s */
+
 /* The internal seam the protocol layer will call for the host's "switch to the
  * external clock" command (the wire opcode is part of the protocol 0.15 work,
  * not here).  Base-level, NOT from a transport ISR: it holds PRIMASK for up to
- * ~23 ms and the SPI/I2C transfer in flight at that instant can fail its CRC.
- * The ISR-safe form is bridge_clock_request_hxtal(): it latches, and
- * bridge_clock_tick() (from bridge_hw_tick()) runs it.  Writing 1 to the SWD
- * variable bridge_clock_hxtal_request does the same for the bench. */
+ * ~23 ms.  It REFUSES (REFUSED_BUSY, false, no register touched) while any PWM
+ * channel or ADC stream is active: supervised outputs must never see the period
+ * stretch.  It does not wait for quiet buses; that is the tick path.  The
+ * ISR-safe form is bridge_clock_request_hxtal(): it latches, and
+ * bridge_clock_tick() (from bridge_hw_tick()) applies the bus-quiet contract
+ * above and then runs it.  Writing 1 to the SWD variable
+ * bridge_clock_hxtal_request does the same for the bench.  Returns true when the
+ * PLL runs from HXTAL afterwards. */
 bool bridge_clock_try_hxtal(void);
 void bridge_clock_request_hxtal(void);
-void bridge_clock_tick(void); /* run a latched request, else clear the attempt marker */
+void bridge_clock_tick(void); /* advance a latched request, else clear the attempt marker */
 extern volatile uint32_t bridge_clock_hxtal_request;
 
-void bridge_clock_pre_deepsleep(void);  /* before Deep-sleep entry: CKMEN off (HXTAL stops) */
-void bridge_clock_relock_prepare(void); /* Deep-sleep exit: restore HXTAL or fall back */
+void bridge_clock_pre_deepsleep(void); /* before Deep-sleep entry: CKMEN off (HXTAL stops) */
+/* Deep-sleep exit: restore HXTAL or fall back.  true = the PLL is already
+ * running and selected (the caller must NOT replay PLLEN/SCS); false = the
+ * caller replays the PLL as for IRC8M.  A WFI that returned without sleeping
+ * leaves HXTAL and the PLL live: that is just a CKM re-arm, never a restart. */
+bool bridge_clock_relock_prepare(void);
 bool bridge_clock_nmi_recover(uint32_t syscfg_stat); /* true = CKM-only NMI handled, resume */
 
 /* SystemCoreClock from the LIVE RCU state.  The vendor SystemCoreClockUpdate()

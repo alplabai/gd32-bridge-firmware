@@ -1114,7 +1114,9 @@ new frequency (8 MHz x108 -> 24.576 MHz would be ~664 MHz).
    `RCU_CTL.HXTALEN` (bit 16) clear, `SystemCoreClock` = 216000000, no change in
    boot time against the IRC8M-only build.
 3. **Host-requested switch.** With SE2 at the intended frequency (U-Boot
-   done), write `1` to `bridge_clock_hxtal_request`, let a tick pass. PASS =
+   done), write `1` to `bridge_clock_hxtal_request` and keep both buses idle: the switch
+   runs after 3 consecutive quiet 50 ms ticks, `bridge_clock_switch_status` goes
+   1 (PENDING) -> 3 (DONE_HXTAL). PASS =
    `RCU_CTL` has `HXTALEN` (bit 16), `HXTALSTB` (bit 17), `HXTALBPS` (bit 18)
    and `CKMEN` (bit 19) set; `RCU_CFG0.SCSS` = PLLP and `RCU_CFG0.AHBPSC` = 0
    (AHB /1); `RCU_PLL.PLLSEL` (bit 22) = 1; `bridge_clock_source` = 1,
@@ -1123,8 +1125,12 @@ new frequency (8 MHz x108 -> 24.576 MHz would be ~664 MHz).
    105, ...); `SystemCoreClock` = the entry SYSCLK (216000000, or 215040000 for
    24.576 MHz). `RTC_BKP9` = `0x48545831` until the next tick, then 0. Scope a
    PWM output at a known period and compare it with the host timebase: it must
-   now track SE2, not IRC8M. Request the switch BEFORE starting PWM / ADC
-   streaming: timers configured earlier keep their old prescaler.
+   now track SE2, not IRC8M. With a PWM output or ADC stream already running
+   the request must end `bridge_clock_switch_status` = 5 (REFUSED_BUSY) with
+   `bridge_clock_source` = 0, the PWM period unchanged, and nothing latched
+   (stop the PWM afterwards: no switch happens by itself). Likewise keep a
+   transfer toggling CS during the request: it must stay PENDING (or end 5 after
+   ~10 s) and never switch under the traffic.
 4. **Frequency classification.** Repeat step 3 with SE2 set to whatever the
    bench can produce. PASS = 24.576 MHz lands on its entry (PLLPSC field 5,
    PLLN 105, 215040000); 8, 12, 16 and 20 MHz (if producible) land on theirs
@@ -1132,10 +1138,9 @@ new frequency (8 MHz x108 -> 24.576 MHz would be ~664 MHz).
    PASS = no switch, `bridge_clock_source` = 0, `bridge_clock_fallback` = 6 (or 2
    for 32.768 kHz, where `HXTALSTB` does not set), SYSCLK never left the IRC8M
    PLL (probe a PWM period before and after: unchanged). Do NOT feed 25 MHz as a
-   test: it is only refused while the IRC8M timebase is within about 0.7% (see
-   README). Also confirm TIMER14 is idle again (`RCU_APB2EN.TIMER14EN` clear)
+   test: it is refused unless the IRC8M is more than 1.4% fast (see README). Also confirm TIMER14 is idle again (`RCU_APB2EN.TIMER14EN` clear)
    after every attempt. If a good 24.576 MHz clock always reports 6, either the
-   unit IRC8M is more than ~1% off (the +-1% band refuses it by design) or the
+   unit IRC8M is more than ~1% off (the -1% / +0.3% band refuses a slow IRC8M by design) or the
    HXTAL/32 -> TIMER14 routing needs a closer look: it is taken from the vendor
    header and has not run on silicon.
 5. **OSCOUT stays a GPIO.** With HXTAL up, drive E1M IO13 (PF1) high and low with
@@ -1170,6 +1175,9 @@ new frequency (8 MHz x108 -> 24.576 MHz would be ~664 MHz).
     wait is bounded by 5 ms of core time (the old 1e6-spin budget would have been
     1.2-1.9 s at 8 MHz under PRIMASK, past the 445 ms FWDGT window), so b) must
     complete without a watchdog reset and within ~15 ms of the wake.
+    c) A wake where the WFI returns at once (provoke a CS edge or RTC tick just
+    as the entry starts; hard to hit, retry): source stays 1, `HXTALEN` is never
+    seen cleared and the PLL never leaves PLLP; only `CKMEN` is re-armed.
 11. **Autonomous mode** (`-DBRIDGE_CLOCK_HXTAL_AT_BOOT=ON`, only for an SoM whose
     SE2 is correct from POR): steps 2-4 and 6 with the switch at boot instead of
     on request; boot to a working link must stay well inside the FWDGT window
@@ -1178,7 +1186,7 @@ new frequency (8 MHz x108 -> 24.576 MHz would be ~664 MHz).
 **What the firmware cannot catch.** A frequency that changes after the switch
 (the clock monitor only sees a stop), and an SE2 frequency that falls inside the
 acceptance band of a table entry (25 MHz is taken for 24.576 MHz when the IRC8M
-reads 0.7%-2.7% fast; it must never be fed). The frequency check itself replaces the earlier "cannot measure it"
+is more than 1.4% fast; it must never be fed). The frequency check itself replaces the earlier "cannot measure it"
 limit: it counts HXTAL/32 against the IRC8M-derived core clock (accuracy of that
 reference is the datasheet IRC8M tolerance, to be confirmed). The `RTC_BKP9`
 marker only helps if a misclock faults or resets AND the backup domain survives.

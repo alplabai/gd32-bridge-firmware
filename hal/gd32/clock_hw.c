@@ -130,27 +130,55 @@ static uint32_t cycles_for_us(uint32_t us)
 	return (live_sysclk_hz() / 1000000u) * us;
 }
 
-/* Poll `cond` until it holds or `us` of core time has passed.  The iteration
- * count is capped at the cycle budget as well, so a CYCCNT that is not running
- * (debugger-disabled DWT) still ends the wait instead of hanging. */
-static bool wait_for(bool (*cond)(void), uint32_t us)
+/* Poll `cond` until it holds or `budget` core cycles have passed.  A CYCCNT that
+ * does not advance (debugger-disabled DWT) is detected -- consecutive reads
+ * must differ -- and ends the wait at once instead of hanging under PRIMASK. */
+static bool wait_cycles(bool (*cond)(void), uint32_t budget)
 {
-	const uint32_t budget = cycles_for_us(us);
-	const uint32_t t0     = BRIDGE_CYCCNT();
-	for (uint32_t n = budget; n != 0u; n--) {
+	const uint32_t t0   = BRIDGE_CYCCNT();
+	uint32_t       last = t0, same = 0u;
+	for (;;) {
 		if (cond()) return true;
 		if (s_feed) fwdgt_counter_reload();
-		if ((uint32_t)(BRIDGE_CYCCNT() - t0) >= budget) break;
+		const uint32_t now = BRIDGE_CYCCNT();
+		if ((uint32_t)(now - t0) >= budget) break;
+		if (now == last) {
+			if (++same >= 8u) break; /* DWT stalled */
+		} else {
+			same = 0u;
+			last = now;
+		}
 	}
 	return cond();
+}
+
+/* `hz` = the LOWEST core clock the wait can run at.  A wait that starts at one
+ * clock and finishes at another (the SCS write that drops 216 MHz / AHB 4 to
+ * IRC8M / AHB 4) must budget with the slower one, or the "2 ms" is 13 ms. */
+static bool wait_for_at(bool (*cond)(void), uint32_t us, uint32_t hz)
+{
+	return wait_cycles(cond, (hz / 1000000u) * us);
+}
+
+static bool wait_for(bool (*cond)(void), uint32_t us)
+{
+	return wait_cycles(cond, cycles_for_us(us));
 }
 
 static void delay_us(uint32_t us)
 {
 	const uint32_t budget = cycles_for_us(us);
 	const uint32_t t0     = BRIDGE_CYCCNT();
-	for (uint32_t n = budget; n != 0u; n--) {
-		if ((uint32_t)(BRIDGE_CYCCNT() - t0) >= budget) break;
+	uint32_t       last = t0, same = 0u;
+	for (;;) {
+		const uint32_t now = BRIDGE_CYCCNT();
+		if ((uint32_t)(now - t0) >= budget) break;
+		if (now == last) {
+			if (++same >= 8u) break;
+		} else {
+			same = 0u;
+			last = now;
+		}
 	}
 }
 
@@ -184,6 +212,10 @@ static void hw_hxtal_bypass_enable(void)
 	/* Monitor off first: CKMEN must not survive into a restart (it stays set
 	 * through Deep-sleep), and bypass may only change with HXTALEN clear. */
 	RCU_CTL &= ~RCU_CTL_CKMEN;
+	/* Never clear HXTALEN under a PLL that is running from it (a WFI that
+	 * returned without sleeping leaves exactly that): bypass is already set
+	 * and the clock is live, so there is nothing to change. */
+	if ((RCU_PLL & RCU_PLL_PLLSEL) == RCU_PLLSRC_HXTAL && 0u != (RCU_CTL & RCU_CTL_PLLEN)) return;
 	RCU_CTL &= ~RCU_CTL_HXTALEN;
 	RCU_CTL |= RCU_CTL_HXTALBPS;
 }
@@ -219,7 +251,11 @@ static void hw_ckm_ack(void)
 	SYSCFG_STAT = SYSCFG_STAT_CKMNMIIF; /* ... then the SYSCFG mirror (rc_w1) */
 }
 
-/* HXTAL/32 -> TIMER14 ITI14 as an external clock (slave mode external 0). */
+/* HXTAL/32 -> TIMER14 ITI14 as an external clock (slave mode external 0).
+ * Returns the count NORMALISED to `window_us` of core time: the window is
+ * measured with the cycle counter between timer_enable() and the counter read
+ * (the SYSCFG/TRIGSEL/timer calls cost real time, a large share at 8 MHz), so
+ * f = counts * core_hz / elapsed_cycles. */
 static uint32_t hw_hxtal_div32_count(uint32_t window_us)
 {
 	bridge_rcu_periph_clock_enable(RCU_TRIGSEL);
@@ -227,13 +263,18 @@ static uint32_t hw_hxtal_div32_count(uint32_t window_us)
 
 	trigsel_init(TRIGSEL_OUTPUT_TIMER14_ITI14, TRIGSEL_INPUT_HXTAL_DIV32_TRIG);
 	timer_deinit(TIMER14);
+	/* timer_deinit() leaves CAR at its reset value; an explicit full-range
+	 * reload keeps the counter from stopping at a stale/zero auto-reload. */
+	timer_autoreload_value_config(TIMER14, 0xFFFFu);
 	timer_input_trigger_source_select(TIMER14, TIMER_SMCFG_TRGSEL_ITI14);
 	timer_slave_mode_select(TIMER14, TIMER_SLAVE_MODE_EXTERNAL0);
 	timer_counter_value_config(TIMER14, 0u);
 	timer_enable(TIMER14);
+	const uint32_t c0 = BRIDGE_CYCCNT();
 
 	delay_us(window_us);
 	const uint32_t counts = timer_counter_read(TIMER14);
+	const uint32_t c1     = BRIDGE_CYCCNT();
 
 	/* Release everything this touched. */
 	timer_disable(TIMER14);
@@ -247,7 +288,11 @@ static uint32_t hw_hxtal_div32_count(uint32_t window_us)
 		rcu_periph_clock_disable(RCU_TIMER14);
 		bridge_irq_unlock(primask);
 	}
-	return counts;
+
+	const uint32_t elapsed = (uint32_t)(c1 - c0);
+	if (elapsed == 0u) return 0u;
+	return (uint32_t)((uint64_t)counts * live_sysclk_hz() * window_us /
+	                  ((uint64_t)elapsed * 1000000u));
 }
 
 /* ------------------------------------------------------------------ */
@@ -310,7 +355,10 @@ static bool hw_pll_select(bridge_clock_source_t src, uint32_t input_hz)
 	if (leaving_pll) vcore_step_down();
 	RCU_CFG0 = (RCU_CFG0 & ~RCU_CFG0_SCS) | RCU_CKSYSSRC_IRC8M;
 	delay_us(VCORE_SETTLE_US);
-	if (!wait_for(cond_scss_irc8m, BRIDGE_CLOCK_SWITCH_US)) {
+	/* The core drops to IRC8M (still AHB /4 when leaving the PLL) during this
+	 * wait: budget with that clock, not the 216 MHz it starts at. */
+	if (!wait_for_at(
+	        cond_scss_irc8m, BRIDGE_CLOCK_SWITCH_US, BRIDGE_CLOCK_IRC8M_HZ >> ahb_shift())) {
 		if (leaving_pll) vcore_step_up();
 		return false;
 	}
@@ -380,17 +428,42 @@ void bridge_clock_init(bool fwdgt_running)
 #endif
 }
 
+volatile bridge_clock_switch_status_t bridge_clock_switch_status = BRIDGE_CLOCK_SW_IDLE;
+
+static uint32_t s_quiet_ticks, s_pending_ticks;
+
+/* Supervised outputs must never see the ~27x period stretch of the PLL rebuild:
+ * refuse while any PWM channel (output or capture) or ADC stream is active.
+ * The quadrature encoders are not listed: they count external edges with no
+ * SYSCLK-derived period (only the input filter time shifts by the clock ratio),
+ * are enabled at boot, and have no session to wait for. */
+static bool switch_blocked(void)
+{
+	return pwm_any_claimed() || adc_stream_any_active();
+}
+
 bool bridge_clock_try_hxtal(void)
 {
-	if (bridge_clock_source == BRIDGE_CLOCK_SRC_HXTAL) return true;
+	if (bridge_clock_source == BRIDGE_CLOCK_SRC_HXTAL) {
+		bridge_clock_switch_status = BRIDGE_CLOCK_SW_DONE_HXTAL;
+		return true;
+	}
+	if (switch_blocked()) {
+		bridge_clock_switch_status = BRIDGE_CLOCK_SW_REFUSED_BUSY;
+		return false; /* nothing touched, nothing latched */
+	}
 	s_feed = !ota_trial_unconfirmed();
 	BRIDGE_DWT_ENSURE();
+	bridge_clock_switch_status = BRIDGE_CLOCK_SW_RUNNING;
 	/* PRIMASK across the whole sequence, as the Deep-sleep wake does: no
 	 * transport ISR may run while the core is on a transient clock. */
 	const uint32_t primask = bridge_irq_lock();
-	const bool     ok      = bridge_clock_attempt_hxtal(&s_ops);
+	(void)bridge_clock_attempt_hxtal(&s_ops);
 	resync_core_clock();
 	bridge_irq_unlock(primask);
+	/* The truth is the active source: an NMI may have fallen back already. */
+	const bool ok              = (bridge_clock_source == BRIDGE_CLOCK_SRC_HXTAL);
+	bridge_clock_switch_status = ok ? BRIDGE_CLOCK_SW_DONE_HXTAL : BRIDGE_CLOCK_SW_DONE_FALLBACK;
 	return ok;
 }
 
@@ -403,8 +476,30 @@ void bridge_clock_tick(void)
 {
 	if (bridge_clock_hxtal_request != 0u) {
 		bridge_clock_hxtal_request = 0u;
-		(void)bridge_clock_try_hxtal();
-		return; /* the marker is cleared by the NEXT healthy tick */
+		if (bridge_clock_switch_status != BRIDGE_CLOCK_SW_PENDING &&
+		    bridge_clock_switch_status != BRIDGE_CLOCK_SW_RUNNING) {
+			if (bridge_clock_source == BRIDGE_CLOCK_SRC_HXTAL) {
+				bridge_clock_switch_status = BRIDGE_CLOCK_SW_DONE_HXTAL;
+			} else if (switch_blocked()) {
+				bridge_clock_switch_status = BRIDGE_CLOCK_SW_REFUSED_BUSY;
+			} else {
+				bridge_clock_switch_status = BRIDGE_CLOCK_SW_PENDING;
+				s_quiet_ticks              = 0u;
+				s_pending_ticks            = 0u;
+			}
+		}
+	}
+	if (bridge_clock_switch_status == BRIDGE_CLOCK_SW_PENDING) {
+		if (switch_blocked() || ++s_pending_ticks > BRIDGE_CLOCK_PENDING_MAX_TICKS) {
+			bridge_clock_switch_status = BRIDGE_CLOCK_SW_REFUSED_BUSY; /* drop it */
+			return;
+		}
+		s_quiet_ticks = bridge_link_quiet() ? s_quiet_ticks + 1u : 0u;
+		if (s_quiet_ticks >= BRIDGE_CLOCK_QUIET_TICKS) {
+			(void)bridge_clock_try_hxtal();
+			return; /* the marker is cleared by the NEXT healthy tick */
+		}
+		return;
 	}
 	bridge_clock_mark_healthy(&s_ops);
 }
@@ -416,15 +511,27 @@ void bridge_clock_pre_deepsleep(void)
 	if (bridge_clock_source == BRIDGE_CLOCK_SRC_HXTAL) RCU_CTL &= ~RCU_CTL_CKMEN;
 }
 
-void bridge_clock_relock_prepare(void)
+bool bridge_clock_relock_prepare(void)
 {
-	if (bridge_clock_source != BRIDGE_CLOCK_SRC_HXTAL) return;
-	/* Deep-sleep stopped HXTAL; bring it back (or fall back) before the caller
-	 * replays PLLEN.  Runs at 8 MHz under PRIMASK: time-bounded, see
-	 * clock_source.h for the ~23 ms worst case against the 445 ms FWDGT. */
+	if (bridge_clock_source != BRIDGE_CLOCK_SRC_HXTAL) return false;
 	s_feed = !ota_trial_unconfirmed();
 	BRIDGE_DWT_ENSURE();
+	/* A WFI that returned without sleeping (an edge latched between the quiet
+	 * check and the entry) leaves HXTAL and its PLL fully live: only the
+	 * monitor, taken off before the entry, needs re-arming.  Restarting HXTAL
+	 * here would clear HXTALEN under the running PLL. */
+	if ((RCU_CFG0 & RCU_CFG0_SCSS) == RCU_SCSS_PLLP && 0u != (RCU_CTL & RCU_CTL_PLLSTB) &&
+	    0u != (RCU_CTL & RCU_CTL_HXTALSTB)) {
+		hw_ckm_enable();
+		return true;
+	}
+	/* Deep-sleep stopped HXTAL; bring it back (or fall back) before the caller
+	 * would replay PLLEN.  Runs at 8 MHz under PRIMASK: time-bounded, see
+	 * clock_source.h for the ~23 ms worst case against the 445 ms FWDGT. */
 	(void)bridge_clock_external_start(&s_ops, true);
+	/* Both outcomes (HXTAL, or the rebuilt IRC8M PLL) end on PLLP with the PLL
+	 * locked: then the caller must not replay it. */
+	return (RCU_CFG0 & RCU_CFG0_SCSS) == RCU_SCSS_PLLP && 0u != (RCU_CTL & RCU_CTL_PLLSTB);
 }
 
 /* SYSCFG_STAT bits that are events, not NMI sources of their own (single-bit
@@ -462,15 +569,21 @@ bool bridge_clock_try_hxtal(void)
 void bridge_clock_request_hxtal(void)
 {
 }
+volatile bridge_clock_switch_status_t bridge_clock_switch_status = BRIDGE_CLOCK_SW_IDLE;
+
 void bridge_clock_tick(void)
 {
-	bridge_clock_hxtal_request = 0u;
+	if (bridge_clock_hxtal_request != 0u) {
+		bridge_clock_hxtal_request = 0u;
+		bridge_clock_switch_status = BRIDGE_CLOCK_SW_DONE_FALLBACK; /* FB_BUILD_DISABLED */
+	}
 }
 void bridge_clock_pre_deepsleep(void)
 {
 }
-void bridge_clock_relock_prepare(void)
+bool bridge_clock_relock_prepare(void)
 {
+	return false;
 }
 bool bridge_clock_nmi_recover(uint32_t syscfg_stat)
 {

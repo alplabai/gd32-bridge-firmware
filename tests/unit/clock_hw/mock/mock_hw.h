@@ -18,10 +18,15 @@ typedef struct {
 	uint32_t lock_us;        /* PLLEN -> PLLSTB */
 	bool     pll_locks_irc8m;
 	bool     pll_locks_hxtal;
-	bool     scs_refuses_irc8m;  /* SCSS never leaves the PLL (a wedged switch) */
-	int      irc8m_err_permille; /* IRC8M (and its PLL) fast by this much */
-	uint32_t step_cycles;        /* core cycles that elapse per time/cycle-counter read */
-	bool     trial;              /* ota_trial_unconfirmed() */
+	bool     scs_refuses_irc8m;          /* SCSS never leaves the PLL (a wedged switch) */
+	int      irc8m_err_permille;         /* IRC8M (and its PLL) fast by this much */
+	uint32_t step_cycles;                /* core cycles that elapse per time/cycle-counter read */
+	bool     trial;                      /* ota_trial_unconfirmed() */
+	bool     pwm_active;                 /* pwm_any_claimed() */
+	bool     adc_active;                 /* adc_stream_any_active() */
+	bool     link_busy;                  /* bridge_link_quiet() == false */
+	bool     cyccnt_stalled;             /* DWT->CYCCNT does not advance */
+	uint32_t timer_read_overhead_cycles; /* core cycles burnt inside timer_counter_read() */
 } mock_scn_t;
 
 extern mock_scn_t mock_scn;
@@ -50,5 +55,6 @@ void     mock_set_stat_flags(uint32_t flags);
 void     mock_hw_ckm_fire(void);
 void     mock_hw_deepsleep(void);
 uint32_t mock_stat_flags(void);
+uint32_t mock_timer14_car(void);
 
 #endif

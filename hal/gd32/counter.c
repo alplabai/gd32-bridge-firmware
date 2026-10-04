@@ -23,7 +23,9 @@ int bridge_hw_counter_read(uint8_t counter, uint32_t *ticks)
 	/* Single free-running counter exposed today; future revisions can
      * carve out additional ids for derived (slower) tick bases.  The
      * DWT counter ticks at the live core clock (bridge_core_clock_hz: 216 MHz on the
-     * IRC8M PLL, 215.04 MHz on a 24.576 MHz OSCIN; the host converts) and
+     * IRC8M PLL, 215.04 MHz on a 24.576 MHz OSCIN).  The core clock is not on the
+     * wire yet (alplabai/gd32-bridge-firmware#330), so a host that converts these
+     * ticks assumes 216 MHz and is 0.44% off after an HXTAL switch.  The counter
      * free-runs, wrapping 0xFFFFFFFF -> 0x00000000 every ~19.9 s.  It
      * is NOT monotonic.  Each read is a single atomic 32-bit load, so
      * deltas are correct under unsigned 32-bit arithmetic provided

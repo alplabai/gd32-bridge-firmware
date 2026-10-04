@@ -23,6 +23,7 @@ static void boot(bool fwdgt_running)
 	bridge_clock_fallback      = BRIDGE_CLOCK_FB_NONE;
 	bridge_clock_input_hz      = 0u;
 	bridge_clock_hxtal_request = 0u;
+	bridge_clock_switch_status = BRIDGE_CLOCK_SW_IDLE;
 	bridge_clock_init(fwdgt_running);
 }
 

@@ -137,6 +137,7 @@ void     timer_deinit(uint32_t timer);
 void     timer_input_trigger_source_select(uint32_t timer, uint32_t intrigger);
 void     timer_slave_mode_select(uint32_t timer, uint32_t slavemode);
 void     timer_counter_value_config(uint32_t timer, uint32_t counter);
+void     timer_autoreload_value_config(uint32_t timer, uint32_t autoreload);
 void     timer_enable(uint32_t timer);
 void     timer_disable(uint32_t timer);
 uint32_t timer_counter_read(uint32_t timer);

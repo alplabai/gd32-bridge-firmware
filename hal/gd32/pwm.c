@@ -203,6 +203,11 @@ static uint8_t pwm_timer_index(uint32_t periph)
 	return (uint8_t)((periph == TIMER0) ? 0u : 1u);
 }
 
+bool pwm_any_claimed(void)
+{
+	return (pwm_timer_claims[0] | pwm_timer_claims[1]) != 0u;
+}
+
 void pwm_channel_claim(uint8_t channel)
 {
 	if (channel >= PWM_CHANNEL_COUNT) return;
