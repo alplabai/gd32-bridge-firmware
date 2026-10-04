@@ -25,7 +25,7 @@ whole struct and stamps the header at boot.
 | 0x48 | `cmd_last` | opcode of the most recent recorded request |
 
 Each stat (`timing_stat_t`, 16 bytes) is four u32: `+0 count`, `+4 last`,
-`+8 min`, `+12 max`, all in DWT cycles.  Cycles / `SystemCoreClock` (216 MHz)
+`+8 min`, `+12 max`, all in DWT cycles.  Cycles / `SystemCoreClock` (216 MHz on the IRC8M PLL; read the live value, see README "System clock")
 gives seconds: 216 cycles = 1 us.
 
 `total` starts at the CS-release branch of the CS EXTI handler (after the EXTI
