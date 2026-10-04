@@ -196,10 +196,13 @@ typedef enum { DMA_CH0 = 0 } dma_channel_enum;
 #define DMA_REQUEST_ADC3            3u
 #define DMA_FLAG_FTF                ((uint32_t)(1u << 0))
 #define DMA_FLAG_ERR                ((uint32_t)(1u << 1))
+#define DMA_FLAG_HTF                ((uint32_t)(1u << 2))
 #define DMA_INT_FTF                 ((uint32_t)(1u << 0))
 #define DMA_INT_ERR                 ((uint32_t)(1u << 1))
+#define DMA_INT_HTF                 ((uint32_t)(1u << 2))
 #define DMA_INT_FLAG_FTF            ((uint32_t)(1u << 0))
 #define DMA_INT_FLAG_ERR            ((uint32_t)(1u << 1))
+#define DMA_INT_FLAG_HTF            ((uint32_t)(1u << 2))
 #define DMA_CHXCTL_CHEN             ((uint32_t)(1u << 0))
 
 extern uint32_t *mock_dma_chctl_ref(uint32_t dma_periph, dma_channel_enum channelx);

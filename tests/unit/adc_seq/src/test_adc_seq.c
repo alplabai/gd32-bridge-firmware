@@ -64,6 +64,24 @@ extern void adc_dsp_fac_release(uint8_t stream_id); /* adc_stream.c */
  * (forward-declared so the earlier tests' resets can call it too). */
 static void fac_latch_release(void);
 
+/* Symbols the production adc_stream.c reaches in other translation units
+ * (init.c's clock check, transport_hw_gd32.c's ATTN event latch), supplied
+ * here: the BEGIN2/READ2 cases below steer the first and count the second. */
+bool            bridge_core_clock_matches = true;
+uint32_t        bridge_core_clock_hz      = 216000000u;
+static uint32_t ev_set[BRIDGE_ADC_STREAM_COUNT];
+static uint32_t ev_clear[BRIDGE_ADC_STREAM_COUNT];
+
+void bridge_hw_attn_event_set(uint8_t stream_id)
+{
+	ev_set[stream_id]++;
+}
+
+void bridge_hw_attn_event_clear(uint8_t stream_id)
+{
+	ev_clear[stream_id]++;
+}
+
 static void adc_seq_reset(void)
 {
 	/* The owner bytes are file-local production state. Release both stream
@@ -82,11 +100,16 @@ static void adc_seq_reset(void)
 	}
 	mock_adc_set_flag(BRIDGE_ADC_CH0_PERIPH, ADC_FLAG_ROVF, RESET);
 	mock_adc_set_flag(BRIDGE_ADC_CH0_PERIPH, ADC_FLAG_EOC, RESET);
-	vref_ok            = true;
-	adc_vref_mv        = ADC_VREF_MV;
-	adc_vrefint_code   = 0u;
-	mock_adc_eoc_stuck = false;
-	mock_vref_ready    = true;
+	vref_ok                   = true;
+	adc_vref_mv               = ADC_VREF_MV;
+	adc_vrefint_code          = 0u;
+	mock_adc_eoc_stuck        = false;
+	mock_vref_ready           = true;
+	bridge_core_clock_matches = true;
+	memset(ev_set, 0, sizeof ev_set);
+	memset(ev_clear, 0, sizeof ev_clear);
+	memset(adc_oversample_ratio_cache, 0, sizeof adc_oversample_ratio_cache);
+	memset(adc_sample_cycles_cache, 0, sizeof adc_sample_cycles_cache);
 }
 
 /* ---------------------------------------------------------------------
@@ -1475,6 +1498,415 @@ ZTEST(gd32_adc_seq, test_vref_measure_forces_12bit_no_oversample_and_recalibrate
 	zassert_true(ena > res && ena > ovs, "converter re-enabled after the format");
 	zassert_true(trg > ena, "first trigger only after re-enable + calibration");
 	zassert_equal(adc_vref_mv, 1800u, "code 2730 -> 1800 mV");
+}
+
+/* =====================================================================
+ * v0.15 BEGIN2 / READ2 against the register mock.
+ *
+ * adc_stream.c is the REAL production source; the DMA write position is
+ * steered with mock_dma_set_remaining() (write index = ring_depth -
+ * remaining) and lap_count, exactly as the legacy overrun tests do.  The
+ * planning arithmetic itself is proven in the adc_stream2 suite.
+ * ===================================================================== */
+
+#define READ2_MAX 121u
+
+static bridge_hw_adc_stream2_info_t begin2_ok(uint8_t stream_id, uint32_t rate, uint16_t wm)
+{
+	bridge_hw_adc_stream2_info_t info;
+	memset(&info, 0, sizeof info);
+	zassert_equal(bridge_hw_adc_stream_begin2(stream_id, BRIDGE_ADC_CH0, rate, wm, &info),
+	              BRIDGE_HW_OK,
+	              "BEGIN2 succeeds against the mock");
+	return info;
+}
+
+static int read2_call(uint8_t   stream_id,
+                      uint8_t   max,
+                      uint32_t *first,
+                      uint32_t *dropped,
+                      uint8_t  *got,
+                      uint16_t *codes)
+{
+	uint8_t raw[2u * READ2_MAX];
+	int     rc = bridge_hw_adc_stream_read2(stream_id, max, first, dropped, got, raw);
+	for (uint8_t i = 0u; rc == BRIDGE_HW_OK && i < *got; i++) {
+		codes[i] = (uint16_t)(raw[2u * i] | ((uint16_t)raw[2u * i + 1u] << 8));
+	}
+	return rc;
+}
+
+ZTEST(gd32_adc_seq, test_begin2_reports_the_realised_pace_and_snapshots)
+{
+	adc_seq_reset();
+	fac_latch_release();
+	adc_vrefint_code = 2730u;
+	adc_vref_mv      = 1800u;
+
+	const bridge_hw_adc_stream2_info_t info = begin2_ok(0u, 1000u, 256u);
+	zassert_equal(info.tick_hz, 1000000u);
+	zassert_equal(info.period_ticks, 1000u);
+	zassert_equal(info.full_scale, 4095u);
+	zassert_equal(info.vref_mv, 1800u);
+	zassert_equal(info.flags, BRIDGE_HW_ADC_STREAM2_FLAG_VREF_MEASURED, "measured reference");
+	zassert_equal(info.watermark, 256u);
+	zassert_equal(info.ring_depth, 512u, "ring = 2 * watermark");
+	zassert_true(adc_streams[0].v2);
+	zassert_equal(adc_streams[0].ring_depth, 512u);
+	zassert_equal(adc_streams[0].read2_d, 0u);
+
+	/* HTF (watermark) joins FTF + ERR in the armed interrupt set. */
+	const int enable_i = mock_seq_find_from("dma_interrupt_enable", DMA0, 0);
+	zassert_true(enable_i >= 0);
+	zassert_equal(mock_seq[enable_i].arg, DMA_INT_FTF | DMA_INT_ERR | DMA_INT_HTF);
+	bridge_hw_adc_stream_end(0u);
+}
+
+ZTEST(gd32_adc_seq, test_begin2_without_watermark_uses_the_whole_ring_and_no_htf)
+{
+	adc_seq_reset();
+	fac_latch_release();
+	adc_vrefint_code                        = 0u; /* never measured: the 1800 mV fallback */
+	const bridge_hw_adc_stream2_info_t info = begin2_ok(0u, 300u, 0u);
+	zassert_equal(info.ring_depth, 1024u);
+	zassert_equal(info.watermark, 0u);
+	zassert_equal(info.period_ticks, 3333u, "300 Hz truncates to 3333 ticks (300.03 Hz)");
+	zassert_equal(info.flags, 0u, "fallback reference is not VREF_MEASURED");
+	const int enable_i = mock_seq_find_from("dma_interrupt_enable", DMA0, 0);
+	zassert_equal(mock_seq[enable_i].arg, DMA_INT_FTF | DMA_INT_ERR, "no watermark, no HTF");
+	bridge_hw_adc_stream_end(0u);
+}
+
+/* BEGIN2 never reports a rate it cannot achieve: the conversion must fit the
+ * pacing period, checked BEFORE any hardware is touched. */
+ZTEST(gd32_adc_seq, test_begin2_refuses_a_conversion_longer_than_the_period)
+{
+	adc_seq_reset();
+	fac_latch_release();
+	adc_oversample_ratio_cache[BRIDGE_ADC_CH0] = 256u;
+	adc_sample_cycles_cache[BRIDGE_ADC_CH0]    = 638u;
+	bridge_hw_adc_stream2_info_t info;
+	zassert_equal(bridge_hw_adc_stream_begin2(0u, BRIDGE_ADC_CH0, 1000u, 0u, &info),
+	              BRIDGE_HW_ERR_RANGE,
+	              "4.6 ms of conversion cannot fit a 1 ms period");
+	zassert_equal(mock_seq_find_from("dma_init", DMA0, 0), -1, "no DMA was set up");
+	zassert_equal(mock_seq_find_from("adc_disable", BRIDGE_ADC_CH0_PERIPH, 0),
+	              -1,
+	              "the converter was never touched");
+	zassert_false(adc_streams[0].in_use);
+
+	/* The legacy BEGIN keeps its silent degradation (0.14 behaviour). */
+	zassert_equal(bridge_hw_adc_stream_begin(0u, BRIDGE_ADC_CH0, 1000u), BRIDGE_HW_OK);
+	bridge_hw_adc_stream_end(0u);
+	adc_oversample_ratio_cache[BRIDGE_ADC_CH0] = 0u;
+	adc_sample_cycles_cache[BRIDGE_ADC_CH0]    = 0u;
+}
+
+ZTEST(gd32_adc_seq, test_begin2_refuses_a_wrong_core_clock)
+{
+	adc_seq_reset();
+	fac_latch_release();
+	bridge_core_clock_matches = false;
+	bridge_hw_adc_stream2_info_t info;
+	zassert_equal(bridge_hw_adc_stream_begin2(0u, BRIDGE_ADC_CH0, 1000u, 0u, &info),
+	              BRIDGE_HW_ERR_IO,
+	              "the realised rate would be wrong");
+	zassert_false(adc_streams[0].in_use);
+	/* Legacy BEGIN is unaffected. */
+	zassert_equal(bridge_hw_adc_stream_begin(0u, BRIDGE_ADC_CH0, 1000u), BRIDGE_HW_OK);
+	bridge_hw_adc_stream_end(0u);
+}
+
+/* A late VREFRDY lock: BEGIN2 answers NOT_READY (retry after the housekeeping
+ * tick) rather than snapshotting a vref_mv that is about to change; a dead
+ * reference stays IO; the legacy BEGIN answers IO for both. */
+ZTEST(gd32_adc_seq, test_begin2_not_ready_while_a_vref_remeasure_is_pending)
+{
+	adc_seq_reset();
+	fac_latch_release();
+	bridge_hw_adc_stream2_info_t info;
+
+	vref_ok         = false;
+	mock_vref_ready = false;
+	zassert_equal(bridge_hw_adc_stream_begin2(0u, BRIDGE_ADC_CH0, 1000u, 0u, &info),
+	              BRIDGE_HW_ERR_IO,
+	              "reference never locked: dead");
+
+	mock_vref_ready = true; /* locks late: noted by the probe, measured at base level */
+	zassert_equal(bridge_hw_adc_stream_begin2(0u, BRIDGE_ADC_CH0, 1000u, 0u, &info),
+	              BRIDGE_HW_ERR_NOT_READY);
+	zassert_true(vref_remeasure_pending_get());
+	zassert_equal(bridge_hw_adc_stream_begin(0u, BRIDGE_ADC_CH0, 1000u),
+	              BRIDGE_HW_ERR_IO,
+	              "legacy BEGIN has no NOT_READY: IO until the tick runs");
+
+	vref_late_tick(); /* the base-level measurement + publish */
+	zassert_true(vref_ok);
+	zassert_false(vref_remeasure_pending_get());
+	zassert_equal(bridge_hw_adc_stream_begin2(0u, BRIDGE_ADC_CH0, 1000u, 0u, &info), BRIDGE_HW_OK);
+	bridge_hw_adc_stream_end(0u);
+}
+
+ZTEST(gd32_adc_seq, test_begin2_slot_in_use_and_shared_converter_are_inval)
+{
+	adc_seq_reset();
+	fac_latch_release();
+	begin2_ok(0u, 1000u, 0u);
+	bridge_hw_adc_stream2_info_t info;
+	zassert_equal(bridge_hw_adc_stream_begin2(0u, BRIDGE_ADC_CH0, 1000u, 0u, &info),
+	              BRIDGE_HW_ERR_INVAL,
+	              "slot already in use");
+	zassert_equal(bridge_hw_adc_stream_begin2(1u, 1u, 1000u, 0u, &info),
+	              BRIDGE_HW_ERR_INVAL,
+	              "channel 1 rides the same converter (ADC3) as channel 0");
+	bridge_hw_adc_stream_end(0u);
+}
+
+/* A BEGIN2 stream answers only READ2 and a legacy stream only STREAM_READ. */
+ZTEST(gd32_adc_seq, test_begin2_and_legacy_streams_do_not_cross_read)
+{
+	adc_seq_reset();
+	fac_latch_release();
+	uint32_t first, dropped;
+	uint8_t  got;
+	uint16_t codes[4];
+	uint16_t mv[4];
+	uint8_t  got8;
+
+	zassert_equal(read2_call(0u, 4u, &first, &dropped, &got, codes),
+	              BRIDGE_HW_ERR_INVAL,
+	              "READ2 on a stopped stream");
+
+	begin2_ok(0u, 1000u, 0u);
+	zassert_equal(bridge_hw_adc_stream_read(0u, 4u, &got8, mv),
+	              BRIDGE_HW_ERR_INVAL,
+	              "legacy STREAM_READ on a BEGIN2 stream");
+	bridge_hw_adc_stream_end(0u);
+
+	zassert_equal(bridge_hw_adc_stream_begin(0u, BRIDGE_ADC_CH0, 1000u), BRIDGE_HW_OK);
+	zassert_equal(read2_call(0u, 4u, &first, &dropped, &got, codes),
+	              BRIDGE_HW_ERR_INVAL,
+	              "READ2 on a legacy-started stream");
+	bridge_hw_adc_stream_end(0u);
+}
+
+ZTEST(gd32_adc_seq, test_read2_delivers_in_order_with_a_running_index)
+{
+	adc_seq_reset();
+	fac_latch_release();
+	begin2_ok(0u, 1000u, 16u); /* ring depth 32 */
+	for (uint16_t i = 0u; i < 32u; i++)
+		adc_streams[0].ring[i] = (uint16_t)(100u + i);
+	mock_dma_set_remaining(DMA0, DMA_CH0, 32u - 10u); /* write index 10 */
+
+	uint32_t first, dropped;
+	uint8_t  got;
+	uint16_t codes[READ2_MAX];
+
+	zassert_equal(read2_call(0u, 4u, &first, &dropped, &got, codes), BRIDGE_HW_OK);
+	zassert_equal(got, 4u);
+	zassert_equal(first, 0u);
+	zassert_equal(dropped, 0u);
+	zassert_equal(codes[0], 100u);
+	zassert_equal(codes[3], 103u);
+
+	zassert_equal(read2_call(0u, 20u, &first, &dropped, &got, codes), BRIDGE_HW_OK);
+	zassert_equal(got, 6u, "only 6 left of the 10 deposited");
+	zassert_equal(first, 4u, "first_index == previous first_index + previous got");
+	zassert_equal(dropped, 0u);
+	zassert_equal(codes[0], 104u);
+	zassert_equal(codes[5], 109u);
+
+	zassert_equal(read2_call(0u, 20u, &first, &dropped, &got, codes), BRIDGE_HW_OK);
+	zassert_equal(got, 0u, "empty ring: STATUS_OK, got 0");
+	zassert_equal(first, 10u);
+	bridge_hw_adc_stream_end(0u);
+}
+
+/* Overrun is never BUSY: the oldest samples are skipped, counted in
+ * `dropped`, and the freshest depth - GUARD are served. */
+ZTEST(gd32_adc_seq, test_read2_overrun_skips_counts_and_never_answers_busy)
+{
+	adc_seq_reset();
+	fac_latch_release();
+	begin2_ok(0u, 1000u, 16u); /* ring depth 32, budget 24 */
+	for (uint16_t i = 0u; i < 32u; i++)
+		adc_streams[0].ring[i] = (uint16_t)(200u + i);
+	adc_streams[0].lap_count = 1u;              /* the writer deposited one full ring */
+	mock_dma_set_remaining(DMA0, DMA_CH0, 32u); /* write index 0: total written = 32 */
+
+	uint32_t first, dropped;
+	uint8_t  got;
+	uint16_t codes[READ2_MAX];
+	zassert_equal(read2_call(0u, 50u, &first, &dropped, &got, codes), BRIDGE_HW_OK);
+	zassert_equal(dropped, 8u, "backlog 32 > 24: skip the 8 oldest");
+	zassert_equal(first, 8u, "first_index = D + dropped");
+	zassert_equal(got, 24u);
+	zassert_equal(codes[0], 208u, "the freshest contiguous samples");
+	zassert_equal(codes[23], 231u);
+
+	/* Next read continues exactly where the delivered index left off. */
+	zassert_equal(read2_call(0u, 50u, &first, &dropped, &got, codes), BRIDGE_HW_OK);
+	zassert_equal(got, 0u);
+	zassert_equal(dropped, 0u);
+	zassert_equal(first, 32u, "8 dropped + 24 delivered");
+	bridge_hw_adc_stream_end(0u);
+}
+
+ZTEST(gd32_adc_seq, test_read2_index_wraps_mod_2_32_and_codes_clamp_to_full_scale)
+{
+	adc_seq_reset();
+	fac_latch_release();
+	begin2_ok(0u, 1000u, 16u);
+	adc_streams[0].read2_d = 0xFFFFFFFEu;
+	adc_streams[0].ring[0] = 4095u + 905u; /* above full scale: clamped */
+	adc_streams[0].ring[1] = 7u;
+	adc_streams[0].ring[2] = 8u;
+	adc_streams[0].ring[3] = 9u;
+	mock_dma_set_remaining(DMA0, DMA_CH0, 32u - 4u);
+
+	uint32_t first, dropped;
+	uint8_t  got;
+	uint16_t codes[READ2_MAX];
+	zassert_equal(read2_call(0u, 4u, &first, &dropped, &got, codes), BRIDGE_HW_OK);
+	zassert_equal(first, 0xFFFFFFFEu);
+	zassert_equal(codes[0], 4095u, "clamped to full_scale");
+	zassert_equal(adc_streams[0].read2_d, 2u, "D wrapped past 2^32");
+	bridge_hw_adc_stream_end(0u);
+}
+
+/* ROVF recovery is a discontinuity of unknown length: the sentinel, got 0,
+ * first_index = D_prev, never BUSY. */
+ZTEST(gd32_adc_seq, test_read2_rovf_recovery_reports_the_discontinuity_sentinel)
+{
+	adc_seq_reset();
+	fac_latch_release();
+	begin2_ok(0u, 1000u, 16u);
+	adc_streams[0].read2_d = 55u;
+	mock_adc_set_flag(BRIDGE_ADC_CH0_PERIPH, ADC_FLAG_ROVF, SET);
+
+	uint32_t first, dropped;
+	uint8_t  got = 0xFFu;
+	uint16_t codes[4];
+	zassert_equal(read2_call(0u, 4u, &first, &dropped, &got, codes), BRIDGE_HW_OK);
+	zassert_equal(dropped, 0xFFFFFFFFu);
+	zassert_equal(got, 0u);
+	zassert_equal(first, 55u);
+	zassert_equal(adc_streams[0].read2_d, 55u, "an unknown-length gap does not advance D");
+	zassert_equal((int)adc_flag_get(BRIDGE_ADC_CH0_PERIPH, ADC_FLAG_ROVF), (int)RESET);
+	bridge_hw_adc_stream_end(0u);
+}
+
+/* DSP data plane: processed-ring codes, the sticky DSP faults, FFT = NOSUPPORT,
+ * and a pump gap answers the sentinel. */
+ZTEST(gd32_adc_seq, test_read2_on_a_dsp_bound_stream)
+{
+	adc_seq_reset();
+	fac_latch_release();
+	begin2_ok(0u, 1000u, 16u);
+	adc_stream_state_t *s = &adc_streams[0];
+	s->dsp_bound          = true;
+	s->dsp_terminal       = 0u; /* FIR */
+
+	uint32_t first, dropped;
+	uint8_t  got;
+	uint16_t codes[READ2_MAX];
+
+	s->proc_ring[0] = 11u;
+	s->proc_ring[1] = 22u;
+	s->proc_write   = 2u;
+	s->proc_read    = 0u;
+	zassert_equal(read2_call(0u, 8u, &first, &dropped, &got, codes), BRIDGE_HW_OK);
+	zassert_equal(got, 2u, "processed-ring codes");
+	zassert_equal(codes[0], 11u);
+	zassert_equal(codes[1], 22u);
+
+	s->proc_gap   = true;
+	s->proc_write = 9u;
+	zassert_equal(read2_call(0u, 8u, &first, &dropped, &got, codes), BRIDGE_HW_OK);
+	zassert_equal(dropped, 0xFFFFFFFFu, "pump proc_gap is a discontinuity");
+	zassert_equal(got, 0u);
+	zassert_false(s->proc_gap);
+	zassert_equal(s->proc_read, s->proc_write, "processed cursor resynced");
+
+	s->dsp_cfg_bad = true;
+	zassert_equal(read2_call(0u, 8u, &first, &dropped, &got, codes), BRIDGE_HW_ERR_RANGE);
+	s->dsp_cfg_bad = false;
+	s->dsp_sat     = true;
+	zassert_equal(read2_call(0u, 8u, &first, &dropped, &got, codes), BRIDGE_HW_ERR_IO);
+	s->dsp_sat      = false;
+	s->dsp_terminal = 3u; /* FFT */
+	zassert_equal(read2_call(0u, 8u, &first, &dropped, &got, codes), BRIDGE_HW_ERR_NOTIMPL);
+	s->dsp_bound = false;
+	bridge_hw_adc_stream_end(0u);
+}
+
+/* The watermark events: HTF and FTF on a BEGIN2 stream with a watermark and a
+ * raw data plane raise the event; legacy streams, W == 0 and DSP-bound streams
+ * do not. */
+ZTEST(gd32_adc_seq, test_watermark_events_from_the_dma_isr)
+{
+	adc_seq_reset();
+	fac_latch_release();
+	begin2_ok(0u, 1000u, 64u);
+
+	mock_dma_set_interrupt_flag(DMA0, DMA_CH0, DMA_INT_FLAG_HTF, SET);
+	DMA0_Channel0_IRQHandler();
+	zassert_equal(ev_set[0], 1u, "HTF = W samples");
+	mock_dma_set_interrupt_flag(DMA0, DMA_CH0, DMA_INT_FLAG_FTF, SET);
+	DMA0_Channel0_IRQHandler();
+	zassert_equal(ev_set[0], 2u, "FTF = 2W samples");
+	zassert_equal(adc_streams[0].lap_count, 1u, "the lap counter still counts FTF");
+
+	adc_streams[0].dsp_bound = true;
+	mock_dma_set_interrupt_flag(DMA0, DMA_CH0, DMA_INT_FLAG_HTF, SET);
+	DMA0_Channel0_IRQHandler();
+	zassert_equal(ev_set[0], 2u, "a DSP-bound stream raises events from the pump instead");
+	adc_streams[0].dsp_bound = false;
+	bridge_hw_adc_stream_end(0u);
+
+	begin2_ok(0u, 1000u, 0u);
+	mock_dma_set_interrupt_flag(DMA0, DMA_CH0, DMA_INT_FLAG_FTF, SET);
+	DMA0_Channel0_IRQHandler();
+	zassert_equal(ev_set[0], 2u, "no watermark, no event");
+	bridge_hw_adc_stream_end(0u);
+
+	zassert_equal(bridge_hw_adc_stream_begin(0u, BRIDGE_ADC_CH0, 1000u), BRIDGE_HW_OK);
+	mock_dma_set_interrupt_flag(DMA0, DMA_CH0, DMA_INT_FLAG_FTF, SET);
+	DMA0_Channel0_IRQHandler();
+	zassert_equal(ev_set[0], 2u, "legacy stream raises no events");
+	bridge_hw_adc_stream_end(0u);
+}
+
+/* READ2 clears the stream's event and raises it again while a watermark's
+ * worth of backlog remains; STREAM_END clears it and drops HTF. */
+ZTEST(gd32_adc_seq, test_read2_rearms_the_event_only_while_a_watermark_remains)
+{
+	adc_seq_reset();
+	fac_latch_release();
+	begin2_ok(0u, 1000u, 16u);                        /* depth 32 */
+	mock_dma_set_remaining(DMA0, DMA_CH0, 32u - 20u); /* 20 deposited */
+
+	uint32_t first, dropped;
+	uint8_t  got;
+	uint16_t codes[READ2_MAX];
+	zassert_equal(read2_call(0u, 2u, &first, &dropped, &got, codes), BRIDGE_HW_OK);
+	zassert_equal(ev_clear[0], 1u, "the read consumed the event");
+	zassert_equal(ev_set[0], 1u, "18 >= W(16) remain: re-raised");
+
+	zassert_equal(read2_call(0u, 2u, &first, &dropped, &got, codes), BRIDGE_HW_OK);
+	zassert_equal(ev_set[0], 2u, "16 >= 16 remain");
+	zassert_equal(read2_call(0u, 2u, &first, &dropped, &got, codes), BRIDGE_HW_OK);
+	zassert_equal(ev_set[0], 2u, "14 < 16 remain: stays cleared");
+	zassert_equal(ev_clear[0], 3u);
+
+	const uint32_t clears = ev_clear[0];
+	zassert_equal(bridge_hw_adc_stream_end(0u), BRIDGE_HW_OK);
+	zassert_equal(ev_clear[0], clears + 1u, "END clears the event");
+	const int dis = mock_seq_find_from("dma_interrupt_disable", DMA0, 0);
+	zassert_true(dis >= 0);
+	zassert_equal(mock_seq[dis].arg, DMA_INT_FTF | DMA_INT_HTF | DMA_INT_ERR);
+	zassert_false(adc_streams[0].v2);
 }
 
 ZTEST_SUITE(gd32_adc_seq, NULL, NULL, NULL, NULL, NULL);

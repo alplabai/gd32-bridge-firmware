@@ -17,9 +17,19 @@
 #include "gd32g5x3.h"
 
 #include "adc_dsp_chain.h"
+#include "adc_stream2.h"
 #include "bridge_board_config.h"
 #include "bridge_critical.h"
 #include "gd32_common.h"
+#include "protocol.h" /* the wire-side stream constants asserted below */
+
+/* The protocol layer validates BEGIN2 against its own copies of these. */
+_Static_assert(BRIDGE_ADC_STREAM_RATE_MAX_HZ == GD32_BRIDGE_ADC_STREAM2_RATE_MAX_HZ,
+               "BEGIN2's rate ceiling (protocol.h) must match the HAL's");
+_Static_assert(BRIDGE_ADC_STREAM_RING_SAMPLES == GD32_BRIDGE_ADC_STREAM_RING_SAMPLES,
+               "the host-visible ring depth (protocol.h) must match the HAL's");
+_Static_assert(BRIDGE_ADC_STREAM_COUNT == GD32_BRIDGE_ADC_STREAM_COUNT,
+               "stream count (protocol.h) must match the HAL's");
 
 /* Stream slots; layout + sizing doc in gd32_common.h. */
 adc_stream_state_t adc_streams[BRIDGE_ADC_STREAM_COUNT];
@@ -67,9 +77,20 @@ static void adc_stream_latch_dma_error(uint8_t stream_id)
 	/* ERRIFC only: a global clear would discard a concurrent FTF. */
 	dma_interrupt_flag_clear(s->dma_periph, (dma_channel_enum)s->dma_channel, DMA_INT_FLAG_ERR);
 	dma_interrupt_disable(
-	    s->dma_periph, (dma_channel_enum)s->dma_channel, DMA_INT_FTF | DMA_INT_ERR);
+	    s->dma_periph, (dma_channel_enum)s->dma_channel, DMA_INT_FTF | DMA_INT_HTF | DMA_INT_ERR);
 	dma_channel_disable(s->dma_periph, (dma_channel_enum)s->dma_channel);
 	s->dma_error_count++;
+}
+
+/* A watermark boundary was crossed on stream `id` (half-transfer at W samples,
+ * full-transfer at 2W of a 2W-deep ring).  Only a BEGIN2 stream with a
+ * watermark whose data plane is the RAW ring raises ATTN events from here; a
+ * DSP-bound stream raises them from the base-level pump when the PROCESSED
+ * backlog reaches W (bridge_hw_dsp_pump). */
+static void adc_stream_watermark_event(uint8_t id)
+{
+	const adc_stream_state_t *s = &adc_streams[id];
+	if (s->v2 && s->watermark != 0u && !s->dsp_bound) bridge_hw_attn_event_set(id);
 }
 
 /* DMA full-transfer-finish "lap" ISRs -- one per stream (stream 0 ->
@@ -85,6 +106,11 @@ void DMA0_Channel0_IRQHandler(void)
 	if (dma_interrupt_flag_get(DMA0, DMA_CH0, DMA_INT_FLAG_FTF) != RESET) {
 		dma_interrupt_flag_clear(DMA0, DMA_CH0, DMA_INT_FLAG_FTF);
 		adc_streams[0].lap_count++;
+		adc_stream_watermark_event(0u);
+	}
+	if (dma_interrupt_flag_get(DMA0, DMA_CH0, DMA_INT_FLAG_HTF) != RESET) {
+		dma_interrupt_flag_clear(DMA0, DMA_CH0, DMA_INT_FLAG_HTF);
+		adc_stream_watermark_event(0u);
 	}
 	adc_stream_latch_dma_error(0u);
 }
@@ -94,6 +120,11 @@ void DMA1_Channel0_IRQHandler(void)
 	if (dma_interrupt_flag_get(DMA1, DMA_CH0, DMA_INT_FLAG_FTF) != RESET) {
 		dma_interrupt_flag_clear(DMA1, DMA_CH0, DMA_INT_FLAG_FTF);
 		adc_streams[1].lap_count++;
+		adc_stream_watermark_event(1u);
+	}
+	if (dma_interrupt_flag_get(DMA1, DMA_CH0, DMA_INT_FLAG_HTF) != RESET) {
+		dma_interrupt_flag_clear(DMA1, DMA_CH0, DMA_INT_FLAG_HTF);
+		adc_stream_watermark_event(1u);
 	}
 	adc_stream_latch_dma_error(1u);
 }
@@ -118,8 +149,8 @@ static uint16_t adc_stream_write_index(const adc_stream_state_t *s)
 	/* remaining == 0 (mid circular reload) is write index 0, never 1024: a
 	 * 1024 stored into read_idx would index ring[1024], which aliases the
 	 * read_idx member itself (gh#18 A22). */
-	if (remaining == 0u || remaining > BRIDGE_ADC_STREAM_RING_SAMPLES) return 0u;
-	return (uint16_t)(BRIDGE_ADC_STREAM_RING_SAMPLES - remaining);
+	if (remaining == 0u || remaining > s->ring_depth) return 0u;
+	return (uint16_t)(s->ring_depth - remaining);
 }
 
 /* Total samples the DMA has ever deposited, with gh#149's coalescing
@@ -166,9 +197,9 @@ static uint32_t adc_stream_total_written(adc_stream_state_t *s, adc_dma_pos_t *t
 {
 	const uint32_t laps  = s->lap_count;
 	const uint16_t w     = adc_stream_write_index(s);
-	uint32_t       total = laps * BRIDGE_ADC_STREAM_RING_SAMPLES + (uint32_t)w;
+	uint32_t       total = laps * s->ring_depth + (uint32_t)w;
 	if (trk->valid && laps == trk->laps && w < trk->w) {
-		total += BRIDGE_ADC_STREAM_RING_SAMPLES; /* one uncounted reload */
+		total += s->ring_depth; /* one uncounted reload */
 	}
 	trk->laps  = laps;
 	trk->w     = w;
@@ -176,13 +207,29 @@ static uint32_t adc_stream_total_written(adc_stream_state_t *s, adc_dma_pos_t *t
 	return total;
 }
 
-int bridge_hw_adc_stream_begin(uint8_t stream_id, uint8_t channel, uint32_t sample_rate_hz)
+/* Shared body of the legacy BEGIN and BEGIN2 (v2 == true).  BEGIN2 adds, all
+ * BEFORE any hardware is touched: a late-VREF-pending refusal (NOT_READY), a
+ * core-clock check (IO), and the conversion-time check (RANGE) -- it never
+ * reports a rate it cannot achieve -- and on success fills `info` with the
+ * realised pace.  Everything else is the one proven bring-up sequence. */
+static int adc_stream_begin_common(uint8_t                       stream_id,
+                                   uint8_t                       channel,
+                                   uint32_t                      sample_rate_hz,
+                                   uint16_t                      watermark,
+                                   bool                          v2,
+                                   bridge_hw_adc_stream2_info_t *info)
 {
 	if (stream_id >= BRIDGE_ADC_STREAM_COUNT) return BRIDGE_HW_ERR_RANGE;
 	if (channel >= ADC_CHANNEL_MAP_COUNT) return BRIDGE_HW_ERR_RANGE;
 	if (sample_rate_hz == 0u) return BRIDGE_HW_ERR_INVAL;
 	if (sample_rate_hz > BRIDGE_ADC_STREAM_RATE_MAX_HZ) return BRIDGE_HW_ERR_RANGE;
-	if (!vref_ready_check()) return BRIDGE_HW_ERR_IO; /* dead reference -- fail loud */
+	if (!vref_ready_check()) {
+		/* A late lock was just noted: the base-level re-measure will replace
+		 * adc_vref_mv, so a BEGIN2 snapshot taken now would go stale.  Retry
+		 * after the SysTick housekeeping period.  Otherwise the reference is
+		 * simply dead -- fail loud. */
+		return (v2 && vref_remeasure_pending_get()) ? BRIDGE_HW_ERR_NOT_READY : BRIDGE_HW_ERR_IO;
+	}
 
 	adc_stream_state_t *s = &adc_streams[stream_id];
 	if (s->in_use) return BRIDGE_HW_ERR_INVAL; /* stream already running */
@@ -197,6 +244,22 @@ int bridge_hw_adc_stream_begin(uint8_t stream_id, uint8_t channel, uint32_t samp
 		if (i != stream_id && adc_streams[i].in_use &&
 		    adc_channels_map[adc_streams[i].channel].periph == ch->periph) {
 			return BRIDGE_HW_ERR_INVAL;
+		}
+	}
+
+	/* The realised pace and, for BEGIN2, the checks that need it. */
+	uint32_t tick_hz, period_ticks;
+	adc_stream2_pace(sample_rate_hz, &tick_hz, &period_ticks);
+	const uint16_t ring_depth =
+	    v2 ? adc_stream2_ring_depth(watermark) : (uint16_t)BRIDGE_ADC_STREAM_RING_SAMPLES;
+	if (v2) {
+		/* Every timing constant here assumes the 216 MHz core clock. */
+		if (!bridge_core_clock_matches) return BRIDGE_HW_ERR_IO;
+		if (!adc_stream2_conv_fits(adc_effective_ratio(channel),
+		                           adc_sample_cycles_cache[channel],
+		                           period_ticks,
+		                           tick_hz)) {
+			return BRIDGE_HW_ERR_RANGE;
 		}
 	}
 
@@ -225,7 +288,7 @@ int bridge_hw_adc_stream_begin(uint8_t stream_id, uint8_t channel, uint32_t samp
 	init.periph_addr  = (uint32_t)(uintptr_t)&ADC_RDATA(ch->periph);
 	init.memory_addr  = (uint32_t)(uintptr_t)s->ring;
 	init.direction    = DMA_PERIPHERAL_TO_MEMORY;
-	init.number       = BRIDGE_ADC_STREAM_RING_SAMPLES;
+	init.number       = ring_depth;
 	init.periph_inc   = DMA_PERIPH_INCREASE_DISABLE;
 	init.memory_inc   = DMA_MEMORY_INCREASE_ENABLE;
 	init.periph_width = DMA_PERIPHERAL_WIDTH_16BIT;
@@ -344,6 +407,10 @@ int bridge_hw_adc_stream_begin(uint8_t stream_id, uint8_t channel, uint32_t samp
 	 * change the divisor under a running stream -- the converter keeps
 	 * the format this begin applied until stream_end. */
 	s->full_scale   = adc_full_scale_for_bits(adc_resolution_bits_cache[channel]);
+	s->ring_depth   = ring_depth;
+	s->watermark    = watermark;
+	s->v2           = v2;
+	s->read2_d      = 0u; /* the delivered index starts at 0 at BEGIN2 */
 	s->read_idx     = 0u;
 	s->total_read   = 0u; /* lap_count zeroed above, pre-arm */
 	s->dsp_chain_id = 0u;
@@ -365,9 +432,15 @@ int bridge_hw_adc_stream_begin(uint8_t stream_id, uint8_t channel, uint32_t samp
 	 * phantom lap on the first read. */
 	s->rd_pos.valid   = false;
 	s->pump_pos.valid = false;
-	dma_flag_clear(s->dma_periph, (dma_channel_enum)s->dma_channel, DMA_FLAG_FTF | DMA_FLAG_ERR);
-	dma_interrupt_enable(
-	    s->dma_periph, (dma_channel_enum)s->dma_channel, DMA_INT_FTF | DMA_INT_ERR);
+	dma_flag_clear(s->dma_periph,
+	               (dma_channel_enum)s->dma_channel,
+	               DMA_FLAG_FTF | DMA_FLAG_HTF | DMA_FLAG_ERR);
+	/* HTF fires at W samples of the 2W ring, FTF at 2W: the two watermark
+	 * boundaries.  A legacy / no-watermark stream keeps FTF (the lap counter)
+	 * and ERR only. */
+	dma_interrupt_enable(s->dma_periph,
+	                     (dma_channel_enum)s->dma_channel,
+	                     DMA_INT_FTF | DMA_INT_ERR | (watermark != 0u ? DMA_INT_HTF : 0u));
 	nvic_irq_enable((s->dma_periph == DMA0) ? DMA0_Channel0_IRQn : DMA1_Channel0_IRQn,
 	                ADC_STREAM_LAP_IRQ_PRIO,
 	                ADC_STREAM_LAP_IRQ_SUBPRIO);
@@ -386,14 +459,9 @@ int bridge_hw_adc_stream_begin(uint8_t stream_id, uint8_t channel, uint32_t samp
 
 	bridge_rcu_periph_clock_enable((stream_id == 0u) ? RCU_TIMER5 : RCU_TIMER6);
 	timer_deinit(s->pace_timer);
-	uint32_t psc, period_ticks;
-	if (sample_rate_hz >= 16u) {
-		psc          = (BRIDGE_ADC_PACE_CLK_HZ / 1000000u) - 1u; /* 1 MHz tick  */
-		period_ticks = 1000000u / sample_rate_hz;                /* 10..62500   */
-	} else {
-		psc          = (BRIDGE_ADC_PACE_CLK_HZ / 10000u) - 1u; /* 10 kHz tick */
-		period_ticks = 10000u / sample_rate_hz;                /* 667..10000  */
-	}
+	/* adc_stream2_pace(): 1 MHz tick (period 10..62500) at >= 16 Hz, else a
+	 * 10 kHz tick (period 667..10000). */
+	const uint32_t         psc = (BRIDGE_ADC_PACE_CLK_HZ / tick_hz) - 1u;
 	timer_parameter_struct tp;
 	timer_struct_para_init(&tp);
 	tp.prescaler = (uint16_t)psc;
@@ -401,6 +469,18 @@ int bridge_hw_adc_stream_begin(uint8_t stream_id, uint8_t channel, uint32_t samp
 	timer_init(s->pace_timer, &tp);
 	timer_master_output0_trigger_source_select(s->pace_timer, TIMER_TRI_OUT0_SRC_UPDATE);
 	timer_enable(s->pace_timer);
+
+	if (info != NULL) {
+		info->tick_hz      = tick_hz;
+		info->period_ticks = period_ticks;
+		info->full_scale   = s->full_scale;
+		info->vref_mv      = adc_vref_mv;
+		info->watermark    = watermark;
+		info->ring_depth   = ring_depth;
+		info->flags        = adc_vref_is_measured(adc_vrefint_code)
+		                         ? (uint8_t)BRIDGE_HW_ADC_STREAM2_FLAG_VREF_MEASURED
+		                         : 0u;
+	}
 
 	/* Publish last: every reader-visible field was set before the DMA
 	 * and pacing timer were armed (gh#18 A21). */
@@ -411,6 +491,26 @@ int bridge_hw_adc_stream_begin(uint8_t stream_id, uint8_t channel, uint32_t samp
      * converter, for as long as the stream runs. */
 	adc_periph_release(ch->periph);
 	return BRIDGE_HW_OK;
+}
+
+int bridge_hw_adc_stream_begin(uint8_t stream_id, uint8_t channel, uint32_t sample_rate_hz)
+{
+	return adc_stream_begin_common(stream_id, channel, sample_rate_hz, 0u, false, NULL);
+}
+
+int bridge_hw_adc_stream_begin2(uint8_t                       stream_id,
+                                uint8_t                       channel,
+                                uint32_t                      sample_rate_hz,
+                                uint16_t                      watermark,
+                                bridge_hw_adc_stream2_info_t *info)
+{
+	if (info == NULL) return BRIDGE_HW_ERR_INVAL;
+	return adc_stream_begin_common(stream_id, channel, sample_rate_hz, watermark, true, info);
+}
+
+bool bridge_hw_adc_stream2_supported(void)
+{
+	return true;
 }
 
 /* Recover the ADC from a routine-data overflow (#44) -- the 9-step
@@ -457,9 +557,9 @@ static bool adc_stream_recover_rovf(adc_stream_state_t *s, const gd32_adc_ch_t *
 	if (!adc_stream_dma_disable_confirm(s->dma_periph, (dma_channel_enum)s->dma_channel)) {
 		return false;
 	}
-	dma_transfer_number_config(
-	    s->dma_periph, (dma_channel_enum)s->dma_channel, BRIDGE_ADC_STREAM_RING_SAMPLES);
+	dma_transfer_number_config(s->dma_periph, (dma_channel_enum)s->dma_channel, s->ring_depth);
 	dma_interrupt_flag_clear(s->dma_periph, (dma_channel_enum)s->dma_channel, DMA_INT_FLAG_FTF);
+	dma_interrupt_flag_clear(s->dma_periph, (dma_channel_enum)s->dma_channel, DMA_INT_FLAG_HTF);
 
 	adc_flag_clear(ch->periph, ADC_FLAG_ROVF); /* 4. Clear ROVF bit of ADC_STAT. */
 	dma_channel_enable(s->dma_periph, (dma_channel_enum)s->dma_channel); /* 5. Set CHEN. */
@@ -469,6 +569,24 @@ static bool adc_stream_recover_rovf(adc_stream_state_t *s, const gd32_adc_ch_t *
 		/* 8. Wait T(setup) -- same bound stream_begin/the boot setup use. */
 	}
 	return adc_calibrate_bounded(ch->periph); /* ADCON edge above invalidated calibration. */
+}
+
+/* ROVF recovery plus the cursor re-anchor both read paths need.  Re-anchors
+ * through the SAME corrected total the read path uses (gh#149): the recovery
+ * 9-step can step the DMA, so both position trackers are re-based against the
+ * raw post-recovery position -- valid=false makes the next sample a clean
+ * baseline rather than a regression.  Returns false only if the bounded
+ * recalibration never completed. */
+static bool adc_stream_rovf_recover_and_reanchor(adc_stream_state_t *s, const gd32_adc_ch_t *ch)
+{
+	const bool     recal_ok = adc_stream_recover_rovf(s, ch);
+	const uint16_t w        = adc_stream_write_index(s);
+	s->rd_pos.valid         = false;
+	s->pump_pos.valid       = false;
+	s->read_idx             = (uint16_t)(w % s->ring_depth);
+	s->total_read           = s->lap_count * s->ring_depth + (uint32_t)w;
+	s->pump_raw_read        = s->total_read;
+	return recal_ok;
 }
 
 int bridge_hw_adc_stream_read(uint8_t   stream_id,
@@ -483,6 +601,8 @@ int bridge_hw_adc_stream_read(uint8_t   stream_id,
 
 	adc_stream_state_t *s = &adc_streams[stream_id];
 	if (!s->in_use) return BRIDGE_HW_ERR_INVAL;
+	/* A stream started with BEGIN2 answers only READ2. */
+	if (s->v2) return BRIDGE_HW_ERR_INVAL;
 	adc_stream_latch_dma_error(stream_id);
 	if (s->dma_error_count != 0u) return BRIDGE_HW_ERR_IO;
 
@@ -495,18 +615,7 @@ int bridge_hw_adc_stream_read(uint8_t   stream_id,
 	 * forever, on both planes. */
 	const gd32_adc_ch_t *ch = &adc_channels_map[s->channel];
 	if (SET == adc_flag_get(ch->periph, ADC_FLAG_ROVF)) {
-		const bool     recal_ok = adc_stream_recover_rovf(s, ch);
-		const uint16_t w        = adc_stream_write_index(s);
-		/* Re-anchor through the SAME corrected total the read path
-		 * uses (gh#149): the recovery 9-step can step the DMA, so
-		 * both position trackers are re-based against the raw
-		 * post-recovery position -- valid=false makes the next
-		 * sample a clean baseline rather than a regression. */
-		s->rd_pos.valid   = false;
-		s->pump_pos.valid = false;
-		s->read_idx       = (uint16_t)(w % BRIDGE_ADC_STREAM_RING_SAMPLES);
-		s->total_read     = s->lap_count * BRIDGE_ADC_STREAM_RING_SAMPLES + (uint32_t)w;
-		s->pump_raw_read  = s->total_read;
+		const bool recal_ok = adc_stream_rovf_recover_and_reanchor(s, ch);
 		/* Same wire contract as the ring-overrun branch below
 		 * (alp-sdk docs/gd32-bridge-protocol.md §3.10): STATUS_BUSY, "poll
 		 * faster".  A failed recalibration is the harder failure --
@@ -585,7 +694,7 @@ int bridge_hw_adc_stream_read(uint8_t   stream_id,
 	const int32_t  backlog       = (int32_t)(total_written - s->total_read);
 	if (backlog <= 0) return BRIDGE_HW_OK; /* empty ring (or transient undercount) */
 
-	if ((uint32_t)backlog >= BRIDGE_ADC_STREAM_RING_SAMPLES) {
+	if ((uint32_t)backlog >= s->ring_depth) {
 		/* Lapped (or exactly full, where the oldest unread slot is the
 	     * DMA's next landing zone -- reading it races the in-flight
 	     * beat).  Drop the corrupt backlog and resynchronise the
@@ -593,7 +702,7 @@ int bridge_hw_adc_stream_read(uint8_t   stream_id,
 	     * fresh, gap-free samples; answer BUSY so the host learns
 	     * samples were lost (alp-sdk docs/gd32-bridge-protocol.md §3.10: ring
 	     * overrun -> STATUS_BUSY, "poll faster"). */
-		s->read_idx   = (uint16_t)(w % BRIDGE_ADC_STREAM_RING_SAMPLES);
+		s->read_idx   = (uint16_t)(w % s->ring_depth);
 		s->total_read = total_written;
 		return BRIDGE_HW_ERR_BUSY;
 	}
@@ -604,10 +713,122 @@ int bridge_hw_adc_stream_read(uint8_t   stream_id,
 		uint32_t code = s->ring[s->read_idx];
 		if (code > s->full_scale) code = s->full_scale;
 		mv[i]       = (uint16_t)((code * (uint32_t)adc_vref_mv) / s->full_scale);
-		s->read_idx = (uint16_t)((s->read_idx + 1u) % BRIDGE_ADC_STREAM_RING_SAMPLES);
+		s->read_idx = (uint16_t)((s->read_idx + 1u) % s->ring_depth);
 	}
 	s->total_read += to_emit;
 	*got_samples = (uint8_t)to_emit;
+	return BRIDGE_HW_OK;
+}
+
+/* =====================================================================
+ * v0.15 READ2 -- lossless-accounting read of a BEGIN2 stream.
+ *
+ * The planning arithmetic (overrun skip, GUARD band, delivered index D,
+ * the discontinuity sentinel) is adc_read2_plan() in adc_stream2.c; this is
+ * its hardware half: pick the data plane (raw DMA ring or the DSP-processed
+ * ring), apply the plan to the cursors, copy the codes straight into the
+ * caller's reply bytes, and keep the ATTN event bit honest.  Overrun is never
+ * BUSY: the oldest samples are skipped and counted in `dropped`.
+ * ===================================================================== */
+int bridge_hw_adc_stream_read2(uint8_t   stream_id,
+                               uint8_t   max_samples,
+                               uint32_t *first_index,
+                               uint32_t *dropped,
+                               uint8_t  *got,
+                               uint8_t  *codes_le)
+{
+	if (first_index == 0 || dropped == 0 || got == 0 || codes_le == 0) return BRIDGE_HW_ERR_INVAL;
+	*first_index = 0u;
+	*dropped     = 0u;
+	*got         = 0u;
+	if (stream_id >= BRIDGE_ADC_STREAM_COUNT) return BRIDGE_HW_ERR_RANGE;
+
+	adc_stream_state_t *s = &adc_streams[stream_id];
+	/* Not running, or started with the legacy BEGIN (which answers only
+	 * STREAM_READ). */
+	if (!s->in_use || !s->v2) return BRIDGE_HW_ERR_INVAL;
+	adc_stream_latch_dma_error(stream_id);
+	if (s->dma_error_count != 0u) return BRIDGE_HW_ERR_IO;
+
+	adc_read2_plan_t plan;
+
+	/* ROVF recovery (#44): the stalled conversion is restarted and the
+	 * cursors re-anchored, but the samples lost in between are unknowable --
+	 * the discontinuity sentinel, unless the recalibration itself failed. */
+	const gd32_adc_ch_t *ch = &adc_channels_map[s->channel];
+	if (SET == adc_flag_get(ch->periph, ADC_FLAG_ROVF)) {
+		const bool recal_ok = adc_stream_rovf_recover_and_reanchor(s, ch);
+		bridge_hw_attn_event_clear(stream_id);
+		if (!recal_ok) return BRIDGE_HW_ERR_IO;
+		adc_read2_plan(0u, s->ring_depth, max_samples, s->read2_d, true, &plan);
+		*first_index = plan.first_index;
+		*dropped     = plan.dropped;
+		return BRIDGE_HW_OK;
+	}
+
+	uint32_t remaining;
+	if (s->dsp_bound) {
+		/* Filtered data plane: processed-ring codes in the same code space.
+		 * An FFT chain has no stream data plane (spectrum is its own
+		 * opcode); the sticky DSP faults keep their 0.14 meaning. */
+		if (s->dsp_terminal == 3u) return BRIDGE_HW_ERR_NOTIMPL;
+		if (s->dsp_cfg_bad) return BRIDGE_HW_ERR_RANGE;
+		if (s->dsp_sat) return BRIDGE_HW_ERR_IO;
+
+		const bool gap = s->proc_gap;
+		if (gap) {
+			s->proc_gap  = false; /* the pump resynced past a full ring */
+			s->proc_read = s->proc_write;
+		}
+		const uint32_t backlog = (uint32_t)(s->proc_write - s->proc_read);
+		adc_read2_plan(
+		    backlog, (uint16_t)BRIDGE_ADC_STREAM_RING_SAMPLES, max_samples, s->read2_d, gap, &plan);
+		s->proc_read += plan.skip;
+		for (uint32_t i = 0u; i < plan.got; ++i) {
+			uint32_t code = s->proc_ring[s->proc_read % BRIDGE_ADC_STREAM_RING_SAMPLES];
+			if (code > s->full_scale) code = s->full_scale;
+			codes_le[2u * i]      = (uint8_t)(code & 0xFFu);
+			codes_le[2u * i + 1u] = (uint8_t)((code >> 8) & 0xFFu);
+			s->proc_read++;
+		}
+	} else {
+		/* Raw DMA ring: the same exact total-written-vs-read accounting the
+		 * legacy read uses (gh#149 coalescing recovery included), now against
+		 * this stream's own ring depth. */
+		const uint32_t total_written = adc_stream_total_written(s, &s->rd_pos);
+		const uint16_t w             = adc_stream_write_index(s);
+		const uint32_t backlog       = total_written - s->total_read;
+		adc_read2_plan(backlog, s->ring_depth, max_samples, s->read2_d, false, &plan);
+		if (plan.sentinel) {
+			/* Cursors disagree beyond recovery: resync to the live position. */
+			s->read_idx   = (uint16_t)(w % s->ring_depth);
+			s->total_read = total_written;
+		} else {
+			uint32_t idx = ((uint32_t)s->read_idx + (plan.skip % s->ring_depth)) % s->ring_depth;
+			for (uint32_t i = 0u; i < plan.got; ++i) {
+				uint32_t code = s->ring[idx];
+				if (code > s->full_scale) code = s->full_scale;
+				codes_le[2u * i]      = (uint8_t)(code & 0xFFu);
+				codes_le[2u * i + 1u] = (uint8_t)((code >> 8) & 0xFFu);
+				idx                   = (idx + 1u) % s->ring_depth;
+			}
+			s->read_idx = (uint16_t)idx;
+			s->total_read += plan.skip + plan.got;
+		}
+	}
+
+	remaining    = plan.remaining;
+	s->read2_d   = plan.next_d;
+	*first_index = plan.first_index;
+	*dropped     = plan.dropped;
+	*got         = (uint8_t)plan.got;
+
+	/* ATTN event bookkeeping: this read consumed the event; it stays raised
+	 * when a watermark's worth of backlog is still waiting. */
+	bridge_hw_attn_event_clear(stream_id);
+	if (!plan.sentinel && s->watermark != 0u && remaining >= s->watermark) {
+		bridge_hw_attn_event_set(stream_id);
+	}
 	return BRIDGE_HW_OK;
 }
 
@@ -649,9 +870,11 @@ int bridge_hw_adc_stream_end(uint8_t stream_id)
      * later single-shot user of this DMA controller can't inherit a
      * stale lap tick. */
 	dma_interrupt_disable(
-	    s->dma_periph, (dma_channel_enum)s->dma_channel, DMA_INT_FTF | DMA_INT_ERR);
+	    s->dma_periph, (dma_channel_enum)s->dma_channel, DMA_INT_FTF | DMA_INT_HTF | DMA_INT_ERR);
 	nvic_irq_disable((s->dma_periph == DMA0) ? DMA0_Channel0_IRQn : DMA1_Channel0_IRQn);
-	dma_flag_clear(s->dma_periph, (dma_channel_enum)s->dma_channel, DMA_FLAG_FTF | DMA_FLAG_ERR);
+	dma_flag_clear(s->dma_periph,
+	               (dma_channel_enum)s->dma_channel,
+	               DMA_FLAG_FTF | DMA_FLAG_HTF | DMA_FLAG_ERR);
 
 	/* A trigger edge may have started a conversion just before the
      * timer stopped.  Dwell past one conversion time (~6.3 us healthy;
@@ -693,6 +916,9 @@ int bridge_hw_adc_stream_end(uint8_t stream_id)
 	s->dsp_bound   = false;
 	s->dsp_cfg_bad = false; /* gh#35: sticky flags live exactly one session */
 	s->dsp_sat     = false;
+	s->v2          = false;
+	s->watermark   = 0u;
+	bridge_hw_attn_event_clear(stream_id); /* the stream's pending watermark event dies with it */
 	return restored ? BRIDGE_HW_OK : BRIDGE_HW_ERR_IO;
 }
 
@@ -1192,7 +1418,7 @@ static void adc_dsp_pump_stream(uint8_t sid)
 		 * was ever wanted by the filter: if a ring or more has piled up,
 		 * silently jump to the live total (no proc_gap). */
 		const uint32_t live = adc_stream_total_written(s, &s->pump_pos);
-		if ((uint32_t)(live - s->pump_raw_read) >= BRIDGE_ADC_STREAM_RING_SAMPLES) {
+		if ((uint32_t)(live - s->pump_raw_read) >= s->ring_depth) {
 			const uint32_t irq_state = bridge_irq_lock();
 			if (adc_dsp_owner_live_locked(&adc_dsp_fac_owner, (int8_t)sid, s, false))
 				s->pump_raw_read = live;
@@ -1211,7 +1437,7 @@ static void adc_dsp_pump_stream(uint8_t sid)
 	const uint32_t total_written = adc_stream_total_written(s, &s->pump_pos);
 	int32_t        avail         = (int32_t)(total_written - s->pump_raw_read);
 	if (avail <= 0) return;
-	if ((uint32_t)avail >= BRIDGE_ADC_STREAM_RING_SAMPLES) {
+	if ((uint32_t)avail >= s->ring_depth) {
 		/* The pump fell a full ring behind the DMA -- drop the corrupt
 		 * backlog and resync so the next batch is gap-free (proc_gap makes
 		 * stream_read answer BUSY, same as a raw overrun). */
@@ -1276,7 +1502,7 @@ static void adc_dsp_pump_stream(uint8_t sid)
 				stalled = true;
 				break;
 			}
-			const uint16_t ridx = (uint16_t)(raw_read % BRIDGE_ADC_STREAM_RING_SAMPLES);
+			const uint16_t ridx = (uint16_t)(raw_read % s->ring_depth);
 			const uint16_t code = (uint16_t)(s->ring[ridx] & 0x0FFFu); /* 12-bit raw ring word */
 			raw_read++;
 
@@ -1346,10 +1572,18 @@ void bridge_hw_dsp_pump(void)
 	for (uint8_t sid = 0u; sid < BRIDGE_ADC_STREAM_COUNT; ++sid) {
 		const adc_stream_state_t *s = &adc_streams[sid];
 		if (!s->in_use || !s->dsp_bound) continue;
-		if (s->dsp_terminal == 3u)
+		if (s->dsp_terminal == 3u) {
 			adc_dsp_pump_fft(sid); /* spectrum path */
-		else
+		} else {
 			adc_dsp_pump_stream(sid); /* FIR/IIR path */
+			/* A BEGIN2 stream's watermark event for a filtered data plane is
+			 * "the PROCESSED backlog reached W" (the raw HTF/FTF are muted
+			 * while a chain is bound).  A hint only: READ2 re-derives it. */
+			if (s->v2 && s->watermark != 0u &&
+			    (uint32_t)(s->proc_write - s->proc_read) >= s->watermark) {
+				bridge_hw_attn_event_set(sid);
+			}
+		}
 	}
 }
 
@@ -1568,7 +1802,7 @@ static void adc_dsp_pump_fft(uint8_t sid)
 	const uint32_t total_written = adc_stream_total_written(s, &s->pump_pos);
 	int32_t        avail         = (int32_t)(total_written - s->pump_raw_read);
 	if (avail <= 0) return;
-	if ((uint32_t)avail >= BRIDGE_ADC_STREAM_RING_SAMPLES) {
+	if ((uint32_t)avail >= s->ring_depth) {
 		const uint32_t irq_state = bridge_irq_lock();
 		if (adc_dsp_owner_live_locked(&adc_dsp_fft_owner, (int8_t)sid, s, true)) {
 			s->pump_raw_read = total_written; /* fell behind -> resync, drop partial window */
@@ -1588,7 +1822,7 @@ static void adc_dsp_pump_fft(uint8_t sid)
 			bridge_irq_unlock(irq_state);
 			return;
 		}
-		const uint16_t ridx = (uint16_t)(s->pump_raw_read % BRIDGE_ADC_STREAM_RING_SAMPLES);
+		const uint16_t ridx = (uint16_t)(s->pump_raw_read % s->ring_depth);
 		const uint16_t code = (uint16_t)(s->ring[ridx] & 0x0FFFu);
 		bridge_irq_unlock(irq_state);
 		const float sample = (float)code / 4096.0f;

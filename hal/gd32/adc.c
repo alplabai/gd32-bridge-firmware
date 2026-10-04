@@ -223,7 +223,7 @@ adc_oversample_params(uint16_t ratio, bool *enable_out, uint16_t *ovsr_out, uint
  * other or from the register value -- the EOC bound previously scaled by
  * the CLAMPED cache rather than the floored one, so a ratio of 200 sized
  * its bound for 200 while the converter ran 128. */
-static uint16_t adc_effective_ratio(uint8_t channel)
+uint16_t adc_effective_ratio(uint8_t channel)
 {
 	bool     enable = false;
 	uint16_t ovsr   = 0u;

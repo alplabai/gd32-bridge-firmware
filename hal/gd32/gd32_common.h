@@ -114,8 +114,20 @@ typedef struct {
 } adc_dma_pos_t;
 
 typedef struct {
-	bool     in_use;
-	uint8_t  channel;     /* ADC channel index this stream watches */
+	bool    in_use;
+	uint8_t channel; /* ADC channel index this stream watches */
+	/* v0.15: this stream's raw-ring length (a power of two <= RING_SAMPLES):
+	 * 1024 for a legacy BEGIN stream, 2*W for a BEGIN2 stream with watermark
+	 * W (1024 when W == 0).  The DMA count, the write-index maths, every
+	 * lap-based total and the DSP pump's raw-ring indexing use THIS, not the
+	 * array size.  BEGIN2 streams answer only READ2 (v2 == true); legacy
+	 * streams answer only STREAM_READ. */
+	uint16_t ring_depth;
+	uint16_t watermark; /* BEGIN2 watermark W; 0 = no events */
+	bool     v2;        /* started with BEGIN2 */
+	/* READ2 accounting (hal/gd32/adc_stream2.h): delivered index D (the
+	 * stream-sequence index of the next sample to deliver, mod 2^32). */
+	uint32_t read2_d;
 	uint16_t full_scale;  /* (1<<res_bits)-1 snapshot at begin, mv math */
 	uint32_t dma_periph;  /* DMA0 or DMA1                          */
 	uint8_t  dma_channel; /* dma_channel_enum value                */
@@ -444,7 +456,10 @@ extern bool                vref_ok;                              /* vref.c */
 bool trng_start(void);       /* trng.c */
 bool trng_poll_ready(void);  /* trng.c */
 bool vref_ready_check(void); /* vref.c, ISR-safe: only notes a late lock */
-void vref_late_tick(void);   /* vref.c, base level: measure + publish vref_ok */
+/* vref.c: a late VREFRDY was noted and the base-level re-measure has not run
+ * yet, so adc_vref_mv may still change (BEGIN2 answers NOT_READY meanwhile). */
+bool vref_remeasure_pending_get(void);
+void vref_late_tick(void); /* vref.c, base level: measure + publish vref_ok */
 /* Boot-only sequence: reset all converters, set the two shared clock domains
  * once (ADC0 covers ADC0/1/2; ADC3 covers itself), then initialise each
  * converter.  Request paths must use adc_periph_restore() instead so a
@@ -471,7 +486,11 @@ bool adc_calibrate_bounded(uint32_t periph); /* adc.c */
  * adc_apply_conv_format programs a channel's cached resolution +
  * oversample into the ADC (caller MUST hold the converter disabled --
  * DRES/OVSAMPCTL only latch with ADCON == 0). */
-uint16_t adc_full_scale_for_bits(uint8_t bits);                   /* adc.c */
+uint16_t adc_full_scale_for_bits(uint8_t bits); /* adc.c */
+/* The oversample ratio the converter really runs for `channel`: the cached
+ * ratio floored to a power of two in [1, 256].  The ADC_READ residency budget
+ * and the BEGIN2 conversion-time check both use it. */
+uint16_t adc_effective_ratio(uint8_t channel);                    /* adc.c */
 void     adc_apply_conv_format(uint32_t periph, uint8_t channel); /* adc.c */
 void     qenc_channel_init(const gd32_qenc_t *e);                 /* qenc.c */
 void     pwm_timer_init(uint32_t periph);                         /* pwm.c */

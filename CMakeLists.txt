@@ -98,6 +98,7 @@ elseif(BRIDGE_HAL_BACKEND STREQUAL "gd32")
         hal/gd32/adc.c
         hal/gd32/adc_dsp_chain.c
         hal/gd32/adc_stream.c
+        hal/gd32/adc_stream2.c
         hal/gd32/counter.c
         hal/gd32/dac.c
         hal/gd32/fault_diag.c

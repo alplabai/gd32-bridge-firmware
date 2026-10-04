@@ -411,6 +411,7 @@ add_executable(test_adc_seq
     adc_seq/mock/mock_gd32.c
     ${FW}/hal/gd32/adc.c
     ${FW}/hal/gd32/adc_stream.c
+    ${FW}/hal/gd32/adc_stream2.c
     ${FW}/hal/gd32/vref.c
     # adc_dsp_chain.c carries the chain pool + adc_dsp_chain_p1_capable()
     # that adc_stream.c's pump-side config functions call.  It was split
@@ -423,6 +424,7 @@ add_executable(test_adc_seq
 target_include_directories(test_adc_seq PRIVATE
     ${FW}/hal
     ${FW}/hal/gd32
+    ${FW}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/adc_seq/mock
 )
 target_compile_options(test_adc_seq PRIVATE ${TEST_FLAGS})
@@ -431,6 +433,21 @@ target_compile_options(test_adc_seq PRIVATE ${TEST_FLAGS})
 # this because CMSIS-DSP/arm-none-eabi's libm supplies them implicitly.
 target_link_libraries(test_adc_seq PRIVATE ztest_shim m)
 add_test(NAME adc_seq COMMAND test_adc_seq)
+
+# --- adc_stream2: READ2 accounting + BEGIN2 arithmetic (v0.15) ---------------
+#
+# Links ONLY hal/gd32/adc_stream2.c, the vendor-header-free half of BEGIN2/READ2
+# (overrun skip / GUARD / delivered index / discontinuity sentinel, the pace
+# timer's realised rate, the conversion-time model, VREF_MEASURED).  The
+# hardware half runs against the register mock in the adc_seq suite above.
+add_executable(test_adc_stream2
+    adc_stream2/src/test_adc_stream2.c
+    ${FW}/hal/gd32/adc_stream2.c
+)
+target_include_directories(test_adc_stream2 PRIVATE ${FW}/hal ${FW}/hal/gd32 ${FW}/src)
+target_compile_options(test_adc_stream2 PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_adc_stream2 PRIVATE ztest_shim)
+add_test(NAME adc_stream2 COMMAND test_adc_stream2)
 
 # --- fmc_ota_guard: the #79 address guard, header-only, no GD32 register
 # dependency (see hal/fmc_ota_guard.h) -------------------------------------
