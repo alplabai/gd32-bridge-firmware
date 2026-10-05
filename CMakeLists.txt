@@ -72,6 +72,11 @@ set(GD32_BRIDGE_SOURCES
 # on silicon 2026-06-04; a fresh B->A update remains untested and HIL-gated.
 option(BRIDGE_OTA_PARTITIONED "Arm the OTA Path-A flash path (HIL-gated)" OFF)
 
+# Skip the per-transaction SPI1 peripheral reset (~28 us) when SPI_STAT shows no
+# stale TX/RX state; otherwise the full reset runs as before (gh#165).  Counters:
+# `bridge_spi_reinit_stats` over SWD.  OFF restores the always-reset behaviour.
+option(BRIDGE_SPI_FAST_REINIT "Skip SPI reset at CS rising when SPI_STAT proves it idle" ON)
+
 # Opt-in DWT cycle-counter stats for the SPI round trip (issue #104): per
 # transaction cycles for request CRC / protocol_dispatch / reply stage / CS-edge
 # to reply-staged, in the RAM struct `bridge_timing_stats` (layout:
@@ -263,6 +268,11 @@ function(gd32_firmware_target tgt linker_script)
     add_dependencies(${tgt} gd32-build-id)
     if(BRIDGE_TIMING_STATS)
         target_compile_definitions(${tgt} PRIVATE BRIDGE_TIMING_STATS=1)
+    endif()
+    if(BRIDGE_SPI_FAST_REINIT)
+        target_compile_definitions(${tgt} PRIVATE BRIDGE_SPI_FAST_REINIT=1)
+    else()
+        target_compile_definitions(${tgt} PRIVATE BRIDGE_SPI_FAST_REINIT=0)
     endif()
     # -Os pinned directly here (not via CMAKE_BUILD_TYPE) so it applies
     # unconditionally to every target and can't be silently lost by an

@@ -92,6 +92,21 @@ void gpio_af_set(uint32_t port, uint32_t af, uint32_t pin)
 	attn_record(pin, af == GPIO_AF_0 ? OP_AF0 : OP_OTHER);
 }
 
+/* SPI reset model: the RCU pulse empties both FIFOs and clears TRANS and the
+ * sticky error flags -- the only way this silicon discards stale TX bytes. */
+static unsigned spi_resets;
+void            rcu_periph_reset_enable(rcu_periph_reset_enum r)
+{
+	(void)r;
+	spi_resets++;
+	mock_spi_stat &= ~(SPI_STAT_TXLVL | SPI_STAT_RXLVL | SPI_STAT_TRANS | SPI_STAT_CRCERR |
+	                   SPI_STAT_CONFERR | SPI_STAT_RXORERR | SPI_STAT_FERR);
+}
+void rcu_periph_reset_disable(rcu_periph_reset_enum r)
+{
+	(void)r;
+}
+
 uint32_t *mock_exti_pd0(void)
 {
 	pd0_accesses++;
@@ -204,17 +219,20 @@ void fault_reset_loop_mark_healthy(void)
 /* The shim runs no suite hooks, so each case calls this itself. */
 static void reset_state(void)
 {
-	pd0                   = 1u << 8; /* line 8 (CS) pending at entry */
-	pd0_accesses          = 0u;
-	cs_level_high         = true;
-	dma_err_flag          = false;
-	mock_dma_chctl        = 0u; /* CHEN clear: channels quiesce */
-	mock_spi_stat         = 0u;
-	spi_dma_error_pending = false;
-	cs_high_fresh         = true;
-	transport_err_called  = false;
-	mock_dhcsr            = 0u;
-	attn_log_n            = 0u;
+	pd0                          = 1u << 8; /* line 8 (CS) pending at entry */
+	pd0_accesses                 = 0u;
+	cs_level_high                = true;
+	dma_err_flag                 = false;
+	mock_dma_chctl               = 0u; /* CHEN clear: channels quiesce */
+	mock_spi_stat                = 0u;
+	spi_resets                   = 0u;
+	bridge_spi_reinit_stats.fast = 0u;
+	bridge_spi_reinit_stats.slow = 0u;
+	spi_dma_error_pending        = false;
+	cs_high_fresh                = true;
+	transport_err_called         = false;
+	mock_dhcsr                   = 0u;
+	attn_log_n                   = 0u;
 	memset(attn_log, 0, sizeof(attn_log));
 	cs_flip_low_after = 0;
 	attn_quiesced     = false;
@@ -270,6 +288,101 @@ ZTEST(transport_hw_cs_exti, test_cs_rising_spi_overrun_clears_group)
 	mock_spi_stat = SPI_STAT_RXORERR;
 	BRIDGE_SPI_CS_EXTI_HANDLER();
 	expect_group_cleared("spi overrun seam");
+}
+
+/* ---- SPI fast re-init (gh#165) --------------------------------------------- */
+
+#define TXLVL(n) ((uint32_t)(n) << 11)
+#define RXLVL(n) ((uint32_t)(n) << 9)
+
+/* Run one CS-rising with the given SPI_STAT; the model's reset clears it. */
+static void rising_with_stat(uint32_t stat)
+{
+	reset_state();
+	mock_spi_stat = stat;
+	BRIDGE_SPI_CS_EXTI_HANDLER();
+}
+
+/* No byte may be left in the TX FIFO once the handler returns: a stale one
+ * would be shifted out as the first byte of the NEXT reply. */
+static void expect_no_stale_tx(const char *what)
+{
+	zassert_equal(mock_spi_stat & SPI_STAT_TXLVL, 0u, "%s: stale TX byte survives", what);
+	zassert_equal(mock_spi_stat & SPI_STAT_TRANS, 0u, "%s: still transmitting", what);
+}
+
+ZTEST(transport_hw_cs_exti, test_fast_reinit_taken_when_spi_idle)
+{
+	rising_with_stat(0u);
+	zassert_equal(spi_resets, 0u, "no peripheral reset when TX empty and idle");
+	zassert_equal(bridge_spi_reinit_stats.fast, 1u);
+	zassert_equal(bridge_spi_reinit_stats.slow, 0u);
+	expect_no_stale_tx("fast");
+	expect_group_cleared("fast path");
+}
+
+ZTEST(transport_hw_cs_exti, test_slow_reinit_when_tx_fifo_not_empty)
+{
+	for (unsigned lvl = 1u; lvl <= 3u; lvl++) {
+		rising_with_stat(TXLVL(lvl));
+		zassert_equal(spi_resets, 1u, "TXLVL=%u must reset", lvl);
+		zassert_equal(bridge_spi_reinit_stats.slow, 1u);
+		zassert_equal(bridge_spi_reinit_stats.fast, 0u);
+		expect_no_stale_tx("slow, TXLVL");
+	}
+}
+
+ZTEST(transport_hw_cs_exti, test_slow_reinit_when_trans_set)
+{
+	rising_with_stat(SPI_STAT_TRANS);
+	zassert_equal(spi_resets, 1u);
+	zassert_equal(bridge_spi_reinit_stats.slow, 1u);
+	expect_no_stale_tx("slow, TRANS");
+}
+
+ZTEST(transport_hw_cs_exti, test_slow_reinit_when_rx_not_drained_or_flag_sticky)
+{
+	static const uint32_t bad[] = { RXLVL(1), SPI_STAT_CRCERR, SPI_STAT_CONFERR, SPI_STAT_FERR };
+	for (unsigned i = 0u; i < sizeof(bad) / sizeof(bad[0]); i++) {
+		rising_with_stat(bad[i]);
+		zassert_equal(spi_resets, 1u, "stat 0x%x must reset", bad[i]);
+		zassert_equal(bridge_spi_reinit_stats.fast, 0u);
+	}
+}
+
+/* Equivalence: for EVERY TXLVL/TRANS/RXLVL combination the post-handler state
+ * is the same as the always-reset behaviour -- empty TX FIFO, not busy -- and
+ * the fast path is taken exactly when that was already true on entry. */
+ZTEST(transport_hw_cs_exti, test_fast_reinit_equivalent_to_full_reset_for_every_fifo_state)
+{
+	for (uint32_t tx = 0u; tx <= 3u; tx++) {
+		for (uint32_t rx = 0u; rx <= 3u; rx++) {
+			for (uint32_t trans = 0u; trans <= 1u; trans++) {
+				const uint32_t stat = TXLVL(tx) | RXLVL(rx) | (trans ? SPI_STAT_TRANS : 0u);
+				rising_with_stat(stat);
+				expect_no_stale_tx("equivalence");
+				const bool clean = (stat == 0u);
+				zassert_equal(spi_resets, clean ? 0u : 1u, "tx=%u rx=%u trans=%u", tx, rx, trans);
+				zassert_equal(bridge_spi_reinit_stats.fast, clean ? 1u : 0u);
+			}
+		}
+	}
+}
+
+/* The overrun / error-seam / quiesce-timeout exits keep their unconditional
+ * reset: the fast path must never apply to a transaction with a fault. */
+ZTEST(transport_hw_cs_exti, test_fault_paths_still_reset)
+{
+	rising_with_stat(SPI_STAT_RXORERR);
+	zassert_equal(spi_resets, 1u, "overrun");
+	reset_state();
+	dma_err_flag = true;
+	BRIDGE_SPI_CS_EXTI_HANDLER();
+	zassert_equal(spi_resets, 1u, "dma error");
+	reset_state();
+	mock_dma_chctl = DMA_CHXCTL_CHEN;
+	BRIDGE_SPI_CS_EXTI_HANDLER();
+	zassert_equal(spi_resets, 1u, "quiesce timeout");
 }
 
 /* ---- ATTN (v0.15) --------------------------------------------------------- */

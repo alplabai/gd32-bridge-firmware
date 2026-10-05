@@ -47,7 +47,13 @@ extern uint32_t mock_dhcsr;
 #define DMA_CHCTL(d, ch) mock_dma_chctl
 #define DMA_CHXCTL_CHEN  1u
 #define SPI_STAT(p)      mock_spi_stat
+#define SPI_STAT_CRCERR  0x10u
+#define SPI_STAT_CONFERR 0x20u
 #define SPI_STAT_RXORERR 0x40u
+#define SPI_STAT_TRANS   0x80u
+#define SPI_STAT_FERR    0x100u
+#define SPI_STAT_RXLVL   0x600u  /* BITS(9,10)  */
+#define SPI_STAT_TXLVL   0x1800u /* BITS(11,12) */
 #define SPI_DATA(p)      mock_scratch
 #define I2C_CTL0(p)      mock_scratch
 #define GPIO_LOCK(p)     mock_scratch
@@ -72,6 +78,11 @@ void gpio_bit_reset(uint32_t port, uint32_t pin);
 void gpio_mode_set(uint32_t port, uint32_t mode, uint32_t pupd, uint32_t pin);
 void gpio_output_options_set(uint32_t port, uint32_t otype, uint32_t speed, uint32_t pin);
 void gpio_af_set(uint32_t port, uint32_t af, uint32_t pin);
+
+/* The SPI peripheral reset is the one void call the fast-path cases observe:
+ * the test models it as "clears every FIFO level and the busy flag". */
+void rcu_periph_reset_enable(rcu_periph_reset_enum r);
+void rcu_periph_reset_disable(rcu_periph_reset_enum r);
 
 /* Void vendor calls: swallowed. */
 #define dma_channel_disable(...)               ((void)0)
@@ -106,8 +117,6 @@ void gpio_af_set(uint32_t port, uint32_t af, uint32_t pin);
 #define nvic_irq_enable(...)                   ((void)0)
 #define rcu_i2c_clock_config(...)              ((void)0)
 #define rcu_periph_clock_enable(...)           ((void)0)
-#define rcu_periph_reset_disable(...)          ((void)0)
-#define rcu_periph_reset_enable(...)           ((void)0)
 #define spi_data_transmit(...)                 ((void)0)
 #define spi_dma_enable(...)                    ((void)0)
 #define spi_enable(...)                        ((void)0)
@@ -117,6 +126,8 @@ void gpio_af_set(uint32_t port, uint32_t af, uint32_t pin);
 #define syscfg_exti_line_config(...)           ((void)0)
 
 /* Vendor constants the handler/bring-up code names but never decides on. */
+#define RCU_SPI1RST                 0u
+#define RCU_I2C0RST                 0u
 #define CK_APB1                     0u
 #define DMA0                        0u
 #define DMA_CH2                     0u

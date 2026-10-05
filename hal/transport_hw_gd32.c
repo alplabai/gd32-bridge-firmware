@@ -62,6 +62,7 @@
 #include "gd32/i2c_recovery.h"
 #include "gd32/i2c_timeout.h"
 #include "gd32/spi_dma_arm_status.h"
+#include "gd32/spi_fast_reinit.h"
 #include "protocol.h" /* GD32_BRIDGE_DEFAULT_I2C_ADDR */
 #include "timing_stats.h"
 #include "transport.h" /* the seams we drive */
@@ -506,6 +507,33 @@ static void attn_cs_exit(bool fresh)
 	}
 }
 
+/* SWD-readable counters (gh#165): end-of-transaction re-inits that took the
+ * fast path (no peripheral reset) vs the full RCU reset.  Plain RAM words, no
+ * wrap handling; read them over SWD by symbol name. */
+volatile bridge_spi_reinit_stats_t bridge_spi_reinit_stats;
+
+/* End-of-transaction SPI re-init, run after the RX FIFO was drained.
+ *
+ * The GD32G5x3 SPI has no FIFO flush bit (UM Rev1.3), and nothing documents
+ * discarding stale TX FIFO bytes -- that is what the RCU reset buys.  When
+ * SPI_STAT already proves there is nothing stale (TXLVL==0, TRANS==0,
+ * RXLVL==0, no error flag) the reset has nothing to clean and BYTEN / DMAREN /
+ * DMATEN / SPIEN are still as bridge_spi_periph_config() left them, so it is
+ * skipped (~28 us saved).  Anything else takes the unchanged full reset. */
+static void spi_end_of_transaction_reinit(void)
+{
+#if BRIDGE_SPI_FAST_REINIT
+	if (bridge_spi_fast_reinit_ok(SPI_STAT(BRIDGE_SPI_PERIPH))) {
+		bridge_spi_reinit_stats.fast++;
+		return;
+	}
+#endif
+	bridge_spi_reinit_stats.slow++;
+	rcu_periph_reset_enable(RCU_SPI1RST);
+	rcu_periph_reset_disable(RCU_SPI1RST);
+	bridge_spi_periph_config();
+}
+
 /* CS edge: PA8 on EXTI8.  Falling = select (reset RX, preload the staged
  * reply); rising = end of transaction (decode + stage the next reply).
  *
@@ -655,9 +683,7 @@ void BRIDGE_SPI_CS_EXTI_HANDLER(void)
 				spi_rx_dma_buf[received++] = (uint8_t)spi_data_receive(BRIDGE_SPI_PERIPH);
 			}
 
-			rcu_periph_reset_enable(RCU_SPI1RST);
-			rcu_periph_reset_disable(RCU_SPI1RST);
-			bridge_spi_periph_config();
+			spi_end_of_transaction_reinit();
 
 			/* Self-contained decode: reset the portable staging FIRST so a
              * swallowed falling edge cannot prepend the previous frame's
