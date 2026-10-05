@@ -13,16 +13,15 @@
 # keys/alp_release_signing_ecdsa_p256.pub.pem in the alp-sdk repository
 # (pinned commit + SHA-256 below), so a mismatched secret fails the release.
 #
-# The vendor-library fetch below mirrors ci.yml's `gd32 backend build` job
-# exactly (same mirror, same tag, same pinned commit).  When ci.yml's
-# GD32_VENDOR_PIN moves, move it here in the same change.
-#
-# Release images MUST link the IRC8M clock override (the stock HXTAL SystemInit
-# hangs before main() on this SoM).  The override is staged from alp-sdk at the
-# pinned commit ALP_SDK_PIN and its SHA-256 is checked; the build never passes
-# BRIDGE_ALLOW_STOCK_SYSTEM_INIT, and tools/check_clock_override.py fails the
-# release if the linked images are not the override.  Move ALP_SDK_PIN and the
-# two SHA-256 values together, deliberately.
+# The GigaDevice GD32G5x3 firmware library is fetched from GigaDevice's
+# official repository by tools/fetch_gd32_library.sh, which fails closed unless
+# the commit and the Firmware/ tree hash match its pins (same script CI uses).
+# It is never committed here and never taken from alp-sdk.  Release images link
+# the IRC8M clock patch (the stock HXTAL SystemInit hangs before main() on this
+# SoM); the build never passes BRIDGE_ALLOW_STOCK_SYSTEM_INIT, and
+# tools/check_clock_override.py fails the release if the linked images are not
+# the patched clock init.  THIRD_PARTY_NOTICES.md ships as a release asset
+# alongside the binaries because they contain GigaDevice's library.
 #
 # Two jobs: `build` runs untrusted vendor CMake with a read-only token and no
 # secrets; `publish` holds contents:write and the signing key and never runs a
@@ -38,11 +37,8 @@ permissions:
   contents: read
 
 env:
-  # Pinned alp-sdk commit that carries the IRC8M clock override and the
-  # published release-signing public key.
+  # Pinned alp-sdk commit that carries the published release-signing public key.
   ALP_SDK_PIN: ff136d79278c85596c1af1ce9c63ed2ae8efe9fd
-  WRAPPER_SHA256: 763243a4dc60b3525fb8b19126137104803a8935c1d1cece8063c10c75a43b9c
-  OVERRIDE_SHA256: 38ea3d9fe2d30afb5270f81622acb652d169f42cf0cc597424eab9ba9330a8fb
   PUBKEY_SHA256: 664071ba6297240579dc46105931bff2fccf688802290757b872d677c98d4650
 
 jobs:
@@ -83,46 +79,12 @@ jobs:
             gcc-arm-none-eabi libnewlib-arm-none-eabi
           arm-none-eabi-gcc --version | head -1
 
-      # alp-sdk's own wrapper (not ci/gd32_vendor_wrapper, which always compiles
-      # the stock system_gd32g5x3.c): it selects overrides/system_gd32g5x3.c
-      # when that file exists, so the IRC8M override is actually compiled.
-      - name: stage the vendor wrapper CMakeLists (pinned alp-sdk commit)
-        run: |
-          set -euo pipefail
-          d="$RUNNER_TEMP/gd32_vendor/gd32_firmware_library"
-          mkdir -p "$d/overrides"
-          curl -fsSL --retry 3 -o "$d/CMakeLists.txt" \
-            "https://raw.githubusercontent.com/alplabai/alp-sdk/$ALP_SDK_PIN/vendors/gd32_firmware_library/CMakeLists.txt"
-          echo "$WRAPPER_SHA256  $d/CMakeLists.txt" | sha256sum -c -
-
-      # The stock SystemInit() hangs before main() on this SoM; a release must
-      # carry alp-sdk's IRC8M override.  Fail here if it cannot be fetched or
-      # is not the reviewed file.
-      - name: stage the IRC8M clock override (pinned alp-sdk commit)
-        run: |
-          set -euo pipefail
-          dst="$RUNNER_TEMP/gd32_vendor/gd32_firmware_library/overrides/system_gd32g5x3.c"
-          curl -fsSL --retry 3 -o "$dst" \
-            "https://raw.githubusercontent.com/alplabai/alp-sdk/$ALP_SDK_PIN/vendors/gd32_firmware_library/overrides/system_gd32g5x3.c"
-          echo "$OVERRIDE_SHA256  $dst" | sha256sum -c -
-
-      - name: fetch the GD32 vendor firmware library (pinned commit, via tag)
+      - name: fetch the GD32 vendor firmware library (GigaDevice official repo, pinned commit + tree hash)
         timeout-minutes: 5
-        env:
-          GD32_VENDOR_PIN: 4a0258080c45227a31fd4c32fa2c4860ba11c16a
-        run: |
-          set -euo pipefail
-          git clone --branch v1.5.0 --depth 1 \
-            https://github.com/alplabai/gd32g5x3-firmware-library.git \
-            "$RUNNER_TEMP/gd32_vendor/gd32_firmware_library/upstream"
-          actual="$(git -C "$RUNNER_TEMP/gd32_vendor/gd32_firmware_library/upstream" rev-parse HEAD)"
-          if [ "$actual" != "$GD32_VENDOR_PIN" ]; then
-            echo "::error::vendor firmware library HEAD is $actual, expected $GD32_VENDOR_PIN -- moved tag; refusing to build a release against it."
-            exit 1
-          fi
+        run: tools/fetch_gd32_library.sh
 
-      # No BRIDGE_ALLOW_STOCK_SYSTEM_INIT: CMakeLists.txt only checks that the
-      # override file exists.  That the override is COMPILED is enforced by
+      # No BRIDGE_ALLOW_STOCK_SYSTEM_INIT: the in-repo wrapper applies the IRC8M
+      # patch.  That the patched clock init is COMPILED is enforced by
       # tools/check_clock_override.py in the verify step below.
       - name: build the partitioned set (bootloader, slot A, slot B)
         run: |
@@ -130,8 +92,7 @@ jobs:
             -DCMAKE_TOOLCHAIN_FILE=toolchain/arm-none-eabi.cmake \
             -DBRIDGE_HAL_BACKEND=gd32 \
             -DBRIDGE_OTA_PARTITIONED=ON \
-            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-            -DGD32_VENDOR_DIR="$RUNNER_TEMP/gd32_vendor/gd32_firmware_library"
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
           cmake --build build-gd32 -j"$(nproc)"
 
       - name: build the full-flash image
@@ -139,8 +100,7 @@ jobs:
           cmake -B build-gd32-flash -S . \
             -DCMAKE_TOOLCHAIN_FILE=toolchain/arm-none-eabi.cmake \
             -DBRIDGE_HAL_BACKEND=gd32 \
-            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-            -DGD32_VENDOR_DIR="$RUNNER_TEMP/gd32_vendor/gd32_firmware_library"
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
           cmake --build build-gd32-flash -j"$(nproc)"
 
       - name: verify the linked images use the IRC8M clock override
@@ -179,6 +139,8 @@ jobs:
             --fw-version "$fwv" \
             --out "dist/gd32-bridge-$v-ota-meta-rec0.bin"
           (cd dist && sha256sum -- *.bin > SHA256SUMS && cat SHA256SUMS)
+          # The binaries contain GigaDevice's library: ship its notices.
+          cp THIRD_PARTY_NOTICES.md dist/THIRD_PARTY_NOTICES.md
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -246,6 +208,7 @@ jobs:
             echo "$status"
             echo
             echo "Flashing guide: docs/RECOVERY.md (in this repository at this tag)."
+            echo "Third-party notices (GigaDevice firmware library linked into these binaries): THIRD_PARTY_NOTICES.md asset."
             echo "Flash addresses: bootloader 0x08000000, metadata record 0x08008000, slot A 0x0800A000, slot B 0x08040000."
           } > notes.md
           gh release create "$GITHUB_REF_NAME" dist/* \

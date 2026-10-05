@@ -12,9 +12,9 @@
 #     BRIDGE_HAL_BACKEND=stub only forces this transitively: CMakeLists.txt
 #     FATAL_ERRORs if BRIDGE_OTA_PARTITIONED=ON is combined with the stub
 #     backend, since the armed OTA path needs the real gd32 HAL to flash.
-#   * The `gd32 backend build` job (below) stages the real GD32 firmware
-#     library from the pinned public mirror
-#     https://github.com/alplabai/gd32g5x3-firmware-library and configures
+#   * The `gd32 backend build` job (below) fetches the real GD32 firmware
+#     library from GigaDevice's official repository
+#     (tools/fetch_gd32_library.sh, pinned commit + tree hash) and configures
 #     -DBRIDGE_HAL_BACKEND=gd32 -DBRIDGE_OTA_PARTITIONED=ON, which compiles
 #     and links every hal/gd32/*.c file, hal/transport_hw_gd32.c,
 #     hal/fmc_ota.c, src/ota.c's real armed state machine, and
@@ -235,16 +235,9 @@ jobs:
       # here is a substitute for a bench run, and this job intentionally
       # carries no `needs-silicon` label.
       #
-      # Checked out at $GITHUB_WORKSPACE (repo root) -- NOT re-nested at
-      # firmware/gd32-bridge. This repo split out of alp-sdk (alp-sdk#1370)
-      # and that pre-split nesting exists nowhere any more; reconstructing
-      # it here just to let CMakeLists.txt's `../../vendors/gd32_firmware_
-      # library` fallback resolve (Refs #110) meant a typo'd or rescoped
-      # GD32_VENDOR_DIR, and the FATAL_ERROR #67 added for a missing vendor
-      # tree, both stayed untested -- every job here took the fallback
-      # branch instead. The vendor tree is staged under $RUNNER_TEMP below
-      # and passed explicitly via -DGD32_VENDOR_DIR, so this job now
-      # exercises the flag PR #67 actually added.
+      # Checked out at $GITHUB_WORKSPACE (repo root).  The vendor library is
+      # fetched into vendor/gd32_firmware_library/upstream below, never
+      # committed.
       - uses: actions/checkout@v4
 
       # Same install as the stub-build job above, INCLUDING the newlib-header
@@ -265,103 +258,58 @@ jobs:
           arm-none-eabi-gcc -mcpu=cortex-m33 -mthumb -c /tmp/hdr.c -o /tmp/hdr.o
           echo "newlib headers reachable"
 
-      # Negative path (Refs #110): no -DGD32_VENDOR_DIR, and nothing staged
-      # yet at any fallback location, so CMakeLists.txt's
-      # `if(NOT EXISTS ${_GD32_VENDOR_DIR}/CMakeLists.txt)` guard must fire.
-      # Asserts on the FATAL_ERROR message text, not just the non-zero exit
-      # -- the message naming `-DGD32_VENDOR_DIR` is the actual fix #67
-      # delivered; a exit-code-only check would pass just as happily if the
-      # message regressed to something unhelpful.
-      - name: configure (gd32 backend, no vendor tree) must fail naming the flag
+      # Negative path (Refs #110): the library is not fetched yet, so the
+      # in-repo wrapper's guard must fire.  Asserts on the message naming the
+      # fetch script, not just the non-zero exit -- the message is the fix.
+      - name: configure (gd32 backend, library not fetched) must fail naming the fetch script
         run: |
           set -uo pipefail
           if out=$(cmake -B build-negative -S . \
               -DCMAKE_TOOLCHAIN_FILE=toolchain/arm-none-eabi.cmake \
               -DBRIDGE_HAL_BACKEND=gd32 2>&1); then
             echo "$out"
-            echo "::error::configure succeeded with no GD32_VENDOR_DIR and no vendor tree staged; expected the FATAL_ERROR from #67"
+            echo "::error::configure succeeded with no GD32 library fetched; expected the FATAL_ERROR naming tools/fetch_gd32_library.sh"
             exit 1
           fi
           echo "$out"
-          if ! echo "$out" | grep -q -- '-DGD32_VENDOR_DIR'; then
-            echo "::error::configure failed as expected, but the message does not name -DGD32_VENDOR_DIR"
+          if ! echo "$out" | grep -q -- 'tools/fetch_gd32_library.sh'; then
+            echo "::error::configure failed as expected, but the message does not name tools/fetch_gd32_library.sh"
             exit 1
           fi
-          echo "negative path OK: FATAL_ERROR names -DGD32_VENDOR_DIR"
+          echo "negative path OK: FATAL_ERROR names tools/fetch_gd32_library.sh"
 
-      # ci/gd32_vendor_wrapper/CMakeLists.txt is this repo's own Apache-2.0
-      # glue (a copy of alp-sdk's vendors/gd32_firmware_library/CMakeLists.txt
-      # wrapper) -- it is NOT GigaDevice IP and carries no vendor licence
-      # terms.  Staged under $RUNNER_TEMP (outside the checkout, cleaned up
-      # by the runner after the job) -- a location with no significance
-      # other than "somewhere GD32_VENDOR_DIR can point at", which is the
-      # point: it is not the fallback path.
-      - name: stage the vendor wrapper CMakeLists
-        run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/gd32_vendor/gd32_firmware_library"
-          cp ci/gd32_vendor_wrapper/CMakeLists.txt \
-             "$RUNNER_TEMP/gd32_vendor/gd32_firmware_library/CMakeLists.txt"
+      # The GD32G5x3 firmware library is GigaDevice IP under GigaDevice's own
+      # terms (THIRD_PARTY_NOTICES.md); it is never committed here and is NOT
+      # taken from alp-sdk or any Alp mirror.  The script clones GigaDevice's
+      # official repository and fails closed unless the commit AND the
+      # Firmware/ tree hash match its pins, so a moved tag or a tampered
+      # mirror cannot change what this required check compiles.  The cache is
+      # only a speed/offline aid: the script re-verifies a cached checkout.
+      - name: cache the GD32 vendor firmware library
+        uses: actions/cache@v4
+        with:
+          path: vendor/gd32_firmware_library/upstream
+          key: gd32-lib-${{ hashFiles('tools/fetch_gd32_library.sh') }}
 
-      # The actual GD32G5x3 firmware library IS GigaDevice IP, redistributed
-      # under SLA-GD0001 v1.1 -- see that licence's terms, quoted in full in
-      # this repo's PR body and in alp-sdk's vendors/gd32_firmware_library/
-      # README.md.  It is not vendored into any repo's main tree; fetched
-      # here from the pinned public mirror alp-sdk itself pins as a
-      # submodule, at the immutable commit alp-sdk's gitlink points to --
-      # NOT by tag: `git clone --branch` resolves a mutable annotated tag
-      # (or a same-named branch, silently preferred if one ever exists),
-      # so anyone with push to the mirror could retarget what this
-      # required check compiles with no diff in this repo. The clone still
-      # requests the tag (cheap, shallow, matches today's history), but the
-      # checkout below fails closed if that tag no longer points where
-      # alp-sdk's .gitmodules says it does.
-      - name: fetch the GD32 vendor firmware library (pinned commit, via tag)
+      - name: fetch the GD32 vendor firmware library (pinned commit + tree hash)
         timeout-minutes: 5
-        env:
-          GD32_VENDOR_PIN: 4a0258080c45227a31fd4c32fa2c4860ba11c16a
-        run: |
-          set -euo pipefail
-          git clone --branch v1.5.0 --depth 1 \
-            https://github.com/alplabai/gd32g5x3-firmware-library.git \
-            "$RUNNER_TEMP/gd32_vendor/gd32_firmware_library/upstream"
-          actual="$(git -C "$RUNNER_TEMP/gd32_vendor/gd32_firmware_library/upstream" rev-parse HEAD)"
-          if [ "$actual" != "$GD32_VENDOR_PIN" ]; then
-            echo "::error::vendor firmware library HEAD is $actual, expected $GD32_VENDOR_PIN -- tag v1.5.0 no longer points at the commit alp-sdk's .gitmodules pins. Update GD32_VENDOR_PIN here in lockstep with any deliberate alp-sdk submodule bump; otherwise this is a moved tag and the build must not proceed."
-            exit 1
-          fi
+        run: tools/fetch_gd32_library.sh
 
-      # BRIDGE_OTA_PARTITIONED=ON, with the gd32 backend, builds THREE
-      # targets from one configure: gd32-bridge-slot-a and
-      # gd32-bridge-slot-b (both compile src/ota.c's real BEGIN / WRITE_CHUNK
-      # / VERIFY / COMMIT / ROLLBACK / GET_STATE / ABORT machine, since
-      # BRIDGE_OTA_PARTITIONED is defined for them and src/ota.c:56-482 is no
-      # longer preprocessed out), and gd32-bootloader (the only target that
-      # compiles src/boot/boot_main.c). The two app targets share
-      # CMakeLists.txt's GD32_BRIDGE_SOURCES list; the bootloader deliberately
-      # has a smaller source list, including the fault recorder it needs
-      # before either app is reached.
-      # -DGD32_VENDOR_DIR points at the tree staged above -- the positive
-      # path (Refs #110): this is the flag itself doing the work, not the
-      # CMakeLists.txt fallback.
-      # Negative path for the #127 guard, in the same style as the
-      # GD32_VENDOR_DIR one above: the vendor tree IS staged now, but
-      # ci/gd32_vendor_wrapper/CMakeLists.txt deliberately omits alp-sdk's
-      # overrides/system_gd32g5x3.c, so configuring WITHOUT
-      # -DBRIDGE_ALLOW_STOCK_SYSTEM_INIT must fail rather than emit an image
-      # that hangs in system_clock_216m_hxtal() before main().  Asserts on
-      # the message naming the flag, not just the non-zero exit -- an
-      # exit-code-only check would pass just as happily if the guard started
-      # firing for some unrelated reason.
-      - name: configure (gd32 backend, no clock override) must fail naming the flag
+      # Negative path for the #127 guard: a wrapper directory with no
+      # patches/ must fail rather than emit an image that hangs in
+      # system_clock_216m_hxtal() before main().  Asserts on the message
+      # naming the flag, not just the non-zero exit.
+      - name: configure (gd32 backend, no clock patch) must fail naming the flag
         run: |
           set -uo pipefail
+          mkdir -p "$RUNNER_TEMP/novendor"
+          cp vendor/gd32_firmware_library/CMakeLists.txt "$RUNNER_TEMP/novendor/CMakeLists.txt"
           if out=$(cmake -B build-negative-clock -S . \
               -DCMAKE_TOOLCHAIN_FILE=toolchain/arm-none-eabi.cmake \
               -DBRIDGE_HAL_BACKEND=gd32 \
-              -DGD32_VENDOR_DIR="$RUNNER_TEMP/gd32_vendor/gd32_firmware_library" 2>&1); then
+              -DGD32_VENDOR_DIR="$RUNNER_TEMP/novendor" 2>&1); then
             echo "$out"
-            echo "::error::configure succeeded against a vendor tree with no overrides/system_gd32g5x3.c; expected the FATAL_ERROR from #127 (this build would produce an image that hangs before main())"
+            echo "::error::configure succeeded against a vendor dir with no clock patch; expected the FATAL_ERROR from #127 (this build would produce an image that hangs before main())"
             exit 1
           fi
           echo "$out"
@@ -371,20 +319,19 @@ jobs:
           fi
           echo "negative path OK: FATAL_ERROR names -DBRIDGE_ALLOW_STOCK_SYSTEM_INIT"
 
-      # -DBRIDGE_ALLOW_STOCK_SYSTEM_INIT=ON (#127): the wrapper staged above
-      # carries no clock override, so this build links the STOCK vendor
-      # SystemInit() and the resulting .bin HANGS before main() on real
-      # silicon. That is fine and intended HERE -- this job compiles and
-      # links only -- but the flag has to be explicit, so nothing produces a
-      # bricking image by accident. Never add this flag to anything flashed.
+      # BRIDGE_OTA_PARTITIONED=ON, with the gd32 backend, builds THREE
+      # targets from one configure: gd32-bridge-slot-a and gd32-bridge-slot-b
+      # (both compile src/ota.c's real BEGIN / WRITE_CHUNK / VERIFY / COMMIT /
+      # ROLLBACK / GET_STATE / ABORT machine), and gd32-bootloader (the only
+      # target that compiles src/boot/boot_main.c).  The in-repo wrapper
+      # applies the IRC8M clock patch, so no BRIDGE_ALLOW_STOCK_SYSTEM_INIT.
       - name: configure (gd32 backend, OTA partitioned)
         run: |
           cmake -B build-gd32 -S . \
             -DCMAKE_TOOLCHAIN_FILE=toolchain/arm-none-eabi.cmake \
             -DBRIDGE_HAL_BACKEND=gd32 \
             -DBRIDGE_OTA_PARTITIONED=ON \
-            -DBRIDGE_ALLOW_STOCK_SYSTEM_INIT=ON \
-            -DGD32_VENDOR_DIR="$RUNNER_TEMP/gd32_vendor/gd32_firmware_library"
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 
       - name: build
         run: cmake --build build-gd32 -j"$(nproc)"
@@ -392,18 +339,26 @@ jobs:
       # BRIDGE_OTA_PARTITIONED defaults OFF: that's the non-partitioned
       # `gd32-bridge` target linked against toolchain/gd32g553_flash.ld --
       # the image actually flashed to the bench -- and no other job here
-      # links it against the gd32 backend. Same vendor fetch already staged
-      # above; one extra configure+build closes that gap.
+      # links it against the gd32 backend.
       - name: configure (gd32 backend, full-flash / non-partitioned)
         run: |
           cmake -B build-gd32-flash -S . \
             -DCMAKE_TOOLCHAIN_FILE=toolchain/arm-none-eabi.cmake \
             -DBRIDGE_HAL_BACKEND=gd32 \
-            -DBRIDGE_ALLOW_STOCK_SYSTEM_INIT=ON \
-            -DGD32_VENDOR_DIR="$RUNNER_TEMP/gd32_vendor/gd32_firmware_library"
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 
       - name: build (full-flash)
         run: cmake --build build-gd32-flash -j"$(nproc)"
+
+      - name: verify the linked images use the IRC8M clock patch
+        run: |
+          set -euo pipefail
+          python3 tools/check_clock_override.py build-gd32/compile_commands.json \
+            build-gd32/gd32-bootloader.elf \
+            build-gd32/gd32-bridge-slot-a.elf \
+            build-gd32/gd32-bridge-slot-b.elf
+          python3 tools/check_clock_override.py build-gd32-flash/compile_commands.json \
+            build-gd32-flash/gd32-bridge.elf
 
       # The vendor Reset_Handler copies .data and zeroes .bss only.  Until it
       # grows an explicit TCMSRAM initialiser, every linker script must reject

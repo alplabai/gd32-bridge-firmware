@@ -1,0 +1,61 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Alp Lab AB
+#
+# Alp Lab's IRC8M clock fix for the GD32G5x3 firmware library's
+# system_gd32g5x3.c (V1.5.0).  This patch is Alp-authored and contains only
+# our changes; GigaDevice's file is NOT redistributed here -- the wrapper
+# applies this patch to a build-directory copy of the file fetched from
+# GigaDevice (see vendor/gd32_firmware_library/CMakeLists.txt).
+#
+# Stock selects 216M-PLL-HXTAL, but on the E1M-V2M101 SoM the GD32 HXTAL input
+# (5L35023B SE2, a single-pin external oscillator configured over BRD_I2C,
+# held low by the DX-M1) never starts, so SystemInit() hangs forever waiting
+# for HXTALSTB and never reaches main().  This selects 216M-PLL-IRC8M instead
+# and enables HXTAL bypass in the (currently unused) HXTAL path.
+--- a/system_gd32g5x3.c	2026-10-05 19:02:06.934632100 +0200
++++ b/system_gd32g5x3.c	2026-10-05 19:02:06.984158400 +0200
+@@ -41,7 +41,7 @@
+ //#define __SYSTEM_CLOCK_96M_PLL_IRC8M           (uint32_t)(96000000)
+ //#define __SYSTEM_CLOCK_120M_PLL_IRC8M           (uint32_t)(120000000)
+ //#define __SYSTEM_CLOCK_170M_PLL_IRC8M           (uint32_t)(170000000)
+-//#define __SYSTEM_CLOCK_216M_PLL_IRC8M           (uint32_t)(216000000)
++#define __SYSTEM_CLOCK_216M_PLL_IRC8M           (uint32_t)(216000000)
+ #else
+ //#define __SYSTEM_CLOCK_IRC8M                    (uint32_t)(__IRC8M)
+ //#define __SYSTEM_CLOCK_48M_PLL_IRC8M           (uint32_t)(48000000)
+@@ -57,7 +57,10 @@
+ //#define __SYSTEM_CLOCK_96M_PLL_HXTAL            (uint32_t)(96000000)
+ //#define __SYSTEM_CLOCK_120M_PLL_HXTAL           (uint32_t)(120000000)
+ //#define __SYSTEM_CLOCK_170M_PLL_HXTAL           (uint32_t)(170000000)
+-#define __SYSTEM_CLOCK_216M_PLL_HXTAL           (uint32_t)(216000000)
++/* E1M-V2M101: HXTAL (5L35023B SE2, 8 MHz) is UNUSED for now -- the 5L35023B
++ * is configured over BRD_I2C which the DX-M1 holds low, so SE2 may be inactive.
++ * Clock the GD32 from internal IRC8M (216M_PLL_IRC8M above) until I2C is fixed. */
++//#define __SYSTEM_CLOCK_216M_PLL_HXTAL           (uint32_t)(216000000)
+ #else
+ //#define __SYSTEM_CLOCK_HXTAL                    (uint32_t)(__HXTAL)
+ //#define __SYSTEM_CLOCK_48M_PLL_HXTAL            (uint32_t)(48000000)
+@@ -186,6 +189,9 @@
+ uint32_t SystemCoreClock = __SYSTEM_CLOCK_170M_PLL_HXTAL;
+ static void system_clock_170m_hxtal(void);
+ #elif defined (__SYSTEM_CLOCK_216M_PLL_HXTAL)
++/* E1M-V2M101 SoM: HXTAL = 5L35023B SE2, an 8 MHz single-pin clock (needs HXTAL
++ * bypass; see system_clock_216m_hxtal).  8/2 * 108 / 2 = 216 MHz.  Currently
++ * UNUSED (IRC8M is selected) until the 5L35023B is configurable over BRD_I2C. */
+ #define PLLPSC              (2U - 1U)
+ #define PLLN                (108U)
+ #define PLLP                ((2U >> 1U) - 1U)
+@@ -984,6 +990,13 @@
+     uint32_t stab_flag = 0U;
+     __IO uint32_t reg_temp;
+ 
++    /* E1M-V2M101 SoM: the GD32 HXTAL input is a single-pin EXTERNAL OSCILLATOR
++     * (clock fed into OSC_IN), NOT a 2-pin crystal.  Enable HXTAL bypass so the
++     * RCU takes the external clock directly; without it HXTALSTB never asserts
++     * in crystal-drive mode and SystemInit hangs here forever (never reaching
++     * main(), so SPI/I2C never come up).  Must be set while HXTALEN==0. */
++    RCU_CTL |= RCU_CTL_HXTALBPS;
++
+     /* enable HXTAL */
+     RCU_CTL |= RCU_CTL_HXTALEN;
+ 
