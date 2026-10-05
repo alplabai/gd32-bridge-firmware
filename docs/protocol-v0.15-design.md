@@ -357,7 +357,7 @@ The length is self-delimiting, and its maximum can be computed from the request.
 
 Enforced in `protocol_dispatch_inner()` **after** the trial gate (unchanged: any CRC-valid frame on either link confirms a trial) and before the opcode switch.
 
-- **Allowed on `GD32_BRIDGE_LINK_I2C`:** `0x00` PING, `0x01` GET_VERSION, `0x02` GET_BUILD_ID, `0x03` RESET_REASON, `0x10` GPIO_READ, `0x11` GPIO_WRITE, `0x41` SE_RESET, `0x81` LINK_FEATURES (I2C grants only STATUS_SEQ, `mp` = 65), and `0xF0..0xFF` OTA.
+- **Allowed on `GD32_BRIDGE_LINK_I2C`:** `0x00` PING, `0x01` GET_VERSION, `0x02` GET_BUILD_ID, `0x03` RESET_REASON, `0x10` GPIO_READ, `0x11` GPIO_WRITE, `0x41` SE_RESET, `0x42` BOOT_CONFIG, `0x81` LINK_FEATURES (I2C grants only STATUS_SEQ, `mp` = 65), and `0xF0..0xFF` OTA.
 - Any other opcode: `STATUS_NOSUPPORT` (`0x06`) with an empty payload; the handler never runs.
 - Add SWD-readable diagnostics `bridge_i2c_denied_count:u32` and `bridge_i2c_denied_last_cmd:u8`, in the same style as `bridge_i2c_rx_diag`.
 - SPI is unrestricted. No per-pad GPIO ownership is enforced (§11 Q9).
@@ -472,3 +472,15 @@ Each new regression check must be shown to fail against the 0.14 build first.
 - Q9: no per-pad ownership enforcement in 0.15.
 - Q11 portable API: `<alp/adc.h>` is unchanged in this step; the chip API (`gd32g553_adc_stream_read2`) reports `first_index` / `dropped`. The V2N ADC backend uses READ2 when granted and still returns `ALP_ERR_BUSY` only on the discontinuity sentinel.
 - Host SPI engine: DMA only; no interim FIFO-interrupt engine. ATTN replaces the staging-gap busy-wait when granted (IRQ + semaphore, no polling).
+
+
+## 13. `CMD_BOOT_CONFIG` (0x42): persistent opt-in boot behaviour (alp-sdk #2697)
+
+Request `op:u8 flags:u32 LE` (5 B); reply `flags:u32 LE` (the stored value). `op` 0 = GET (`flags` ignored), 1 = SET. Allowed on I2C and SPI (provisioning runs from Linux). Added inside the unreleased 0.15 line, so no `PROTOCOL_VERSION` bump; a host sees `STATUS_NOSUPPORT` from firmware that predates it.
+
+- `flags` bit0 `SDMUX_EN_HIGH`: from `bridge_hw_init()` the GD32 drives PD11 (E1M IO29, the EVK's `SDIO_MUX_EN`, active-low: low = SD connected, high = SD disconnected) HIGH, so a provisioning run keeps the microSD out across cold power cycles. Other bits -> `STATUS_INVAL`.
+- **Default off.** IO29's meaning is carrier-specific, so a unit that never received a SET behaves as before: the pad is not touched (hi-Z/analog park). The flag is host-set, never a firmware default.
+- **Storage:** one 16-byte record (`magic "BCF1"`, `flags`, CRC-32, 0) in its own flash page at `OTA_CONFIG_BASE` (0x08076000, previously reserved; `src/ota_layout.h`). It survives power cycles and OTA slot swaps. An erased, torn or foreign page reads as all-off, so a power cut mid-SET falls back to the safe default. SET = page erase (<= 20 ms, the SPI reply is late by that much) + program + readback; `STATUS_IO` / `STATUS_TIMEOUT` on a flash fault, `STATUS_NOSUPPORT` when the build has no FMC HAL.
+- **SET never moves a pad.** It takes effect at the next GD32 reset, so setting it on a unit running from the SD cannot pull its rootfs out. A host that wants the SD out now also writes IO29 high with `GPIO_WRITE`; clearing the flag does not release an already-driven pad (that needs a GD32 reset).
+- **Boot timing (estimate, not measured):** the pad is driven right after the pad map is parked in `bridge_hw_init()`, i.e. after the bootloader's slot check (~72 ms at -Os for a full-slot CRC, `src/boot/boot_main.c`) and the pre-`main()` SRAM init (~20-25 ms, `hal/gd32/se_reset.c`) plus a few ms of clock/NVIC/SYSCFG setup: roughly 100-150 ms after GD32 reset release. RZ/V2N U-Boot scans mmc1 seconds after power-up (TF-A + DDR training + U-Boot SPL first), so the margin is one order of magnitude or more. Bench item: scope PD11 vs the SoM supply on 2026W38-0008 to confirm.
+- `GPIO_READ` is unaffected by this feature and still must not reconfigure a pad (alp-sdk #2701).

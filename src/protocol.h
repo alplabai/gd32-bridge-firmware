@@ -210,6 +210,15 @@ typedef enum {
      * the GD32 even while BRD_I2C is held low).  The active level is
      * firmware-owned (OPTIGA RST is active-low; see hal/gd32/se_reset.c). */
 	CMD_SE_RESET = 0x41,
+	/* v0.15: persistent boot configuration (src/boot_config.h).  Request
+	 * `op:u8 flags:u32` (5 B): op 0 = GET (flags ignored), op 1 = SET (store
+	 * `flags`, bit0 = drive PD11 / E1M IO29 SDIO_MUX_EN high at every boot;
+	 * unknown bits -> STATUS_INVAL).  Reply `flags:u32` = the stored value.
+	 * SET takes effect at the next GD32 reset and does NOT touch a pad now;
+	 * a SET blocks for one flash page erase (<= 20 ms).  NOSUPPORT on a build
+	 * without the FMC HAL.  Allowed on the I2C link (provisioning runs from
+	 * Linux).  Added inside the unreleased 0.15 line: no version bump. */
+	CMD_BOOT_CONFIG = 0x42,
 	/* v0.2 additions -- the GD32 carries every E1M-standard analog
 	 * and counter peripheral on V2N (per alp-sdk gd32-io-mcu-map.tsv); the
      * SDK's portable surface routes through these. */

@@ -358,6 +358,7 @@ static bool i2c_allowed(unsigned cmd)
 	case 0x10:
 	case 0x11:
 	case 0x41:
+	case 0x42:
 	case 0x81:
 		return true;
 	default:
