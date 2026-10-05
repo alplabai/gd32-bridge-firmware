@@ -30,7 +30,8 @@
  *   CS falling: reset the portable RX staging (spi_slave_cs_low).
  *   CS rising:  read the RX residue (count = buffer - DMA remaining),
  *               flush + re-init the peripheral (RCU reset -- the only
- *               reliable FIFO flush), feed the received bytes through
+ *               reliable FIFO flush; skipped when SPI_STAT proves
+ *               nothing is stale), feed the received bytes through
  *               the byte seams, decode + stage the reply, then re-arm
  *               RX DMA (full buffer) and TX DMA (exact reply length).
  *
@@ -62,6 +63,7 @@
 #include "gd32/i2c_recovery.h"
 #include "gd32/i2c_timeout.h"
 #include "gd32/spi_dma_arm_status.h"
+#include "gd32/spi_fast_reinit.h"
 #include "protocol.h" /* GD32_BRIDGE_DEFAULT_I2C_ADDR */
 #include "timing_stats.h"
 #include "transport.h" /* the seams we drive */
@@ -184,7 +186,8 @@ static bool spi_dma_disable_confirm(dma_channel_enum channel)
 
 /* One-time channel configuration (clocks, DMAMUX routing, widths).  The
  * per-transaction address/count reloads live in the arm helpers below;
- * everything here survives both the per-transaction SPI RCU reset (DMA and
+ * everything here survives both the end-of-transaction SPI RCU reset (taken
+ * when spi_end_of_transaction_reinit() finds stale state; DMA and
  * DMAMUX are separate peripherals) and channel disable/enable cycles. */
 static void spi_dma_init(void)
 {
@@ -265,8 +268,11 @@ static bool spi_dma_arm_rx(void)
 /* Arm TX with exactly the staged reply (never more: the GD32 SPI has no
  * TX-underrun error and no FIFO flush, so over-queued bytes would stick --
  * the same invariant the old per-byte path enforced via tx_pending()). */
+static uint32_t spi_tx_armed_len; /* TX DMA length armed for the current reply (fast re-init) */
+
 static bool spi_dma_arm_tx(uint32_t len)
 {
+	spi_tx_armed_len = 0u;
 	if (!spi_dma_disable_confirm(BRIDGE_SPI_TX_DMA_CH)) {
 		spi_dma_arm_record_confirm_fail(&spi_dma_tx_arm_fail_count, &spi_dma_error_pending);
 		return false;
@@ -277,6 +283,7 @@ static bool spi_dma_arm_tx(uint32_t len)
 	dma_memory_address_config(BRIDGE_SPI_DMA, BRIDGE_SPI_TX_DMA_CH, (uint32_t)spi_tx_dma_buf);
 	dma_transfer_number_config(BRIDGE_SPI_DMA, BRIDGE_SPI_TX_DMA_CH, len);
 	dma_channel_enable(BRIDGE_SPI_DMA, BRIDGE_SPI_TX_DMA_CH);
+	spi_tx_armed_len = len;
 	return true;
 }
 
@@ -296,10 +303,11 @@ static void spi_cs_exti_init(void)
 }
 
 /* (Re)configure the SPI1 slave peripheral: mode-0, 8-bit, hardware-NSS,
- * full-duplex, RX + error interrupts on.  Called at init AND as the per-
- * transaction FIFO flush (after a peripheral reset -- see the CS-rising
- * handler).  GPIO/EXTI/NVIC are set up once and survive a peripheral reset, so
- * they stay in bridge_transport_spi_hw_init(). */
+ * full-duplex, RX + error interrupts on.  Called at init AND after the
+ * end-of-transaction peripheral reset, when spi_end_of_transaction_reinit()
+ * decides one is needed (see the CS-rising handler).  GPIO/EXTI/NVIC are
+ * set up once and survive a peripheral reset, so they stay in
+ * bridge_transport_spi_hw_init(). */
 static void bridge_spi_periph_config(void)
 {
 	spi_parameter_struct sp;
@@ -323,7 +331,7 @@ static void bridge_spi_periph_config(void)
      * the SPL routes byte access to the 8-bit DATA alias (gd32g5x3_spi.c), so a
      * byte access DOES advance the FIFO -- the stale "8-bit jams / 16-bit
      * required" note was wrong.  Re-applied here on every (re)config because the
-     * per-transaction RCU_SPI1RST reset (CS-rising handler) clears BYTEN. */
+     * RCU_SPI1RST reset (end-of-transaction slow path) clears BYTEN. */
 	spi_fifo_access_size_config(BRIDGE_SPI_PERIPH, SPI_BYTE_ACCESS);
 
 	/* DMA-driven data path: no SPI data interrupts at all (at 25 MHz a byte
@@ -331,7 +339,7 @@ static void bridge_spi_periph_config(void)
      * request lines for both directions; the actual flow is gated by the DMA
      * channel enables (the arm helpers), so a raised TBE request with the TX
      * channel disabled moves nothing.  Both CTL1 bits are cleared by the
-     * per-transaction RCU_SPI1RST flush, so they are re-applied here, exactly
+     * RCU_SPI1RST reset, so they are re-applied here, exactly
      * like BYTEN above. */
 	spi_dma_enable(BRIDGE_SPI_PERIPH, SPI_DMA_RECEIVE);
 	spi_dma_enable(BRIDGE_SPI_PERIPH, SPI_DMA_TRANSMIT);
@@ -506,6 +514,37 @@ static void attn_cs_exit(bool fresh)
 	}
 }
 
+/* SWD-readable counters (gh#165): end-of-transaction re-inits that took the
+ * fast path (no peripheral reset) vs the full RCU reset.  Plain RAM words, no
+ * wrap handling; read them over SWD by symbol name. */
+volatile bridge_spi_reinit_stats_t bridge_spi_reinit_stats;
+
+/* End-of-transaction SPI re-init, run after the RX FIFO was drained.
+ *
+ * The GD32G5x3 SPI has no FIFO flush bit (UM Rev1.3), and nothing documents
+ * discarding stale TX FIFO bytes -- that is what the RCU reset buys.  When
+ * SPI_STAT already proves there is nothing stale (TXLVL==0, TRANS==0,
+ * RXLVL==0, no error flag) AND the master clocked the whole armed TX reply with
+ * the TX DMA drained (TXLVL misses the shift register), the reset has nothing
+ * to clean and BYTEN / DMAREN / DMATEN / SPIEN are still as
+ * bridge_spi_periph_config() left them, so it is skipped (~28 us saved).  Anything else takes the unchanged full reset. */
+static void spi_end_of_transaction_reinit(uint32_t received)
+{
+#if BRIDGE_SPI_FAST_REINIT
+	if (bridge_spi_fast_reinit_ok(SPI_STAT(BRIDGE_SPI_PERIPH),
+	                              spi_tx_armed_len,
+	                              dma_transfer_number_get(BRIDGE_SPI_DMA, BRIDGE_SPI_TX_DMA_CH),
+	                              received)) {
+		bridge_spi_reinit_stats.fast++;
+		return;
+	}
+#endif
+	bridge_spi_reinit_stats.slow++;
+	rcu_periph_reset_enable(RCU_SPI1RST);
+	rcu_periph_reset_disable(RCU_SPI1RST);
+	bridge_spi_periph_config();
+}
+
 /* CS edge: PA8 on EXTI8.  Falling = select (reset RX, preload the staged
  * reply); rising = end of transaction (decode + stage the next reply).
  *
@@ -577,11 +616,11 @@ void BRIDGE_SPI_CS_EXTI_HANDLER(void)
              *    just-finished receive makes the captured byte run just as
              *    untrustworthy as a DMA ERRIF, so it feeds the SAME error
              *    seam below rather than a second one.
-             * 3. FLUSH + re-init the SPI via the RCU reset (the only
-             *    reliable FIFO flush; it also clears BYTEN/DMAREN/DMATEN,
-             *    which bridge_spi_periph_config re-applies) so the
-             *    peripheral is reception-ready while the heavier decode
-             *    below runs.
+             * 3. spi_end_of_transaction_reinit() decides: skip when nothing is
+             *    stale, else RCU reset (the only reliable FIFO flush; it also
+             *    clears BYTEN/DMAREN/DMATEN, which bridge_spi_periph_config
+             *    re-applies) so the peripheral is reception-ready while the
+             *    heavier decode below runs.
              * 4. Feed the captured bytes through the byte seams, then
              *    re-arm RX BEFORE decoding.  The portable layer has copied
              *    them, so a following transaction can safely reuse the DMA
@@ -655,9 +694,7 @@ void BRIDGE_SPI_CS_EXTI_HANDLER(void)
 				spi_rx_dma_buf[received++] = (uint8_t)spi_data_receive(BRIDGE_SPI_PERIPH);
 			}
 
-			rcu_periph_reset_enable(RCU_SPI1RST);
-			rcu_periph_reset_disable(RCU_SPI1RST);
-			bridge_spi_periph_config();
+			spi_end_of_transaction_reinit(received);
 
 			/* Self-contained decode: reset the portable staging FIRST so a
              * swallowed falling edge cannot prepend the previous frame's
@@ -959,8 +996,9 @@ int bridge_transport_i2c_hw_init(void)
 	 * PA8; GPIOB 0x8200 = PB15/PB9; GPIOC 0x2000 = PC13.
 	 *
 	 * Audited reconfigure paths (the issue demands this before
-	 * enabling): the per-transaction SPI flush above resets SPI1
-	 * only (RCU_SPI1RST) and never touches GPIO config; the
+	 * enabling): the end-of-transaction SPI flush above, when it
+	 * takes the slow path, resets SPI1 only (RCU_SPI1RST) and never
+	 * touches GPIO config; the
 	 * Deep-sleep wake path (power.c) calls THIS function again, whose
 	 * gpio_mode_set/gpio_af_set on PA15/PB9 become harmless no-ops
 	 * under the lock -- GPIO config survives Deep-sleep (GPIO is in
