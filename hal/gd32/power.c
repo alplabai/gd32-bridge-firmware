@@ -391,7 +391,8 @@ int bridge_hw_power_mode_set(uint8_t  mode,
 		 * leave CS as the only proven wake -- is refused until a bench run proves
 		 * the line. */
 		if (no_timer) {
-			return ((flags & POWER_FLAG_WAKE_I2C) != 0u) ? BRIDGE_HW_ERR_RANGE : BRIDGE_HW_ERR_INVAL;
+			return ((flags & POWER_FLAG_WAKE_I2C) != 0u) ? BRIDGE_HW_ERR_RANGE
+			                                             : BRIDGE_HW_ERR_INVAL;
 		}
 		if (!no_timer) {
 			const uint32_t ms = (wake_after_ms != 0u) ? wake_after_ms : POWER_WAKE_TIMER_MAX_MS;
