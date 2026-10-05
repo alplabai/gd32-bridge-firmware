@@ -20,11 +20,16 @@
 
 #define NDW (OTA_PAGE_SIZE / 8u)
 
-static uint8_t          g_page[2][OTA_PAGE_SIZE];
-static bool             g_bad[2][NDW]; /* doubleword reads as uncorrectable */
-static uint32_t         g_erase_calls;
-static uint32_t         g_bad_reads; /* read_safe calls that returned false */
-static uint32_t         g_payload_reads;
+static uint8_t  g_page[2][OTA_PAGE_SIZE];
+static bool     g_bad[2][NDW]; /* doubleword reads as uncorrectable */
+static uint32_t g_erase_calls;
+static uint32_t g_bad_reads; /* read_safe calls that returned false */
+static uint32_t g_payload_reads;
+static bool     g_ota_active;
+bool            ota_session_active(void)
+{
+	return g_ota_active;
+}
 static bool             g_supported, g_busy, g_write_safe;
 static ota_fmc_result_t g_erase_rv, g_program_rv;
 static int  g_ops_before_cut; /* flash ops that complete before a power cut; <0 = none */
@@ -119,6 +124,7 @@ static void fresh_unit(void) /* factory-new: both pages erased, HAL reset */
 	g_erase_calls = g_bad_reads = g_payload_reads = 0u;
 	g_supported                                   = true;
 	g_busy                                        = false;
+	g_ota_active                                  = false;
 	g_write_safe                                  = true;
 	g_ops_before_cut                              = -1;
 	g_cut                                         = false;
@@ -265,6 +271,18 @@ ZTEST(boot_config, test_busy_while_a_different_set_is_pending)
 	zassert_equal(cfg(GD32_BRIDGE_LINK_SPI, 1u, 0u, &v), STATUS_OK);
 	boot_config_tick();
 	zassert_equal(boot_config_flags(), 0u);
+}
+
+ZTEST(boot_config, test_set_is_busy_while_an_ota_session_is_active)
+{
+	uint32_t v, p;
+	fresh_unit();
+	g_ota_active = true;
+	zassert_equal(cfg(GD32_BRIDGE_LINK_SPI, 1u, F1, &v), STATUS_BUSY, "SET during OTA");
+	zassert_false(boot_config_pending(&p));
+	zassert_equal(cfg(GD32_BRIDGE_LINK_SPI, 1u, 0u, &v), STATUS_OK, "unchanged SET still a no-op");
+	g_ota_active = false;
+	zassert_equal(cfg(GD32_BRIDGE_LINK_SPI, 1u, F1, &v), STATUS_OK);
 }
 
 ZTEST(boot_config, test_tick_waits_for_the_fmc_funnel)

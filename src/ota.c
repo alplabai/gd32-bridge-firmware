@@ -624,6 +624,11 @@ void ota_boot_init(void)
 	}
 }
 
+bool ota_session_active(void)
+{
+	return s_state != OTA_ST_IDLE && s_state != OTA_ST_ERROR;
+}
+
 bool ota_trial_unconfirmed(void)
 {
 	return s_trial;
@@ -1319,6 +1324,12 @@ void ota_erase_tick(void)
 /* OTA inert: no trial ever gets armed, so nothing to reconcile/gate/confirm. */
 void ota_boot_init(void)
 {
+}
+
+/* Weak so a host test can drive it; OTA-inert builds have no session. */
+__attribute__((weak)) bool ota_session_active(void)
+{
+	return false;
 }
 
 bool ota_trial_unconfirmed(void)

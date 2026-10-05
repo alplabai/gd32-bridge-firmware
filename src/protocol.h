@@ -217,9 +217,10 @@ typedef enum {
 	 * SET is asynchronous: it is accepted at once (reply = the old stored
 	 * value) and committed from the main loop, never in the transport ISR;
 	 * the host polls GET until the stored value equals what it asked for.
-	 * The commit erases one flash page (<= 20 ms, interrupts masked for the
-	 * busy window), so the host must leave the link idle for ~30 ms after a
-	 * SET before polling.  A SET equal to the stored value is a no-op; a
+	 * The commit erases two 1 KB pages on dual-bank parts (each <= 20 ms,
+	 * interrupts masked), so the link can black out for 2 x 20 ms plus
+	 * main-loop latency; there is no fixed idle window, so GET polls must be
+	 * retry-tolerant.  A SET while an OTA session is active answers BUSY.  A SET equal to the stored value is a no-op; a
 	 * different SET while one is queued answers BUSY.  SET takes effect at
 	 * the next GD32 reset and does NOT touch a pad now.  NOSUPPORT on a
 	 * build without the FMC HAL, with OBCTL.DBS = 0, or running from bank 1.

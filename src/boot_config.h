@@ -34,9 +34,11 @@
  *    (boot_config_request) and committed from the main loop
  *    (boot_config_tick, bridge_hw_tick) -- the host gets its reply
  *    immediately and polls GET until the stored value equals what it asked
- *    for.  The page erase (<= 20 ms) masks interrupts for its busy window
- *    (hal/fmc_ota.c erase_one_page): the host must not clock the link during
- *    that window, so it waits before polling (gd32g553_boot_config_set).
+ *    for.  The commit erases 2 x 1 KB pages on dual-bank parts (DBS=1), each
+ *    <= 20 ms with interrupts masked (hal/fmc_ota.c erase_one_page): up to
+ *    2 x 20 ms of blackout, plus main-loop latency (boot_config_tick can
+ *    start ~40 ms late behind an ota_erase_tick walk).  There is no fixed
+ *    idle window: polls must simply be retry-tolerant (gd32g553_boot_config_set).
  *    A SET equal to the stored value is a no-op and never touches flash.
  *
  * Today's only flag, BOOT_CONFIG_FLAG_SDMUX_EN_HIGH, drives PD11 (E1M IO29,

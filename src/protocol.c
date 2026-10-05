@@ -407,6 +407,8 @@ static gd32_bridge_status_t handle_boot_config(const uint8_t *req,
 		const uint32_t flags = get_le32(&req[1]);
 		if ((flags & ~BOOT_CONFIG_KNOWN_FLAGS) != 0u) return STATUS_INVAL;
 		if (flags != boot_config_flags() && !ota_fmc_config_write_safe()) return STATUS_NOSUPPORT;
+		if (flags != boot_config_flags() && ota_session_active())
+			return STATUS_BUSY;                              /* OTA owns the FMC */
 		if (!boot_config_request(flags)) return STATUS_BUSY; /* a different SET is in flight */
 	}
 	put_le32(reply, boot_config_flags());
