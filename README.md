@@ -268,7 +268,7 @@ host-tested in `tests/unit/power_wake/`); the entry/wake sequence is
   `last_wake_source` (1 CS, 2 I2C, 3 RTC, 4 other), `last_wake_pd0` (raw
   EXTI_PD0), `last_wake_restore_cyc` (DWT cycles from the `WFI` return to the
   clock and I2C restored, counted partly on IRC8M), `i2c_wake_armed`. It lives in
-  SRAM, so a Standby wake zeroes it; the cause is in `bridge_reset_reason`.
+  SRAM, so a Standby wake zeroes it; the cause is in the reset-reason report (`CMD_RESET_REASON`).
 
 ### Bench plan (E1M-V2M103, R&D unit 0008)
 
