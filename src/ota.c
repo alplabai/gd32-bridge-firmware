@@ -112,6 +112,10 @@ __attribute__((weak)) bool ota_fmc_funnel_busy(void)
 {
 	return false; /* stub backend: no funnel, nothing to contend for */
 }
+__attribute__((weak)) bool ota_fmc_config_write_safe(void)
+{
+	return true;
+}
 __attribute__((weak)) const void *ota_fmc_flash_ptr(uint32_t addr)
 {
 	return (const void *)(uintptr_t)addr;

@@ -215,8 +215,9 @@ typedef enum {
 	 * `flags`, bit0 = drive PD11 / E1M IO29 SDIO_MUX_EN high at every boot;
 	 * unknown bits -> STATUS_INVAL).  Reply `flags:u32` = the stored value.
 	 * SET takes effect at the next GD32 reset and does NOT touch a pad now;
-	 * a SET blocks for one flash page erase (<= 20 ms).  NOSUPPORT on a build
-	 * without the FMC HAL.  Allowed on the I2C link (provisioning runs from
+	 * a SET blocks for one flash page erase (<= 20 ms); an unchanged SET is a
+	 * no-op.  BUSY while an OTA erase walk owns the FMC funnel.  NOSUPPORT on
+	 * a build without the FMC HAL, with OBCTL.DBS = 0, or running from bank 1.  Allowed on the I2C link (provisioning runs from
 	 * Linux).  Added inside the unreleased 0.15 line: no version bump. */
 	CMD_BOOT_CONFIG = 0x42,
 	/* v0.2 additions -- the GD32 carries every E1M-standard analog

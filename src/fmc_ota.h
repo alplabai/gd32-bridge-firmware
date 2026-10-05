@@ -65,4 +65,11 @@ const void *ota_fmc_flash_ptr(uint32_t addr);
  * why h_begin (src/ota.c) needs this ahead of its metadata-demote call. */
 bool ota_fmc_funnel_busy(void);
 
+/* True when erasing the boot-config page (bank 1) is safe for THIS build:
+ * FMC_OBCTL.DBS = 1 (dual bank) and the running image is not itself in
+ * bank 1 (a bank-1 erase while executing from bank 1 stalls the fetch; the
+ * OTA path never does that, B->A is untested).  Weak default in ota.c is
+ * true so host tests are unaffected; the stub has no FMC anyway. */
+bool ota_fmc_config_write_safe(void);
+
 #endif /* GD32_BRIDGE_FMC_OTA_H */

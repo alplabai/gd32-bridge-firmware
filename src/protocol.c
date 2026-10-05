@@ -402,6 +402,10 @@ static gd32_bridge_status_t handle_boot_config(const uint8_t *req,
 	if (req[0] == 1u) {
 		const uint32_t flags = get_le32(&req[1]);
 		if ((flags & ~BOOT_CONFIG_KNOWN_FLAGS) != 0u) return STATUS_INVAL;
+		if (flags != boot_config_flags()) { /* an unchanged SET never touches flash */
+			if (!ota_fmc_config_write_safe()) return STATUS_NOSUPPORT;
+			if (ota_fmc_funnel_busy()) return STATUS_BUSY; /* #266: retry after ota_erase_tick */
+		}
 		const ota_fmc_result_t rv = boot_config_store(flags);
 		if (rv == OTA_FMC_RESULT_TIMEOUT) return STATUS_TIMEOUT;
 		if (rv != OTA_FMC_RESULT_OK) return STATUS_IO;

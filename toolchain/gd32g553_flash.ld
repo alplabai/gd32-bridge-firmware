@@ -182,6 +182,12 @@ SECTIONS
         KEEP(*(.tcmsram*))
         . = ALIGN(4);
     } > TCMSRAM
+    /* The boot-config SET (src/boot_config.h) runs the FMC erase/program path
+     * from flash in this build (OTA_RAMFUNC is empty), which is only safe
+     * with OBCTL.DBS = 1 and the whole load image in bank 0.  Fail the link
+     * if the image grows past it; the runtime refuses SET when DBS = 0. */
+    ASSERT(_sidata + SIZEOF(.data) <= 0x08040000,
+           "full-flash image must stay in bank 0 (< 0x08040000): boot-config SET erases bank 1")
     ASSERT(SIZEOF(.tcmsram) == 0,
            "TCMSRAM sections require startup copy/zero initialization")
 }
