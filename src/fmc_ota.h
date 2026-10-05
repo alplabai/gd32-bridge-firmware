@@ -72,4 +72,12 @@ bool ota_fmc_funnel_busy(void);
  * true so host tests are unaffected; the stub has no FMC anyway. */
 bool ota_fmc_config_write_safe(void);
 
+/* ECC-fault-safe flash read of `len` bytes (doubleword-aligned addr + len) into
+ * `dst`.  Returns false when the read hit an uncorrectable (double-bit) ECC
+ * error -- what a power cut mid-erase/program leaves behind -- instead of
+ * raising the flash-ECC NMI (which resets the part, gh#36); `dst` is then
+ * undefined.  The gd32 body (hal/fmc_ota.c) masks the NMI source around the
+ * read and checks FMC_ECCCS; the weak default in ota.c is a plain copy. */
+bool ota_fmc_read_safe(uint32_t addr, void *dst, size_t len);
+
 #endif /* GD32_BRIDGE_FMC_OTA_H */
