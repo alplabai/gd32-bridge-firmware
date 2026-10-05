@@ -13,7 +13,7 @@
 #include "../hal/bridge_hw.h"
 #include "crc32.h"
 
-static uint32_t          s_stored;  /* RAM cache of the newest valid record's flags */
+static volatile uint32_t s_stored;  /* RAM cache of the newest valid record's flags */
 static volatile bool     s_pending; /* a SET is queued for boot_config_tick() */
 static volatile uint32_t s_pending_flags;
 
@@ -128,7 +128,9 @@ bool boot_config_request(uint32_t flags)
 void boot_config_tick(void)
 {
 	if (!s_pending) return;
-	if (ota_fmc_funnel_busy()) return; /* OTA erase walk owns the FMC: retry next pass */
+	/* SET is refused while an OTA session is active, but a session may BEGIN
+	 * after a SET was queued: wait for its erase walk to release the FMC. */
+	if (ota_fmc_funnel_busy()) return;
 	const uint32_t flags = s_pending_flags;
 	if (boot_config_store(flags) == OTA_FMC_RESULT_OK) s_stored = flags;
 	s_pending = false; /* after the cache update: a SET racing in sees the new value */

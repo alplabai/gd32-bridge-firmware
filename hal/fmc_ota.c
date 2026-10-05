@@ -372,7 +372,7 @@ bool ota_fmc_read_safe(uint32_t addr, void *dst, size_t len)
 	    (fmc_ecc_flag_get(FMC_FLAG_ECCDET0) == SET) || (fmc_ecc_flag_get(FMC_FLAG_ECCDET1) == SET);
 	if (bad) {
 		fmc_ecc_flag_clear(FMC_FLAG_ECCDET0 | FMC_FLAG_ECCDET1);
-		syscfg_interrupt_flag_clear(SYSCFG_INT_FLAG_FLASHECC);
+		SYSCFG_STAT = SYSCFG_STAT_FLASHECCIF; /* W1C: write only this bit, no RMW */
 	}
 	if (nmi_armed) {
 		syscfg_interrupt_enable(SYSCFG_INT_FLASHECC);
