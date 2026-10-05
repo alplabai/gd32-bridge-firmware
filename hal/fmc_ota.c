@@ -317,6 +317,19 @@ bool ota_fmc_funnel_busy(void)
 	return s_fmc_owned;
 }
 
+bool ota_fmc_config_write_safe(void)
+{
+	if ((FMC_OBCTL & FMC_OBCTL_DBS) == 0u) {
+		return false; /* single-bank: the erase would stall every fetch */
+	}
+#if defined(OTA_RUNNING_SLOT_BASE)
+	if (OTA_RUNNING_SLOT_BASE >= OTA_FMC_BANK1_BASE) {
+		return false; /* bank-1-resident build erasing bank 1: never exercised */
+	}
+#endif
+	return true;
+}
+
 ota_fmc_result_t ota_fmc_erase_range(uint32_t base, uint32_t len)
 {
 	/* Layout regions stay OTA_PAGE_SIZE-granular (2 KB -- a multiple of

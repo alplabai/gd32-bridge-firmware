@@ -18,6 +18,18 @@ static uint8_t          g_page[OTA_PAGE_SIZE];
 static uint32_t         g_erase_calls;
 static bool             g_supported;
 static ota_fmc_result_t g_erase_rv, g_program_rv;
+static bool             g_busy, g_write_safe;
+static uint32_t         g_payload_reads;    /* reads of the payload doubleword */
+static int              g_program_calls_ok; /* programs that succeed before a tear; <0 = no tear */
+
+bool ota_fmc_funnel_busy(void)
+{
+	return g_busy;
+}
+bool ota_fmc_config_write_safe(void)
+{
+	return g_write_safe;
+}
 
 bool ota_fmc_supported(void)
 {
@@ -33,21 +45,29 @@ ota_fmc_result_t ota_fmc_erase_range(uint32_t base, uint32_t len)
 }
 ota_fmc_result_t ota_fmc_program(uint32_t addr, const uint8_t *data, size_t len)
 {
-	zassert_equal(addr, OTA_CONFIG_BASE);
-	if (g_program_rv == OTA_FMC_RESULT_OK) memcpy(g_page, data, len);
+	zassert_true(addr >= OTA_CONFIG_BASE && addr + len <= OTA_CONFIG_BASE + 16u);
+	zassert_equal(addr % 8u, 0u, "doubleword program");
+	if (g_program_calls_ok == 0) return OTA_FMC_RESULT_ERROR; /* power cut here */
+	if (g_program_calls_ok > 0) g_program_calls_ok--;
+	if (g_program_rv == OTA_FMC_RESULT_OK) memcpy(&g_page[addr - OTA_CONFIG_BASE], data, len);
 	return g_program_rv;
 }
 const void *ota_fmc_flash_ptr(uint32_t addr)
 {
-	zassert_equal(addr, OTA_CONFIG_BASE);
-	return g_page;
+	zassert_true(addr == OTA_CONFIG_BASE || addr == OTA_CONFIG_BASE + 8u);
+	if (addr == OTA_CONFIG_BASE) g_payload_reads++;
+	return &g_page[addr - OTA_CONFIG_BASE];
 }
 
 static void fresh_unit(void) /* factory-new: erased page, HAL reset */
 {
 	memset(g_page, 0xFF, sizeof g_page);
-	g_erase_calls = 0u;
-	g_supported   = true;
+	g_erase_calls      = 0u;
+	g_supported        = true;
+	g_busy             = false;
+	g_write_safe       = true;
+	g_payload_reads    = 0u;
+	g_program_calls_ok = -1;
 	g_erase_rv = g_program_rv = OTA_FMC_RESULT_OK;
 	bridge_hw_fake_reset();
 }
@@ -125,10 +145,59 @@ ZTEST(boot_config, test_torn_or_foreign_page_reads_as_off)
 	uint32_t v;
 	fresh_unit();
 	zassert_equal(set_cfg(GD32_BRIDGE_LINK_SPI, 1u, 1u, &v), STATUS_OK);
-	g_page[4] ^= 0x01u; /* flip a flags bit: CRC no longer matches */
+	g_page[0] ^= 0x01u; /* flip a flags bit: CRC no longer matches */
 	zassert_equal(boot_config_flags(), 0u);
 	memset(g_page, 0u, sizeof g_page); /* foreign content */
 	zassert_equal(boot_config_flags(), 0u);
+}
+
+ZTEST(boot_config, test_torn_first_doubleword_is_never_read)
+{
+	uint32_t v;
+	fresh_unit();
+	g_program_calls_ok = 0; /* cut before the payload doubleword lands */
+	zassert_equal(set_cfg(GD32_BRIDGE_LINK_SPI, 1u, 1u, &v), STATUS_IO);
+	g_page[0]       = 0x01u; /* payload doubleword half-written: would be ECC-bad on silicon */
+	g_page[3]       = 0x5Au;
+	g_payload_reads = 0u;
+	zassert_equal(boot_config_flags(), 0u);
+	zassert_equal(g_payload_reads, 0u, "payload read only after the commit magic");
+
+	fresh_unit();
+	g_program_calls_ok = 1; /* payload lands, cut before the commit magic */
+	zassert_equal(set_cfg(GD32_BRIDGE_LINK_SPI, 1u, 1u, &v), STATUS_IO);
+	g_payload_reads = 0u;
+	zassert_equal(boot_config_flags(), 0u, "no commit magic = all off");
+	zassert_equal(g_payload_reads, 0u);
+}
+
+ZTEST(boot_config, test_unchanged_set_skips_flash)
+{
+	uint32_t v;
+	fresh_unit();
+	zassert_equal(set_cfg(GD32_BRIDGE_LINK_SPI, 1u, 0u, &v), STATUS_OK, "default -> default");
+	zassert_equal(g_erase_calls, 0u);
+	zassert_equal(set_cfg(GD32_BRIDGE_LINK_SPI, 1u, 1u, &v), STATUS_OK);
+	zassert_equal(g_erase_calls, 1u);
+	zassert_equal(set_cfg(GD32_BRIDGE_LINK_SPI, 1u, 1u, &v), STATUS_OK, "replayed SET");
+	zassert_equal(g_erase_calls, 1u, "same value: no second erase");
+	g_busy       = true; /* an unchanged SET is still fine while the funnel is busy */
+	g_write_safe = false;
+	zassert_equal(set_cfg(GD32_BRIDGE_LINK_SPI, 1u, 1u, &v), STATUS_OK);
+}
+
+ZTEST(boot_config, test_set_refused_when_funnel_busy_or_bank_unsafe)
+{
+	uint32_t v;
+	fresh_unit();
+	g_busy = true;
+	zassert_equal(set_cfg(GD32_BRIDGE_LINK_SPI, 1u, 1u, &v), STATUS_BUSY);
+	zassert_equal(g_erase_calls, 0u);
+	zassert_equal(set_cfg(GD32_BRIDGE_LINK_SPI, 0u, 0u, &v), STATUS_OK, "GET ignores the funnel");
+	g_busy       = false;
+	g_write_safe = false; /* DBS = 0 or running from bank 1 */
+	zassert_equal(set_cfg(GD32_BRIDGE_LINK_SPI, 1u, 1u, &v), STATUS_NOSUPPORT);
+	zassert_equal(g_erase_calls, 0u);
 }
 
 ZTEST(boot_config, test_validation_and_fault_mapping)
