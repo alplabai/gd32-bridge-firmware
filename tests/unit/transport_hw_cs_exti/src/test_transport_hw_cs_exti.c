@@ -147,11 +147,15 @@ FlagStatus i2c_interrupt_flag_get(uint32_t p, uint32_t f)
 	(void)f;
 	return RESET;
 }
-uint32_t dma_transfer_number_get(uint32_t d, uint32_t ch)
+/* TX/RX DMA model knobs (gh#165): bytes the master clocked this transaction and
+ * TX DMA transfers still pending.  Defaults = nothing clocked, TX drained. */
+static uint32_t mock_clocked;
+static uint32_t mock_tx_remaining;
+static uint32_t mock_reply_left; /* staged reply bytes spi_slave_tx_*() hands out */
+uint32_t        dma_transfer_number_get(uint32_t d, uint32_t ch)
 {
 	(void)d;
-	(void)ch;
-	return BRIDGE_SPI_DMA_BUF_LEN; /* nothing received */
+	return ch == BRIDGE_SPI_TX_DMA_CH ? mock_tx_remaining : BRIDGE_SPI_DMA_BUF_LEN - mock_clocked;
 }
 uint32_t spi_data_receive(uint32_t p)
 {
@@ -187,11 +191,12 @@ void spi_slave_transport_error(void)
 }
 uint8_t spi_slave_tx_next_byte(void)
 {
+	if (mock_reply_left > 0u) mock_reply_left--;
 	return 0xFFu;
 }
 bool spi_slave_tx_pending(void)
 {
-	return false;
+	return mock_reply_left > 0u;
 }
 void i2c_slave_write_start(void)
 {
@@ -219,12 +224,26 @@ void fault_reset_loop_mark_healthy(void)
 /* The shim runs no suite hooks, so each case calls this itself. */
 static void reset_state(void)
 {
+	/* The HAL remembers the armed TX length across calls: prime it to 0 with a
+	 * no-reply transaction so every case starts from "no TX armed". */
+	pd0               = 1u << 8;
+	cs_level_high     = true;
+	dma_err_flag      = false;
+	mock_dma_chctl    = 0u;
+	mock_spi_stat     = 0u;
+	mock_clocked      = 0u;
+	mock_tx_remaining = 0u;
+	mock_reply_left   = 0u;
+	BRIDGE_SPI_CS_EXTI_HANDLER();
 	pd0                          = 1u << 8; /* line 8 (CS) pending at entry */
 	pd0_accesses                 = 0u;
 	cs_level_high                = true;
 	dma_err_flag                 = false;
 	mock_dma_chctl               = 0u; /* CHEN clear: channels quiesce */
 	mock_spi_stat                = 0u;
+	mock_clocked                 = 0u;
+	mock_tx_remaining            = 0u;
+	mock_reply_left              = 0u;
 	spi_resets                   = 0u;
 	bridge_spi_reinit_stats.fast = 0u;
 	bridge_spi_reinit_stats.slow = 0u;
@@ -350,10 +369,60 @@ ZTEST(transport_hw_cs_exti, test_slow_reinit_when_rx_not_drained_or_flag_sticky)
 	}
 }
 
-/* Equivalence: for EVERY TXLVL/TRANS/RXLVL combination the post-handler state
- * is the same as the always-reset behaviour -- empty TX FIFO, not busy -- and
- * the fast path is taken exactly when that was already true on entry. */
-ZTEST(transport_hw_cs_exti, test_fast_reinit_equivalent_to_full_reset_for_every_fifo_state)
+/* Shift-register model.  A reply of `armed` bytes is staged by one transaction;
+ * the next one clocks `clocked` bytes.  The first `armed-clocked` unsent bytes
+ * sit in: 1 shift register + up to 3 FIFO slots + the rest still in the TX DMA.
+ * TXLVL sees only the FIFO, so clocked == armed-1 shows TXLVL=0, TRANS=0 while
+ * one byte is stuck in the shift register -- it would lead the NEXT reply. */
+static void run_reply_then_read(uint32_t armed, uint32_t clocked)
+{
+	reset_state();
+	mock_reply_left = armed;
+	BRIDGE_SPI_CS_EXTI_HANDLER(); /* stages + arms the reply */
+	pd0                          = 1u << 8;
+	pd0_accesses                 = 0u;
+	spi_resets                   = 0u;
+	bridge_spi_reinit_stats.fast = 0u;
+	bridge_spi_reinit_stats.slow = 0u;
+	const uint32_t unsent        = armed > clocked ? armed - clocked : 0u;
+	const uint32_t queued        = unsent > 0u ? unsent - 1u : 0u; /* behind the shift register */
+	const uint32_t fifo          = queued > 3u ? 3u : queued;
+	mock_clocked                 = clocked;
+	mock_tx_remaining            = queued - fifo;
+	mock_spi_stat                = TXLVL(fifo);
+	BRIDGE_SPI_CS_EXTI_HANDLER();
+}
+
+/* Equivalence with the always-reset behaviour: whenever the fast path is taken
+ * no reply byte may remain unsent (shift register, FIFO or DMA), and it is taken
+ * exactly when the master clocked the whole armed reply.  Includes the
+ * clocked == armed-1 case. */
+ZTEST(transport_hw_cs_exti, test_fast_reinit_never_leaves_a_stale_tx_byte)
+{
+	for (uint32_t armed = 1u; armed <= 12u; armed++) {
+		for (uint32_t clocked = 0u; clocked <= armed + 2u; clocked++) {
+			run_reply_then_read(armed, clocked);
+			const bool all_sent = clocked >= armed;
+			zassert_equal(spi_resets, all_sent ? 0u : 1u, "armed=%u clocked=%u", armed, clocked);
+			zassert_equal(bridge_spi_reinit_stats.fast,
+			              all_sent ? 1u : 0u,
+			              "armed=%u clocked=%u",
+			              armed,
+			              clocked);
+		}
+	}
+}
+
+ZTEST(transport_hw_cs_exti, test_short_read_by_one_byte_takes_slow_path)
+{
+	run_reply_then_read(8u, 7u); /* TXLVL=0 TRANS=0 yet one byte in the shift register */
+	zassert_equal(mock_spi_stat & (SPI_STAT_TXLVL | SPI_STAT_TRANS), 0u);
+	zassert_equal(spi_resets, 1u, "short read must reset");
+	zassert_equal(bridge_spi_reinit_stats.slow, 1u);
+}
+
+/* SPI_STAT combinations still force the slow path on their own. */
+ZTEST(transport_hw_cs_exti, test_every_fifo_state_resets_unless_idle)
 {
 	for (uint32_t tx = 0u; tx <= 3u; tx++) {
 		for (uint32_t rx = 0u; rx <= 3u; rx++) {

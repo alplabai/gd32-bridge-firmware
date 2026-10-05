@@ -130,8 +130,8 @@ void rcu_periph_reset_disable(rcu_periph_reset_enum r);
 #define RCU_I2C0RST                 0u
 #define CK_APB1                     0u
 #define DMA0                        0u
-#define DMA_CH2                     0u
-#define DMA_CH3                     0u
+#define DMA_CH2                     2u
+#define DMA_CH3                     3u
 #define DMA_INT_FLAG_ERR            0u
 #define DMA_MEMORY_INCREASE_ENABLE  0u
 #define DMA_MEMORY_TO_PERIPHERAL    0u

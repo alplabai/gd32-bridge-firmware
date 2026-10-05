@@ -167,7 +167,9 @@ At CS rising the handler used to pulse `RCU_SPI1RST` on every transaction
 discarding stale TX FIFO bytes (User Manual Rev1.3).  With `BRIDGE_SPI_FAST_REINIT`
 (CMake option, default ON) the reset is skipped when `SPI_STAT`, read after
 the RX drain, shows TXLVL==00, TRANS==0, RXLVL==00 and no CRCERR / CONFERR /
-RXORERR / FERR; BYTEN / DMAREN / DMATEN / SPIEN are untouched by a skipped
+RXORERR / FERR **and** the master clocked the whole armed TX reply with the TX
+DMA drained (TXLVL counts the FIFO only, not the shift register: a reply read
+one byte short leaves a stale byte there with TXLVL==0, TRANS==0); BYTEN / DMAREN / DMATEN / SPIEN are untouched by a skipped
 reset, so only the existing RX re-arm follows.  Anything else, and the DMA
 quiesce-timeout / DMA-error / overrun exits, take the unchanged full reset.
 `-DBRIDGE_SPI_FAST_REINIT=OFF` restores always-reset.  SWD-readable counters:
@@ -175,9 +177,10 @@ quiesce-timeout / DMA-error / overrun exits, take the unchanged full reset.
 the three fault exits are not counted).
 
 Host tests (`tests/unit/transport_hw_cs_exti`) model the reset as the only
-thing that empties the TX FIFO and prove, for every TXLVL/RXLVL/TRANS
-combination, that no stale TX byte survives the handler and that the fast path
-is taken exactly when the FIFO was already empty.  They cannot prove silicon
+thing that empties the TX path (shift register + FIFO + DMA) and prove, for
+every armed-length / clocked-length pair including clocked == armed-1, that no
+stale TX byte survives the handler and that the fast path is taken exactly
+when the master clocked the whole armed reply.  They cannot prove silicon
 behaviour: the default-ON setting is **unvalidated on hardware until the plan
 below passes**, and must be flipped to OFF if it does not.
 
@@ -196,7 +199,10 @@ clock, protocol 0.15 negotiated with BIG_FRAME 256-B frames and ATTN enabled.
    not show fails the change.
 3. **linkbench.**  ~105k frames with zero errors on the ON build, including
    mixed request/reply lengths, a reply read directly after a request whose
-   staged reply was never read (the stale-TX hazard), and ATTN-driven reads.
+   staged reply was never read (the stale-TX hazard), a reply read exactly one
+   byte short (armed_len-1 clocked) followed by a full read, and ATTN-driven
+   reads.  Record the `bridge_spi_reinit_stats` ratio for the short-read step
+   separately: every short read must count as `slow`.
 4. **Counters.**  Over SWD read `bridge_spi_reinit_stats` after each run:
    expect `fast` to dominate; a large `slow` share means the fast path is
    rarely eligible and the win is smaller than hoped.  Record the ratio.
