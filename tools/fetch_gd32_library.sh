@@ -31,9 +31,12 @@ dest="${1:-$root/vendor/gd32_firmware_library/upstream}"
 # $dest (not a parent repo), and nothing may be modified, untracked or ignored
 # (an extra .c would be globbed straight into the build).
 verify() {
-  local top c t
-  top="$(git -C "$dest" rev-parse --show-toplevel 2>/dev/null)" || return 1
-  [ "$(cd "$top" && pwd -P)" = "$(cd "$dest" && pwd -P)" ] || return 1
+  local prefix c t
+  # Empty prefix <=> $dest is the repo root.  Compared by git itself, not by
+  # path strings: on Windows the toplevel path git prints can map back to a
+  # different Git Bash mount than $dest, which made a valid clone fail here.
+  prefix="$(git -C "$dest" rev-parse --show-prefix 2>/dev/null)" || return 1
+  [ -z "$prefix" ] || return 1
   git -C "$dest" update-index --really-refresh >/dev/null 2>&1 || true
   c="$(git -C "$dest" rev-parse HEAD)"
   t="$(git -C "$dest" rev-parse HEAD:Firmware)"
