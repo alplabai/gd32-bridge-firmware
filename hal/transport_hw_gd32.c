@@ -30,7 +30,8 @@
  *   CS falling: reset the portable RX staging (spi_slave_cs_low).
  *   CS rising:  read the RX residue (count = buffer - DMA remaining),
  *               flush + re-init the peripheral (RCU reset -- the only
- *               reliable FIFO flush), feed the received bytes through
+ *               reliable FIFO flush; skipped when SPI_STAT proves
+ *               nothing is stale), feed the received bytes through
  *               the byte seams, decode + stage the reply, then re-arm
  *               RX DMA (full buffer) and TX DMA (exact reply length).
  *
@@ -185,7 +186,8 @@ static bool spi_dma_disable_confirm(dma_channel_enum channel)
 
 /* One-time channel configuration (clocks, DMAMUX routing, widths).  The
  * per-transaction address/count reloads live in the arm helpers below;
- * everything here survives both the per-transaction SPI RCU reset (DMA and
+ * everything here survives both the end-of-transaction SPI RCU reset (taken
+ * when spi_end_of_transaction_reinit() finds stale state; DMA and
  * DMAMUX are separate peripherals) and channel disable/enable cycles. */
 static void spi_dma_init(void)
 {
@@ -303,8 +305,9 @@ static void spi_cs_exti_init(void)
 /* (Re)configure the SPI1 slave peripheral: mode-0, 8-bit, hardware-NSS,
  * full-duplex, RX + error interrupts on.  Called at init AND after the
  * end-of-transaction peripheral reset, when spi_end_of_transaction_reinit()
- * decides one is needed (see the CS-rising handler).  GPIO/EXTI/NVIC are set up once and survive a peripheral reset, so
- * they stay in bridge_transport_spi_hw_init(). */
+ * decides one is needed (see the CS-rising handler).  GPIO/EXTI/NVIC are
+ * set up once and survive a peripheral reset, so they stay in
+ * bridge_transport_spi_hw_init(). */
 static void bridge_spi_periph_config(void)
 {
 	spi_parameter_struct sp;
@@ -523,9 +526,8 @@ volatile bridge_spi_reinit_stats_t bridge_spi_reinit_stats;
  * SPI_STAT already proves there is nothing stale (TXLVL==0, TRANS==0,
  * RXLVL==0, no error flag) AND the master clocked the whole armed TX reply with
  * the TX DMA drained (TXLVL misses the shift register), the reset has nothing
- * to clean and BYTEN / DMAREN /
- * DMATEN / SPIEN are still as bridge_spi_periph_config() left them, so it is
- * skipped (~28 us saved).  Anything else takes the unchanged full reset. */
+ * to clean and BYTEN / DMAREN / DMATEN / SPIEN are still as
+ * bridge_spi_periph_config() left them, so it is skipped (~28 us saved).  Anything else takes the unchanged full reset. */
 static void spi_end_of_transaction_reinit(uint32_t received)
 {
 #if BRIDGE_SPI_FAST_REINIT
@@ -994,8 +996,9 @@ int bridge_transport_i2c_hw_init(void)
 	 * PA8; GPIOB 0x8200 = PB15/PB9; GPIOC 0x2000 = PC13.
 	 *
 	 * Audited reconfigure paths (the issue demands this before
-	 * enabling): the per-transaction SPI flush above resets SPI1
-	 * only (RCU_SPI1RST) and never touches GPIO config; the
+	 * enabling): the end-of-transaction SPI flush above, when it
+	 * takes the slow path, resets SPI1 only (RCU_SPI1RST) and never
+	 * touches GPIO config; the
 	 * Deep-sleep wake path (power.c) calls THIS function again, whose
 	 * gpio_mode_set/gpio_af_set on PA15/PB9 become harmless no-ops
 	 * under the lock -- GPIO config survives Deep-sleep (GPIO is in

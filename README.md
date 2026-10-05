@@ -169,8 +169,8 @@ discarding stale TX FIFO bytes (User Manual Rev1.3).  With `BRIDGE_SPI_FAST_REIN
 the RX drain, shows TXLVL==00, TRANS==0, RXLVL==00 and no CRCERR / CONFERR /
 RXORERR / FERR **and** the master clocked the whole armed TX reply with the TX
 DMA drained (TXLVL counts the FIFO only, not the shift register: a reply read
-one byte short leaves a stale byte there with TXLVL==0, TRANS==0); BYTEN / DMAREN / DMATEN / SPIEN are untouched by a skipped
-reset, so only the existing RX re-arm follows.  Anything else, and the DMA
+one byte short leaves a stale byte there with TXLVL==0, TRANS==0);
+BYTEN / DMAREN / DMATEN / SPIEN are untouched by a skipped reset, so only the existing RX re-arm follows.  Anything else, and the DMA
 quiesce-timeout / DMA-error / overrun exits, take the unchanged full reset.
 `-DBRIDGE_SPI_FAST_REINIT=OFF` restores always-reset.  SWD-readable counters:
 `bridge_spi_reinit_stats.fast` / `.slow` (RAM, `hal/gd32/spi_fast_reinit.h`;

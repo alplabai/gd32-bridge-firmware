@@ -72,7 +72,7 @@ set(GD32_BRIDGE_SOURCES
 # on silicon 2026-06-04; a fresh B->A update remains untested and HIL-gated.
 option(BRIDGE_OTA_PARTITIONED "Arm the OTA Path-A flash path (HIL-gated)" OFF)
 
-# Skip the per-transaction SPI1 peripheral reset (~28 us) when SPI_STAT shows no
+# Skip the end-of-transaction SPI1 peripheral reset (~28 us) when SPI_STAT shows no
 # stale TX/RX state; otherwise the full reset runs as before (gh#165).  Counters:
 # `bridge_spi_reinit_stats` over SWD.  OFF restores the always-reset behaviour.
 option(BRIDGE_SPI_FAST_REINIT "Skip SPI reset at CS rising when SPI_STAT proves it idle" ON)
