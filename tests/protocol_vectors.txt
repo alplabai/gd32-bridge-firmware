@@ -73,6 +73,12 @@ spi_counter_read_ch0_request   = A57000A992
 spi_se_reset_assert_request    = A541012CB4
 # SOF | CMD=0x41 | assert=0 (release the SE) | CRC
 spi_se_reset_release_request   = A541000DA4
+# SOF | CMD=0x42 | op=0 (GET) | flags=0 (ignored) | CRC
+spi_boot_config_get_request    = A542000000000036AC
+# SOF | CMD=0x42 | op=1 (SET) | flags=0x00000001 (drive PD11 / E1M IO29 SDIO_MUX_EN high at boot, SD disconnected) | CRC
+spi_boot_config_set_sdmux_en_high_request = A5420101000000D370
+# SOF | STATUS=0x00 | flags=0x00000001 (u32 LE, the stored value) | CRC
+spi_boot_config_reply_sdmux_en_high = A500010000008DDA
 # SOF | STATUS=0x06 (NOSUPPORT) | empty payload | CRC -- stub-firmware reply for any v0.2+ opcode whose HAL body is not yet wired
 spi_reply_nosupport            = A506429F
 
