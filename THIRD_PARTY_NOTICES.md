@@ -19,14 +19,16 @@ changes only, no GigaDevice code).
 - It is **not part of this repository.** `tools/fetch_gd32_library.sh` clones it
   from GigaDevice at build time and refuses to proceed unless both ids match.
 - It is **not under Apache-2.0** as a whole and Alp Lab does not relicense it.
-  Its terms are GigaDevice's: the per-file notices in the library (BSD-3-Clause
-  for the standard peripheral library, Apache-2.0 for the CMSIS system and
-  startup files and Arm CMSIS content) and the GigaDevice Software License
-  Agreement SLA-GD0001 v1.1 that accompanies GigaDevice's firmware-library
-  archive. In particular SLA-GD0001 limits use of the licensed code to GigaDevice
-  devices and restricts making it subject to open-source licence terms. The
-  authoritative text is GigaDevice's; read it before redistributing anything
-  that contains the library.- The released `.bin` images link the library (unmodified, except the clock
+  The source on GigaDevice's GitHub carries per-file notices only: BSD-3-Clause
+  for the standard peripheral library, Apache-2.0 for the GD CMSIS device files
+  and the Arm CMSIS core headers. The GitHub repository contains no licence
+  file. The GigaDevice Software License Agreement SLA-GD0001 v1.1 accompanies
+  the archive distributed from gd32mcu.com. Our reading of its restrictions
+  (use on GigaDevice devices; no making the licensed code subject to
+  open-source licence terms) is a paraphrase **pending legal sign-off**, not a
+  statement of fact. The authoritative text is GigaDevice's; read it before
+  redistributing anything that contains the library.
+- The released `.bin` images link the library (unmodified, except the clock
   patch below). Binaries are redistributed with this notice, as the
   BSD-3-Clause terms below require.
 - The image's `SystemInit()` is the library's `system_gd32g5x3.c` with
@@ -63,5 +65,5 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSI
 OF SUCH DAMAGE.
 ```
 
-The Apache-2.0 files in the library (CMSIS system and startup files) carry their
-own Apache-2.0 notices; the Apache-2.0 text is in this repository's `LICENSE`.
+The Apache-2.0 files in the library (GD CMSIS device files and Arm CMSIS core
+headers) carry their own Apache-2.0 notices; the Apache-2.0 text is in this repository's `LICENSE`.

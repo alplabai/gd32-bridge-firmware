@@ -319,6 +319,24 @@ jobs:
           fi
           echo "negative path OK: FATAL_ERROR names -DBRIDGE_ALLOW_STOCK_SYSTEM_INIT"
 
+      # The fetch script must never delete a directory it did not create and
+      # must reject a cached checkout carrying extra files.
+      - name: fetch script safety tests
+        run: tests/test_fetch_gd32_library.sh
+
+      # The opt-out path: against a wrapper dir with no patches/ and
+      # BRIDGE_ALLOW_STOCK_SYSTEM_INIT=ON, configure must succeed and emit the
+      # NOT FLASHABLE warning (#127), so the warning cannot silently vanish.
+      - name: configure (gd32 backend, stock SystemInit opt-out) must warn
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/stockvendor"
+          cp vendor/gd32_firmware_library/CMakeLists.txt "$RUNNER_TEMP/stockvendor/CMakeLists.txt"
+          ln -sfn "$PWD/vendor/gd32_firmware_library/upstream" "$RUNNER_TEMP/stockvendor/upstream"
+          out=$(cmake -B build-stock -S . -DCMAKE_TOOLCHAIN_FILE=toolchain/arm-none-eabi.cmake -DBRIDGE_HAL_BACKEND=gd32 -DBRIDGE_ALLOW_STOCK_SYSTEM_INIT=ON -DGD32_VENDOR_DIR="$RUNNER_TEMP/stockvendor" 2>&1)
+          echo "$out"
+          echo "$out" | grep -q 'NOT FLASHABLE' || { echo "::error::opt-out configure did not emit the NOT FLASHABLE warning"; exit 1; }
+
       # BRIDGE_OTA_PARTITIONED=ON, with the gd32 backend, builds THREE
       # targets from one configure: gd32-bridge-slot-a and gd32-bridge-slot-b
       # (both compile src/ota.c's real BEGIN / WRITE_CHUNK / VERIFY / COMMIT /

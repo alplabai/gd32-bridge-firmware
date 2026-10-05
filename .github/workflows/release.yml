@@ -138,9 +138,10 @@ jobs:
             --slot-image build-gd32/gd32-bridge-slot-a.bin \
             --fw-version "$fwv" \
             --out "dist/gd32-bridge-$v-ota-meta-rec0.bin"
-          (cd dist && sha256sum -- *.bin > SHA256SUMS && cat SHA256SUMS)
-          # The binaries contain GigaDevice's library: ship its notices.
+          # The binaries contain GigaDevice's library: ship its notices, and
+          # cover them by SHA256SUMS (and so the signatures) like the images.
           cp THIRD_PARTY_NOTICES.md dist/THIRD_PARTY_NOTICES.md
+          (cd dist && sha256sum -- *.bin THIRD_PARTY_NOTICES.md > SHA256SUMS && cat SHA256SUMS)
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

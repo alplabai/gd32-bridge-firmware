@@ -38,6 +38,9 @@ set(_GD32_SYSTEM_STOCK ${_GD32_CMSIS}/GD/GD32G5x3/Source/system_gd32g5x3.c)
 set(_GD32_SYSTEM_PATCH ${CMAKE_CURRENT_SOURCE_DIR}/patches/system_gd32g5x3-irc8m.patch)
 if(EXISTS ${_GD32_SYSTEM_PATCH})
     find_package(Git REQUIRED)
+    # Re-run configure (and so re-apply) when either input changes.
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+        ${_GD32_SYSTEM_PATCH} ${_GD32_SYSTEM_STOCK})
     set(_GD32_OVR_DIR ${CMAKE_CURRENT_BINARY_DIR}/overrides)
     file(MAKE_DIRECTORY ${_GD32_OVR_DIR})
     file(COPY ${_GD32_SYSTEM_STOCK} DESTINATION ${_GD32_OVR_DIR})
