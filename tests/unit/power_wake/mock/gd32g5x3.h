@@ -24,6 +24,7 @@ typedef enum { ERROR = 0, SUCCESS = !ERROR } ErrStatus;
 #define RTC_FLAG_WT        40u
 #define RTC_INT_WAKEUP     41u
 #define EXTI_19            50u
+#define EXTI_31            53u
 #define EXTI_INTERRUPT     51u
 #define EXTI_TRIG_RISING   52u
 #define RTC_WKUP_IRQn      3
@@ -140,6 +141,20 @@ void            i2c_enable(uint32_t periph);
  * is latched inside power.c, so it happens once per process. */
 extern int mock_rtc_clock_config_saw_irq_masked;
 
+/* DWT cycle counter: the mock advances it on every read. */
+typedef struct {
+	uint32_t CYCCNT;
+} mock_dwt_t;
+extern mock_dwt_t mock_dwt;
+#define DWT (&mock_dwt)
+
+/* Activity the Deep-sleep / Standby BUSY gate samples. */
+extern int mock_act_adc, mock_act_pwm, mock_act_dac, mock_act_ota;
+/* EXTI_PD0 the mock deep-sleep leaves behind (the wake source). */
+extern uint32_t mock_pd0_on_wake;
+extern uint32_t mock_exti31_enables, mock_wake_mode_sets, mock_i2c_init_wake_mode;
+extern int      mock_i2c_wake_mode;
+
 void mock_power_reset(void);
 
 void       rcu_osci_on(uint32_t osci);
@@ -158,6 +173,7 @@ void       pmu_to_standbymode(void);
 void       rtc_flag_clear(uint32_t flag);
 void       rtc_interrupt_enable(uint32_t interrupt);
 void       exti_flag_clear(uint32_t linex);
+void       exti_interrupt_enable(uint32_t linex);
 void       exti_init(uint32_t linex, uint32_t mode, uint32_t trig_type);
 void       exti_interrupt_flag_clear(uint32_t linex);
 void       nvic_irq_enable(int32_t nvic_irq, uint8_t pre_priority, uint8_t sub_priority);

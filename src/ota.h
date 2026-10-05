@@ -47,6 +47,10 @@ void ota_boot_init(void);
  * before touching any opcode. */
 bool ota_trial_unconfirmed(void);
 
+/* An OTA session is open (BEGIN accepted, not yet committed/aborted) or a
+ * flash erase is still running.  Gates Deep-sleep / Standby entry. */
+bool ota_session_active(void);
+
 /* Note that a wire frame arrived (a single store) -- the confirm signal
  * the trial is waiting for.  Safe to call unconditionally; a no-op
  * outside a trial boot. */

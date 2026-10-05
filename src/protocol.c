@@ -860,15 +860,17 @@ static gd32_bridge_status_t handle_power_mode_set(const uint8_t *req,
 	(void)reply;
 	(void)reply_cap;
 	if (req_len != 10u) return STATUS_INVAL;
-	if (req[0] > 3u) return STATUS_INVAL; /* mode ∈ {RUN, SLEEP, DEEP_SLEEP, STANDBY} */
-	/* ATTN is driven low before any transition out of RUN (STANDBY is a
-	 * reset, which returns PA14 to SWCLK on its own). */
-	if (req[0] != 0u) bridge_hw_attn_quiesce();
-	/* req[1] is reserved padding. */
+	if (req[0] > 3u) return STATUS_INVAL; /* mode in {RUN, SLEEP, DEEP_SLEEP, STANDBY} */
+	/* req[1] = POWER_FLAG_* (0 from a host that predates the flags). */
 	const uint32_t wake_bitmap   = get_le32(&req[2]);
 	const uint32_t wake_after_ms = get_le32(&req[6]);
-	const int      rv            = bridge_hw_power_mode_set(req[0], wake_bitmap, wake_after_ms);
-	*reply_len                   = 0u;
+	const int      rv = bridge_hw_power_mode_set(req[0], wake_bitmap, wake_after_ms, req[1]);
+	/* ATTN is driven low once a transition out of RUN is ACCEPTED (a refused
+	 * request, e.g. BUSY, leaves the link as it was; the entry itself runs
+	 * later at base level, after this reply drains).  STANDBY is a reset,
+	 * which returns PA14 to SWCLK on its own. */
+	if (rv == BRIDGE_HW_OK && req[0] != 0u) bridge_hw_attn_quiesce();
+	*reply_len = 0u;
 	return status_from_hw(rv);
 }
 

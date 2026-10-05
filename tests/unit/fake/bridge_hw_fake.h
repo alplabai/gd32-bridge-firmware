@@ -342,6 +342,9 @@ void bridge_hw_fake_power_mode_get_last_call(uint8_t  *mode,
                                              uint32_t *wake_bitmap,
                                              uint32_t *wake_after_ms);
 
+/* req[1] (POWER_FLAG_*) of the last bridge_hw_power_mode_set() call. */
+uint8_t bridge_hw_fake_power_mode_last_flags(void);
+
 /* --------------------------------------------------------------- */
 /* DSP chain-open id + stage-push argument capture.                  */
 /* --------------------------------------------------------------- */

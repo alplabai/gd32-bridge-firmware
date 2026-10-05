@@ -865,6 +865,24 @@ i2c_timing_derive(uint32_t apb1_hz, uint32_t *psc, uint32_t *scl_dely, uint32_t 
 	return true;
 }
 
+/* Deep-sleep I2C wake (POWER_MODE_SET flag WAKE_I2C).  The I2C WUEN wake
+ * only works with the kernel clock on IRC8M (UM Rev1.2 p.1279: APB1 is gated
+ * in Deep-sleep), so while this is set I2C0 runs from CK_IRC8M (8 MHz,
+ * independent of the PLL) and WUEN is armed.  Changed only with I2C0
+ * disabled (bridge_power_tick()); bridge_transport_i2c_hw_init() applies it. */
+static volatile bool s_i2c_wake_mode;
+#define I2C_IRC8M_HZ 8000000u
+
+void bridge_transport_i2c_wake_mode_set(bool wake)
+{
+	s_i2c_wake_mode = wake;
+}
+
+bool bridge_transport_i2c_wake_mode(void)
+{
+	return s_i2c_wake_mode;
+}
+
 int bridge_transport_i2c_hw_init(void)
 {
 	/* gh#257: bare RCU_CFG3 read-modify-write, same exposure class as
@@ -873,12 +891,14 @@ int bridge_transport_i2c_hw_init(void)
      * path (hal/gd32/power.c), with interrupts live, not just at
      * boot. */
 	const uint32_t i2csrc_primask_ = bridge_irq_lock();
-	rcu_i2c_clock_config(BRIDGE_I2C_RCU_IDX, BRIDGE_I2C_CK_SRC);
+	rcu_i2c_clock_config(BRIDGE_I2C_RCU_IDX,
+	                     s_i2c_wake_mode ? RCU_I2CSRC_IRC8M : BRIDGE_I2C_CK_SRC);
 	bridge_irq_unlock(i2csrc_primask_);
 	bridge_rcu_periph_clock_enable(BRIDGE_I2C_RCU);
 	i2c_gpio_init();
 
-	const uint32_t apb1_hz = rcu_clock_freq_get(CK_APB1);
+	/* Named apb1_hz for the derivations below; it is the I2C KERNEL clock. */
+	const uint32_t apb1_hz = s_i2c_wake_mode ? I2C_IRC8M_HZ : rcu_clock_freq_get(CK_APB1);
 	uint32_t       psc, scl_dely, sda_dely;
 	uint16_t       stretch_timeout_reload;
 	if (!i2c_timing_derive(apb1_hz, &psc, &scl_dely, &sda_dely) ||
@@ -938,6 +958,12 @@ int bridge_transport_i2c_hw_init(void)
 	                     I2C_INT_ADDM | I2C_INT_RBNE | I2C_INT_STPDET | I2C_INT_ERR);
 	nvic_irq_enable(BRIDGE_I2C_EV_IRQN, BRIDGE_I2C_IRQ_PRIO, BRIDGE_I2C_IRQ_SUBPRIO);
 	nvic_irq_enable(BRIDGE_I2C_ER_IRQN, BRIDGE_I2C_IRQ_PRIO, BRIDGE_I2C_IRQ_SUBPRIO);
+
+	if (s_i2c_wake_mode) {
+		i2c_wakeup_from_deepsleep_enable(BRIDGE_I2C_PERIPH);
+	} else {
+		i2c_wakeup_from_deepsleep_disable(BRIDGE_I2C_PERIPH);
+	}
 
 	i2c_enable(BRIDGE_I2C_PERIPH);
 

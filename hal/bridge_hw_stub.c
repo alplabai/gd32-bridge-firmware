@@ -273,8 +273,12 @@ int bridge_hw_timer_sync(uint8_t master, uint8_t slave, uint8_t mode)
 /* v0.5 (§2B.3) -- system power-mode set                             */
 /* --------------------------------------------------------------- */
 
-int bridge_hw_power_mode_set(uint8_t mode, uint32_t wake_bitmap, uint32_t wake_after_ms)
+int bridge_hw_power_mode_set(uint8_t  mode,
+                             uint32_t wake_bitmap,
+                             uint32_t wake_after_ms,
+                             uint8_t  flags)
 {
+	(void)flags;
 	(void)mode;
 	(void)wake_bitmap;
 	(void)wake_after_ms;
