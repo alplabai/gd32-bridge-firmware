@@ -178,8 +178,7 @@ int bridge_hw_gpio_read(uint32_t mask, uint32_t *levels)
 		if (gpio_is_output[i]) continue;
 		if (gpio_input_promoted[i]) continue;
 		gpio_input_promoted[i] = true;
-		gpio_mode_set(
-		    gpio_pad_map[i].periph, GPIO_MODE_INPUT, GPIO_PUPD_NONE, gpio_pad_map[i].pin);
+		gpio_mode_set(gpio_pad_map[i].periph, GPIO_MODE_INPUT, GPIO_PUPD_NONE, gpio_pad_map[i].pin);
 	}
 
 	/* Bits above `GPIO_PAD_MAP_COUNT` are silently ignored -- the
