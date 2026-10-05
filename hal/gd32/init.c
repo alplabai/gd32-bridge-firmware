@@ -161,6 +161,7 @@
 
 #include "bridge_hw.h"
 #include "bridge_board_config.h"
+#include "boot_config.h"
 
 /* The wrapper's PUBLIC include directories expose the GigaDevice device
  * header.  It supplies the CMSIS/core definitions and pulls this project's
@@ -567,6 +568,15 @@ void bridge_hw_init(void)
 	              gpio_pad_map[GPIO_PAD_CAN_STBY].pin);
 	gpio_is_output[GPIO_PAD_CAN_STBY] = true;
 
+	/* Opt-in persistent boot config (src/boot_config.h, alp-sdk #2697): with
+	 * BOOT_CONFIG_FLAG_SDMUX_EN_HIGH set by the host, drive PD11 (E1M IO29
+	 * = SDIO_MUX_EN, active-low) HIGH so the carrier keeps the microSD
+	 * disconnected before U-Boot's mmc1 scan.  No flag stored (the factory
+	 * default) = no pad touched.  Placed right after the pad map is parked
+	 * and gpio_is_output[] is reset, the earliest point where the pad
+	 * write is not undone by the reset loop above. */
+	boot_config_apply();
+
 	/* TRNG bring-up: configure + enable only.  The NIST pipeline's
      * first conditioned word can lag past any boot-time wait we are
      * willing to spin; readiness is promoted lazily by the first
@@ -909,6 +919,7 @@ void bridge_hw_tick(void)
 	bridge_hw_dsp_pump();
 	vref_late_tick();
 	ota_erase_tick();
+	boot_config_tick(); /* queued CMD_BOOT_CONFIG SET: flash write at base level only */
 	ota_confirm_tick();
 	bridge_transport_i2c_stuck_poll();
 	bridge_power_tick();

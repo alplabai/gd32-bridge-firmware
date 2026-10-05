@@ -205,7 +205,7 @@ firmware reader needs:
   handlers as standalone requests, validates the whole request before executing
   anything, and stops at the first non-`OK` sub-status.
 * **The one unconditional change is the I2C opcode allow-list**: the I2C link
-  carries only `0x00..0x03`, `0x10`, `0x11`, `0x41`, `0x81` and `0xF0..0xFF`;
+  carries only `0x00..0x03`, `0x10`, `0x11`, `0x41`, `0x42`, `0x81` and `0xF0..0xFF`;
   every other opcode answers an empty `STATUS_NOSUPPORT` and never reaches its
   handler. `bridge_i2c_denied_count` / `bridge_i2c_denied_last_cmd` (SWD-readable)
   record the refusals. SPI is unrestricted.

@@ -112,6 +112,15 @@ __attribute__((weak)) bool ota_fmc_funnel_busy(void)
 {
 	return false; /* stub backend: no funnel, nothing to contend for */
 }
+__attribute__((weak)) bool ota_fmc_config_write_safe(void)
+{
+	return true;
+}
+__attribute__((weak)) bool ota_fmc_read_safe(uint32_t addr, void *dst, size_t len)
+{
+	memcpy(dst, ota_fmc_flash_ptr(addr), len);
+	return true;
+}
 __attribute__((weak)) const void *ota_fmc_flash_ptr(uint32_t addr)
 {
 	return (const void *)(uintptr_t)addr;
@@ -613,6 +622,11 @@ void ota_boot_init(void)
 			(void)meta_commit(OTA_RUNNING_SLOT, false, 0u, 0u, 0u, 0u, 0u, newest.active_slot);
 		}
 	}
+}
+
+bool ota_session_active(void)
+{
+	return s_state != OTA_ST_IDLE && s_state != OTA_ST_ERROR;
 }
 
 bool ota_trial_unconfirmed(void)
@@ -1310,6 +1324,12 @@ void ota_erase_tick(void)
 /* OTA inert: no trial ever gets armed, so nothing to reconcile/gate/confirm. */
 void ota_boot_init(void)
 {
+}
+
+/* Weak so a host test can drive it; OTA-inert builds have no session. */
+__attribute__((weak)) bool ota_session_active(void)
+{
+	return false;
 }
 
 bool ota_trial_unconfirmed(void)
