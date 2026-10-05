@@ -213,12 +213,18 @@ typedef enum {
 	/* v0.15: persistent boot configuration (src/boot_config.h).  Request
 	 * `op:u8 flags:u32` (5 B): op 0 = GET (flags ignored), op 1 = SET (store
 	 * `flags`, bit0 = drive PD11 / E1M IO29 SDIO_MUX_EN high at every boot;
-	 * unknown bits -> STATUS_INVAL).  Reply `flags:u32` = the stored value.
-	 * SET takes effect at the next GD32 reset and does NOT touch a pad now;
-	 * a SET blocks for one flash page erase (<= 20 ms); an unchanged SET is a
-	 * no-op.  BUSY while an OTA erase walk owns the FMC funnel.  NOSUPPORT on
-	 * a build without the FMC HAL, with OBCTL.DBS = 0, or running from bank 1.  Allowed on the I2C link (provisioning runs from
-	 * Linux).  Added inside the unreleased 0.15 line: no version bump. */
+	 * unknown bits -> STATUS_INVAL).  Reply `flags:u32` = the STORED value.
+	 * SET is asynchronous: it is accepted at once (reply = the old stored
+	 * value) and committed from the main loop, never in the transport ISR;
+	 * the host polls GET until the stored value equals what it asked for.
+	 * The commit erases one flash page (<= 20 ms, interrupts masked for the
+	 * busy window), so the host must leave the link idle for ~30 ms after a
+	 * SET before polling.  A SET equal to the stored value is a no-op; a
+	 * different SET while one is queued answers BUSY.  SET takes effect at
+	 * the next GD32 reset and does NOT touch a pad now.  NOSUPPORT on a
+	 * build without the FMC HAL, with OBCTL.DBS = 0, or running from bank 1.
+	 * Allowed on the I2C link (provisioning runs from Linux).  Added inside
+	 * the unreleased 0.15 line: no version bump. */
 	CMD_BOOT_CONFIG = 0x42,
 	/* v0.2 additions -- the GD32 carries every E1M-standard analog
 	 * and counter peripheral on V2N (per alp-sdk gd32-io-mcu-map.tsv); the

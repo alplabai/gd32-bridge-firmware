@@ -116,6 +116,11 @@ __attribute__((weak)) bool ota_fmc_config_write_safe(void)
 {
 	return true;
 }
+__attribute__((weak)) bool ota_fmc_read_safe(uint32_t addr, void *dst, size_t len)
+{
+	memcpy(dst, ota_fmc_flash_ptr(addr), len);
+	return true;
+}
 __attribute__((weak)) const void *ota_fmc_flash_ptr(uint32_t addr)
 {
 	return (const void *)(uintptr_t)addr;

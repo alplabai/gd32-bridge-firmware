@@ -919,6 +919,7 @@ void bridge_hw_tick(void)
 	bridge_hw_dsp_pump();
 	vref_late_tick();
 	ota_erase_tick();
+	boot_config_tick(); /* queued CMD_BOOT_CONFIG SET: flash write at base level only */
 	ota_confirm_tick();
 	bridge_transport_i2c_stuck_poll();
 	bridge_power_tick();

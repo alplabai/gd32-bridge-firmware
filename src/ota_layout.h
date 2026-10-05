@@ -16,8 +16,9 @@
  *   0x08008000  metadata      8 KB   (A/B records, one per page)
  *   0x0800A000  slot A      216 KB   (ends at the bank boundary)
  *   0x08040000  slot B      216 KB   (starts at the bank boundary)
- *   0x08076000  boot config   2 KB   (src/boot_config.h; survives OTA + power cycles)
- *   0x08076800  reserved     38 KB
+ *   0x08076000  boot config A 2 KB   (src/boot_config.h: A/B records; survive OTA + power cycles)
+ *   0x08076800  boot config B 2 KB
+ *   0x08077000  reserved     36 KB
  *   0x08080000  end
  *
  * NOTE: OTA self-flashing needs the partitioned bootloader layout
@@ -48,7 +49,8 @@
 #define OTA_SLOT_B_BASE     0x08040000u
 #define OTA_SLOT_SIZE       0x00036000u /* 216 KB */
 #define OTA_FMC_BANK1_BASE  0x08040000u
-#define OTA_CONFIG_BASE     0x08076000u /* one boot-config page, see src/boot_config.h */
+#define OTA_CONFIG_REC0     0x08076000u /* boot-config A/B record pages, see src/boot_config.h */
+#define OTA_CONFIG_REC1     0x08076800u
 #define OTA_FLASH_END       0x08080000u
 
 /* The GD32G553's dual-bank read-while-write safety only helps when the
@@ -60,8 +62,9 @@ _Static_assert(OTA_SLOT_A_BASE + OTA_SLOT_SIZE <= OTA_FMC_BANK1_BASE,
 _Static_assert(OTA_SLOT_B_BASE >= OTA_FMC_BANK1_BASE, "OTA slot B starts in flash bank 0");
 _Static_assert(OTA_SLOT_A_BASE + OTA_SLOT_SIZE <= OTA_SLOT_B_BASE, "OTA slots overlap");
 _Static_assert(OTA_SLOT_B_BASE + OTA_SLOT_SIZE <= OTA_FLASH_END, "OTA slot B exceeds flash");
-_Static_assert(OTA_SLOT_B_BASE + OTA_SLOT_SIZE <= OTA_CONFIG_BASE, "boot config overlaps slot B");
-_Static_assert(OTA_CONFIG_BASE + OTA_PAGE_SIZE <= OTA_FLASH_END, "boot config exceeds flash");
+_Static_assert(OTA_SLOT_B_BASE + OTA_SLOT_SIZE <= OTA_CONFIG_REC0, "boot config overlaps slot B");
+_Static_assert(OTA_CONFIG_REC0 + OTA_PAGE_SIZE <= OTA_CONFIG_REC1, "boot config pages overlap");
+_Static_assert(OTA_CONFIG_REC1 + OTA_PAGE_SIZE <= OTA_FLASH_END, "boot config exceeds flash");
 
 /* Two metadata records on separate pages -- a power-fail-safe A/B commit.
  * meta_commit() in ota.c chooses which page to erase + overwrite BY RANK

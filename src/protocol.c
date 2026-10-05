@@ -400,15 +400,14 @@ static gd32_bridge_status_t handle_boot_config(const uint8_t *req,
 	if (req[0] > 1u) return STATUS_INVAL;              /* op: 0 = GET, 1 = SET */
 	if (!ota_fmc_supported()) return STATUS_NOSUPPORT; /* no FMC HAL = no config page */
 	if (req[0] == 1u) {
+		/* Never flash from here (transport ISR): queue the SET for the main
+		 * loop (boot_config_tick) and reply with the CURRENT stored value.
+		 * The host polls GET until it equals the request.  A SET equal to
+		 * the stored value is accepted without queueing (no-op). */
 		const uint32_t flags = get_le32(&req[1]);
 		if ((flags & ~BOOT_CONFIG_KNOWN_FLAGS) != 0u) return STATUS_INVAL;
-		if (flags != boot_config_flags()) { /* an unchanged SET never touches flash */
-			if (!ota_fmc_config_write_safe()) return STATUS_NOSUPPORT;
-			if (ota_fmc_funnel_busy()) return STATUS_BUSY; /* #266: retry after ota_erase_tick */
-		}
-		const ota_fmc_result_t rv = boot_config_store(flags);
-		if (rv == OTA_FMC_RESULT_TIMEOUT) return STATUS_TIMEOUT;
-		if (rv != OTA_FMC_RESULT_OK) return STATUS_IO;
+		if (flags != boot_config_flags() && !ota_fmc_config_write_safe()) return STATUS_NOSUPPORT;
+		if (!boot_config_request(flags)) return STATUS_BUSY; /* a different SET is in flight */
 	}
 	put_le32(reply, boot_config_flags());
 	*reply_len = 4u;

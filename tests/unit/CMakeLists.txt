@@ -107,6 +107,7 @@ foreach(_slot A B)
         ${FW}/src/ota.c
         ${FW}/src/crc32.c
         ${FW}/src/protocol.c
+        ${FW}/src/boot_config.c
         ${FW}/src/bootloader/bootloader.c
         ${FW}/hal/bridge_hw_stub.c
     )
@@ -149,6 +150,7 @@ add_test(NAME crc32 COMMAND test_crc32)
 add_executable(test_crc16
     crc16/src/test_crc16.c
     ${FW}/src/protocol.c
+    ${FW}/src/boot_config.c
     ${FW}/src/bootloader/bootloader.c
     ${FW}/src/ota.c
     ${FW}/src/crc32.c
@@ -164,6 +166,7 @@ add_executable(test_transport_spi
     transport_spi/src/test_transport_spi.c
     ${FW}/src/transport_spi.c
     ${FW}/src/protocol.c
+    ${FW}/src/boot_config.c
     ${FW}/src/bootloader/bootloader.c
     ${FW}/src/ota.c
     ${FW}/src/crc32.c
@@ -183,6 +186,7 @@ add_executable(test_timing_stats
     ${FW}/src/timing_stats.c
     ${FW}/src/transport_spi.c
     ${FW}/src/protocol.c
+    ${FW}/src/boot_config.c
     ${FW}/src/bootloader/bootloader.c
     ${FW}/src/ota.c
     ${FW}/src/crc32.c
@@ -464,6 +468,7 @@ add_executable(test_transport_i2c
     transport_i2c/src/test_transport_i2c.c
     ${FW}/src/transport_i2c.c
     ${FW}/src/protocol.c
+    ${FW}/src/boot_config.c
     ${FW}/src/bootloader/bootloader.c
     ${FW}/src/ota.c
     ${FW}/src/crc32.c
@@ -509,6 +514,7 @@ add_executable(test_protocol
     protocol/src/test_protocol_v015.c
     fake/bridge_hw_fake.c
     ${FW}/src/protocol.c
+    ${FW}/src/boot_config.c
     ${FW}/src/bootloader/bootloader.c
     ${FW}/src/ota.c
     ${FW}/src/crc32.c
@@ -525,6 +531,7 @@ add_executable(test_boot_config
     boot_config/src/test_boot_config.c
     fake/bridge_hw_fake.c
     ${FW}/src/protocol.c
+    ${FW}/src/boot_config.c
     ${FW}/src/bootloader/bootloader.c
     ${FW}/src/ota.c
     ${FW}/src/crc32.c
@@ -585,6 +592,7 @@ add_executable(test_protocol_vectors
     ${FW}/src/transport_spi.c
     ${FW}/src/transport_i2c.c
     ${FW}/src/protocol.c
+    ${FW}/src/boot_config.c
     ${FW}/src/bootloader/bootloader.c
     ${FW}/src/ota.c
     ${FW}/src/crc32.c
@@ -607,6 +615,7 @@ add_executable(test_protocol_vectors_fake
     fake/bridge_hw_fake.c
     ${FW}/src/transport_spi.c
     ${FW}/src/protocol.c
+    ${FW}/src/boot_config.c
     ${FW}/src/bootloader/bootloader.c
     ${FW}/src/ota.c
     ${FW}/src/crc32.c
