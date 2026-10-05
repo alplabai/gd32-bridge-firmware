@@ -492,12 +492,12 @@ void bridge_hw_init(void)
 	 * design") -- on a part whose whole point in modes 2/3 is low
 	 * standing current.  bridge_hw_gpio_read() now promotes a pad to
 	 * floating INPUT (no pull, #2701) lazily on the first
-	 * CMD_GPIO_READ that names it, mirroring the existing lazy OUTPUT promotion in
-	 * bridge_hw_gpio_write(); gpio_is_output[] stays the write-side
-	 * truth.  Tradeoff made deliberately per gh#66: an unconnected
-	 * E1M IO reads 0 only while its pad is parked analog (ISTAT
-	 * reads 0 in analog mode, UM p.270) -- the first READ names it,
-	 * promotes it, and every later read is the pulled-up level.
+	 * CMD_GPIO_READ that names it, mirroring the existing lazy OUTPUT
+	 * promotion in bridge_hw_gpio_write(); gpio_is_output[] stays the
+	 * write-side truth.  Tradeoff made deliberately per gh#66: an
+	 * unconnected E1M IO reads 0 while its pad is parked analog (ISTAT
+	 * reads 0 in analog mode, UM p.270) and floats, with an
+	 * indeterminate level, once a read promotes it.
 	 *
 	 * Also settles the SDIO mux regression bench-proven 2026-09-26 on
 	 * E1M-V2M103 / E1M-X EVK: the carrier's SDIO mux (microSD vs M.2
