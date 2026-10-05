@@ -493,16 +493,17 @@ uint16_t adc_full_scale_for_bits(uint8_t bits); /* adc.c */
  * and the BEGIN2 conversion-time check both use it. */
 uint16_t adc_effective_ratio(uint8_t channel);                    /* adc.c */
 void     adc_apply_conv_format(uint32_t periph, uint8_t channel); /* adc.c */
-/* Low-power gate queries (power.c): true while the feature is live. */
-bool bridge_adc_streams_active(void); /* adc_stream.c */
-bool bridge_pwm_claims_active(void);  /* pwm.c */
-bool bridge_dac_driven(void);         /* dac.c */
 void     qenc_channel_init(const gd32_qenc_t *e);                 /* qenc.c */
 void     pwm_timer_init(uint32_t periph);                         /* pwm.c */
 void     pwm_channel_init(const gd32_pwm_ch_t *ch);               /* pwm.c */
 void     pwm_channel_claim(uint8_t channel);                      /* pwm.c */
 void     pwm_channel_release(uint8_t channel);                    /* pwm.c */
 void     se_reset_init(void);                                     /* se_reset.c */
+
+/* Low-power gate queries (power.c): true while the feature is live. */
+bool bridge_adc_streams_active(void); /* adc_stream.c */
+bool bridge_pwm_claims_active(void);  /* pwm.c */
+bool bridge_dac_driven(void);         /* dac.c */
 
 /* Per-timer CAR shadow-promotion tracking (pwm_capture.c owns the
  * state; see the comment above pwm_capture_active_car).  pwm.c calls

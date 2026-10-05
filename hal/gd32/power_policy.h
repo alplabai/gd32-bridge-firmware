@@ -15,17 +15,17 @@
 
 /* POWER_MODE_SET request byte 1 (reserved/0 on every pre-flags host, so a
  * 0.14 host is unaffected).  Unknown bits are refused (STATUS_INVAL). */
-#define POWER_FLAG_WAKE_I2C 0x01u /* BRD_I2C address match ends Deep-sleep */
+#define POWER_FLAG_WAKE_I2C   0x01u /* BRD_I2C address match ends Deep-sleep */
 #define POWER_FLAGS_SUPPORTED (POWER_FLAG_WAKE_I2C)
 
 /* Everything that must keep running, or whose state a Deep-sleep / Standby
  * would silently corrupt.  SLEEP (mode 1) keeps every clock and is never
  * refused on these grounds. */
 typedef struct {
-	bool adc_stream; /* an ADC stream (STREAM_BEGIN/BEGIN2) is paced */
-	bool pwm;        /* a continuous PWM output or PWM input-capture is claimed */
-	bool dac;        /* a DAC output has been driven by the host */
-	bool ota;        /* an OTA session is open (BEGIN..COMMIT) or an erase runs */
+	bool adc_stream;  /* an ADC stream (STREAM_BEGIN/BEGIN2) is paced */
+	bool pwm;         /* a continuous PWM output or PWM input-capture is claimed */
+	bool dac;         /* a DAC output has been driven by the host */
+	bool ota;         /* an OTA session is open (BEGIN..COMMIT) or an erase runs */
 	bool boot_commit; /* a trial image / boot-config commit is unconfirmed */
 } power_activity_t;
 
@@ -63,6 +63,7 @@ typedef struct {
 	uint32_t wakes[4];              /* completed wakes per mode (2 only) */
 	uint32_t refused_busy;          /* STATUS_BUSY: activity blocked the entry */
 	uint32_t refused_late;          /* latched request dropped, activity started after the reply */
+	uint32_t cancelled;             /* latched request superseded by RUN / SLEEP before the entry */
 	uint32_t last_wake_pd0;         /* raw EXTI_PD0 at the last wake */
 	uint32_t last_wake_restore_cyc; /* DWT cycles, WFI return -> clock/I2C restored */
 	uint8_t  last_mode;

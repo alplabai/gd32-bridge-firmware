@@ -29,14 +29,14 @@ FlagStatus     mock_cs_level = SET;
 uint64_t       mock_nvic_pending;
 void (*mock_on_settle)(void);
 void (*mock_on_i2c_disable)(void);
-uint32_t mock_i2c_enables, mock_rtc_disables, mock_rtc_flag_clears, mock_exti19_clears;
-uint32_t mock_seq, mock_seq_clock_restore, mock_seq_i2c_init, mock_seq_rtc_disable;
-int      mock_i2c_init_rc;
-int      mock_rtc_clock_config_saw_irq_masked;
+uint32_t   mock_i2c_enables, mock_rtc_disables, mock_rtc_flag_clears, mock_exti19_clears;
+uint32_t   mock_seq, mock_seq_clock_restore, mock_seq_i2c_init, mock_seq_rtc_disable;
+int        mock_i2c_init_rc;
+int        mock_rtc_clock_config_saw_irq_masked;
 mock_dwt_t mock_dwt;
 int        mock_act_adc, mock_act_pwm, mock_act_dac, mock_act_ota;
 uint32_t   mock_pd0_on_wake;
-uint32_t   mock_exti31_enables, mock_wake_mode_sets, mock_i2c_init_wake_mode;
+uint32_t   mock_exti31_enables, mock_exti31_disables, mock_wake_mode_sets, mock_i2c_init_wake_mode;
 int        mock_i2c_wake_mode;
 
 void mock_power_reset(void)
@@ -68,6 +68,7 @@ void mock_power_reset(void)
 	EXTI_PD1                                                                     = 0u;
 	mock_act_adc = mock_act_pwm = mock_act_dac = mock_act_ota = 0;
 	mock_pd0_on_wake                                          = 0u;
+	mock_exti31_disables                                      = 0u;
 	mock_exti31_enables = mock_wake_mode_sets = mock_i2c_init_wake_mode = 0u;
 	mock_i2c_wake_mode                                                  = 0;
 	mock_dwt.CYCCNT                                                     = 0u;
@@ -191,7 +192,7 @@ void exti_flag_clear(uint32_t linex)
 
 void exti_init(uint32_t linex, uint32_t mode, uint32_t trig_type)
 {
-	(void)linex;
+	if (linex == EXTI_31) ++mock_exti31_enables;
 	(void)mode;
 	(void)trig_type;
 	++mock_power_hw_calls;
@@ -259,9 +260,9 @@ void SystemCoreClockUpdate(void)
 	mock_dwt.CYCCNT += 10u;
 }
 
-void exti_interrupt_enable(uint32_t linex)
+void exti_interrupt_disable(uint32_t linex)
 {
-	if (linex == EXTI_31) ++mock_exti31_enables;
+	if (linex == EXTI_31) ++mock_exti31_disables;
 	++mock_power_hw_calls;
 }
 

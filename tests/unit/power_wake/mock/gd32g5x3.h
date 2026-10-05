@@ -152,8 +152,9 @@ extern mock_dwt_t mock_dwt;
 extern int mock_act_adc, mock_act_pwm, mock_act_dac, mock_act_ota;
 /* EXTI_PD0 the mock deep-sleep leaves behind (the wake source). */
 extern uint32_t mock_pd0_on_wake;
-extern uint32_t mock_exti31_enables, mock_wake_mode_sets, mock_i2c_init_wake_mode;
-extern int      mock_i2c_wake_mode;
+extern uint32_t mock_exti31_enables, mock_exti31_disables, mock_wake_mode_sets,
+    mock_i2c_init_wake_mode;
+extern int mock_i2c_wake_mode;
 
 void mock_power_reset(void);
 
@@ -173,7 +174,7 @@ void       pmu_to_standbymode(void);
 void       rtc_flag_clear(uint32_t flag);
 void       rtc_interrupt_enable(uint32_t interrupt);
 void       exti_flag_clear(uint32_t linex);
-void       exti_interrupt_enable(uint32_t linex);
+void       exti_interrupt_disable(uint32_t linex);
 void       exti_init(uint32_t linex, uint32_t mode, uint32_t trig_type);
 void       exti_interrupt_flag_clear(uint32_t linex);
 void       nvic_irq_enable(int32_t nvic_irq, uint8_t pre_priority, uint8_t sub_priority);

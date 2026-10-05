@@ -658,20 +658,20 @@ def build_vectors() -> list[tuple[str, str, str | None] | _Section]:
     ))
 
     # Request byte 1 is the POWER_FLAG_* byte (0 from a host that predates
-    # it).  WAKE_I2C (0x01) lets a BRD_I2C address match end Deep-sleep, so
-    # this Deep-sleep request carries no timer.
+    # it).  WAKE_I2C (0x01) adds an early wake on a BRD_I2C address match to a
+    # TIMED Deep-sleep (an untimed one answers STATUS_OUT_OF_RANGE).
     out.append((
         "spi_power_mode_set_deepsleep_wake_i2c_request",
         spi_frame(SOF, CMD_POWER_MODE_SET,
                   bytes([0x02,                            # mode = DEEP_SLEEP
                          0x01,                            # flags = WAKE_I2C
                          0x00, 0x00, 0x00, 0x00,          # wake_bitmap = none
-                         0x00, 0x00, 0x00, 0x00,          # wake_after_ms = 0 (unbounded)
+                         0x64, 0x00, 0x00, 0x00,          # wake_after_ms = 100 (LE)
                   ])).hex().upper(),
         "SOF | CMD=0x28 | mode=DEEP_SLEEP | flags=WAKE_I2C | wake_bitmap=0 |"
-        " wake_after_ms=0 | CRC -- accepted only with WAKE_I2C (an unbounded"
-        " Deep-sleep needs both host buses able to end it); answers STATUS_BUSY"
-        " while an ADC stream, PWM, DAC or OTA session is live",
+        " wake_after_ms=100 | CRC -- answers STATUS_BUSY while an ADC stream,"
+        " PWM, DAC or OTA session is live; an untimed WAKE_I2C request answers"
+        " STATUS_OUT_OF_RANGE",
     ))
 
     # ----- §10. v0.5 additions (§2B wave-2): chunked DSP-chain upload -

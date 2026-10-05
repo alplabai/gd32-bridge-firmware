@@ -475,8 +475,8 @@ int bridge_hw_timer_sync(uint8_t master, uint8_t slave, uint8_t mode);
  * bits, or any flag on mode 0/1/3, return BRIDGE_HW_ERR_INVAL.
  *
  * Mode 2 and mode 3 REQUIRE a bounded sleep (wake_after_ms > 0 or the RTC/TIMER
- * bit; else BRIDGE_HW_ERR_INVAL); mode 2 alone may be unbounded when
- * WAKE_I2C is set.  Mode 2/3 return BRIDGE_HW_ERR_BUSY while an ADC stream, a
+ * bit; else BRIDGE_HW_ERR_INVAL, or BRIDGE_HW_ERR_RANGE when WAKE_I2C asks for
+ * an untimed sleep, refused until the I2C0 wake line is bench-proven).  Mode 2/3 return BRIDGE_HW_ERR_BUSY while an ADC stream, a
  * PWM output / capture, a DAC output, an OTA session or an unconfirmed trial
  * is live (mode 1 is never refused); mode 0 cancels a latched request.
  * Mode 2 (deep-sleep) also wakes

@@ -339,9 +339,12 @@ int bridge_hw_power_mode_set(uint8_t  mode,
 		 * closed for the wake_bitmap axis.  Refuse before any
 		 * hardware touch, matching the standby gate below. */
 		if (wake_after_ms != 0u || flags != 0u) return BRIDGE_HW_ERR_INVAL;
-		if (mode == 0u) {
-			if (s_lp_pending_mode != 0u) power_cancel_pending();
-		} else {
+		/* RUN and SLEEP both supersede a latched, not yet executed request. */
+		if (s_lp_pending_mode != 0u) {
+			++bridge_power_diag.cancelled;
+			power_cancel_pending();
+		}
+		if (mode == 1u) {
 			++bridge_power_diag.entries[1];
 			bridge_power_diag.last_mode = 1u;
 		}
@@ -380,16 +383,15 @@ int bridge_hw_power_mode_set(uint8_t  mode,
 		 * is latched (gh#40 fix 1). */
 		const bool no_timer =
 		    (wake_after_ms == 0u && (wake_bitmap & (POWER_WAKE_RTC | POWER_WAKE_TIMER)) == 0u);
-		/* Deep-sleep may be unbounded only when BOTH host buses can end it
-		 * (SPI CS always, I2C via POWER_FLAG_WAKE_I2C); without that, or in
-		 * Standby, a timer is mandatory. */
-		const bool unbounded_ok = (mode == 2u) && ((flags & POWER_FLAG_WAKE_I2C) != 0u);
-		if (no_timer && !unbounded_ok) {
-			return BRIDGE_HW_ERR_INVAL;
-		}
-		/* Unbounded: a running FWDGT would reset the part out of the sleep. */
-		if (no_timer && (FMC_OBCTL & FMC_OBCTL_FWDGSPD_DPSLP) != 0u) {
-			return BRIDGE_HW_ERR_RANGE;
+		/* Every sleep is bounded by the RTC timer.  WAKE_I2C only adds an early
+		 * wake on a BRD_I2C address match: the I2C0 wakeup EXTI line is NOT yet
+		 * confirmed against the GD32G5x3 user manual (the vendor header names
+		 * NVIC IRQ 31 = I2C0_EV_WKUP but gives no EXTI line table, and the UM is
+		 * not reachable from the tree), so an untimed WAKE_I2C -- which would
+		 * leave CS as the only proven wake -- is refused until a bench run proves
+		 * the line. */
+		if (no_timer) {
+			return ((flags & POWER_FLAG_WAKE_I2C) != 0u) ? BRIDGE_HW_ERR_RANGE : BRIDGE_HW_ERR_INVAL;
 		}
 		if (!no_timer) {
 			const uint32_t ms = (wake_after_ms != 0u) ? wake_after_ms : POWER_WAKE_TIMER_MAX_MS;
@@ -538,6 +540,25 @@ static bool lp_link_quiet(void)
 	return true;
 }
 
+/* The last look before a WFI, taken with PRIMASK set so no ISR can change
+ * anything between it and the entry.  The settle spin before it runs with
+ * interrupts ON, so a RUN / SLEEP request, a stream start or a CS edge can
+ * land there.  Returns 0 = enter, 1 = link not quiet (request stays latched,
+ * retry next tick), 2 = request gone (cancelled or overtaken; counted). */
+static int lp_final_gate(uint8_t mode)
+{
+	if (s_lp_pending_mode != mode) {
+		++bridge_power_diag.cancelled;
+		return 2;
+	}
+	if (power_entry_refused(mode)) {
+		++bridge_power_diag.refused_late;
+		power_cancel_pending();
+		return 2;
+	}
+	return lp_link_quiet() ? 0 : 1;
+}
+
 /* Base-level low-power entry (gh#63): the deferred half of
  * bridge_hw_power_mode_set().  Runs from bridge_hw_tick() -- base level,
  * AFTER the accepted request's reply has drained onto the wire, with
@@ -647,7 +668,7 @@ void bridge_power_tick(void)
 
 		const bool want_i2c_wake = (s_lp_flags & POWER_FLAG_WAKE_I2C) != 0u;
 		bool       i2c_wake_ok   = false;
-		bool       go            = lp_link_quiet() && !power_entry_refused(2u);
+		bool       go            = (lp_final_gate(2u) == 0);
 		if (go) {
 			/* I2C0 off while it is reconfigured (UM p.1279); re-enabled below
 			 * or on back-out.  Re-check once more afterwards: an address match
@@ -656,24 +677,26 @@ void bridge_power_tick(void)
 			i2c_disable(BRIDGE_I2C_PERIPH);
 			bridge_transport_i2c_wake_mode_set(want_i2c_wake);
 			if (want_i2c_wake) {
-				/* Kernel clock -> IRC8M + WUEN, I2C0 re-enabled by the init;
-				 * EXTI 31 is the I2C0 wakeup line (IRQ 31 = I2C0_EV_WKUP). */
+				/* Kernel clock -> IRC8M + WUEN, I2C0 re-enabled by the init.
+				 * EXTI line 31 is ASSUMED to be the I2C0 wakeup line: NVIC IRQ
+				 * 31 (I2C0_EV_WKUP) is a separate numbering, and the UM EXTI
+				 * line table (the one that gives RTC wakeup = line 19, UM p.213
+				 * Table 5-3) is not reachable from this tree, so the line, and
+				 * whether it is configurable, are UNCONFIRMED -- bench item.
+				 * Armed like line 19 (rising, interrupt); the wake path below
+				 * disables it again. */
 				i2c_wake_ok = (bridge_transport_i2c_hw_init() == BRIDGE_HW_OK);
 				if (i2c_wake_ok) {
 					i2c_off = false;
 					exti_flag_clear(EXTI_31);
-					exti_interrupt_enable(EXTI_31);
+					exti_init(EXTI_31, EXTI_INTERRUPT, EXTI_TRIG_RISING);
 				} else {
-					/* Left half-configured: a later tick re-initialises it.  An
-					 * unbounded request would then be ended by CS alone, so
-					 * refuse it. */
+					/* Left half-configured: a later tick re-initialises it.  The
+					 * request is timed (untimed WAKE_I2C is refused), so the
+					 * sleep still ends; only the early I2C wake is lost. */
 					bridge_transport_i2c_wake_mode_set(false);
 					bridge_i2c_reinit_pending = 1u;
 					i2c_off                   = false;
-					if (!s_lp_timed) {
-						go = false;
-						power_cancel_pending();
-					}
 				}
 			}
 			if (go) go = lp_link_quiet();
@@ -718,6 +741,14 @@ void bridge_power_tick(void)
 		(void)rtc_wakeup_disable();
 		rtc_flag_clear(RTC_FLAG_WT);
 		exti_flag_clear(EXTI_19);
+		if (i2c_wake_ok) {
+			/* The line was only for the sleep.  I2C0 is still on IRC8M, possibly
+			 * mid-transaction: hand it back to APB1 from the tick once idle. */
+			exti_interrupt_disable(EXTI_31);
+			exti_flag_clear(EXTI_31);
+			bridge_transport_i2c_wake_mode_set(false);
+			bridge_i2c_reinit_pending = 1u;
+		}
 		SysTick->VAL  = 0u;
 		SysTick->CTRL = systick_ctrl;
 		++bridge_power_diag.wakes[2];
@@ -733,6 +764,16 @@ void bridge_power_tick(void)
 	}
 
 	if (mode == 3u) {
+		/* PRIMASK across the gate and the entry, as for Deep-sleep: a RUN
+		 * request arriving in the settle spin must not be lost.  An aborted
+		 * entry unwinds below with the lock still held. */
+		const uint32_t primask = bridge_irq_lock();
+		if (lp_final_gate(3u) != 0) {
+			SysTick->VAL  = 0u;
+			SysTick->CTRL = systick_ctrl;
+			bridge_irq_unlock(primask);
+			return;
+		}
 		++bridge_power_diag.entries[3];
 		bridge_power_diag.last_mode = 3u;
 		pmu_to_standbymode();
@@ -759,5 +800,6 @@ void bridge_power_tick(void)
 		SysTick->CTRL     = systick_ctrl;
 		s_lp_pending_mode = 0u; /* drop the failed request */
 		s_lp_timed        = false;
+		bridge_irq_unlock(primask);
 	}
 }

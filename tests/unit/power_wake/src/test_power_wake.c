@@ -474,7 +474,6 @@ ZTEST(power_wake, test_clock_restore_backs_out_when_scss_never_switches)
 	zassert_false(bridge_core_clock_matches);
 }
 
-
 /* ------------------------------------------------------------------ */
 /* Low-power modes: BUSY gate, flags, I2C wake, diagnostics            */
 /* ------------------------------------------------------------------ */
@@ -502,8 +501,10 @@ ZTEST(power_wake, test_busy_gate_refuses_deep_sleep_and_standby_but_not_sleep)
 		} else {
 			mock_trial_unconfirmed = 1; /* pending boot-config commit */
 		}
-		zassert_equal(bridge_hw_power_mode_set(2u, 0u, 100u, 0u), BRIDGE_HW_ERR_BUSY, "%u", (unsigned)i);
-		zassert_equal(bridge_hw_power_mode_set(3u, 0u, 100u, 0u), BRIDGE_HW_ERR_BUSY, "%u", (unsigned)i);
+		zassert_equal(
+		    bridge_hw_power_mode_set(2u, 0u, 100u, 0u), BRIDGE_HW_ERR_BUSY, "%u", (unsigned)i);
+		zassert_equal(
+		    bridge_hw_power_mode_set(3u, 0u, 100u, 0u), BRIDGE_HW_ERR_BUSY, "%u", (unsigned)i);
 		zassert_equal(mock_power_hw_calls, 0u, "refused before any hardware touch");
 		zassert_equal(bridge_power_diag.refused_busy, 2u);
 		/* SLEEP keeps every clock running; RUN is a no-op. */
@@ -550,46 +551,52 @@ ZTEST(power_wake, test_run_cancels_a_latched_request)
 ZTEST(power_wake, test_flag_validation)
 {
 	mock_power_reset();
-	zassert_equal(bridge_hw_power_mode_set(2u, 0u, 100u, 0x02u), BRIDGE_HW_ERR_INVAL, "unknown bit");
+	zassert_equal(
+	    bridge_hw_power_mode_set(2u, 0u, 100u, 0x02u), BRIDGE_HW_ERR_INVAL, "unknown bit");
 	zassert_equal(bridge_hw_power_mode_set(3u, 0u, 100u, POWER_FLAG_WAKE_I2C), BRIDGE_HW_ERR_INVAL);
 	zassert_equal(bridge_hw_power_mode_set(1u, 0u, 0u, POWER_FLAG_WAKE_I2C), BRIDGE_HW_ERR_INVAL);
 	zassert_equal(bridge_hw_power_mode_set(0u, 0u, 0u, POWER_FLAG_WAKE_I2C), BRIDGE_HW_ERR_INVAL);
 	zassert_equal(mock_power_hw_calls, 0u);
-	/* An I2C-wake Deep-sleep may be unbounded -- unless the FWDGT would reset it. */
-	FMC_OBCTL = FMC_OBCTL_FWDGSPD_DPSLP;
+	/* Untimed WAKE_I2C is refused until the I2C0 wake line is bench-proven;
+	 * without the flag an untimed Deep-sleep is INVAL. */
 	zassert_equal(bridge_hw_power_mode_set(2u, 0u, 0u, POWER_FLAG_WAKE_I2C), BRIDGE_HW_ERR_RANGE);
-	FMC_OBCTL = 0u;
-	zassert_equal(bridge_hw_power_mode_set(2u, 0u, 0u, POWER_FLAG_WAKE_I2C), BRIDGE_HW_OK);
+	zassert_equal(bridge_hw_power_mode_set(2u, 0u, 0u, 0u), BRIDGE_HW_ERR_INVAL);
+	zassert_equal(bridge_hw_power_mode_set(2u, 0u, 100u, POWER_FLAG_WAKE_I2C), BRIDGE_HW_OK);
 	bridge_hw_power_mode_set(0u, 0u, 0u, 0u);
 }
 
-ZTEST(power_wake, test_i2c_wake_runs_i2c_from_irc8m_and_is_not_reinitialised_after_the_wake)
+ZTEST(power_wake, test_i2c_wake_runs_i2c_from_irc8m_then_reverts_to_apb1_from_the_tick)
 {
 	mock_power_reset();
 	diag_reset();
 	clock_ready();
 	mock_pd0_on_wake = 1u << 31; /* the I2C0 wakeup line ended the sleep */
-	zassert_equal(bridge_hw_power_mode_set(2u, 0u, 0u, POWER_FLAG_WAKE_I2C), BRIDGE_HW_OK);
-	zassert_equal(mock_rtc_disables, 0u, "unbounded: no RTC timer armed");
+	zassert_equal(bridge_hw_power_mode_set(2u, 0u, 100u, POWER_FLAG_WAKE_I2C), BRIDGE_HW_OK);
 	bridge_power_tick();
 	zassert_equal(mock_deepsleep_entries, 1u);
-	zassert_equal(mock_i2c_inits, 1u, "initialised once, before the entry only");
+	zassert_equal(mock_i2c_inits, 1u, "initialised once, before the entry; not cut after the wake");
 	zassert_equal(mock_i2c_init_wake_mode, 1u, "that init ran with the IRC8M kernel clock + WUEN");
-	zassert_equal(mock_exti31_enables, 1u);
+	zassert_equal(mock_exti31_enables, 1u, "line armed for the sleep");
+	zassert_equal(mock_exti31_disables, 1u, "and disabled again after the wake");
 	zassert_equal(mock_i2c_enables, 0u);
 	zassert_true(mock_seq_i2c_init < mock_seq_clock_restore, "I2C armed first, PLL restored after");
+	zassert_equal(mock_i2c_wake_mode, 0, "wake mode cleared for the revert");
 	zassert_equal(bridge_power_diag.wakes[2], 1u);
 	zassert_equal(bridge_power_diag.entries[2], 1u);
 	zassert_equal(bridge_power_diag.last_wake_source, POWER_WAKE_SRC_I2C);
 	zassert_equal(bridge_power_diag.i2c_wake_armed, 1u);
 	zassert_true(bridge_power_diag.last_wake_restore_cyc > 0u);
-	/* The next, non-I2C-wake request puts the kernel clock back on APB1. */
+
+	/* Base level, link idle: I2C0 goes back to APB1 (kernel clock + no WUEN). */
 	mock_pd0_on_wake = 0u;
 	EXTI_PD0         = 0u;
-	zassert_equal(bridge_hw_power_mode_set(2u, 0u, 100u, 0u), BRIDGE_HW_OK);
+	mock_i2c_busy    = SET; /* the woken transaction is still running */
 	bridge_power_tick();
-	zassert_equal(mock_i2c_init_wake_mode, 0u);
-	zassert_equal(bridge_power_diag.i2c_wake_armed, 0u);
+	zassert_equal(mock_i2c_inits, 1u, "not while the transaction runs");
+	mock_i2c_busy = RESET;
+	bridge_power_tick();
+	zassert_equal(mock_i2c_inits, 2u);
+	zassert_equal(mock_i2c_init_wake_mode, 0u, "re-initialised on APB1");
 }
 
 ZTEST(power_wake, test_wake_source_classification)
@@ -616,28 +623,16 @@ ZTEST(power_wake, test_wake_source_classification)
 	}
 }
 
-ZTEST(power_wake, test_i2c_wake_init_failure_refuses_unbounded_but_sleeps_when_bounded)
+ZTEST(power_wake, test_i2c_wake_init_failure_still_sleeps_timer_only)
 {
 	mock_power_reset();
 	diag_reset();
 	clock_ready();
 	mock_i2c_init_rc = BRIDGE_HW_ERR_RANGE;
-	zassert_equal(bridge_hw_power_mode_set(2u, 0u, 0u, POWER_FLAG_WAKE_I2C), BRIDGE_HW_OK);
-	bridge_power_tick();
-	zassert_equal(mock_deepsleep_entries, 0u, "only CS could end it: refused");
-	zassert_equal(mock_i2c_wake_mode, 0, "wake mode reverted");
-	bridge_power_tick();
-	zassert_equal(mock_deepsleep_entries, 0u, "request dropped");
-
-	/* With a timer the part may still sleep; the I2C comes back after it. */
-	mock_i2c_init_rc = BRIDGE_HW_OK;
-	drain_pending_relock();
-	mock_power_reset();
-	clock_ready();
-	mock_i2c_init_rc = BRIDGE_HW_ERR_RANGE;
 	zassert_equal(bridge_hw_power_mode_set(2u, 0u, 100u, POWER_FLAG_WAKE_I2C), BRIDGE_HW_OK);
 	bridge_power_tick();
 	zassert_equal(mock_deepsleep_entries, 1u);
+	zassert_equal(mock_i2c_wake_mode, 0, "wake mode reverted");
 	zassert_equal(bridge_power_diag.i2c_wake_armed, 0u);
 	mock_i2c_init_rc = BRIDGE_HW_OK;
 	drain_pending_relock();
@@ -651,6 +646,66 @@ ZTEST(power_wake, test_standby_entries_are_counted)
 	bridge_power_tick();
 	zassert_equal(bridge_power_diag.entries[3], 1u);
 	zassert_equal(bridge_power_diag.last_mode, 3u);
+}
+
+/* A RUN request arriving from the CS ISR during the watchdog-settle spin (which
+ * runs with interrupts on) must stop the entry: previously Standby was entered
+ * with the RTC timer already disabled, and Deep-sleep slept after the cancel. */
+static void inject_run_cancel(void)
+{
+	zassert_equal(bridge_hw_power_mode_set(0u, 0u, 0u, 0u), BRIDGE_HW_OK);
+}
+
+ZTEST(power_wake, test_review_run_cancel_during_settle_deepsleep)
+{
+	mock_power_reset();
+	diag_reset();
+	clock_ready();
+	zassert_equal(bridge_hw_power_mode_set(2u, 0u, 100u, 0u), BRIDGE_HW_OK);
+	mock_on_settle = inject_run_cancel;
+	bridge_power_tick();
+	zassert_equal(mock_deepsleep_entries, 0u, "no sleep after the cancel");
+	zassert_equal(mock_i2c_disables, 0u);
+	zassert_equal(mock_primask, 0u);
+	zassert_equal(bridge_power_diag.cancelled, 2u, "RUN itself + the gate that saw it");
+	mock_on_settle = NULL;
+	bridge_power_tick();
+	zassert_equal(mock_deepsleep_entries, 0u, "and it stays cancelled");
+}
+
+ZTEST(power_wake, test_review_run_cancel_during_settle_standby)
+{
+	mock_power_reset();
+	diag_reset();
+	zassert_equal(bridge_hw_power_mode_set(3u, 0u, 100u, 0u), BRIDGE_HW_OK);
+	mock_systick.CTRL = SysTick_CTRL_ENABLE_Msk | SysTick_CTRL_TICKINT_Msk;
+	mock_on_settle    = inject_run_cancel;
+	bridge_power_tick();
+	zassert_equal(mock_systick_ctrl_at_standby, 0u, "standby was never entered");
+	zassert_equal(bridge_power_diag.entries[3], 0u);
+	zassert_equal(mock_primask, 0u, "lock released");
+	zassert_equal(mock_systick.CTRL, SysTick_CTRL_ENABLE_Msk | SysTick_CTRL_TICKINT_Msk);
+	mock_on_settle = NULL;
+	bridge_power_tick();
+	zassert_equal(bridge_power_diag.entries[3], 0u, "and it stays cancelled");
+}
+
+ZTEST(power_wake, test_standby_aborted_entry_releases_the_lock)
+{
+	run_aborted_standby(SysTick_CTRL_ENABLE_Msk);
+	zassert_equal(mock_primask, 0u);
+}
+
+ZTEST(power_wake, test_sleep_cancels_a_latched_request)
+{
+	mock_power_reset();
+	diag_reset();
+	clock_ready();
+	zassert_equal(bridge_hw_power_mode_set(2u, 0u, 100u, 0u), BRIDGE_HW_OK);
+	zassert_equal(bridge_hw_power_mode_set(1u, 0u, 0u, 0u), BRIDGE_HW_OK);
+	bridge_power_tick();
+	zassert_equal(mock_deepsleep_entries, 0u);
+	zassert_equal(bridge_power_diag.cancelled, 1u);
 }
 
 ZTEST_SUITE(power_wake, NULL, NULL, NULL, NULL, NULL);
