@@ -97,15 +97,12 @@ void gpio_mode_set(uint32_t gpio_periph, uint32_t mode, uint32_t pull_up_down, u
 {
 	/* gh#66 added the read path's lazy INPUT promotion, so this mock
 	 * sees both (OUTPUT, PUPD_NONE) from the write path and (INPUT,
-	 * PULLUP) from the read path. */
+	 * PUPD_NONE) from the read path.  A read must never add a pull: a
+	 * pull-up on a carrier net (e.g. EVK SDIO_MUX_EN) flips it. */
 	zassert_true(mode == GPIO_MODE_OUTPUT || mode == GPIO_MODE_INPUT,
 	             "unexpected GPIO mode %u",
 	             (unsigned)mode);
-	if (mode == GPIO_MODE_OUTPUT) {
-		zassert_equal(pull_up_down, GPIO_PUPD_NONE);
-	} else {
-		zassert_equal(pull_up_down, GPIO_PUPD_PULLUP);
-	}
+	zassert_equal(pull_up_down, GPIO_PUPD_NONE);
 	mock_log(MOCK_EVENT_MODE, gpio_periph, pin);
 }
 
@@ -251,7 +248,7 @@ ZTEST(gpio_grouped, test_null_read_output_is_rejected_without_access)
 }
 
 /* gh#66: pads are parked at their analog reset state at boot; the FIRST
- * read that names a pad promotes it to INPUT + PULLUP (lazily), and
+ * read that names a pad promotes it to floating INPUT, no pull (lazily), and
  * exactly once -- a second read must not re-promote. */
 ZTEST(gpio_grouped, test_first_read_promotes_input_once)
 {

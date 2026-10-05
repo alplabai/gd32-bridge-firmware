@@ -126,8 +126,8 @@ _Static_assert(sizeof(gpio_pad_map) / sizeof(gpio_pad_map[0]) == GPIO_PAD_MAP_CO
  * GPIO_PAD_CAN_STBY (bit 20), which boot OUTPUT driven instead (see
  * init.c and the pad-map comment above); bridge_hw_gpio_write() flips
  * an entry to OUTPUT push-pull on first call (sticky until the next
- * chip reset), and bridge_hw_gpio_read() promotes a pad to INPUT +
- * PULLUP on the first read that names it.  Avoids the need for a
+ * chip reset), and bridge_hw_gpio_read() promotes a pad to floating INPUT
+ * (no pull) on the first read that names it.  Avoids the need for a
  * separate `CMD_GPIO_CONFIGURE` opcode.  gpio_is_output is used ONLY by
  * bridge_hw_gpio_write() to decide whether a pad still needs
  * promoting -- bridge_hw_gpio_read() below always reads the measured
@@ -159,20 +159,16 @@ int bridge_hw_gpio_read(uint32_t mask, uint32_t *levels)
 	*levels                                       = 0u;
 	uint16_t port_inputs[GPIO_MAPPED_PORT_COUNT]  = { 0u };
 	bool     port_sampled[GPIO_MAPPED_PORT_COUNT] = { false };
-	bool     promoted_any                         = false;
 
-	/* Lazy INPUT promotion (gh#66): boot parks the pad map at its
-	 * analog reset state, so the first read that names a pad brings it
-	 * to INPUT + PULLUP here -- mirroring the write path's OUTPUT
-	 * promotion below.  The pull-up then has to charge the pad's
-	 * capacitance before the level is meaningful: 40 kΩ (Datasheet
-	 * Rev2.0 p.128 Table 4-28) against a pad-plus-trace C settles in
-	 * well under a microsecond for any realistic load, so a ~5 us
-	 * settle spin after ANY promotion is orders of margin -- and is
-	 * the only way the FIRST read after promotion can be trusted
-	 * (the issue's own caveat).  5 us in the CS-EXTI handler at prio
-	 * 1 is budgeted: single-digit-us dispatch sits inside the
-	 * master's 60 us inter-transaction gap. */
+	/* Lazy INPUT promotion (gh#66, #2701): boot parks the pad map at
+	 * its analog reset state, where the input buffer is off and ISTAT
+	 * reads 0, so the first read that names a pad has to enable the
+	 * input buffer.  It does so with NO pull: a read must sample the
+	 * net, never bias it -- a pull-up here flipped the carrier's
+	 * SDIO_MUX_EN (IO29) high on a plain read.  Analog and floating
+	 * input both leave the pad high-Z with no pull, so the net level
+	 * does not change; the input buffer is live immediately, so no
+	 * settle delay is needed. */
 	for (size_t i = 0; i < GPIO_PAD_MAP_COUNT; ++i) {
 		if ((mask & ((uint32_t)1u << i)) == 0u) continue;
 		/* gh#255: a pad the host already promoted to OUTPUT (write
@@ -183,13 +179,7 @@ int bridge_hw_gpio_read(uint32_t mask, uint32_t *levels)
 		if (gpio_input_promoted[i]) continue;
 		gpio_input_promoted[i] = true;
 		gpio_mode_set(
-		    gpio_pad_map[i].periph, GPIO_MODE_INPUT, GPIO_PUPD_PULLUP, gpio_pad_map[i].pin);
-		promoted_any = true;
-	}
-	if (promoted_any) {
-		for (volatile uint32_t settle = 0u; settle < 400u; ++settle) {
-			/* ~5 us at 216 MHz, ~5 cycles per volatile iteration */
-		}
+		    gpio_pad_map[i].periph, GPIO_MODE_INPUT, GPIO_PUPD_NONE, gpio_pad_map[i].pin);
 	}
 
 	/* Bits above `GPIO_PAD_MAP_COUNT` are silently ignored -- the

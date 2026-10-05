@@ -491,9 +491,8 @@ void bridge_hw_init(void)
 	 * Rev2.0 p.128 Table 4-28: RPU = 40 kΩ, "value guaranteed by
 	 * design") -- on a part whose whole point in modes 2/3 is low
 	 * standing current.  bridge_hw_gpio_read() now promotes a pad to
-	 * INPUT + PULLUP lazily on the first CMD_GPIO_READ that names
-	 * it (with a settling allowance for the pull-up charging the pad
-	 * capacitance), mirroring the existing lazy OUTPUT promotion in
+	 * floating INPUT (no pull, #2701) lazily on the first
+	 * CMD_GPIO_READ that names it, mirroring the existing lazy OUTPUT promotion in
 	 * bridge_hw_gpio_write(); gpio_is_output[] stays the write-side
 	 * truth.  Tradeoff made deliberately per gh#66: an unconnected
 	 * E1M IO reads 0 only while its pad is parked analog (ISTAT
