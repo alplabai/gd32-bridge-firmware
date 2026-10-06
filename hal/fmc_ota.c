@@ -317,6 +317,70 @@ bool ota_fmc_funnel_busy(void)
 	return s_fmc_owned;
 }
 
+bool ota_fmc_config_write_safe(void)
+{
+	if ((FMC_OBCTL & FMC_OBCTL_DBS) == 0u) {
+		return false; /* single-bank: the erase would stall every fetch */
+	}
+#if defined(OTA_RUNNING_SLOT_BASE)
+	if (OTA_RUNNING_SLOT_BASE >= OTA_FMC_BANK1_BASE) {
+		return false; /* bank-1-resident build erasing bank 1: never exercised */
+	}
+#endif
+	return true;
+}
+
+/* ECC-fault-safe read (boot-config A/B pages, src/boot_config.h).
+ *
+ * A doubleword half-written or half-erased by a power cut can hold an
+ * uncorrectable (double-bit) error.  Per the GD32G5x3 User Manual (Rev1.2,
+ * FMC ECC section, p.93-94) a double-bit error on a flash read sets
+ * FMC_ECCCS.ECCDET0 / ECCDET1 and -- SYSCFG_CFG3.FLASHECCIE being armed by
+ * default and by bridge_hw_init() -- raises the flash-ECC NMI, which this
+ * firmware turns into a record + reset (hal/gd32/fault_handlers.c, gh#36): a
+ * torn config page would then reset the unit on every boot.  So the read
+ * masks that single NMI source (vendor syscfg_interrupt_disable), clears the
+ * stale ECC flags, performs the aligned word loads, tests the flags and
+ * reports "uncorrectable" instead.  Clearing ECCDET0 also clears
+ * SYSCFG_STAT.FLASHECCIF (UM p.94 Note 4; the same step fault_common_handler
+ * takes); the syscfg flag is cleared explicitly as well, BEFORE the enable
+ * bit is restored, so re-arming never fires a stale NMI.  One-bit errors are
+ * corrected in hardware and need no handling.
+ *
+ * Interrupts are masked for the few-microsecond window so no other NMI-source
+ * user of FLASHECCIE sees it off.  UNVERIFIED ON SILICON: that the NMI-masked
+ * read of a real uncorrectable doubleword completes with the flag set rather
+ * than a bus fault -- see docs/protocol-v0.15-design.md section 13. */
+bool ota_fmc_read_safe(uint32_t addr, void *dst, size_t len)
+{
+	if (((addr | (uint32_t)len) & 7u) != 0u) {
+		return false; /* doubleword granule only */
+	}
+	const volatile uint32_t *src       = (const volatile uint32_t *)(uintptr_t)addr;
+	uint32_t                *out       = (uint32_t *)dst;
+	const uint32_t           sect      = bridge_irq_lock();
+	const bool               nmi_armed = (SYSCFG_CFG3 & SYSCFG_CFG3_FLASHECCIE) != 0u;
+
+	if (nmi_armed) {
+		syscfg_interrupt_disable(SYSCFG_INT_FLASHECC);
+	}
+	fmc_ecc_flag_clear(FMC_FLAG_ECCDET0 | FMC_FLAG_ECCDET1);
+	for (size_t i = 0u; i < len / 4u; i++) {
+		out[i] = src[i];
+	}
+	const bool bad =
+	    (fmc_ecc_flag_get(FMC_FLAG_ECCDET0) == SET) || (fmc_ecc_flag_get(FMC_FLAG_ECCDET1) == SET);
+	if (bad) {
+		fmc_ecc_flag_clear(FMC_FLAG_ECCDET0 | FMC_FLAG_ECCDET1);
+		SYSCFG_STAT = SYSCFG_STAT_FLASHECCIF; /* W1C: write only this bit, no RMW */
+	}
+	if (nmi_armed) {
+		syscfg_interrupt_enable(SYSCFG_INT_FLASHECC);
+	}
+	bridge_irq_unlock(sect);
+	return !bad;
+}
+
 ota_fmc_result_t ota_fmc_erase_range(uint32_t base, uint32_t len)
 {
 	/* Layout regions stay OTA_PAGE_SIZE-granular (2 KB -- a multiple of

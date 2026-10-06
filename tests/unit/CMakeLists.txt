@@ -107,6 +107,7 @@ foreach(_slot A B)
         ${FW}/src/ota.c
         ${FW}/src/crc32.c
         ${FW}/src/protocol.c
+        ${FW}/src/boot_config.c
         ${FW}/src/bootloader/bootloader.c
         ${FW}/hal/bridge_hw_stub.c
     )
@@ -149,6 +150,7 @@ add_test(NAME crc32 COMMAND test_crc32)
 add_executable(test_crc16
     crc16/src/test_crc16.c
     ${FW}/src/protocol.c
+    ${FW}/src/boot_config.c
     ${FW}/src/bootloader/bootloader.c
     ${FW}/src/ota.c
     ${FW}/src/crc32.c
@@ -164,6 +166,7 @@ add_executable(test_transport_spi
     transport_spi/src/test_transport_spi.c
     ${FW}/src/transport_spi.c
     ${FW}/src/protocol.c
+    ${FW}/src/boot_config.c
     ${FW}/src/bootloader/bootloader.c
     ${FW}/src/ota.c
     ${FW}/src/crc32.c
@@ -183,6 +186,7 @@ add_executable(test_timing_stats
     ${FW}/src/timing_stats.c
     ${FW}/src/transport_spi.c
     ${FW}/src/protocol.c
+    ${FW}/src/boot_config.c
     ${FW}/src/bootloader/bootloader.c
     ${FW}/src/ota.c
     ${FW}/src/crc32.c
@@ -464,6 +468,7 @@ add_executable(test_transport_i2c
     transport_i2c/src/test_transport_i2c.c
     ${FW}/src/transport_i2c.c
     ${FW}/src/protocol.c
+    ${FW}/src/boot_config.c
     ${FW}/src/bootloader/bootloader.c
     ${FW}/src/ota.c
     ${FW}/src/crc32.c
@@ -509,6 +514,7 @@ add_executable(test_protocol
     protocol/src/test_protocol_v015.c
     fake/bridge_hw_fake.c
     ${FW}/src/protocol.c
+    ${FW}/src/boot_config.c
     ${FW}/src/bootloader/bootloader.c
     ${FW}/src/ota.c
     ${FW}/src/crc32.c
@@ -517,6 +523,23 @@ target_include_directories(test_protocol PRIVATE ${FW}/src ${FW}/hal ${CMAKE_CUR
 target_compile_options(test_protocol PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_protocol PRIVATE ztest_shim)
 add_test(NAME protocol COMMAND test_protocol)
+
+# --- boot_config: opt-in persistent PD11 / IO29 SDIO_MUX_EN-high flag (alp-sdk #2697)
+# Header-only src/boot_config.h through the real protocol_dispatch() over the
+# fake HAL; flash is a host page behind the weak ota_fmc_* seams.
+add_executable(test_boot_config
+    boot_config/src/test_boot_config.c
+    fake/bridge_hw_fake.c
+    ${FW}/src/protocol.c
+    ${FW}/src/boot_config.c
+    ${FW}/src/bootloader/bootloader.c
+    ${FW}/src/ota.c
+    ${FW}/src/crc32.c
+)
+target_include_directories(test_boot_config PRIVATE ${FW}/src ${FW}/hal ${CMAKE_CURRENT_SOURCE_DIR}/fake)
+target_compile_options(test_boot_config PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_boot_config PRIVATE ztest_shim)
+add_test(NAME boot_config COMMAND test_boot_config)
 
 # --- adc_dsp: chain pool + chain_bind capability validation (#69, #70) -----
 #
@@ -569,6 +592,7 @@ add_executable(test_protocol_vectors
     ${FW}/src/transport_spi.c
     ${FW}/src/transport_i2c.c
     ${FW}/src/protocol.c
+    ${FW}/src/boot_config.c
     ${FW}/src/bootloader/bootloader.c
     ${FW}/src/ota.c
     ${FW}/src/crc32.c
@@ -591,6 +615,7 @@ add_executable(test_protocol_vectors_fake
     fake/bridge_hw_fake.c
     ${FW}/src/transport_spi.c
     ${FW}/src/protocol.c
+    ${FW}/src/boot_config.c
     ${FW}/src/bootloader/bootloader.c
     ${FW}/src/ota.c
     ${FW}/src/crc32.c

@@ -31,6 +31,7 @@
 
 #include "protocol.h"
 #include "../hal/bridge_hw.h"
+#include "boot_config.h"
 #include "bootloader/bootloader.h"
 #include "ota.h"
 
@@ -385,6 +386,33 @@ static gd32_bridge_status_t handle_se_reset(const uint8_t *req,
 	if (rv == BRIDGE_HW_ERR_NOTIMPL) return STATUS_NOSUPPORT;
 	if (rv < 0) return STATUS_IO;
 	*reply_len = 0u;
+	return STATUS_OK;
+}
+
+static gd32_bridge_status_t handle_boot_config(const uint8_t *req,
+                                               size_t         req_len,
+                                               uint8_t       *reply,
+                                               size_t         reply_cap,
+                                               size_t        *reply_len)
+{
+	if (req_len != 5u) return STATUS_INVAL;
+	if (reply_cap < 4u) return STATUS_NOMEM;
+	if (req[0] > 1u) return STATUS_INVAL;              /* op: 0 = GET, 1 = SET */
+	if (!ota_fmc_supported()) return STATUS_NOSUPPORT; /* no FMC HAL = no config page */
+	if (req[0] == 1u) {
+		/* Never flash from here (transport ISR): queue the SET for the main
+		 * loop (boot_config_tick) and reply with the CURRENT stored value.
+		 * The host polls GET until it equals the request.  A SET equal to
+		 * the stored value is accepted without queueing (no-op). */
+		const uint32_t flags = get_le32(&req[1]);
+		if ((flags & ~BOOT_CONFIG_KNOWN_FLAGS) != 0u) return STATUS_INVAL;
+		if (flags != boot_config_flags() && !ota_fmc_config_write_safe()) return STATUS_NOSUPPORT;
+		if (flags != boot_config_flags() && ota_session_active())
+			return STATUS_BUSY;                              /* OTA owns the FMC */
+		if (!boot_config_request(flags)) return STATUS_BUSY; /* a different SET is in flight */
+	}
+	put_le32(reply, boot_config_flags());
+	*reply_len = 4u;
 	return STATUS_OK;
 }
 
@@ -1362,6 +1390,7 @@ static bool i2c_opcode_allowed(uint8_t cmd)
 	case CMD_GPIO_READ:
 	case CMD_GPIO_WRITE:
 	case CMD_SE_RESET:
+	case CMD_BOOT_CONFIG:
 	case CMD_LINK_FEATURES:
 		return true;
 	default:
@@ -1468,6 +1497,9 @@ static gd32_bridge_status_t protocol_dispatch_inner(gd32_bridge_link_t link,
 		break;
 	case CMD_SE_RESET:
 		h = handle_se_reset;
+		break;
+	case CMD_BOOT_CONFIG:
+		h = handle_boot_config;
 		break;
 	case CMD_DAC_SET:
 		h = handle_dac_set;

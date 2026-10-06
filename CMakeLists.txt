@@ -58,6 +58,7 @@ set(BRIDGE_HAL_BACKEND "stub" CACHE STRING "Bridge HAL backend (stub | gd32)")
 set(GD32_BRIDGE_SOURCES
     src/main.c
     src/protocol.c
+    src/boot_config.c
     src/transport_spi.c
     src/transport_i2c.c
     src/bootloader/bootloader.c
