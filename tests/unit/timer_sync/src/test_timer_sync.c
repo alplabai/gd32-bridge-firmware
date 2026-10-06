@@ -242,6 +242,32 @@ static void assert_sync_master_guard(uint8_t master, uint8_t slave, uint8_t pwm_
 	zassert_equal(mock_primask, 0u, "running PWM_SET must not retain PRIMASK");
 }
 
+ZTEST(timer_sync, test_pwm_stop_releases_claim_for_sibling_single_pulse)
+{
+	reset_calls();
+	zassert_equal(bridge_hw_pwm_set(0u, 10000u, 5000u), BRIDGE_HW_OK);
+	zassert_equal(bridge_hw_pwm_single_pulse(1u, 5000u), BRIDGE_HW_ERR_BUSY);
+
+	zassert_equal(bridge_hw_pwm_set(0u, 0u, 0u), BRIDGE_HW_OK);
+	zassert_equal(mock_timer_cv[0][0], 0u, "stop parks compare at 0 (idle low)");
+	zassert_equal(mock_timer_car[0], 9u, "stop keeps the shared ARR");
+	zassert_equal(mock_primask, 0u, "stop must restore PRIMASK");
+	zassert_equal(bridge_hw_pwm_single_pulse(1u, 5000u), BRIDGE_HW_OK);
+}
+
+ZTEST(timer_sync, test_pwm_stop_honours_sync_master_guard)
+{
+	reset_calls();
+	zassert_equal(bridge_hw_pwm_set(0u, 10000u, 5000u), BRIDGE_HW_OK);
+	mock_timer_ctl0[0] &= ~TIMER_CTL0_CEN; /* halted */
+	zassert_equal(bridge_hw_timer_sync(0u, 1u, 1u), BRIDGE_HW_OK);
+	pwm_mutation_calls = 0u;
+	zassert_equal(bridge_hw_pwm_set(0u, 0u, 0u), BRIDGE_HW_ERR_BUSY);
+	zassert_equal(pwm_mutation_calls, 0u);
+	/* claim kept: sibling one-shot still refused (BUSY from claim or guard) */
+	zassert_equal(bridge_hw_pwm_single_pulse(1u, 5000u), BRIDGE_HW_ERR_BUSY);
+}
+
 ZTEST(timer_sync, test_pwm_sync_guard_covers_both_pwm_timers)
 {
 	assert_sync_master_guard(0u, 1u, 0u);

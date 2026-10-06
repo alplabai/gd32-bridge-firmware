@@ -362,6 +362,14 @@ ADC and encoder maps in `hal/gd32/adc.c` (`adc_channels_map[]`) and
 Host code reaches a channel by its logical id; the firmware
 translates internally.
 
+`CMD_PWM_SET` (`0x20`, payload `ch(1) pad(1) period_ns(4 LE) duty_ns(4 LE)`)
+with `period_ns == 0` is **STOP**: the pad is driven to its idle low level
+and the channel's claim on its timer (TIMER0: PWM0..3, TIMER7: PWM4..7) is
+released, so `PWM_SINGLE_PULSE` on a sibling works again without a GD32
+reset.  `duty_ns` must be 0 for a stop (`STATUS_INVAL` otherwise).  The
+shared auto-reload is left unchanged.  This needs no protocol minor bump:
+firmware before this change answers period 0 with `STATUS_OUT_OF_RANGE`.
+
 `gpio_pad_map[]` is 21 entries: 18 E1M IO pads (bits 0-17) plus three
 sideband bits (18, 19, 20) that are not E1M pads at all -- `BT_REG_ON`
 (GD32 `PE14`) and `WL_REG_ON` (GD32 `PE15`), the Murata

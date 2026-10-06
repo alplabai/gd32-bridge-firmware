@@ -109,10 +109,11 @@ int bridge_hw_gpio_write(uint32_t mask, uint32_t levels);
 /* PWM                                                              */
 /* --------------------------------------------------------------- */
 
-/* period_ns > 0 required (BRIDGE_HW_ERR_RANGE otherwise); duty_ns must not
- * exceed period_ns (BRIDGE_HW_ERR_INVAL).  A period or duty that does not fit
- * the timer's 16-bit ARR/compare registers answers BRIDGE_HW_ERR_RANGE before
- * any timer register is changed; requests are never silently clamped.  If the
+/* period_ns == 0 with duty_ns == 0 is STOP: compare 0 (pad idle low), the
+ * channel's timer claim is released.  duty_ns must not exceed period_ns
+ * (BRIDGE_HW_ERR_INVAL), so period 0 with duty != 0 is INVAL.
+ * A period or duty that does not fit the timer's 16-bit ARR/compare
+ * registers answers BRIDGE_HW_ERR_RANGE before any timer register is changed; requests are never silently clamped.  If the
  * timer is halted and currently drives an enabled bridge_hw_timer_sync route,
  * the forced preload transfer would trigger its slave, so the call returns
  * BRIDGE_HW_ERR_BUSY without changing PWM state. */
