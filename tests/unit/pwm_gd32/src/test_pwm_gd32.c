@@ -29,6 +29,14 @@ int pwm_apply_counter_values(uint8_t channel, uint32_t arr, uint32_t compare)
 	return BRIDGE_HW_OK;
 }
 
+static uint8_t stopped_channel = UINT8_MAX;
+
+int pwm_channel_stop(uint8_t channel)
+{
+	stopped_channel = channel;
+	return BRIDGE_HW_OK;
+}
+
 static void reset_apply_seam(bool center_aligned)
 {
 	test_center_aligned = center_aligned;
@@ -43,6 +51,16 @@ static void expect_refused_without_apply(uint32_t period_ns, uint32_t duty_ns, b
 	reset_apply_seam(center_aligned);
 	zassert_equal(bridge_hw_pwm_set(0u, period_ns, duty_ns), BRIDGE_HW_ERR_RANGE);
 	zassert_equal(apply_call_count, 0u);
+}
+
+ZTEST(pwm_gd32, test_period_zero_stops_instead_of_range)
+{
+	reset_apply_seam(false);
+	stopped_channel = UINT8_MAX;
+	zassert_equal(bridge_hw_pwm_set(0u, 0u, 0u), BRIDGE_HW_OK);
+	zassert_equal(stopped_channel, 0u);
+	zassert_equal(apply_call_count, 0u);
+	zassert_equal(bridge_hw_pwm_set(0u, 0u, 1000u), BRIDGE_HW_ERR_INVAL);
 }
 
 ZTEST(pwm_gd32, test_edge_accepts_exact_period_limit)

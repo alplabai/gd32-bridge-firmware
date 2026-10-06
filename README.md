@@ -224,6 +224,15 @@ ADC and encoder maps in `hal/gd32/adc.c` (`adc_channels_map[]`) and
 Host code reaches a channel by its logical id; the firmware
 translates internally.
 
+`CMD_PWM_SET` (`0x20`, payload `ch(1) pad(1) period_ns(4 LE) duty_ns(4 LE)`)
+with `period_ns == 0` is **STOP**: the pad is driven to its idle low level
+and the channel's claim on its timer (TIMER0: PWM0..3, TIMER7: PWM4..7) is
+released, so `PWM_SINGLE_PULSE` on a sibling works again without a GD32
+reset.  `duty_ns` must be 0 for a stop (`STATUS_INVAL` otherwise).  The
+shared auto-reload is left unchanged.  Shipped in protocol 0.17: hosts must require
+MINOR >= 17 before sending it (older firmware underflows the shared timer
+auto-reload on period 0).
+
 `gpio_pad_map[]` is 27 entries: 20 E1M IO pads (bits 0-17, 21, 22) plus seven
 sideband bits (18, 19, 20, 23..26) that are not E1M pads at all -- the
 camera LDO enables `CAM_EN_LDO0..3` (bits 23..26, described after the table) and `BT_REG_ON`

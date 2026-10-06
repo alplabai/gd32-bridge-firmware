@@ -185,6 +185,11 @@ typedef enum {
      * v0.17: grew again, 23 to 27 bits -- bits 23..26 are
      * CAM_EN_LDO0..3 (PC3, PE8, PE7, PE10), output-only, booted LOW.
      * Hosts relying on them must require MINOR >= 17. */
+	/* PWM_SET with period_ns == 0 (duty_ns must be 0, else STATUS_INVAL) is
+     * STOP: the channel's pad goes to its idle low level and its timer
+     * claim is released, so a sibling PWM_SINGLE_PULSE is accepted again.
+     * Shipped in v0.17: hosts must require MINOR >= 17; older
+     * firmware underflows the shared timer ARR on period 0. */
 	CMD_PWM_SET = 0x20,
 	CMD_PWM_GET = 0x21,
 	/* v0.3: sticky per-channel PWM tuning (align mode, dead time, fault
