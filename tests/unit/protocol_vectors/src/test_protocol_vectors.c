@@ -50,11 +50,6 @@
  *                 (SOF + STATUS with a 0-byte payload has the same CRC every
  *                 time), so the file's own spi_reply_nosupport vector
  *                 legitimately stands in for the whole class.
- *   PV_IO      -- STATUS_IO, 0-byte payload: GPIO_READ/GPIO_WRITE, the one
- *                 HAL-backed pair whose handlers do NOT route through the
- *                 central status_from_hw() mapper (`if (rv < 0) return
- *                 STATUS_IO;`).  Same constant-reply reasoning, against
- *                 spi_reply_io.
  *
  * NOT COVERED (checked against this tree at commit bbd5c99; each reason is
  * why closing it is bigger than this bounded suite, not an oversight):
@@ -126,7 +121,7 @@ static size_t spi_roundtrip(const pv_vector_t *req, uint8_t *reply, size_t cap)
 	return n;
 }
 
-/* ---- PV_EXACT / PV_NOSUPP / PV_IO classification table --------------- */
+/* ---- PV_EXACT / PV_NOSUPP classification table ---------------------- */
 /*
  * CMD_LINK_FEATURES is deliberately NOT a row here: granting it is a
  * side effect on protocol.c's own `static uint8_t link_features`, which
@@ -134,7 +129,7 @@ static size_t spi_roundtrip(const pv_vector_t *req, uint8_t *reply, size_t cap)
  * protocol.c's) -- see test_protocol.c's file header for the same fact
  * documented from the fake-HAL suite's side.  Arming it here would stamp
  * every STATUS byte this loop checks AFTER that row, corrupting every
- * PV_EXACT/PV_NOSUPP/PV_IO comparison that follows.
+ * PV_EXACT/PV_NOSUPP comparison that follows.
  *
  * "AFTER that row" is why this is load-bearing, and it is not something this
  * file can arrange: the loop is one ZTEST body, and the LINK_FEATURES case is
@@ -147,7 +142,6 @@ static size_t spi_roundtrip(const pv_vector_t *req, uint8_t *reply, size_t cap)
 typedef enum {
 	PV_EXACT,
 	PV_NOSUPP,
-	PV_IO,
 } pv_class_t;
 
 typedef struct {
@@ -185,13 +179,11 @@ static const pv_case_t SPI_CASES[] = {
 	{ "spi_reset_reason_request",                        PV_EXACT,  "spi_reset_reason_reply_unknown" },
 	{ "spi_da9292_status_forward_request",               PV_EXACT,  "spi_da9292_status_forward_reply_no_sample" },
 
-	/* PV_IO: GPIO_READ/WRITE map BRIDGE_HW_ERR_NOTIMPL to STATUS_IO, not
-	 * STATUS_NOSUPPORT (src/protocol.c: `if (rv < 0) return STATUS_IO;`). */
-	{ "spi_gpio_read_mask_bit0_request",                 PV_IO,     NULL },
-	{ "spi_gpio_write_mask_bit0_high_request",           PV_IO,     NULL },
-
-	/* PV_NOSUPP: every other stub-backed HAL opcode, v0.2..v0.5, plus the
+	/* PV_NOSUPP: every stub-backed HAL opcode, v0.2..v0.5 (GPIO_READ/WRITE
+	 * included since they route through status_from_hw()), plus the
 	 * reserved 0x36 probe. */
+	{ "spi_gpio_read_mask_bit0_request",                 PV_NOSUPP, NULL },
+	{ "spi_gpio_write_mask_bit0_high_request",           PV_NOSUPP, NULL },
 	{ "spi_dac_set_ch0_1650mv_request",                  PV_NOSUPP, NULL },
 	{ "spi_dac_get_ch1_request",                         PV_NOSUPP, NULL },
 	{ "spi_qenc_read_ch0_request",                       PV_NOSUPP, NULL },
@@ -315,13 +307,11 @@ ZTEST(protocol_vectors, test_spi_requests_match_committed_replies)
 	pv_build_get_version_reply_name();
 
 	const pv_vector_t *nosupp = pv_find("spi_reply_nosupport");
-	const pv_vector_t *io     = pv_find("spi_reply_io");
 
 	for (size_t i = 0; i < N_SPI_CASES; i++) {
-		const pv_case_t   *c   = &SPI_CASES[i];
-		const pv_vector_t *req = pv_find(c->req_name);
-		const pv_vector_t *want =
-		    (c->class == PV_EXACT) ? pv_find(c->reply_name) : (c->class == PV_IO ? io : nosupp);
+		const pv_case_t   *c    = &SPI_CASES[i];
+		const pv_vector_t *req  = pv_find(c->req_name);
+		const pv_vector_t *want = (c->class == PV_EXACT) ? pv_find(c->reply_name) : nosupp;
 
 		size_t n = spi_roundtrip(req, reply, sizeof reply);
 		zassert_equal(n, want->len, "%s: reply length", c->req_name);
