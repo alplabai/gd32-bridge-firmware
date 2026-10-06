@@ -518,6 +518,27 @@ target_compile_options(test_protocol PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_protocol PRIVATE ztest_shim)
 add_test(NAME protocol COMMAND test_protocol)
 
+# --- i2cm: I2C3 master proxy (v0.17) -- job state machine + wire handlers ---
+#
+# hal/gd32/i2cm_core.c (vendor-header-free) is driven against fake bus ops;
+# the CMD_I2CM_* handlers in src/protocol.c run over the same injectable fake
+# HAL the `protocol` suite uses.  The polled register driver hal/gd32/i2cm.c
+# needs the vendor headers and a bus, so it is covered by the gd32 backend
+# build and the bench instead.
+add_executable(test_i2cm
+    i2cm/src/test_i2cm.c
+    fake/bridge_hw_fake.c
+    ${FW}/hal/gd32/i2cm_core.c
+    ${FW}/src/protocol.c
+    ${FW}/src/bootloader/bootloader.c
+    ${FW}/src/ota.c
+    ${FW}/src/crc32.c
+)
+target_include_directories(test_i2cm PRIVATE ${FW}/src ${FW}/hal ${FW}/hal/gd32 ${CMAKE_CURRENT_SOURCE_DIR}/fake)
+target_compile_options(test_i2cm PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_i2cm PRIVATE ztest_shim)
+add_test(NAME i2cm COMMAND test_i2cm)
+
 # --- adc_dsp: chain pool + chain_bind capability validation (#69, #70) -----
 #
 # Links ONLY hal/gd32/adc_dsp_chain.c -- the chain pool + bind-time validator

@@ -123,6 +123,15 @@ const gd32_gpio_pad_t gpio_pad_map[] = {
 	 * (unverified, see TODO in init.c). */
 	{ GPIOB, GPIO_PIN_4 }, /* bit 21 = E1M IO15 */
 	{ GPIOC, GPIO_PIN_2 }, /* bit 22 = E1M IO26 */
+	/* Camera LDO enables on the SoM power-supply sheet (sideband, NOT
+	 * E1M pads; SoM 2625-R2).  Output-only: booted OUTPUT driven LOW =
+	 * LDO off, see the GPIO_PAD_CAM_EN_LDO0..3 boot loop in
+	 * hal/gd32/init.c.  Power policy is the HOST's -- the GD32 only
+	 * proxies a host CMD_GPIO_WRITE, never enables a rail on its own. */
+	{ GPIOC, GPIO_PIN_3 },  /* bit 23 = CAM_EN_LDO0 */
+	{ GPIOE, GPIO_PIN_8 },  /* bit 24 = CAM_EN_LDO1 */
+	{ GPIOE, GPIO_PIN_7 },  /* bit 25 = CAM_EN_LDO2 */
+	{ GPIOE, GPIO_PIN_10 }, /* bit 26 = CAM_EN_LDO3 */
 };
 _Static_assert(sizeof(gpio_pad_map) / sizeof(gpio_pad_map[0]) == GPIO_PAD_MAP_COUNT,
                "gpio_pad_map size must match GPIO_PAD_MAP_COUNT");
@@ -130,7 +139,7 @@ _Static_assert(sizeof(gpio_pad_map) / sizeof(gpio_pad_map[0]) == GPIO_PAD_MAP_CO
 /* Per-pad direction tracking.  Boot parks every pad at its ANALOG reset
  * state (gh#66 -- no boot-time pull-up current) -- except
  * GPIO_PAD_BT_REG_ON / GPIO_PAD_WL_REG_ON (bits 18/19) and
- * GPIO_PAD_CAN_STBY (bit 20), which boot OUTPUT driven instead (see
+ * GPIO_PAD_CAN_STBY (bit 20) and GPIO_PAD_CAM_EN_LDO0..3 (bits 23..26), which boot OUTPUT driven instead (see
  * init.c and the pad-map comment above); bridge_hw_gpio_write() flips
  * an entry to OUTPUT push-pull on first call (sticky until the next
  * chip reset), and bridge_hw_gpio_read() promotes a pad to INPUT +

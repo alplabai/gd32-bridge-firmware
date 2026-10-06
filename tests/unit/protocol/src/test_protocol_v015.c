@@ -97,7 +97,7 @@ static gd32_bridge_status_t negotiate_ext(gd32_bridge_link_t link,
 /* Version                                                             */
 /* ------------------------------------------------------------------ */
 
-ZTEST(protocol, test_v015_get_version_reports_0_15_0)
+ZTEST(protocol, test_v015_get_version_reports_current_minor)
 {
 	uint8_t reply[CAP];
 	size_t  n;
@@ -107,7 +107,7 @@ ZTEST(protocol, test_v015_get_version_reports_0_15_0)
 	              STATUS_OK);
 	zassert_equal(n, 3u);
 	zassert_equal(reply[0], 0u);
-	zassert_equal(reply[1], 15u, "PROTOCOL_VERSION_MINOR 15");
+	zassert_equal(reply[1], PROTOCOL_VERSION_MINOR, "GET_VERSION reports PROTOCOL_VERSION_MINOR");
 	zassert_equal(reply[2], 0u);
 	zassert_equal(CMD_BATCH, 0x04);
 	zassert_equal(CMD_ADC_STREAM_BEGIN2, 0x3B);
@@ -359,6 +359,9 @@ static bool i2c_allowed(unsigned cmd)
 	case 0x11:
 	case 0x41:
 	case 0x81:
+	case 0xA0: /* v0.17 I2C3 proxy */
+	case 0xA1:
+	case 0xA2:
 		return true;
 	default:
 		return cmd >= 0xF0u;
@@ -424,7 +427,7 @@ ZTEST(protocol, test_v015_i2c_allowed_opcodes_still_run)
 	              STATUS_OK);
 	zassert_equal(disp(GD32_BRIDGE_LINK_I2C, CMD_GET_VERSION, NULL, 0u, reply, sizeof reply, &n),
 	              STATUS_OK);
-	zassert_equal(reply[1], 15u);
+	zassert_equal(reply[1], PROTOCOL_VERSION_MINOR);
 	zassert_equal(disp(GD32_BRIDGE_LINK_I2C, CMD_GPIO_READ, mask, 4u, reply, sizeof reply, &n),
 	              STATUS_OK);
 	zassert_equal(bridge_hw_fake_call_count(FAKE_FN_GPIO_READ), 1u);

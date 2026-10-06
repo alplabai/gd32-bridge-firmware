@@ -67,8 +67,14 @@
  * v0.16: the GPIO mask grew from 21 to 23 bits -- bit 21 is E1M IO15
  * (GD32 PB4), bit 22 is E1M IO26 (GD32 PC2).  Hosts relying on bits
  * 21/22 must require MINOR >= 16; 0.15 firmware ignores them and
- * still answers STATUS_OK. */
-#define PROTOCOL_VERSION_MINOR 16u
+ * still answers STATUS_OK.
+ *
+ * v0.17: the GPIO mask grew from 23 to 27 bits -- bits 23..26 are
+ * CAM_EN_LDO0..3 (PC3, PE8, PE7, PE10), output-only, booted LOW (LDOs
+ * off).  And the I2C3 master proxy, CMD_I2CM_CONFIG / _XFER / _RESULT
+ * (0xA0..0xA2, I2C link only; E1M-X I2C3 on PC8/PC9).  Hosts relying on
+ * either must require MINOR >= 17. */
+#define PROTOCOL_VERSION_MINOR 17u
 #define PROTOCOL_VERSION_PATCH 0u
 
 /* v0.7: opt-in link features negotiated via CMD_LINK_FEATURES.
@@ -329,7 +335,47 @@ typedef enum {
      * The legacy 1-byte form keeps only STATUS_SEQ and clears every 0.15
      * bit on that link. */
 	CMD_LINK_FEATURES = 0x81,
+	/* v0.17: I2C3 master proxy (E1M-X I2C3 = GD32 PC8 SCL / PC9 SDA).
+	 * I2C link ONLY (answers STATUS_NOSUPPORT on SPI), not in
+	 * CMD_BATCH.  A transfer is asynchronous: XFER only validates and
+	 * queues, the base-level tick runs it, RESULT collects it.
+	 *
+	 * CMD_I2CM_CONFIG  req `bus_khz:u16` (100 or 400; 0 releases PC8/PC9
+	 *   to hi-Z); reply empty.  Runs the 9-clock bus recovery first.  Any
+	 *   other speed -> STATUS_INVAL.  The pads are hi-Z until the first
+	 *   CONFIG, and again after a Deep-sleep wake.  BUSY while a job runs.
+	 * CMD_I2CM_XFER    req `tag:u8 addr7:u8 flags:u8(=0) wlen:u8(<=60)
+	 *   rlen:u8(<=62) wdata[wlen]`; reply empty.  wlen>0 && rlen>0 =
+	 *   S W.. Sr R.. P; write only; read only; both 0 = quick write
+	 *   probe.  STATUS_OK = queued, STATUS_BUSY = a job is running,
+	 *   STATUS_NOT_READY = no CONFIG yet.  A new XFER discards an
+	 *   uncollected result.
+	 * CMD_I2CM_RESULT  req empty; reply STATUS_BUSY (empty) while the job
+	 *   runs; STATUS_OK `tag:u8 result:u8 nread:u8 rdata[nread]`;
+	 *   STATUS_NOT_READY when no job ran since CONFIG.  The result stays
+	 *   readable until the next XFER / CONFIG, so a lost read can be
+	 *   repeated.  `result` is gd32_bridge_i2cm_result_t; the outer
+	 *   STATUS keeps its generic meaning. */
+	CMD_I2CM_CONFIG = 0xA0,
+	CMD_I2CM_XFER   = 0xA1,
+	CMD_I2CM_RESULT = 0xA2,
 } gd32_bridge_cmd_t;
+
+/* CMD_I2CM_RESULT `result` byte.  Linux maps these to errnos:
+ * NACK_ADDR -ENXIO, NACK_DATA -EIO, ARB_LOST -EAGAIN, BUS_ERROR -EIO,
+ * TIMEOUT -ETIMEDOUT, BUS_STUCK -EBUSY. */
+typedef enum {
+	I2CM_RES_OK        = 0,
+	I2CM_RES_NACK_ADDR = 1,
+	I2CM_RES_NACK_DATA = 2,
+	I2CM_RES_ARB_LOST  = 3,
+	I2CM_RES_BUS_ERROR = 4,
+	I2CM_RES_TIMEOUT   = 5,
+	I2CM_RES_BUS_STUCK = 6,
+} gd32_bridge_i2cm_result_t;
+
+#define I2CM_MAX_WRITE 60u
+#define I2CM_MAX_READ  62u
 
 /* TMU function index sent in CMD_TMU_COMPUTE's request payload byte 0.
  * Mirrors @ref gd32g553_tmu_function_t on the host side. */

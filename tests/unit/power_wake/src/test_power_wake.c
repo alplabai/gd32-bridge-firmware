@@ -95,6 +95,7 @@ ZTEST(power_wake, test_deep_sleep_entry_and_wake_sequence)
 	zassert_equal(mock_primask, 0u, "interrupts re-enabled after the wake");
 	zassert_equal(mock_system_core_clock_updates > 0u, true, "clock restore ran");
 	zassert_equal(mock_i2c_inits, 1u, "I2C re-initialised after the wake");
+	zassert_equal(mock_i2cm_wakes, 1u, "I2C3 proxy marked unconfigured after the wake");
 	zassert_equal(mock_fwdgt_feeds, 1u);
 	zassert_equal(mock_systick.CTRL, SysTick_CTRL_ENABLE_Msk | SysTick_CTRL_TICKINT_Msk);
 	zassert_equal(mock_systick.VAL, 0u);

@@ -486,6 +486,37 @@ int bridge_hw_timer_sync(uint8_t master, uint8_t slave, uint8_t mode);
 int bridge_hw_power_mode_set(uint8_t mode, uint32_t wake_bitmap, uint32_t wake_after_ms);
 
 /* --------------------------------------------------------------- */
+/* v0.17 -- I2C3 master proxy (E1M-X I2C3, GD32 PC8 SCL / PC9 SDA)   */
+/* --------------------------------------------------------------- */
+
+/* Set the I2C3 bus speed and take the pads.  @p bus_khz is 100 or 400;
+ * 0 releases PC8/PC9 to hi-Z and marks the proxy unconfigured; anything
+ * else answers BRIDGE_HW_ERR_INVAL.  Runs the 9-clock bus recovery first.
+ * BRIDGE_HW_ERR_BUSY while a transfer job is queued or running.  Request-
+ * handler context: bounded busy-work only (the recovery is ~100 us). */
+int bridge_hw_i2cm_config(uint16_t bus_khz);
+
+/* Validate-and-queue one transfer; it runs later at base level.  @p wlen
+ * <= 60, @p rlen <= 62 (BRIDGE_HW_ERR_INVAL otherwise); both 0 = quick
+ * write probe.  BRIDGE_HW_ERR_NOT_READY before bridge_hw_i2cm_config(),
+ * BRIDGE_HW_ERR_BUSY while a job is queued or running.  Discards an
+ * uncollected result.  Never touches the bus. */
+int bridge_hw_i2cm_xfer(uint8_t        tag,
+                        uint8_t        addr7,
+                        const uint8_t *wdata,
+                        uint8_t        wlen,
+                        uint8_t        rlen);
+
+/* Collect the last job's outcome: @p result is a gd32_bridge_i2cm_result_t
+ * value, @p rdata (>= 62 bytes) gets @p nread bytes.  BRIDGE_HW_ERR_BUSY
+ * while the job runs, BRIDGE_HW_ERR_NOT_READY when no job ran since the last
+ * CONFIG.  Non-destructive: repeatable until the next XFER / CONFIG. */
+int bridge_hw_i2cm_result(uint8_t *tag, uint8_t *result, uint8_t *nread, uint8_t *rdata);
+
+/* True while a job is queued or running (POWER_MODE_SET refuses BUSY). */
+bool bridge_hw_i2cm_busy(void);
+
+/* --------------------------------------------------------------- */
 /* v0.5 (§2B wave-2) -- chunked DSP-chain upload                     */
 /* --------------------------------------------------------------- */
 

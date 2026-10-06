@@ -32,7 +32,13 @@ void (*mock_on_i2c_disable)(void);
 uint32_t mock_i2c_enables, mock_rtc_disables, mock_rtc_flag_clears, mock_exti19_clears;
 uint32_t mock_seq, mock_seq_clock_restore, mock_seq_i2c_init, mock_seq_rtc_disable;
 int      mock_i2c_init_rc;
+uint32_t mock_i2cm_wakes;
 int      mock_rtc_clock_config_saw_irq_masked;
+
+void bridge_hw_i2cm_wake(void)
+{
+	mock_i2cm_wakes++;
+}
 
 void mock_power_reset(void)
 {
@@ -59,6 +65,7 @@ void mock_power_reset(void)
 	mock_i2c_enables = mock_rtc_disables = mock_rtc_flag_clears = mock_exti19_clears = 0u;
 	mock_seq = mock_seq_clock_restore = mock_seq_i2c_init = mock_seq_rtc_disable = 0u;
 	mock_i2c_init_rc                                                             = BRIDGE_HW_OK;
+	mock_i2cm_wakes                                                              = 0u;
 	EXTI_PD0                                                                     = 0u;
 	EXTI_PD1                                                                     = 0u;
 }

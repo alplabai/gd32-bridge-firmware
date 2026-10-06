@@ -107,6 +107,8 @@ elseif(BRIDGE_HAL_BACKEND STREQUAL "gd32")
         hal/gd32/gpio.c
         hal/gd32/i2c_event_priority.c
         hal/gd32/i2c_timeout.c
+        hal/gd32/i2cm.c
+        hal/gd32/i2cm_core.c
         hal/gd32/power.c
         hal/gd32/pwm.c
         hal/gd32/pwm_set.c
