@@ -634,6 +634,12 @@ bool ota_trial_unconfirmed(void)
 	return s_trial;
 }
 
+bool ota_session_active(void)
+{
+	return s_state == OTA_ST_READY || s_state == OTA_ST_BUSY || s_state == OTA_ST_VERIFIED ||
+	       s_erasing;
+}
+
 void ota_note_frame(void)
 {
 	s_frame_seen = true;

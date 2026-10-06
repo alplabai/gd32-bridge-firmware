@@ -116,6 +116,9 @@ void rcu_periph_reset_disable(rcu_periph_reset_enum r);
 #define i2c_timing_config(...)                 ((void)0)
 #define nvic_irq_enable(...)                   ((void)0)
 #define rcu_i2c_clock_config(...)              ((void)0)
+#define RCU_I2CSRC_IRC8M                       2u
+#define i2c_wakeup_from_deepsleep_enable(p)    ((void)(p))
+#define i2c_wakeup_from_deepsleep_disable(p)   ((void)(p))
 #define rcu_periph_clock_enable(...)           ((void)0)
 #define spi_data_transmit(...)                 ((void)0)
 #define spi_dma_enable(...)                    ((void)0)

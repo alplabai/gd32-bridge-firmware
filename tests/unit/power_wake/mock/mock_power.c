@@ -29,10 +29,15 @@ FlagStatus     mock_cs_level = SET;
 uint64_t       mock_nvic_pending;
 void (*mock_on_settle)(void);
 void (*mock_on_i2c_disable)(void);
-uint32_t mock_i2c_enables, mock_rtc_disables, mock_rtc_flag_clears, mock_exti19_clears;
-uint32_t mock_seq, mock_seq_clock_restore, mock_seq_i2c_init, mock_seq_rtc_disable;
-int      mock_i2c_init_rc;
-int      mock_rtc_clock_config_saw_irq_masked;
+uint32_t   mock_i2c_enables, mock_rtc_disables, mock_rtc_flag_clears, mock_exti19_clears;
+uint32_t   mock_seq, mock_seq_clock_restore, mock_seq_i2c_init, mock_seq_rtc_disable;
+int        mock_i2c_init_rc;
+int        mock_rtc_clock_config_saw_irq_masked;
+mock_dwt_t mock_dwt;
+int        mock_act_adc, mock_act_pwm, mock_act_dac, mock_act_ota;
+uint32_t   mock_pd0_on_wake;
+uint32_t   mock_exti31_enables, mock_exti31_disables, mock_wake_mode_sets, mock_i2c_init_wake_mode;
+int        mock_i2c_wake_mode;
 
 void mock_power_reset(void)
 {
@@ -61,6 +66,12 @@ void mock_power_reset(void)
 	mock_i2c_init_rc                                                             = BRIDGE_HW_OK;
 	EXTI_PD0                                                                     = 0u;
 	EXTI_PD1                                                                     = 0u;
+	mock_act_adc = mock_act_pwm = mock_act_dac = mock_act_ota = 0;
+	mock_pd0_on_wake                                          = 0u;
+	mock_exti31_disables                                      = 0u;
+	mock_exti31_enables = mock_wake_mode_sets = mock_i2c_init_wake_mode = 0u;
+	mock_i2c_wake_mode                                                  = 0;
+	mock_dwt.CYCCNT                                                     = 0u;
 }
 
 void rcu_osci_on(uint32_t osci)
@@ -148,6 +159,8 @@ void pmu_to_deepsleepmode(uint32_t ldo, uint32_t command)
 	(void)ldo;
 	(void)command;
 	++mock_deepsleep_entries;
+	EXTI_PD0 |= mock_pd0_on_wake;
+	mock_dwt.CYCCNT += 100u; /* time spent "asleep" */
 	mock_primask_at_deepsleep = mock_primask;
 	++mock_power_hw_calls;
 }
@@ -179,7 +192,7 @@ void exti_flag_clear(uint32_t linex)
 
 void exti_init(uint32_t linex, uint32_t mode, uint32_t trig_type)
 {
-	(void)linex;
+	if (linex == EXTI_31) ++mock_exti31_enables;
 	(void)mode;
 	(void)trig_type;
 	++mock_power_hw_calls;
@@ -209,6 +222,8 @@ FlagStatus i2c_flag_get(uint32_t periph, uint32_t flag)
 int bridge_transport_i2c_hw_init(void)
 {
 	++mock_i2c_inits;
+	mock_i2c_init_wake_mode = (uint32_t)mock_i2c_wake_mode;
+	mock_dwt.CYCCNT += 50u;
 	mock_seq_i2c_init = ++mock_seq;
 	++mock_power_hw_calls;
 	return mock_i2c_init_rc;
@@ -242,4 +257,42 @@ void SystemCoreClockUpdate(void)
 {
 	mock_seq_clock_restore = ++mock_seq;
 	++mock_system_core_clock_updates;
+	mock_dwt.CYCCNT += 10u;
+}
+
+void exti_interrupt_disable(uint32_t linex)
+{
+	if (linex == EXTI_31) ++mock_exti31_disables;
+	++mock_power_hw_calls;
+}
+
+void bridge_transport_i2c_wake_mode_set(bool wake)
+{
+	mock_i2c_wake_mode = wake;
+	++mock_wake_mode_sets;
+}
+
+bool bridge_transport_i2c_wake_mode(void)
+{
+	return mock_i2c_wake_mode != 0;
+}
+
+bool bridge_adc_streams_active(void)
+{
+	return mock_act_adc != 0;
+}
+
+bool bridge_pwm_claims_active(void)
+{
+	return mock_act_pwm != 0;
+}
+
+bool bridge_dac_driven(void)
+{
+	return mock_act_dac != 0;
+}
+
+bool ota_session_active(void)
+{
+	return mock_act_ota != 0;
 }

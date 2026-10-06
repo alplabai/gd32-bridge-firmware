@@ -486,7 +486,13 @@ static struct {
 	uint8_t  mode;
 	uint32_t wake_bitmap;
 	uint32_t wake_after_ms;
+	uint8_t  flags;
 } s_power_last;
+
+uint8_t bridge_hw_fake_power_mode_last_flags(void)
+{
+	return s_power_last.flags;
+}
 
 void bridge_hw_fake_power_mode_get_last_call(uint8_t  *mode,
                                              uint32_t *wake_bitmap,
@@ -944,13 +950,17 @@ int bridge_hw_timer_sync(uint8_t master, uint8_t slave, uint8_t mode)
 	return BRIDGE_HW_OK;
 }
 
-int bridge_hw_power_mode_set(uint8_t mode, uint32_t wake_bitmap, uint32_t wake_after_ms)
+int bridge_hw_power_mode_set(uint8_t  mode,
+                             uint32_t wake_bitmap,
+                             uint32_t wake_after_ms,
+                             uint8_t  flags)
 {
 	int rv = 0;
 	if (forced(FAKE_FN_POWER_MODE_SET, &rv)) return rv;
 	s_power_last.mode          = mode;
 	s_power_last.wake_bitmap   = wake_bitmap;
 	s_power_last.wake_after_ms = wake_after_ms;
+	s_power_last.flags         = flags;
 	return BRIDGE_HW_OK;
 }
 

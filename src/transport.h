@@ -49,6 +49,13 @@ void bridge_transport_spi_hw_init(void);
  * I2C0 was left disabled rather than brought up mistimed. */
 int bridge_transport_i2c_hw_init(void);
 
+/* Select the I2C0 kernel clock for the NEXT bridge_transport_i2c_hw_init():
+ * true = CK_IRC8M with WUEN armed (the I2C slave can end a Deep-sleep on an
+ * address match), false = CK_APB1 (default).  Only change it with I2C0
+ * disabled. */
+void bridge_transport_i2c_wake_mode_set(bool wake);
+bool bridge_transport_i2c_wake_mode(void);
+
 /* Periodic BRD_I2C stuck-SDA detector (gh#39, "Device limitations of
  * GD32G5x3 Rev1.0" erratum 2.3.1): called from the gd32 backend's
  * bridge_hw_tick().  The strong impl polls the SDA pad (valid in AF
