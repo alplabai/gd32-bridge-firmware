@@ -4,13 +4,10 @@
  *
  * GD32G5x3 backend for the bridge HAL.  Selected by setting
  * BRIDGE_HAL_BACKEND=gd32 in CMakeLists.txt.  Links
- * against the GigaDevice firmware-library wrapper.  This repo does NOT
- * vendor that tree: pass -DGD32_VENDOR_DIR=<path> pointing at a checkout
- * of alp-sdk's vendors/gd32_firmware_library/ (a verbatim mirror of GD's
- * v1.5.0 release).  Left unset, the build falls back to
- * ../../vendors/gd32_firmware_library resolved against this source tree
- * -- the pre-split layout, when this tree was nested at
- * <alp-sdk>/firmware/gd32-bridge/.  See README.md "Build".
+ * against the GigaDevice firmware-library wrapper in
+ * vendor/gd32_firmware_library/.  This repo does NOT contain the library:
+ * tools/fetch_gd32_library.sh fetches it from GigaDevice (pinned, hash-
+ * verified).  See README.md "Build".
  *
  * Status:
  *   The hooks below have real bodies -- selecting this backend drives
@@ -146,9 +143,8 @@
  * Build assumptions:
  *   - arm-none-eabi-gcc on PATH (toolchain file
  *     toolchain/arm-none-eabi.cmake handles the rest).
- *   - the GigaDevice firmware-library tree reachable, either via
- *     -DGD32_VENDOR_DIR=<path> or the ../../vendors/gd32_firmware_library
- *     fallback (see the note at the top of this file).
+ *   - the GigaDevice firmware-library tree fetched (tools/fetch_gd32_library.sh; see
+ *     the note at the top of this file).
  *   - Cortex-M33 + Thumb + soft-float ABI (matches the GigaDevice
  *     library's compile flags).
  *
@@ -492,7 +488,11 @@ void bridge_hw_init(void)
 	/* Pad map parking (gh#66): leave every entry in `gpio_pad_map`
 	 * at its CTLy = 0b11 ANALOG reset state -- input buffer and both
 	 * pull resistors disabled (UM Rev1.2 p.270 §7.3.7), which is what
-	 * all twenty-one pads already reset to (p.275).  The old INPUT +
+	 * twenty-two of the twenty-three pads already reset to (p.275);
+	 * PB4 (bit 21) is parked explicitly below because on GD32 parts
+	 * it is believed to reset as the JTAG NJTRST pin (AF + pull-up), not
+	 * analog (unverified, see the TODO at the PB4 park below).
+	 * The old INPUT +
 	 * PULL_UP park sank 1.8 V / 40 kΩ = 45 µA per pad continuously
 	 * from boot into every pad a carrier holds LOW (Datasheet
 	 * Rev2.0 p.128 Table 4-28: RPU = 40 kΩ, "value guaranteed by
@@ -526,6 +526,18 @@ void bridge_hw_init(void)
 	for (size_t i = 0; i < GPIO_PAD_MAP_COUNT; ++i) {
 		gpio_is_output[i] = false;
 	}
+
+	/* PB4 (bit 21, E1M IO15): believed not analog at reset -- JTAG
+	 * NJTRST with an internal pull-up.  Park it analog / no pull so it
+	 * is a plain high-Z pad like the rest (the carrier's own pull owns
+	 * the level) and the JTAG reset function is off.  Debug here is
+	 * SWD only (PA13/PA14), which this does not touch.
+	 * TODO(unverified): the PB4 reset AF / pull-up state and the
+	 * SWD-only pin claim have no UM/datasheet page cited yet.  Cite the
+	 * GD32G5x3 UM GPIOB CTL/PUD reset value + the datasheet pin-definition
+	 * row, or confirm on the bench by reading GPIOB CTL/PUD before and
+	 * after init over SWD. */
+	gpio_mode_set(GPIOB, GPIO_MODE_ANALOG, GPIO_PUPD_NONE, GPIO_PIN_4);
 
 	/* Murata LBEE5HY2FY-922 Wi-Fi/BT REG_ON lines (bits 18/19): boot
      * OUTPUT driven LOW = module OFF.  Power policy belongs to the

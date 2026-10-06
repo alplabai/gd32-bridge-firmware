@@ -31,7 +31,7 @@
  * REMAINING WINDOW (gh#61, not closed by this TU): se_reset_init()
  * being the first thing bridge_hw_init() does only bounds the part of
  * boot from main() onward.  Before main() runs, Reset_Handler
- * (vendors/gd32_firmware_library upstream
+ * (vendor/gd32_firmware_library upstream
  * .../CMSIS/GD/GD32G5x3/Source/GCC/startup_gd32g5x3.S, SramInit: loop)
  * reads SRAM_DENSITY[15:0] at 0x1FFFB3E0 (UM Rev1.2 p.89 §1.8.1,
  * value in KBytes) and zeroes that many bytes of SRAM one word at a

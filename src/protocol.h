@@ -62,8 +62,13 @@
  * an un-negotiated SPI link is byte-identical to v0.14.  The one
  * unconditional change is the I2C opcode allow-list (see
  * protocol_dispatch_inner): opcodes outside it answer STATUS_NOSUPPORT on
- * the I2C link. */
-#define PROTOCOL_VERSION_MINOR 15u
+ * the I2C link.
+ *
+ * v0.16: the GPIO mask grew from 21 to 23 bits -- bit 21 is E1M IO15
+ * (GD32 PB4), bit 22 is E1M IO26 (GD32 PC2).  Hosts relying on bits
+ * 21/22 must require MINOR >= 16; 0.15 firmware ignores them and
+ * still answers STATUS_OK. */
+#define PROTOCOL_VERSION_MINOR 16u
 #define PROTOCOL_VERSION_PATCH 0u
 
 /* v0.7: opt-in link features negotiated via CMD_LINK_FEATURES.
@@ -167,7 +172,10 @@ typedef enum {
      * v0.13: grew again, 20 to 21 bits -- bit 20 is CAN_STBY, the
      * shared standby line for the two on-module TCAN1044 CAN-FD
      * transceivers (sideband, not an E1M pad; GPIO_PAD_CAN_STBY).
-     * Hosts relying on bit 20 must require MINOR >= 13. */
+     * Hosts relying on bit 20 must require MINOR >= 13.
+     * v0.16: grew again, 21 to 23 bits -- bits 21/22 are E1M IO15
+     * (PB4) and IO26 (PC2).  Hosts relying on them must require
+     * MINOR >= 16 (v0.16; 0.15 firmware ignores them). */
 	/* PWM_SET with period_ns == 0 (duty_ns must be 0, else STATUS_INVAL) is
      * STOP: the channel's pad goes to its idle low level and its timer
      * claim is released, so a sibling PWM_SINGLE_PULSE is accepted again.

@@ -240,6 +240,26 @@ ZTEST(gpio_grouped, test_can_stby_bit_routes_to_gpiob_13)
 	zassert_equal(mock_bop[mock_port_index(GPIOB)], GPIO_PIN_13 << 16);
 }
 
+ZTEST(gpio_grouped, test_io15_io26_bits_route_to_pb4_pc2)
+{
+	/* Bit 21 = E1M IO15 = GPIOB PIN_4, bit 22 = E1M IO26 = GPIOC PIN_2. */
+	mock_reset();
+	mock_inputs[mock_port_index(GPIOB)] = GPIO_PIN_4;
+	mock_inputs[mock_port_index(GPIOC)] = GPIO_PIN_2;
+
+	uint32_t       levels = 0u;
+	const uint32_t mask   = (1u << 21) | (1u << 22);
+	zassert_equal(bridge_hw_gpio_read(mask, &levels), BRIDGE_HW_OK);
+	zassert_equal(levels, mask);
+
+	mock_reset();
+	for (size_t i = 0; i < GPIO_PAD_MAP_COUNT; ++i)
+		gpio_is_output[i] = true;
+	zassert_equal(bridge_hw_gpio_write(mask, 1u << 21), BRIDGE_HW_OK);
+	zassert_equal(mock_bop[mock_port_index(GPIOB)], GPIO_PIN_4);
+	zassert_equal(mock_bop[mock_port_index(GPIOC)], GPIO_PIN_2 << 16);
+}
+
 ZTEST(gpio_grouped, test_null_read_output_is_rejected_without_access)
 {
 	mock_reset();

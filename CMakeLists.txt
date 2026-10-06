@@ -48,7 +48,8 @@ set(CMAKE_EXECUTABLE_SUFFIX ".elf")
 #                  hardware-less unit-test environments.
 #   * gd32      -- builds against hal/bridge_hw_gd32.c +
 #                  hal/transport_hw_gd32.c; requires the GigaDevice
-#                  firmware library at vendors/gd32_firmware_library/.
+#                  firmware library fetched by
+#                  tools/fetch_gd32_library.sh.
 set(BRIDGE_HAL_BACKEND "stub" CACHE STRING "Bridge HAL backend (stub | gd32)")
 
 # ----------------------------------------------------------------- #
@@ -135,28 +136,26 @@ elseif(BRIDGE_HAL_BACKEND STREQUAL "gd32")
     # lands the one-line cast in pwm_timer_index() that was the only site
     # -Wconversion flagged, so this source needs no override any more and
     # -Wconversion now covers it like everything else in the list above.
-    # Pull in the GigaDevice firmware-library wrapper.  Its CMakeLists
-    # fatal-errors with a clear "drop the SDK into sdk/" instruction
-    # when the unpacked archive is missing, so an unconfigured
-    # workspace doesn't fall through to a confusing link error.
-    # GD32_VENDOR_DIR overrides where the vendor tree is located.  The
-    # ../../vendors/gd32_firmware_library fallback is the pre-split layout
-    # (this tree nested at <alp-sdk>/firmware/gd32-bridge/); a standalone
-    # clone of this repo has no such parent tree, so it must pass
-    # -DGD32_VENDOR_DIR explicitly.
-    set(GD32_VENDOR_DIR "" CACHE PATH "Path to alp-sdk's vendors/gd32_firmware_library")
+    # Pull in the GigaDevice firmware-library wrapper
+    # (vendor/gd32_firmware_library/CMakeLists.txt, Alp-authored glue).  The
+    # library itself is GigaDevice's code and is NOT in this repository: run
+    # tools/fetch_gd32_library.sh to clone it, pin- and hash-verified, into
+    # vendor/gd32_firmware_library/upstream.  The wrapper fatal-errors with
+    # that instruction when it is missing.
+    # GD32_VENDOR_DIR overrides the wrapper directory (a dir holding a
+    # CMakeLists.txt, upstream/ and patches/); empty = the in-repo wrapper.
+    set(GD32_VENDOR_DIR "" CACHE PATH "Override for vendor/gd32_firmware_library (wrapper dir)")
     if(GD32_VENDOR_DIR)
         set(_GD32_VENDOR_DIR ${GD32_VENDOR_DIR})
     else()
-        set(_GD32_VENDOR_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../vendors/gd32_firmware_library)
+        set(_GD32_VENDOR_DIR ${CMAKE_CURRENT_SOURCE_DIR}/vendor/gd32_firmware_library)
     endif()
     if(NOT EXISTS ${_GD32_VENDOR_DIR}/CMakeLists.txt)
         message(FATAL_ERROR
             "BRIDGE_HAL_BACKEND=gd32 selected but "
             "${_GD32_VENDOR_DIR}/CMakeLists.txt is missing.\n"
-            "Pass -DGD32_VENDOR_DIR=<path> pointing at the alp-sdk repo's "
-            "vendors/gd32_firmware_library/ tree (the wrapper README "
-            "documents the manual SDK drop).")
+            "Omit -DGD32_VENDOR_DIR to use the in-repo wrapper "
+            "(vendor/gd32_firmware_library), then run tools/fetch_gd32_library.sh.")
     endif()
     # #127: refuse to produce an image that hangs before main().
     #
@@ -166,42 +165,41 @@ elseif(BRIDGE_HAL_BACKEND STREQUAL "gd32")
     # -- no timeout escape, no fallback, with HXTAL_STARTUP_TIMEOUT only
     # 0x0FFFF.  On this SoM HXTALSTB never sets, so the part spins there
     # forever and never reaches main(): SPI and I2C never come up, and the
-    # flashed image looks bricked with no diagnostic.  alp-sdk's wrapper
-    # substitutes overrides/system_gd32g5x3.c, which selects
-    # __SYSTEM_CLOCK_216M_PLL_IRC8M and boots.
+    # flashed image looks bricked with no diagnostic.  The in-repo wrapper
+    # applies patches/system_gd32g5x3-irc8m.patch to a build-tree copy, which
+    # selects __SYSTEM_CLOCK_216M_PLL_IRC8M and boots.
     #
     # Before this check, a standalone clone pointed at a vendor tree with no
-    # overrides/ configured, compiled, linked and produced a .bin with no
+    # clock patch configured, compiled, linked and produced a .bin with no
     # #error, no warning and no runtime check anywhere -- the failure only
     # showed up as a dead board on a bench.  Fail at CONFIGURE time instead.
     #
-    # The opt-out exists for compile-and-link jobs (CI's `gd32 backend build`
-    # stages ci/gd32_vendor_wrapper/CMakeLists.txt, which deliberately omits
-    # the override because that job never runs on silicon).  Its name is the
-    # documentation: anything built with it on must not be flashed.
+    # The opt-out exists for compile-and-link builds against a custom
+    # GD32_VENDOR_DIR that carries no patch.  Its name is the documentation:
+    # anything built with it on must not be flashed.
     option(BRIDGE_ALLOW_STOCK_SYSTEM_INIT
         "Build against the vendor's STOCK SystemInit(). The resulting image HANGS before main() on this SoM -- compile/link checks only, never flash it."
         OFF)
-    if(NOT EXISTS ${_GD32_VENDOR_DIR}/overrides/system_gd32g5x3.c)
+    if(NOT EXISTS ${_GD32_VENDOR_DIR}/patches/system_gd32g5x3-irc8m.patch)
         if(BRIDGE_ALLOW_STOCK_SYSTEM_INIT)
             message(WARNING
-                "BRIDGE_ALLOW_STOCK_SYSTEM_INIT=ON and no clock override found at\n"
-                "  ${_GD32_VENDOR_DIR}/overrides/system_gd32g5x3.c\n"
+                "BRIDGE_ALLOW_STOCK_SYSTEM_INIT=ON and no clock patch found at\n"
+                "  ${_GD32_VENDOR_DIR}/patches/system_gd32g5x3-irc8m.patch\n"
                 "Building against the STOCK vendor SystemInit(). The image this "
                 "produces HANGS in system_clock_216m_hxtal() waiting for HXTALSTB "
                 "and never reaches main() on this SoM. NOT FLASHABLE -- "
                 "compile-and-link verification only (#127).")
         else()
             message(FATAL_ERROR
-                "No clock override found at\n"
-                "  ${_GD32_VENDOR_DIR}/overrides/system_gd32g5x3.c\n"
+                "No clock patch found at\n"
+                "  ${_GD32_VENDOR_DIR}/patches/system_gd32g5x3-irc8m.patch\n"
                 "The stock vendor SystemInit() selects __SYSTEM_CLOCK_216M_PLL_HXTAL, "
                 "whose system_clock_216m_hxtal() spins `while(1){}` forever when "
                 "HXTALSTB never sets -- which is what this SoM does. The resulting "
                 "image is flashable and hangs before main(), with SPI and I2C never "
                 "coming up.\n"
-                "Point -DGD32_VENDOR_DIR at an alp-sdk vendors/gd32_firmware_library "
-                "tree that carries overrides/system_gd32g5x3.c, or pass "
+                "Omit -DGD32_VENDOR_DIR to use the in-repo wrapper (it carries the "
+                "IRC8M patch), or pass "
                 "-DBRIDGE_ALLOW_STOCK_SYSTEM_INIT=ON if you are only compiling and "
                 "linking and will NOT flash the result (#127).")
         endif()

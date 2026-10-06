@@ -32,8 +32,8 @@ host-side driver lives at [`chips/gd32g553/` (alp-sdk)](https://github.com/alpla
 gd32-bridge-firmware/
 ├── CMakeLists.txt          ← top-level build entry (host-built, cross-compiled)
 ├── README.md               ← this file
-├── ci/                     ← CI-only glue (e.g. the vendor-library wrapper CMakeLists
-│                              staged by the `gd32 backend build` job; not GigaDevice IP)
+├── vendor/                 ← Alp-authored build glue for the GigaDevice library (wrapper
+│                              CMake + clock patch); the library itself is fetched, not committed
 ├── toolchain/              ← ARM-GCC + linker script for GD32G553MEY7TR
 ├── hal/                    ← thin shims around the GigaDevice firmware library
 ├── src/
@@ -71,45 +71,40 @@ cmake --build build
 `BRIDGE_HAL_BACKEND` defaults to `stub`, so this command emits only
 `build/gd32-bridge.elf` — the stub backend links no vendor
 `Reset_Handler`, so there's nothing for objcopy to extract into
-`.hex`/`.bin`. For a flashable image, select the `gd32` backend and
-point `GD32_VENDOR_DIR` at a checkout of alp-sdk's
-`vendors/gd32_firmware_library/` (this repo does not vendor the
-GigaDevice SDK):
+`.hex`/`.bin`. For a flashable image, select the `gd32` backend. The
+GigaDevice firmware library is **not** in this repository (it is GigaDevice's
+code under its own terms, see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md));
+fetch it once from GigaDevice's official repository:
 
 ```bash
+tools/fetch_gd32_library.sh        # pinned commit + tree-hash verified
 cmake -B build -DCMAKE_TOOLCHAIN_FILE=toolchain/arm-none-eabi.cmake \
-    -DBRIDGE_HAL_BACKEND=gd32 \
-    -DGD32_VENDOR_DIR=<path to alp-sdk checkout>/vendors/gd32_firmware_library
+    -DBRIDGE_HAL_BACKEND=gd32
 cmake --build build
 ```
 
-`GD32_VENDOR_DIR` is empty by default.  Left empty, the build falls
-back to `../../vendors/gd32_firmware_library` **resolved against this
-source tree** — the pre-split layout, when this tree was nested at
-`<alp-sdk>/firmware/gd32-bridge/`.  A standalone clone has no such
-parent tree, so pass the flag explicitly; a relative value you pass is
-resolved against your shell's working directory, not the source tree,
-so prefer an absolute path. That build emits the monolithic
+The script clones `GigaDevice-GD32-MCU/GD32G5x3_Firmware_Library` tag `V1.5.0`
+into `vendor/gd32_firmware_library/upstream/` (gitignored) and fails closed
+unless the commit and the `Firmware/` tree hash match its pins. A verified
+checkout is reused, so a cached `upstream/` works offline;
+`GD32_LIBRARY_URL` points it at a local mirror (pins still enforced).
+`GD32_VENDOR_DIR` is empty by default and only needed to substitute your own
+wrapper directory. The build emits the monolithic
 `build/gd32-bridge.elf` + `.hex` + `.bin` (OTA inert — the whole
 `0xF0..0xFF` range answers `STATUS_NOSUPPORT`, so the image cannot
 brick itself).
 
-**A flashable image needs the IRC8M clock override, not just a vendor
-tree.** The stock vendor `system_gd32g5x3.c` selects
-`__SYSTEM_CLOCK_216M_PLL_HXTAL`, whose startup spins `while(1){}`
-waiting for `HXTALSTB` — which never sets on this SoM, so the part
-hangs before `main()` and the flashed board looks bricked, with SPI
-and I2C never coming up. `GD32_VENDOR_DIR` must therefore point at a
-tree that also carries `overrides/system_gd32g5x3.c` (selects
-`__SYSTEM_CLOCK_216M_PLL_IRC8M` instead) — an alp-sdk checkout's
-`vendors/gd32_firmware_library/` carries this override; the public
-[`gd32g5x3-firmware-library`](https://github.com/alplabai/gd32g5x3-firmware-library)
-mirror alone does not. Configure fails fast with a clear message if
-the override is missing. **`-DBRIDGE_ALLOW_STOCK_SYSTEM_INIT=ON`**
-silences that failure and links the stock, hanging `SystemInit()`
-instead — it exists only for compile-and-link coverage (CI's `gd32
-backend build` job, which never runs on silicon); never pass it for an
-image you intend to flash.
+**A flashable image needs the IRC8M clock patch.** The stock vendor
+`system_gd32g5x3.c` selects `__SYSTEM_CLOCK_216M_PLL_HXTAL`, whose startup
+spins `while(1){}` waiting for `HXTALSTB` — which never sets on this SoM, so the
+part hangs before `main()` and the flashed board looks bricked, with SPI and I2C
+never coming up. The in-repo wrapper (`vendor/gd32_firmware_library/`) applies
+`patches/system_gd32g5x3-irc8m.patch` to a build-directory copy of that file
+(selects `__SYSTEM_CLOCK_216M_PLL_IRC8M` instead). A custom `GD32_VENDOR_DIR`
+without `patches/system_gd32g5x3-irc8m.patch` fails configure with a clear
+message. **`-DBRIDGE_ALLOW_STOCK_SYSTEM_INIT=ON`** silences that failure and links
+the stock, hanging `SystemInit()` — compile-and-link coverage only; never pass
+it for an image you intend to flash.
 
 **`-DBRIDGE_TIMING_STATS=ON`** (bench only, default OFF) records per-SPI-transaction
 DWT cycle counts in a RAM struct read over SWD; see
@@ -220,7 +215,7 @@ it as a wire-incompatible change and stage carefully.
 
 ## Protocol v0.15 (negotiated)
 
-`GET_VERSION` reports `0.15.0`. The full design -- wire layouts, the grant
+`GET_VERSION` reports `0.16.0` (0.16 = v0.15 plus GPIO bits 21/22, E1M IO15/IO26). The full design -- wire layouts, the grant
 algorithm, the ATTN pin rules -- is
 [`docs/protocol-v0.15-design.md`](docs/protocol-v0.15-design.md); the points a
 firmware reader needs:
@@ -370,7 +365,7 @@ reset.  `duty_ns` must be 0 for a stop (`STATUS_INVAL` otherwise).  The
 shared auto-reload is left unchanged.  This needs no protocol minor bump:
 firmware before this change answers period 0 with `STATUS_OUT_OF_RANGE`.
 
-`gpio_pad_map[]` is 21 entries: 18 E1M IO pads (bits 0-17) plus three
+`gpio_pad_map[]` is 23 entries: 20 E1M IO pads (bits 0-17, 21, 22) plus three
 sideband bits (18, 19, 20) that are not E1M pads at all -- `BT_REG_ON`
 (GD32 `PE14`) and `WL_REG_ON` (GD32 `PE15`), the Murata
 LBEE5HY2FY-922 Wi-Fi/BT module's power enables, and `CAN_STBY` (GD32
@@ -404,7 +399,7 @@ repeating it:
 |   8 | PC14     | E1M IO24    |
 |   9 | PC15     | E1M IO25    |
 |  10 | PB11     | E1M IO27    |
-|  11 | PC2      | E1M IO28    |
+|  11 | PE9      | E1M IO28    |
 |  12 | PD11     | E1M IO29    |
 |  13 | PD10     | E1M IO30    |
 |  14 | PE12     | E1M IO31    |
@@ -414,6 +409,14 @@ repeating it:
 |  18 | PE14     | BT_REG_ON   |
 |  19 | PE15     | WL_REG_ON   |
 |  20 | PB13     | CAN_STBY    |
+|  21 | PB4      | E1M IO15    |
+|  22 | PC2      | E1M IO26    |
+
+Bit 21 (`PB4`) is believed to be the JTAG NJTRST pin at reset (AF mode with
+a pull-up), so `bridge_hw_init` parks it analog / no pull at boot; debug
+access on this board is believed to be SWD only. TODO(unverified): no User
+Manual or datasheet page is cited for either claim yet; confirm by reading
+GPIOB CTL/PUD before and after init over SWD.
 
 Bits 8/9 (`PC14`/`PC15`, E1M IO24/IO25) are not ordinary pads: they are
 supplied through the backup-domain power switch together with SE_RST
@@ -440,6 +443,10 @@ yet); firmware v0.12 and earlier do the same for bit 20. A host
 relying on bits 18/19 must require `PROTOCOL_VERSION_MINOR >= 11`,
 and on bit 20 must require `PROTOCOL_VERSION_MINOR >= 13` (both via
 `GET_VERSION`), before trusting that the write actually took effect.
+Bits 21/22 (E1M IO15/IO26) need `PROTOCOL_VERSION_MINOR >= 16` (0.15 firmware
+lacks them); older firmware ignores them and still returns `STATUS_OK`. Like the other
+E1M pads they have no boot-time drive; the first host read/write promotes
+them. `PC14` (bit 8) is untouched and `LXTAL` stays disabled.
 
 ## Cross-link
 
