@@ -1483,6 +1483,9 @@ static bool i2c_opcode_allowed(uint8_t cmd)
 	case CMD_I2CM_CONFIG:
 	case CMD_I2CM_XFER:
 	case CMD_I2CM_RESULT:
+#if defined(BRIDGE_BENCH_DIAG) && BRIDGE_BENCH_DIAG
+	case CMD_I2CM_DIAG:
+#endif
 		return true;
 	default:
 		return cmd >= CMD_OTA_BEGIN;
