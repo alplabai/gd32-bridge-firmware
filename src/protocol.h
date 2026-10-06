@@ -394,6 +394,14 @@ typedef enum {
 	 * only, empty request, 64-byte reply = register dump, layout in
 	 * hal/gd32/i2cm_core.h (I2CM_DIAG_*).  Not part of the wire contract. */
 	CMD_I2CM_DIAG = 0xAF,
+	/* Bench-only, I2C link only.  Request mode:u8, pc8:u8, pc9:u8 (mode 0 =
+	 * release pads to the I2CM AF/OD config, 1 = PC8/PC9 push-pull outputs
+	 * driven to pc8/pc9 (0/1), 2 = plain inputs).  Reply 20 bytes: u32 LE
+	 * GPIO_CTL, GPIO_OMODE, GPIO_PUD, GPIO_ISTAT, GPIO_OCTL of GPIOC taken
+	 * ~10 us after the change.  Modes 1/2 disable I2C2 and drop the proxy
+	 * to unconfigured (a later CONFIG re-inits).  Not part of the wire
+	 * contract. */
+	CMD_I2CM_PADTEST = 0xAE,
 #endif
 } gd32_bridge_cmd_t;
 

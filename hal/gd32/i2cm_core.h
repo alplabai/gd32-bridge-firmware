@@ -75,6 +75,9 @@ void i2cm_diag_pack(uint8_t        out[I2CM_DIAG_LEN],
                     uint8_t        state,
                     uint8_t        last_result);
 
+/* CMD_I2CM_PADTEST reply: 5 x u32 LE (GPIOC CTL, OMODE, PUD, ISTAT, OCTL). */
+void i2cm_padtest_pack(uint8_t out[I2CM_PADTEST_LEN], const uint32_t regs[5]);
+
 /* Current state byte and last job result, for the diag reply. */
 void i2cm_core_diag_state(uint8_t *state, uint8_t *last_result);
 

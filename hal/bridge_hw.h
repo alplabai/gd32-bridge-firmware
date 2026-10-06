@@ -511,6 +511,17 @@ int bridge_hw_power_mode_set(uint8_t  mode,
 size_t bridge_hw_i2cm_diag(uint8_t *out);
 #endif
 
+/* Bench-only CMD_I2CM_PADTEST: request mode/pc8/pc9 (3 bytes), reply 5 x u32
+ * LE (GPIOC CTL, OMODE, PUD, ISTAT, OCTL).  Pack function always built. */
+#define I2CM_PADTEST_REQ_LEN 3u
+#define I2CM_PADTEST_LEN     20u
+#if defined(BRIDGE_BENCH_DIAG) && BRIDGE_BENCH_DIAG
+/* mode 0 release to AF/OD, 1 push-pull outputs pc8/pc9, 2 inputs; fills
+ * @p out (I2CM_PADTEST_LEN).  BRIDGE_HW_ERR_INVAL on bad args, _BUSY while
+ * a job is queued/running (modes 1/2). */
+int bridge_hw_i2cm_padtest(uint8_t mode, uint8_t pc8, uint8_t pc9, uint8_t *out);
+#endif
+
 /* Set the I2C3 bus speed and take the pads.  @p bus_khz is 100 or 400;
  * 0 releases PC8/PC9 to hi-Z and marks the proxy unconfigured; anything
  * else answers BRIDGE_HW_ERR_INVAL.  Runs the 9-clock bus recovery first.

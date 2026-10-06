@@ -125,6 +125,13 @@ void i2cm_core_diag_state(uint8_t *state, uint8_t *last_result)
 	*last_result = s_res_code;
 }
 
+void i2cm_padtest_pack(uint8_t out[I2CM_PADTEST_LEN], const uint32_t regs[5])
+{
+	for (uint32_t i = 0u; i < 5u; ++i) {
+		for (uint32_t b = 0u; b < 4u; ++b) out[4u * i + b] = (uint8_t)(regs[i] >> (8u * b));
+	}
+}
+
 void i2cm_diag_pack(uint8_t        out[I2CM_DIAG_LEN],
                     const uint32_t regs[I2CM_DIAG_NREGS],
                     uint8_t        cap1,

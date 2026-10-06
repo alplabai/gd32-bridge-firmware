@@ -496,4 +496,20 @@ ZTEST(i2cm, test_diag_frame_is_64_bytes_little_endian)
 	for (size_t i = 56u; i < sizeof out; ++i) zassert_equal(out[i], 0u, "tail zeroed");
 }
 
+ZTEST(i2cm, test_padtest_frame_sizes_and_le_pack)
+{
+	const uint32_t regs[5] = { 0x04030201u, 0x14131211u, 0x24232221u, 0x34333231u, 0x44434241u };
+	uint8_t        out[I2CM_PADTEST_LEN];
+
+	zassert_equal(I2CM_PADTEST_REQ_LEN, 3u);
+	zassert_equal(I2CM_PADTEST_LEN, 20u);
+	zassert_true(I2CM_PADTEST_LEN <= I2CM_DIAG_LEN, "fits the I2C reply");
+	i2cm_padtest_pack(out, regs);
+	zassert_equal(out[0], 0x01u);
+	zassert_equal(out[3], 0x04u);
+	zassert_equal(out[4], 0x11u);
+	zassert_equal(out[16], 0x41u);
+	zassert_equal(out[19], 0x44u);
+}
+
 ZTEST_SUITE(i2cm, NULL, NULL, NULL, NULL, NULL);

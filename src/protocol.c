@@ -982,6 +982,21 @@ static gd32_bridge_status_t handle_i2cm_diag(const uint8_t *req,
 	*reply_len = bridge_hw_i2cm_diag(reply);
 	return STATUS_OK;
 }
+
+static gd32_bridge_status_t handle_i2cm_padtest(const uint8_t *req,
+                                                size_t         req_len,
+                                                uint8_t       *reply,
+                                                size_t         reply_cap,
+                                                size_t        *reply_len)
+{
+	*reply_len = 0u;
+	if (req_len != I2CM_PADTEST_REQ_LEN) return STATUS_INVAL;
+	if (reply_cap < I2CM_PADTEST_LEN) return STATUS_NOMEM;
+	const int rv = bridge_hw_i2cm_padtest(req[0], req[1], req[2], reply);
+	if (rv != BRIDGE_HW_OK) return status_from_hw(rv);
+	*reply_len = I2CM_PADTEST_LEN;
+	return STATUS_OK;
+}
 #endif
 
 /* ----------------------------------------------------------------- */
@@ -1485,6 +1500,7 @@ static bool i2c_opcode_allowed(uint8_t cmd)
 	case CMD_I2CM_RESULT:
 #if defined(BRIDGE_BENCH_DIAG) && BRIDGE_BENCH_DIAG
 	case CMD_I2CM_DIAG:
+	case CMD_I2CM_PADTEST:
 #endif
 		return true;
 	default:
@@ -1683,6 +1699,13 @@ static gd32_bridge_status_t protocol_dispatch_inner(gd32_bridge_link_t link,
 			return STATUS_NOSUPPORT;
 		}
 		h = handle_i2cm_diag;
+		break;
+	case CMD_I2CM_PADTEST:
+		if (link != GD32_BRIDGE_LINK_I2C) {
+			*reply_payload_len = 0u;
+			return STATUS_NOSUPPORT;
+		}
+		h = handle_i2cm_padtest;
 		break;
 #endif
 	case CMD_LINK_FEATURES:

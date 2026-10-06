@@ -83,7 +83,7 @@ option(BRIDGE_SPI_FAST_REINIT "Skip SPI reset at CS rising when SPI_STAT proves 
 # transaction cycles for request CRC / protocol_dispatch / reply stage / CS-edge
 # to reply-staged, in the RAM struct `bridge_timing_stats` (layout:
 # docs/timing-stats.md).  OFF adds no code and no data to the image.
-option(BRIDGE_BENCH_DIAG "Bench-only CMD 0xAF I2CM_DIAG register dump (never ship)" OFF)
+option(BRIDGE_BENCH_DIAG "Bench-only CMD 0xAF I2CM_DIAG dump + 0xAE I2CM_PADTEST (never ship)" OFF)
 option(BRIDGE_I2CM_INTERNAL_PULLUP "Bench-only: internal pull-up on I2C3 PC8/PC9 (production needs external pull-ups)" OFF)
 option(BRIDGE_TIMING_STATS "Record SPI round-trip DWT cycle stats in RAM (bench only)" OFF)
 if(BRIDGE_TIMING_STATS)

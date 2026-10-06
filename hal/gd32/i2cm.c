@@ -177,6 +177,37 @@ size_t bridge_hw_i2cm_diag(uint8_t *out)
 	i2cm_diag_pack(out, regs, s_diag_cap[0], s_diag_cap[1], state, last);
 	return I2CM_DIAG_LEN;
 }
+
+int bridge_hw_i2cm_padtest(uint8_t mode, uint8_t pc8, uint8_t pc9, uint8_t *out)
+{
+	if (mode > 2u || pc8 > 1u || pc9 > 1u) return BRIDGE_HW_ERR_INVAL;
+	if (mode == 0u) {
+		pads_af();
+	} else {
+		if (i2cm_core_busy()) return BRIDGE_HW_ERR_BUSY;
+		i2c_disable(BRIDGE_I2CM_PERIPH);
+		i2cm_core_mark_unconfigured(); /* pads hi-Z, CONFIG re-inits */
+		if (mode == 1u) {
+			if (pc8) GPIO_BOP(BRIDGE_I2CM_SCL_PORT) = BRIDGE_I2CM_SCL_PIN;
+			else GPIO_BC(BRIDGE_I2CM_SCL_PORT) = BRIDGE_I2CM_SCL_PIN;
+			if (pc9) GPIO_BOP(BRIDGE_I2CM_SDA_PORT) = BRIDGE_I2CM_SDA_PIN;
+			else GPIO_BC(BRIDGE_I2CM_SDA_PORT) = BRIDGE_I2CM_SDA_PIN;
+			gpio_output_options_set(
+			    BRIDGE_I2CM_SCL_PORT, GPIO_OTYPE_PP, GPIO_OSPEED_12MHZ, BRIDGE_I2CM_SCL_PIN);
+			gpio_output_options_set(
+			    BRIDGE_I2CM_SDA_PORT, GPIO_OTYPE_PP, GPIO_OSPEED_12MHZ, BRIDGE_I2CM_SDA_PIN);
+		}
+		const uint32_t m = (mode == 1u) ? GPIO_MODE_OUTPUT : GPIO_MODE_INPUT;
+		gpio_mode_set(BRIDGE_I2CM_SCL_PORT, m, GPIO_PUPD_NONE, BRIDGE_I2CM_SCL_PIN);
+		gpio_mode_set(BRIDGE_I2CM_SDA_PORT, m, GPIO_PUPD_NONE, BRIDGE_I2CM_SDA_PIN);
+	}
+	i2cm_delay_us(10u);
+	const uint32_t regs[5] = {
+		GPIO_CTL(GPIOC), GPIO_OMODE(GPIOC), GPIO_PUD(GPIOC), GPIO_ISTAT(GPIOC), GPIO_OCTL(GPIOC),
+	};
+	i2cm_padtest_pack(out, regs);
+	return BRIDGE_HW_OK;
+}
 #else
 #define diag_capture(slot) ((void)0)
 #endif
