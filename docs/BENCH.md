@@ -914,6 +914,35 @@ unverified per-iteration cost) is close or far off.
 **Brick risk:** none — ADC misbehaviour is a data-correctness/liveness
 concern, not a flash/boot hazard.
 
+### 7.2 — ADC_READ burst watchdog clocks (DWT across `WFI`, SysTick)
+
+**Proves:** the two clocks that expire a stuck `CMD_ADC_READ` burst
+(`adc_burst_tick`, `hal/gd32/adc.c`) behave on silicon: the DWT cycle counter
+(`DWT->CYCCNT`) and the SysTick period count (`adc_burst_systick`).
+
+**Why it is open:** the host tests model the DWT as a counter that runs while
+enabled. Whether `CYCCNT` keeps counting while the core sits in `__WFI()` is not
+established for this core, and a debugger detach can clear `DEMCR.TRCENA` /
+`DWT_CTRL.CYCCNTENA`. The firmware re-asserts both enables before sampling and
+also ages bursts by SysTick periods (two 50 ms periods), so a stopped DWT cannot
+leave a wedged burst holding its converter; this step measures which of the two
+actually fires.
+
+**Procedure:** with the probe attached, read `DWT->CYCCNT` over SWD twice, several
+ms apart, while the main loop is idle in `WFI` (no host traffic). Repeat after a
+debugger detach/re-attach. Then wedge a burst (hold the ADC clock off, or abort
+conversions mid-burst) and time how long the converter stays claimed.
+
+**PASS:** `CYCCNT` advances across `WFI` (the DWT bound then expires a burst at
+~4 ms), or it does not and the SysTick bound frees the converter within
+50-100 ms. Either way no burst outlives ~100 ms and the I2C `ADC_READ` wait
+returns `STATUS_IO` inside the SMBus stretch window.
+
+**FAIL:** a burst stays claimed (BUSY) beyond ~100 ms, or an I2C `ADC_READ`
+stretches past 25 ms.
+
+**Brick risk:** none.
+
 ---
 
 ## Phase 8 — TMU Q31 band representability (#85 / issue #46)

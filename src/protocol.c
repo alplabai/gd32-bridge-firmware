@@ -313,36 +313,102 @@ static gd32_bridge_status_t handle_pwm_get(const uint8_t *req,
 	return STATUS_OK;
 }
 
+_Static_assert(GD32_BRIDGE_ADC_MAX_SAMPLES == BRIDGE_HW_ADC_READ_MAX_SAMPLES,
+               "the wire's sample cap and the HAL burst capacity are one number");
+
+/* Shared request validation for the synchronous and deferred ADC_READ paths. */
+static gd32_bridge_status_t adc_read_parse(const uint8_t *req,
+                                           size_t         req_len,
+                                           size_t         reply_cap,
+                                           uint8_t       *channel,
+                                           uint8_t       *samples)
+{
+	if (req_len != 2u) return STATUS_INVAL;
+	*channel = req[0];
+	*samples = req[1];
+	if (*samples == 0u) return STATUS_INVAL;
+	/* Reject out-of-range sample counts outright rather than silently
+     * capping -- the host driver compares `reply[0]` against the
+     * originally-requested count and treats a mismatch as a wire
+     * error, so silent capping would turn a documented OUT_OF_RANGE
+     * caller error into a misleading ALP_ERR_IO. */
+	if (*samples > GD32_BRIDGE_ADC_MAX_SAMPLES) return STATUS_OUT_OF_RANGE;
+	if (reply_cap < 1u + (size_t)*samples * 2u) return STATUS_NOMEM;
+	return STATUS_OK;
+}
+
+/* Reply layout: samples echo, then N little-endian u16 millivolts. */
+static size_t adc_read_pack(uint8_t *reply, const uint16_t *mv, uint8_t samples)
+{
+	reply[0] = samples; /* echoes back the (validated) value */
+	for (uint8_t i = 0u; i < samples; ++i) {
+		reply[1u + i * 2u]      = (uint8_t)(mv[i] & 0xFFu);
+		reply[1u + i * 2u + 1u] = (uint8_t)((mv[i] >> 8) & 0xFFu);
+	}
+	return 1u + (size_t)samples * 2u;
+}
+
 static gd32_bridge_status_t handle_adc_read(const uint8_t *req,
                                             size_t         req_len,
                                             uint8_t       *reply,
                                             size_t         reply_cap,
                                             size_t        *reply_len)
 {
-	if (req_len != 2u) return STATUS_INVAL;
-	uint8_t channel = req[0];
-	uint8_t samples = req[1];
-	if (samples == 0u) return STATUS_INVAL;
-	/* Reject out-of-range sample counts outright rather than silently
-     * capping -- the host driver compares `reply[0]` against the
-     * originally-requested count and treats a mismatch as a wire
-     * error, so silent capping would turn a documented OUT_OF_RANGE
-     * caller error into a misleading ALP_ERR_IO. */
-	if (samples > GD32_BRIDGE_ADC_MAX_SAMPLES) return STATUS_OUT_OF_RANGE;
+	uint8_t                    channel;
+	uint8_t                    samples;
+	const gd32_bridge_status_t pst = adc_read_parse(req, req_len, reply_cap, &channel, &samples);
+	if (pst != STATUS_OK) return pst;
 
-	const size_t need = 1u + (size_t)samples * 2u;
-	if (reply_cap < need) return STATUS_NOMEM;
-
-	reply[0] = samples; /* echoes back the (validated) value */
 	uint16_t  mv[GD32_BRIDGE_ADC_MAX_SAMPLES];
 	const int rv = bridge_hw_adc_read(channel, samples, mv);
 	if (rv != BRIDGE_HW_OK) return status_from_hw(rv);
-	for (uint8_t i = 0u; i < samples; ++i) {
-		reply[1u + i * 2u]      = (uint8_t)(mv[i] & 0xFFu);
-		reply[1u + i * 2u + 1u] = (uint8_t)((mv[i] >> 8) & 0xFFu);
-	}
-	*reply_len = need;
+	*reply_len = adc_read_pack(reply, mv, samples);
 	return STATUS_OK;
+}
+
+/* Deferred-reply plumbing (SPI link).  One command defers at a time, so one
+ * sink and one completion callback are enough. */
+static protocol_deferred_reply_fn deferred_sink;
+
+void protocol_deferred_attach(protocol_deferred_reply_fn sink)
+{
+	deferred_sink = sink;
+}
+
+/* bridge_hw_adc_read_start completion.  Interrupt context; see protocol.h. */
+static void adc_read_done(int rv, const uint16_t *mv, uint8_t samples)
+{
+	uint8_t reply[1u + GD32_BRIDGE_ADC_MAX_SAMPLES * 2u];
+
+	if (deferred_sink == NULL) return;
+	if (rv != BRIDGE_HW_OK) {
+		deferred_sink(status_from_hw(rv), NULL, 0u);
+		return;
+	}
+	deferred_sink(STATUS_OK, reply, adc_read_pack(reply, mv, samples));
+}
+
+void protocol_deferred_abort(void)
+{
+	bridge_hw_adc_read_abort(adc_read_done);
+}
+
+/* ADC_READ on the SPI link: arm the conversion burst and return; the burst's
+ * DMA-complete interrupt delivers the reply through the sink.  The request
+ * errors a synchronous read reports (INVAL/RANGE/BUSY/IO/...) are reported
+ * here, identically, before anything starts. */
+static gd32_bridge_status_t
+handle_adc_read_deferred(const uint8_t *req, size_t req_len, size_t reply_cap, size_t *reply_len)
+{
+	uint8_t                    channel;
+	uint8_t                    samples;
+	const gd32_bridge_status_t pst = adc_read_parse(req, req_len, reply_cap, &channel, &samples);
+	if (pst != STATUS_OK) return pst;
+
+	const int rv = bridge_hw_adc_read_start(channel, samples, adc_read_done);
+	if (rv != BRIDGE_HW_OK) return status_from_hw(rv);
+	*reply_len = 0u;
+	return STATUS_DEFERRED;
 }
 
 static gd32_bridge_status_t handle_da9292_forward(const uint8_t *req,
@@ -1070,6 +1136,10 @@ static gd32_bridge_status_t protocol_dispatch_inner(gd32_bridge_link_t link,
 		h = handle_pwm_configure;
 		break;
 	case CMD_ADC_READ:
+		if (link == GD32_BRIDGE_LINK_SPI && deferred_sink != NULL) {
+			return handle_adc_read_deferred(
+			    req_payload, req_payload_len, reply_payload_cap, reply_payload_len);
+		}
 		h = handle_adc_read;
 		break;
 	case CMD_ADC_CONFIGURE:

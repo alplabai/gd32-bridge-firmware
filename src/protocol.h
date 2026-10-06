@@ -85,11 +85,10 @@
  * different sample rates against different ADC channels. */
 #define GD32_BRIDGE_ADC_STREAM_COUNT 2u
 
-/* Number of ADC samples the bridge's streaming ring buffer can hold
- * per stream (firmware-side DMA destination).  Host polls
- * CMD_ADC_STREAM_READ for batches; a non-empty ring lets the firmware
- * decouple DMA cadence from host poll cadence.  Sized in u16 mV slots. */
-#define GD32_BRIDGE_ADC_STREAM_RING_SAMPLES 128u
+/* The per-stream DMA ring depth is firmware-private (it is not on the wire)
+ * and has ONE definition: BRIDGE_ADC_STREAM_RING_SAMPLES in
+ * hal/gd32/gd32_common.h.  A second copy here read 128 while the real ring
+ * was 1024. */
 
 /* Maximum samples returned by a single CMD_ADC_STREAM_READ reply.
  * Bounded by the wire's MAX_PAYLOAD_BYTES; tuned to keep the SPI
@@ -311,6 +310,11 @@ typedef enum {
 	STATUS_NOMEM        = 0x07,
 	STATUS_OUT_OF_RANGE = 0x08,
 	STATUS_NO_PENDING   = 0x80, /* I2C-only: read before any matching write */
+	/* INTERNAL, never on the wire and never staged: protocol_dispatch() returns
+	 * it on the SPI link for a command whose reply a later interrupt delivers
+	 * through the sink registered with protocol_deferred_attach().  Only
+	 * CMD_ADC_READ defers today. */
+	STATUS_DEFERRED = 0xFE,
 } gd32_bridge_status_t;
 
 /* --------------------------------------------------------------- */
@@ -405,6 +409,24 @@ gd32_bridge_status_t protocol_dispatch(gd32_bridge_link_t link,
                                        uint8_t           *reply_payload,
                                        size_t             reply_payload_cap,
                                        size_t            *reply_payload_len);
+
+/* Deferred replies (SPI link only).
+ *
+ * A command may start slow hardware work from inside protocol_dispatch(), return
+ * STATUS_DEFERRED, and let a completion interrupt produce the reply.  The
+ * transport that registered `sink` stages the reply when the sink is called.
+ * The sink runs in interrupt context, at the SAME NVIC group priority as the
+ * code that called protocol_dispatch() (so the two cannot preempt each other),
+ * exactly once per deferred command unless protocol_deferred_abort() cancels it
+ * first.  With no sink attached every command completes synchronously, as on
+ * the I2C link. */
+typedef void (*protocol_deferred_reply_fn)(gd32_bridge_status_t status,
+                                           const uint8_t       *payload,
+                                           size_t               payload_len);
+void protocol_deferred_attach(protocol_deferred_reply_fn sink);
+
+/* Cancel the deferred command in flight, if any; its sink call never happens. */
+void protocol_deferred_abort(void);
 
 /* Link features currently armed ON `link` (GD32_BRIDGE_LINK_FEAT_* bits,
  * set by a CMD_LINK_FEATURES that arrived on that same link).  Consulted

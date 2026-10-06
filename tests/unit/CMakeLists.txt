@@ -432,6 +432,56 @@ target_compile_options(test_adc_seq PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_adc_seq PRIVATE ztest_shim m)
 add_test(NAME adc_seq COMMAND test_adc_seq)
 
+# --- adc_e2e: CMD_ADC_READ over SPI through the REAL transport + protocol + adc.c --
+#
+# adc_seq tests adc.c against hand-built callbacks; adc_burst_reply tests
+# protocol.c over a fake HAL.  Neither sees the done-callback identity contract
+# between them (protocol_deferred_abort -> bridge_hw_adc_read_abort matches the
+# pointer protocol.c registered).  This target links all three for real over the
+# adc_seq vendor mock.  hal/bridge_hw_stub.c supplies the non-ADC bridge_hw_*
+# (GPIO, PWM, ...) the dispatcher references, through adc_e2e/stub_no_adc.c, a
+# build of the stub with its ADC entry points compiled out, so the real
+# hal/gd32/adc*.c definitions are the only ones and no linker override is needed.
+add_executable(test_adc_e2e
+    adc_e2e/src/test_adc_e2e.c
+    adc_seq/mock/mock_gd32.c
+    ${FW}/src/transport_spi.c
+    ${FW}/src/protocol.c
+    ${FW}/src/bootloader/bootloader.c
+    ${FW}/src/ota.c
+    ${FW}/src/crc32.c
+    ${FW}/hal/gd32/adc.c
+    ${FW}/hal/gd32/adc_stream.c
+    ${FW}/hal/gd32/vref.c
+    ${FW}/hal/gd32/adc_dsp_chain.c
+    adc_e2e/stub_no_adc.c
+)
+target_include_directories(test_adc_e2e PRIVATE
+    ${FW}/src
+    ${FW}/hal
+    ${FW}/hal/gd32
+    ${CMAKE_CURRENT_SOURCE_DIR}/adc_seq/mock
+)
+target_compile_options(test_adc_e2e PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_adc_e2e PRIVATE ztest_shim m)
+add_test(NAME adc_e2e COMMAND test_adc_e2e)
+
+# --- status_deferred_guard: STATUS_DEFERRED never goes on the wire ----------
+#
+# Both transports map the dispatcher's internal 0xFE marker to a CRC-valid
+# STATUS_IO at the staging site.  Unreachable through the real dispatcher, so
+# the REAL transport_spi.c + transport_i2c.c run against a fake protocol layer
+# that returns 0xFE on demand.
+add_executable(test_status_deferred_guard
+    status_deferred_guard/src/test_status_deferred_guard.c
+    ${FW}/src/transport_spi.c
+    ${FW}/src/transport_i2c.c
+)
+target_include_directories(test_status_deferred_guard PRIVATE ${FW}/src ${FW}/hal)
+target_compile_options(test_status_deferred_guard PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_status_deferred_guard PRIVATE ztest_shim)
+add_test(NAME status_deferred_guard COMMAND test_status_deferred_guard)
+
 # --- fmc_ota_guard: the #79 address guard, header-only, no GD32 register
 # dependency (see hal/fmc_ota_guard.h) -------------------------------------
 add_executable(test_fmc_ota_guard fmc_ota_guard/src/test_fmc_ota_guard.c)
@@ -441,6 +491,33 @@ target_compile_definitions(test_fmc_ota_guard PRIVATE
 target_compile_options(test_fmc_ota_guard PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_fmc_ota_guard PRIVATE ztest_shim)
 add_test(NAME fmc_ota_guard COMMAND test_fmc_ota_guard)
+
+# --- adc_burst_reply: CMD_ADC_READ over SPI is DEFERRED ----------------------
+#
+# The CS-rising path only arms the conversion burst; the burst's DMA-complete
+# interrupt stages the reply.  Links the REAL transport_spi.c + protocol.c over
+# the fake HAL, whose bridge_hw_fake_adc_async_complete() plays that interrupt,
+# to pin: nothing (not even the previous command's reply) is served while the
+# burst runs, the staged reply is whole and matches the synchronous one, and a
+# newer request / transport error / drain bound / HAL failure each leave one
+# coherent reply and no stranded burst.  The HAL half is the adc_seq suite.
+add_executable(test_adc_burst_reply
+    adc_burst_reply/src/test_adc_burst_reply.c
+    ${FW}/src/transport_spi.c
+    ${FW}/src/protocol.c
+    ${FW}/src/bootloader/bootloader.c
+    ${FW}/src/ota.c
+    ${FW}/src/crc32.c
+    fake/bridge_hw_fake.c
+)
+target_include_directories(test_adc_burst_reply PRIVATE
+    ${FW}/src
+    ${FW}/hal
+    ${CMAKE_CURRENT_SOURCE_DIR}/fake
+)
+target_compile_options(test_adc_burst_reply PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_adc_burst_reply PRIVATE ztest_shim)
+add_test(NAME adc_burst_reply COMMAND test_adc_burst_reply)
 
 # --- transport_i2c: transport + dispatcher over the injectable fake HAL ----
 add_executable(test_transport_i2c

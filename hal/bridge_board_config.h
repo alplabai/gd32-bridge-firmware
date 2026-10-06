@@ -123,6 +123,49 @@
 #define BRIDGE_I2C_IRQ_SUBPRIO         0u
 #define BRIDGE_ADC_STREAM_LAP_IRQ_PRIO 3u
 
+/* ADC burst-read DMA (CMD_ADC_READ, hal/gd32/adc.c).  Its transfer-complete IRQ
+ * stages the SPI reply, so it runs at the CS EXTI's preemption priority: the
+ * two cannot preempt each other, which is what makes the staged-reply buffer
+ * safe between them with no critical section (src/transport_spi.c).  The
+ * sub-priority only orders simultaneous pendings; 0 services a finished burst
+ * before a CS edge that arrived in the same window.  It must still preempt the
+ * I2C ISR, whose blocking ADC_READ waits on it. */
+#define BRIDGE_ADC_BURST_IRQ_PRIO    BRIDGE_CS_IRQ_PRIO
+#define BRIDGE_ADC_BURST_IRQ_SUBPRIO 0u
+
+/* DMA channel map (GD32G553: DMA0 + DMA1, 7 channels each; the DMAMUX channel
+ * serving DMA0 CHn is n, serving DMA1 CHn is n + 7).  Every user in the tree:
+ *
+ *   DMA0 CH0  ADC stream 0 ring       (hal/gd32/adc_stream.c, DMAMUX 0)
+ *   DMA0 CH2  SPI1 TX                 (hal/transport_hw_gd32.c, DMAMUX 2)
+ *   DMA0 CH3  SPI1 RX                 (hal/transport_hw_gd32.c, DMAMUX 3)
+ *   DMA1 CH0  ADC stream 1 ring       (hal/gd32/adc_stream.c, DMAMUX 7)
+ *   DMA1 CH1  ADC burst read, ADC0   (hal/gd32/adc.c,        DMAMUX 8)  <- these
+ *   DMA1 CH2  ADC burst read, ADC1   (hal/gd32/adc.c,        DMAMUX 9)  <- four
+ *   DMA1 CH3  ADC burst read, ADC2   (hal/gd32/adc.c,        DMAMUX 10) <- are the
+ *   DMA1 CH4  ADC burst read, ADC3   (hal/gd32/adc.c,        DMAMUX 11) <- burst set
+ *
+ * Each converter has its own burst channel (converter slot n = ADC<n> -> DMA1
+ * CH(n+1)), so a CMD_ADC_READ on one converter never contends with a burst on
+ * another for the DMA: only a same-converter request is BUSY.  The bursts take
+ * DMA1 so they never queue behind the ULTRA_HIGH SPI channels on DMA0, and
+ * channels no stream can claim (streams only ever use CH0), so a running stream
+ * cannot collide with them.  The DMAMUX request each channel is routed from is
+ * adc_dma_request_id(converter), written by dma_init() per burst.  Free:
+ * DMA0 CH1/CH4..CH6, DMA1 CH5..CH6.  Each channel's IRQ vector is
+ * DMA1_Channel<n>_IRQHandler in hal/gd32/adc.c. */
+#define BRIDGE_ADC_BURST_DMA     DMA1
+#define BRIDGE_ADC_BURST_DMA_RCU RCU_DMA1
+/* Indexed by converter slot: ADC0, ADC1, ADC2, ADC3. */
+#define BRIDGE_ADC_BURST_DMA_CHANNELS    { DMA_CH1, DMA_CH2, DMA_CH3, DMA_CH4 }
+#define BRIDGE_ADC_BURST_DMAMUX_CHANNELS { 8u, 9u, 10u, 11u }
+#define BRIDGE_ADC_BURST_DMA_IRQNS \
+	{ DMA1_Channel1_IRQn, DMA1_Channel2_IRQn, DMA1_Channel3_IRQn, DMA1_Channel4_IRQn }
+
+_Static_assert(BRIDGE_ADC_BURST_IRQ_PRIO == BRIDGE_CS_IRQ_PRIO,
+               "ADC burst completion must share the CS EXTI preemption priority");
+_Static_assert(BRIDGE_ADC_BURST_IRQ_PRIO < BRIDGE_I2C_IRQ_PRIO,
+               "ADC burst completion must preempt the I2C ISR that blocks on it");
 _Static_assert(BRIDGE_CS_IRQ_PRIO < 4u, "PRE2_SUB2 has two preemption bits");
 _Static_assert(BRIDGE_I2C_IRQ_PRIO < 4u, "PRE2_SUB2 has two preemption bits");
 _Static_assert(BRIDGE_ADC_STREAM_LAP_IRQ_PRIO < 4u, "PRE2_SUB2 has two preemption bits");

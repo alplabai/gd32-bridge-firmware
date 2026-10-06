@@ -350,6 +350,27 @@ void bridge_transport_spi_hw_init(void)
 	spi_cs_exti_init();
 }
 
+/* A deferred reply (the ADC burst's DMA-complete IRQ) was staged while no CS
+ * transaction is running the normal arm path.  Called at the CS EXTI's NVIC
+ * group priority, so it cannot interleave with the handler below.
+ *
+ * Link idle (CS high): copy the whole staged reply into the TX DMA buffer and
+ * arm TX now, so the host's very next read clocks the real reply instead of a
+ * drain miss.  CS low: a transaction is in flight and its TX DMA may be
+ * mid-transfer from spi_tx_dma_buf -- touch nothing.  The CS-rising handler
+ * for that transaction takes its drain/rewind path (the transaction carried no
+ * request), which re-arms the staged reply exactly as for any late reply. */
+void bridge_transport_spi_reply_staged(void)
+{
+	if (RESET == gpio_input_bit_get(BRIDGE_SPI_NSS_PORT, BRIDGE_SPI_NSS_PIN)) return;
+
+	uint32_t reply_len = 0u;
+	while (spi_slave_tx_pending() && (reply_len < BRIDGE_SPI_DMA_BUF_LEN)) {
+		spi_tx_dma_buf[reply_len++] = spi_slave_tx_next_byte();
+	}
+	(void)spi_dma_arm_tx(reply_len);
+}
+
 /* CS edge: PA8 on EXTI8.  Falling = select (reset RX, preload the staged
  * reply); rising = end of transaction (decode + stage the next reply).
  *

@@ -764,13 +764,16 @@ void bridge_hw_init(void)
 	}
 }
 
-/* Periodic tick handler (gh#54): empty by design.  Its entire job is
+/* Periodic tick handler (gh#54): its job is
  * to retire the main loop's __WFI() so bridge_hw_tick() runs.  The
  * watchdog is NEVER fed from here: a wedged main loop would otherwise
  * keep being fed by a healthy tick interrupt.  Strong definition
- * overrides the weak Default_Handler alias in the vendor startup. */
+ * overrides the weak Default_Handler alias in the vendor startup.  The one
+ * thing it does besides waking the loop is bump a counter (adc_burst_systick),
+ * the burst watchdog's second clock. */
 void SysTick_Handler(void)
 {
+	adc_burst_systick(); /* second clock for the ADC_READ burst watchdog */
 }
 
 /* Called at base level after every main-loop wake.  This backend uses the
@@ -897,6 +900,7 @@ extern bool ota_trial_unconfirmed(void);
 void bridge_hw_tick(void)
 {
 	bridge_hw_dsp_pump();
+	adc_burst_tick(); /* before vref_late_tick: frees a stuck burst's ADC0 claim first */
 	vref_late_tick();
 	ota_erase_tick();
 	ota_confirm_tick();

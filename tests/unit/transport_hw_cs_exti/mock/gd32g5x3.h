@@ -63,18 +63,22 @@ uint32_t   i2c_data_receive(uint32_t p);
 uint32_t   rcu_clock_freq_get(uint32_t c);
 
 /* Void vendor calls: swallowed. */
-#define dma_channel_disable(...)               ((void)0)
-#define dma_channel_enable(...)                ((void)0)
-#define dma_circulation_disable(...)           ((void)0)
-#define dma_deinit(...)                        ((void)0)
-#define dma_flag_clear(...)                    ((void)0)
-#define dma_init(...)                          ((void)0)
-#define dma_interrupt_enable(...)              ((void)0)
-#define dma_interrupt_flag_clear(...)          ((void)0)
-#define dma_memory_address_config(...)         ((void)0)
-#define dma_memory_to_memory_disable(...)      ((void)0)
-#define dma_struct_para_init(...)              ((void)0)
-#define dma_transfer_number_config(...)        ((void)0)
+#define dma_channel_disable(...) ((void)0)
+/* Counted/recorded (not swallowed): the deferred-reply arm test observes the TX
+ * channel being armed with exactly the staged reply. */
+extern uint32_t mock_dma_enable_calls, mock_dma_cfg_channel, mock_dma_cfg_number;
+#define dma_channel_enable(...)           (mock_dma_enable_calls++)
+#define dma_circulation_disable(...)      ((void)0)
+#define dma_deinit(...)                   ((void)0)
+#define dma_flag_clear(...)               ((void)0)
+#define dma_init(...)                     ((void)0)
+#define dma_interrupt_enable(...)         ((void)0)
+#define dma_interrupt_flag_clear(...)     ((void)0)
+#define dma_memory_address_config(...)    ((void)0)
+#define dma_memory_to_memory_disable(...) ((void)0)
+#define dma_struct_para_init(...)         ((void)0)
+#define dma_transfer_number_config(d, ch, n) \
+	(mock_dma_cfg_channel = (uint32_t)(ch), mock_dma_cfg_number = (uint32_t)(n))
 #define dmamux_synchronization_disable(...)    ((void)0)
 #define exti_init(...)                         ((void)0)
 #define exti_interrupt_flag_clear(...)         ((void)0)

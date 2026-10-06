@@ -26,7 +26,7 @@
 /* Event log -- the register-sequence gate's data source.              */
 /* ------------------------------------------------------------------ */
 
-#define MOCK_SEQ_MAX 256
+#define MOCK_SEQ_MAX 512
 
 typedef struct {
 	const char *name;   /* event tag, e.g. "adc_enable"            */
@@ -108,6 +108,9 @@ void adc_internal_channel_config(uint32_t adc_periph, uint32_t internal_channel,
 #define EXTERNAL_TRIGGER_DISABLE 0u
 #define EXTERNAL_TRIGGER_RISING  1u
 
+#define ADC_SCAN_MODE ((uint32_t)(1u << 8))
+void adc_special_function_config(uint32_t adc_periph, uint32_t function, ControlStatus newvalue);
+
 #define ADC_FLAG_EOC  ((uint32_t)(1u << 0))
 #define ADC_FLAG_ROVF ((uint32_t)(1u << 1))
 
@@ -170,8 +173,9 @@ void       adc_flag_clear(uint32_t adc_periph, uint32_t flag);
 /* Test-only hooks (not part of any real vendor header) -- let a test
  * drive the mocked ADC_FLAG_ROVF bit and control adc_routine_data_read's
  * return value without reaching into the driver's private state. */
-void mock_adc_set_flag(uint32_t periph, uint32_t flag, FlagStatus state);
-void mock_adc_set_routine_data(uint32_t code);
+void     mock_adc_set_flag(uint32_t periph, uint32_t flag, FlagStatus state);
+void     mock_adc_set_routine_data(uint32_t code);
+uint32_t mock_adc_get_routine_data(void);
 extern bool
     mock_adc_internal_ch_on; /* last internal-channel state; the seq log overflows on a timeout */
 extern bool mock_adc_eoc_stuck; /* true: triggers never raise EOC */
@@ -182,7 +186,8 @@ FlagStatus  vref_status_get(void);
 /* DMA function surface.                                               */
 /* ------------------------------------------------------------------ */
 
-typedef enum { DMA_CH0 = 0 } dma_channel_enum;
+typedef enum { DMA_CH0 = 0, DMA_CH1 = 1, DMA_CH2 = 2, DMA_CH3 = 3, DMA_CH4 = 4 } dma_channel_enum;
+#define MOCK_DMA_CH_COUNT 5u
 
 #define DMA_PERIPHERAL_TO_MEMORY    0u
 #define DMA_PERIPH_INCREASE_DISABLE 0u
@@ -190,6 +195,7 @@ typedef enum { DMA_CH0 = 0 } dma_channel_enum;
 #define DMA_PERIPHERAL_WIDTH_16BIT  0u
 #define DMA_MEMORY_WIDTH_16BIT      0u
 #define DMA_PRIORITY_MEDIUM         0u
+#define DMA_PRIORITY_HIGH           1u
 #define DMA_REQUEST_ADC0            0u
 #define DMA_REQUEST_ADC1            1u
 #define DMA_REQUEST_ADC2            2u
@@ -253,6 +259,40 @@ void     mock_dma_set_interrupt_flag(uint32_t         dma_periph,
  * test, not a vendor-header interface. */
 void DMA0_Channel0_IRQHandler(void);
 void DMA1_Channel0_IRQHandler(void);
+/* Burst-read completion IRQs, supplied by the production adc.c: converter slot
+ * n (ADC<n>) owns DMA1 CH(n+1). */
+void DMA1_Channel1_IRQHandler(void);
+void DMA1_Channel2_IRQHandler(void);
+void DMA1_Channel3_IRQHandler(void);
+void DMA1_Channel4_IRQHandler(void);
+
+/* Cortex-M33 DWT cycle counter, as far as the burst time bounds need it: a
+ * free-running CYCCNT the test sets directly (mock_dwt_cycles) and that
+ * additionally advances by mock_dwt_step on every read, so a bounded spin on it
+ * terminates on the host.  `DWT->CYCCNT` is a read of that model. */
+typedef struct {
+	volatile uint32_t CTRL;
+	volatile uint32_t CYCCNT;
+} DWT_Type;
+typedef struct {
+	volatile uint32_t DEMCR;
+} CoreDebug_Type;
+#define DWT_CTRL_CYCCNTENA_Msk     (1u << 0)
+#define CoreDebug_DEMCR_TRCENA_Msk (1u << 24)
+DWT_Type       *mock_dwt_ptr(void);
+CoreDebug_Type *mock_coredebug_ptr(void);
+#define DWT       (mock_dwt_ptr())
+#define CoreDebug (mock_coredebug_ptr())
+/* The counter only runs while DEMCR.TRCENA and DWT_CTRL.CYCCNTENA are both set,
+ * as on the part; a test clears them to model a debugger detach. */
+extern uint32_t mock_dwt_cycles;      /* the counter */
+extern uint32_t mock_dwt_step;        /* added after every CYCCNT read */
+extern uint32_t bridge_core_clock_hz; /* defined here: init.c is not linked */
+
+/* Test-only: called from adc_software_trigger_enable() (after the usual EOC
+ * model).  Lets a test play the hardware finishing a burst -- fill the DMA
+ * destination, raise FTF, run the IRQ -- or leave it to run later by hand. */
+void mock_adc_set_trigger_hook(mock_hook_t hook);
 /* One-shot callback from dma_transfer_number_get(), after the old count is
  * snapshotted but before it is returned. Models an ISR pre-empting the DSP
  * pump after owner commit and before its first data-plane mutation. */
@@ -312,7 +352,14 @@ void timer_disable(uint32_t timer_periph);
 /* NVIC -- logged only.                                                */
 /* ------------------------------------------------------------------ */
 
-typedef enum { DMA0_Channel0_IRQn = 0, DMA1_Channel0_IRQn = 1 } IRQn_Type;
+typedef enum {
+	DMA0_Channel0_IRQn = 0,
+	DMA1_Channel0_IRQn = 1,
+	DMA1_Channel1_IRQn = 2,
+	DMA1_Channel2_IRQn = 3,
+	DMA1_Channel3_IRQn = 4,
+	DMA1_Channel4_IRQn = 5
+} IRQn_Type;
 
 void nvic_irq_enable(IRQn_Type nvic_irq,
                      uint8_t   nvic_irq_pre_priority,
