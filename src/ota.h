@@ -33,8 +33,9 @@ gd32_bridge_status_t ota_dispatch(uint8_t        cmd,
  * in the OTA-inert (non-partitioned) build. */
 void ota_erase_tick(void);
 
-/* True while an OTA session is in flight (READY/BUSY/VERIFIED): the FMC
- * belongs to OTA, so other flash writers (boot_config) must back off. */
+/* True while an OTA session is in flight (READY/BUSY/VERIFIED, or a slot
+ * erase still running): the FMC belongs to OTA, so other flash writers
+ * (boot_config) must back off, and Deep-sleep / Standby entry is gated. */
 bool ota_session_active(void);
 
 /* Trial/confirm + watchdog fallback (bench fact 2026-09-26, E1M-V2M103).
@@ -50,10 +51,6 @@ void ota_boot_init(void);
  * ISR-safe (a single flag read); protocol_dispatch() consults this
  * before touching any opcode. */
 bool ota_trial_unconfirmed(void);
-
-/* An OTA session is open (BEGIN accepted, not yet committed/aborted) or a
- * flash erase is still running.  Gates Deep-sleep / Standby entry. */
-bool ota_session_active(void);
 
 /* Note that a wire frame arrived (a single store) -- the confirm signal
  * the trial is waiting for.  Safe to call unconditionally; a no-op

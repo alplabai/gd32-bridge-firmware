@@ -624,11 +624,6 @@ void ota_boot_init(void)
 	}
 }
 
-bool ota_session_active(void)
-{
-	return s_state != OTA_ST_IDLE && s_state != OTA_ST_ERROR;
-}
-
 bool ota_trial_unconfirmed(void)
 {
 	return s_trial;
