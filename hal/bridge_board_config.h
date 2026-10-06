@@ -80,6 +80,28 @@
  * (these pins also offer I2C1/I2C2 on other AFs — not used here). */
 #define BRIDGE_SPI_GPIO_AF GPIO_AF_5
 
+/* ATTN (v0.15 data-ready / attention line): GD32 PA14 -> RZ/V2N P71, active
+ * HIGH, push-pull, a LEVEL (low = deasserted).  PA14 is SWCLK: when ATTN is
+ * not enabled the pin is left in its SWD alternate function with the reset
+ * pull-down, so the host reads it as deasserted, and the firmware never
+ * drives it while a debugger may be driving it (docs/protocol-v0.15-design.md
+ * section 4.2, rules F1..F5).  Drive: slowest speed class, no pull.
+ *
+ * PA14 MUST NEVER appear in a GPIOx_LOCK mask: the lock freezes
+ * CTL/OMODE/OSPD/PUD/AFSEL until the next reset, and ATTN has to switch
+ * between output and the SWD alternate function at run time.  The GPIOA mask
+ * lives here so the assert below can see both. */
+#define BRIDGE_ATTN_PORT    GPIOA
+#define BRIDGE_ATTN_PIN     GPIO_PIN_14
+#define BRIDGE_ATTN_PIN_NUM 14u
+
+/* GPIOA lock set applied at the end of bridge_transport_i2c_hw_init():
+ * PA15 (I2C0 SCL) | PA10 (SPI1 MISO) | PA9 (SPI1 SCK) | PA8 (SPI1 NSS). */
+#define BRIDGE_GPIOA_LOCK_MASK 0x8700u
+_Static_assert((BRIDGE_GPIOA_LOCK_MASK & (1u << BRIDGE_ATTN_PIN_NUM)) == 0u,
+               "PA14 (ATTN / SWCLK) must never be in the GPIOA lock mask: the lock is "
+               "irreversible until reset and ATTN toggles PA14's mode at run time");
+
 /* =================================================================== */
 /* I2C slave transport — shared BRD_I2C management bus.                */
 /* 7-bit slave address from the protocol header (default 0x70).        */

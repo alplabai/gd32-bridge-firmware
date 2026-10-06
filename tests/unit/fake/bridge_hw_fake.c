@@ -61,6 +61,117 @@ static int forced(bridge_hw_fake_fn_t fn, int *out)
 	return 0;
 }
 
+/* ---- v0.15 link hardware / BEGIN2 / READ2 / ATTN -------------------------- */
+
+static int      s_attn_supported;
+static int      s_stream2_supported;
+static int      s_debugger_attached;
+static int      s_attn_on;
+static int      s_attn_streams_on;
+static uint32_t s_attn_streams_off_calls;
+static uint32_t s_attn_enable_calls;
+static uint32_t s_attn_quiesce_calls;
+static uint32_t s_attn_ev_set[FAKE_STREAM_COUNT];
+static uint32_t s_attn_ev_clear[FAKE_STREAM_COUNT];
+
+static bridge_hw_adc_stream2_info_t s_begin2_info;
+static struct {
+	uint8_t  stream_id;
+	uint8_t  channel;
+	uint32_t sample_rate_hz;
+	uint16_t watermark;
+} s_begin2_last;
+
+static struct {
+	uint32_t first_index;
+	uint32_t dropped;
+	uint8_t  got;
+	uint16_t codes[255];
+	int      unclamped;
+	uint8_t  last_max_samples;
+} s_read2;
+
+void bridge_hw_fake_set_link_hw(int attn_supported, int stream2_supported)
+{
+	s_attn_supported    = attn_supported;
+	s_stream2_supported = stream2_supported;
+}
+
+void bridge_hw_fake_set_debugger_attached(int attached)
+{
+	s_debugger_attached = attached;
+}
+
+int bridge_hw_fake_attn_streams_enabled(void)
+{
+	return s_attn_streams_on;
+}
+
+uint32_t bridge_hw_fake_attn_streams_off_calls(void)
+{
+	return s_attn_streams_off_calls;
+}
+
+int bridge_hw_fake_attn_enabled(void)
+{
+	return s_attn_on;
+}
+
+uint32_t bridge_hw_fake_attn_enable_calls(void)
+{
+	return s_attn_enable_calls;
+}
+
+uint32_t bridge_hw_fake_attn_quiesce_calls(void)
+{
+	return s_attn_quiesce_calls;
+}
+
+uint32_t bridge_hw_fake_attn_event_set_calls(uint8_t stream_id)
+{
+	return s_attn_ev_set[stream_id % FAKE_STREAM_COUNT];
+}
+
+uint32_t bridge_hw_fake_attn_event_clear_calls(uint8_t stream_id)
+{
+	return s_attn_ev_clear[stream_id % FAKE_STREAM_COUNT];
+}
+
+void bridge_hw_fake_begin2_set_info(const bridge_hw_adc_stream2_info_t *info)
+{
+	s_begin2_info = *info;
+}
+
+void bridge_hw_fake_begin2_get_last(uint8_t  *stream_id,
+                                    uint8_t  *channel,
+                                    uint32_t *sample_rate_hz,
+                                    uint16_t *watermark)
+{
+	if (stream_id) *stream_id = s_begin2_last.stream_id;
+	if (channel) *channel = s_begin2_last.channel;
+	if (sample_rate_hz) *sample_rate_hz = s_begin2_last.sample_rate_hz;
+	if (watermark) *watermark = s_begin2_last.watermark;
+}
+
+void bridge_hw_fake_read2_seed(uint32_t        first_index,
+                               uint32_t        dropped,
+                               uint8_t         got,
+                               const uint16_t *codes,
+                               int             unclamped)
+{
+	s_read2.first_index = first_index;
+	s_read2.dropped     = dropped;
+	s_read2.got         = got;
+	s_read2.unclamped   = unclamped;
+	memset(s_read2.codes, 0, sizeof(s_read2.codes));
+	if (codes != NULL) memcpy(s_read2.codes, codes, (size_t)got * sizeof(uint16_t));
+}
+
+uint8_t bridge_hw_fake_read2_last_max_samples(void)
+{
+	return s_read2.last_max_samples;
+}
+
 /* ---- reset-cause + DA9292 -------------------------------------------- */
 
 static uint8_t s_reset_reason;
@@ -460,6 +571,21 @@ void bridge_hw_fake_reset(void)
 	memset(s_stream, 0, sizeof(s_stream));
 	memset(s_spectrum, 0, sizeof(s_spectrum));
 
+	/* Looks like the gd32 backend unless a test says otherwise. */
+	s_attn_supported         = 1;
+	s_stream2_supported      = 1;
+	s_debugger_attached      = 0;
+	s_attn_on                = 0;
+	s_attn_streams_on        = 0;
+	s_attn_streams_off_calls = 0u;
+	s_attn_enable_calls      = 0u;
+	s_attn_quiesce_calls     = 0u;
+	memset(s_attn_ev_set, 0, sizeof(s_attn_ev_set));
+	memset(s_attn_ev_clear, 0, sizeof(s_attn_ev_clear));
+	memset(&s_begin2_info, 0, sizeof(s_begin2_info));
+	memset(&s_begin2_last, 0, sizeof(s_begin2_last));
+	memset(&s_read2, 0, sizeof(s_read2));
+
 	s_trng_seed = 0u;
 
 	memset(&s_tmu_last, 0, sizeof(s_tmu_last));
@@ -600,6 +726,46 @@ int bridge_hw_adc_stream_read(uint8_t   stream_id,
 	for (uint8_t i = 0; i < got; i++) {
 		const uint16_t v = stream_pop_or_zero(s);
 		if (mv) mv[i] = v;
+	}
+	return BRIDGE_HW_OK;
+}
+
+int bridge_hw_adc_stream_begin2(uint8_t                       stream_id,
+                                uint8_t                       channel,
+                                uint32_t                      sample_rate_hz,
+                                uint16_t                      watermark,
+                                bridge_hw_adc_stream2_info_t *info)
+{
+	int rv = 0;
+	if (forced(FAKE_FN_ADC_STREAM_BEGIN2, &rv)) return rv;
+	s_begin2_last.stream_id      = stream_id;
+	s_begin2_last.channel        = channel;
+	s_begin2_last.sample_rate_hz = sample_rate_hz;
+	s_begin2_last.watermark      = watermark;
+	if (info != NULL) *info = s_begin2_info;
+	return BRIDGE_HW_OK;
+}
+
+int bridge_hw_adc_stream_read2(uint8_t   stream_id,
+                               uint8_t   max_samples,
+                               uint32_t *first_index,
+                               uint32_t *dropped,
+                               uint8_t  *got,
+                               uint8_t  *codes_le)
+{
+	(void)stream_id;
+	int rv = 0;
+	if (forced(FAKE_FN_ADC_STREAM_READ2, &rv)) return rv;
+	s_read2.last_max_samples = max_samples;
+	uint8_t g                = s_read2.got;
+	if (!s_read2.unclamped && g > max_samples) g = max_samples;
+	if (first_index) *first_index = s_read2.first_index;
+	if (dropped) *dropped = s_read2.dropped;
+	if (got) *got = g;
+	for (uint8_t i = 0; i < g && codes_le != NULL; i++) {
+		const uint16_t v      = s_read2.codes[i];
+		codes_le[2u * i]      = (uint8_t)(v & 0xFFu);
+		codes_le[2u * i + 1u] = (uint8_t)(v >> 8);
 	}
 	return BRIDGE_HW_OK;
 }
@@ -829,4 +995,52 @@ int bridge_hw_adc_dsp_chain_bind(uint8_t chain_id, uint8_t stream_id)
 	int rv = 0;
 	if (forced(FAKE_FN_ADC_DSP_CHAIN_BIND, &rv)) return rv;
 	return BRIDGE_HW_OK;
+}
+
+/* v0.15 link-feature hardware. */
+bool bridge_hw_attn_supported(void)
+{
+	return s_attn_supported != 0;
+}
+
+bool bridge_hw_adc_stream2_supported(void)
+{
+	return s_stream2_supported != 0;
+}
+
+bool bridge_hw_debugger_attached(void)
+{
+	return s_debugger_attached != 0;
+}
+
+int bridge_hw_attn_enable(bool enable)
+{
+	s_attn_enable_calls++;
+	int rv = 0;
+	if (forced(FAKE_FN_ATTN_ENABLE, &rv)) return rv;
+	s_attn_on = enable ? 1 : 0;
+	return BRIDGE_HW_OK;
+}
+
+void bridge_hw_attn_event_set(uint8_t stream_id)
+{
+	s_attn_ev_set[stream_id % FAKE_STREAM_COUNT]++;
+}
+
+void bridge_hw_attn_streams_enable(bool enable)
+{
+	s_attn_streams_on = enable ? 1 : 0;
+	if (!enable) {
+		s_attn_streams_off_calls++;
+	}
+}
+
+void bridge_hw_attn_event_clear(uint8_t stream_id)
+{
+	s_attn_ev_clear[stream_id % FAKE_STREAM_COUNT]++;
+}
+
+void bridge_hw_attn_quiesce(void)
+{
+	s_attn_quiesce_calls++;
 }

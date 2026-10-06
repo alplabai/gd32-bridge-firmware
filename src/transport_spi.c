@@ -40,8 +40,11 @@ __attribute__((weak)) void bridge_transport_spi_hw_init(void)
 {
 }
 
-/* Maximum SPI envelope = SOF + (CMD or STATUS) + PAYLOAD + CRC. */
-#define SPI_MAX_FRAME_BYTES (1u + 1u + GD32_BRIDGE_MAX_PAYLOAD_BYTES + 2u)
+/* Maximum SPI envelope = SOF + (CMD or STATUS) + PAYLOAD + CRC, sized for
+ * the BIG_FRAME ceiling (v0.15: 256 bytes).  An un-negotiated link never
+ * sees more than 69 bytes of it -- see the >65 enforcement in
+ * decode_and_dispatch(). */
+#define SPI_MAX_FRAME_BYTES GD32_BRIDGE_SPI_MAX_FRAME_BYTES
 
 /* Receive-side staging buffer (filled byte-by-byte by the ISR). */
 static uint8_t spi_rx_buf[SPI_MAX_FRAME_BYTES];
@@ -80,6 +83,13 @@ static uint8_t spi_drain_streak;
  * "the stamp never advanced past my previous accepted reply". */
 static uint8_t spi_seq;
 
+/* Reply payload scratch for decode_and_dispatch().  Static rather than a
+ * 252-byte stack local: the SPI path is non-reentrant (one EXTI5_9 vector at
+ * NVIC priority 1, and protocol_dispatch() refuses a nested request), so one
+ * buffer is safe, and it takes the CS-EXTI stack chain from 65 bytes of
+ * locals to none.  BATCH and READ2 write their replies directly into it. */
+static uint8_t spi_reply_scratch[GD32_BRIDGE_SPI_BIG_MAX_PAYLOAD_BYTES];
+
 static void stage_reply(uint8_t status, const uint8_t *payload, size_t payload_len)
 {
 	if ((protocol_link_features(GD32_BRIDGE_LINK_SPI) & GD32_BRIDGE_LINK_FEAT_STATUS_SEQ) != 0u) {
@@ -109,8 +119,14 @@ static void stage_error_reply(uint8_t status)
 
 /* Decode an in-buffer request envelope; on success, dispatch and
  * stage the reply.  Called once the byte stream looks complete --
- * see spi_slave_cs_high() which fires on CS de-assert. */
-static void decode_and_dispatch(void)
+ * see spi_slave_cs_high() which fires on CS de-assert.
+ *
+ * Returns true when this call staged a FRESH reply, i.e. went through
+ * stage_reply(): a decoded request, an error envelope, or the tar-pit
+ * breaker.  False for the drain / empty-transaction rewinds, which only
+ * re-arm the reply already staged.  The ATTN line (hal/transport_hw_gd32.c)
+ * rises after a fresh stage and only conditionally otherwise. */
+static bool decode_and_dispatch(void)
 {
 	/* Empty transaction: CS toggled with no captured bytes.  Not only the
      * idle case -- when a host read collides with this handler still
@@ -134,10 +150,10 @@ static void decode_and_dispatch(void)
 	if (spi_rx_len == 0u) {
 		if (++spi_drain_streak > SPI_DRAIN_REWIND_BOUND) {
 			stage_error_reply(STATUS_IO); /* tar-pit breaker, see above */
-			return;
+			return true;
 		}
 		spi_tx_cursor = 0u;
-		return;
+		return false;
 	}
 
 	/* Request and reply ride SEPARATE CS transactions.  When the host reads a
@@ -157,7 +173,7 @@ static void decode_and_dispatch(void)
 		for (size_t i = 0u; i < spi_rx_len; i++) {
 			if (spi_rx_buf[i] != 0u) {
 				stage_error_reply(STATUS_IO);
-				return;
+				return true;
 			}
 		}
 		/* All-0x00: reply-drain.  REWIND the cursor, don't just keep the
@@ -175,10 +191,10 @@ static void decode_and_dispatch(void)
          * so the host's re-read schedule converges as documented. */
 		if (++spi_drain_streak > SPI_DRAIN_REWIND_BOUND) {
 			stage_error_reply(STATUS_IO); /* tar-pit breaker, see above */
-			return;
+			return true;
 		}
 		spi_tx_cursor = 0u;
-		return;
+		return false;
 	}
 
 	/* A request addressed to us (leading SOF) but too short to hold even an
@@ -186,7 +202,7 @@ static void decode_and_dispatch(void)
      * framing error -> STATUS_IO so the host re-syncs. */
 	if (spi_rx_len < 4u) {
 		stage_error_reply(STATUS_IO);
-		return;
+		return true;
 	}
 
 	const size_t   payload_len = spi_rx_len - 4u; /* SOF + CMD + .. + CRC(2) */
@@ -197,22 +213,45 @@ static void decode_and_dispatch(void)
 	TS_ONLY(const uint32_t ts_crc1 = timing_stats_now();)
 	if (got_crc != expect_crc) {
 		stage_error_reply(STATUS_IO);
-		return;
+		return true;
 	}
 
-	const uint8_t              cmd = spi_rx_buf[1];
-	uint8_t                    reply_pl[GD32_BRIDGE_MAX_PAYLOAD_BYTES];
+	/* Payload-length enforcement (v0.15, after the CRC so a garbage length
+	 * cannot reach here).  Only CMD_BATCH requests may exceed the base 65-byte
+	 * envelope, and then only up to the negotiated max_payload; every other
+	 * opcode -- OTA 0xF0..0xFF and ADC_DSP_STAGE_PUSH included -- keeps the
+	 * v0.14 limit.  That is what keeps the 0.14 exposure to a capture merged
+	 * with the next transaction's zero filler (the palindromic-CRC hole
+	 * src/ota.c documents) exactly as narrow as it was when the RX buffer
+	 * truncated at 69 bytes. */
+	const uint8_t  cmd = spi_rx_buf[1];
+	const uint16_t mp  = protocol_link_max_payload(GD32_BRIDGE_LINK_SPI);
+	if (cmd == (uint8_t)CMD_BATCH) {
+		if (payload_len > mp) {
+			stage_error_reply(STATUS_INVAL);
+			return true;
+		}
+	} else if (payload_len > GD32_BRIDGE_MAX_PAYLOAD_BYTES) {
+		stage_error_reply(STATUS_INVAL);
+		return true;
+	}
+	/* Only BATCH and READ2 replies may use the negotiated ceiling. */
+	const size_t reply_cap = (cmd == (uint8_t)CMD_BATCH || cmd == (uint8_t)CMD_ADC_STREAM_READ2)
+	                             ? (size_t)mp
+	                             : (size_t)GD32_BRIDGE_MAX_PAYLOAD_BYTES;
+
 	size_t                     reply_pl_len = 0u;
 	const gd32_bridge_status_t st = protocol_dispatch(GD32_BRIDGE_LINK_SPI,
 	                                                  cmd,
 	                                                  payload_len > 0u ? &spi_rx_buf[2] : NULL,
 	                                                  payload_len,
-	                                                  reply_pl,
-	                                                  sizeof(reply_pl),
+	                                                  spi_reply_scratch,
+	                                                  reply_cap,
 	                                                  &reply_pl_len);
 	TS_ONLY(const uint32_t ts_disp1 = timing_stats_now();)
-	stage_reply((uint8_t)st, reply_pl, reply_pl_len);
+	stage_reply((uint8_t)st, spi_reply_scratch, reply_pl_len);
 	TS_ONLY(timing_stats_record(ts_crc0, ts_crc1, ts_disp1, timing_stats_now(), cmd);)
+	return true;
 }
 
 /* --------------------------------------------------------------- */
@@ -237,10 +276,11 @@ void spi_slave_rx_byte(uint8_t b)
      * since the trailing CRC bytes never landed in the buffer. */
 }
 
-/* Call on CS rising-edge: signals end of request envelope. */
-void spi_slave_cs_high(void)
+/* Call on CS rising-edge: signals end of request envelope.  Returns true
+ * when a fresh reply was staged (see decode_and_dispatch). */
+bool spi_slave_cs_high(void)
 {
-	decode_and_dispatch();
+	return decode_and_dispatch();
 }
 
 /* Hardware-side faults which make the captured byte run untrustworthy --

@@ -189,31 +189,57 @@ ZTEST(gd32_bridge_transport_i2c, test_write_end_dispatches_non_idempotent_comman
 	zassert_equal(no_pending[2], (uint8_t)(no_pending_crc >> 8));
 }
 
-/* Switching this suite to the injectable fake also makes the largest valid
- * STATUS_OK reply reachable end-to-end through the I2C staging buffer. */
-ZTEST(gd32_bridge_transport_i2c, test_max_length_reply_is_staged_intact)
+/* The longest STATUS_OK reply the I2C link can carry end-to-end through
+ * protocol_dispatch().  v0.15 restricts the I2C link to a short opcode
+ * allow-list (see src/protocol.c), so the 65-byte ADC_STREAM_READ reply this
+ * case used to stage is no longer reachable here; GET_BUILD_ID (20 bytes) is
+ * now the longest allowed.  The transport's full-capacity staging is pinned
+ * by the transport_i2c_maxlen suite, which drives it with a stand-in
+ * dispatcher. */
+ZTEST(gd32_bridge_transport_i2c, test_longest_allowed_reply_is_staged_intact)
 {
-	const uint8_t payload[] = { 0u, GD32_BRIDGE_ADC_STREAM_READ_MAX };
-	uint8_t       req[6];
-	uint8_t       reply[1u + GD32_BRIDGE_MAX_PAYLOAD_BYTES + 2u];
+	uint8_t req[4];
+	uint8_t reply[1u + GD32_BRIDGE_BUILD_ID_LEN + 2u];
 
 	transport_i2c_init();
 	bridge_hw_fake_reset();
 
-	const size_t req_len = build_write(req, CMD_ADC_STREAM_READ, payload, sizeof(payload));
+	const size_t req_len = build_write(req, CMD_GET_BUILD_ID, NULL, 0u);
 	zassert_true(write_phase(req, req_len));
 	read_phase(reply, sizeof(reply));
 
 	zassert_equal(reply[0], STATUS_OK);
-	zassert_equal(reply[1], 0u, "empty fake stream reports zero valid samples");
-	for (size_t i = 2u; i < 1u + GD32_BRIDGE_MAX_PAYLOAD_BYTES; i++) {
-		zassert_equal(reply[i], 0u, "unused sample slots are zero-padded");
-	}
-
-	const size_t   crc_covered = 1u + GD32_BRIDGE_MAX_PAYLOAD_BYTES;
+	const size_t   crc_covered = 1u + GD32_BRIDGE_BUILD_ID_LEN;
 	const uint16_t crc         = crc16_ccitt_false(reply, crc_covered);
 	zassert_equal(reply[crc_covered], (uint8_t)(crc & 0xFFu));
 	zassert_equal(reply[crc_covered + 1u], (uint8_t)(crc >> 8));
+}
+
+/* v0.15 I2C opcode policy, end to end through the transport: an opcode
+ * outside the allow-list answers an empty NOSUPPORT, bumps the SWD
+ * diagnostics, and never reaches its HAL handler.  OTA and the allow-listed
+ * opcodes still run. */
+ZTEST(gd32_bridge_transport_i2c, test_i2c_opcode_policy_denies_adc_read)
+{
+	const uint8_t payload[] = { 0u, 4u }; /* ADC_READ ch0, 4 samples */
+	uint8_t       req[6];
+	uint8_t       reply[3];
+
+	transport_i2c_init();
+	bridge_hw_fake_reset();
+	const uint32_t denied_before = bridge_i2c_denied_count;
+
+	const size_t req_len = build_write(req, CMD_ADC_READ, payload, sizeof(payload));
+	zassert_true(write_phase(req, req_len));
+	read_phase(reply, sizeof(reply));
+
+	zassert_equal(reply[0], STATUS_NOSUPPORT, "denied opcode answers NOSUPPORT");
+	const uint16_t crc = crc16_ccitt_false(reply, 1u);
+	zassert_equal(reply[1], (uint8_t)(crc & 0xFFu), "empty-payload envelope CRC");
+	zassert_equal(reply[2], (uint8_t)(crc >> 8));
+	zassert_equal(bridge_i2c_denied_count, denied_before + 1u);
+	zassert_equal(bridge_i2c_denied_last_cmd, CMD_ADC_READ);
+	zassert_equal(bridge_hw_fake_call_count(FAKE_FN_ADC_READ), 0u, "handler never ran");
 }
 
 /* Closes the CRC-algorithm-mutation gap directly: crc16_ccitt_false()

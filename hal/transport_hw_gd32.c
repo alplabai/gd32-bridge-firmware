@@ -103,12 +103,18 @@ static void spi_gpio_init(void)
 
 /* ── SPI slave DMA plumbing ─────────────────────────────────────────── */
 
-/* HAL-side DMA staging.  RX captures up to one max wire envelope
- * (1 SOF + 1 CMD/STATUS + 65 payload + 2 CRC = 69 B; padded for margin --
- * anything the master over-clocks beyond this simply stops being captured
- * and the CRC check fails loud).  TX holds the staged reply drained from
- * the portable seams at decode time so the DMA has a stable flat buffer. */
-#define BRIDGE_SPI_DMA_BUF_LEN         72u
+/* HAL-side DMA staging.  RX captures up to one max wire envelope: with
+ * BIG_FRAME that is 1 SOF + 1 CMD/STATUS + 252 payload + 2 CRC = 256 B
+ * (GD32_BRIDGE_SPI_MAX_FRAME_BYTES), plus 4 B of margin -- the same margin
+ * the old 72 gave over the 69-byte envelope.  Anything the master
+ * over-clocks beyond this simply stops being captured and the CRC check
+ * fails loud; a host must never clock more than 256 B in one CS window (the
+ * 4-frame RX FIFO would overflow and RXORERR replaces the staged reply with
+ * STATUS_IO).  TX holds the staged reply drained from the portable seams at
+ * decode time so the DMA has a stable flat buffer. */
+#define BRIDGE_SPI_DMA_BUF_LEN 260u
+_Static_assert(BRIDGE_SPI_DMA_BUF_LEN >= GD32_BRIDGE_SPI_MAX_FRAME_BYTES,
+               "the SPI DMA staging must hold a full BIG_FRAME envelope");
 #define BRIDGE_SPI_DMA_DISABLE_SPINS   64u
 #define BRIDGE_SPI_RX_FIFO_FRAMES      4u
 #define BRIDGE_SPI_DMA_ERR_IRQ_PRIO    3u
@@ -350,6 +356,156 @@ void bridge_transport_spi_hw_init(void)
 	spi_cs_exti_init();
 }
 
+/* =================================================================== */
+/* ATTN -- data-ready / attention line on PA14 (v0.15)                   */
+/* =================================================================== */
+/* Level semantics, drive points and the PA14-is-SWCLK safety rules are in
+ * docs/protocol-v0.15-design.md section 4 (F1..F5) and hal/bridge_board_config.h.
+ * Shape of this block:
+ *
+ *   attn_on  -- the SPI link's feature word has ATTN.  Only then does this
+ *               firmware ever drive PA14 (F1).
+ *   attn_ev  -- one bit per ADC stream: a watermark was reached and the
+ *               host has not read it yet.
+ *
+ * Drive points: LOW at CS falling and at CS-rising entry; HIGH at CS-rising
+ * exit after a FRESH reply is staged and its TX DMA armed (or, with no fresh
+ * stage, only when an event is pending); HIGH from a watermark event only
+ * while CS is idle (PA8 high) and no CS edge is pending (EXTI_PD0 bit 8
+ * clear) -- both tested inside one PRIMASK section so the CS-EXTI handler
+ * cannot slip between the test and the drive.  READ2 / STREAM_END clear the
+ * stream's event bit; the pin itself only falls at the next CS falling edge,
+ * which is what a level-per-reply protocol wants.
+ *
+ * Writers: enable/disable and READ2's clear run in the CS-EXTI dispatch
+ * (prio 1); the watermark set runs in the ADC-stream DMA IRQ (prio 3) or the
+ * base-level pump.  Every read-modify-write of attn_ev therefore takes the
+ * PRIMASK lock. */
+static volatile bool    attn_on;
+static volatile uint8_t attn_ev;
+/* Watermark events only matter while ADC_STREAM2 is granted: with READ2
+ * refused there is nothing able to clear them and ATTN would keep rising. */
+static volatile bool attn_streams_on;
+/* Set by POWER_MODE_SET's quiesce: ATTN stays low (events latch but do not
+ * drive) until the next CS edge, so a watermark IRQ cannot re-raise it
+ * during SLEEP / DEEP_SLEEP.  A SPI edge is what wakes the host's exchange. */
+static volatile bool attn_quiesced;
+
+#ifndef BRIDGE_DHCSR
+#define BRIDGE_DHCSR (*(volatile uint32_t *)0xE000EDF0u)
+#endif
+#define BRIDGE_DHCSR_C_DEBUGEN 0x00000001u
+
+bool bridge_hw_debugger_attached(void)
+{
+	return (BRIDGE_DHCSR & BRIDGE_DHCSR_C_DEBUGEN) != 0u;
+}
+
+bool bridge_hw_attn_supported(void)
+{
+	return true;
+}
+
+static void attn_pin_low(void)
+{
+	gpio_bit_reset(BRIDGE_ATTN_PORT, BRIDGE_ATTN_PIN);
+}
+
+static void attn_pin_high(void)
+{
+	gpio_bit_set(BRIDGE_ATTN_PORT, BRIDGE_ATTN_PIN);
+}
+
+int bridge_hw_attn_enable(bool enable)
+{
+	const uint32_t st = bridge_irq_lock();
+	if (enable && !attn_on) {
+		/* Output latch low FIRST (GPIO_BC), then push-pull / slowest speed /
+		 * no pull, then output mode: PA14 never glitches high. */
+		attn_pin_low();
+		gpio_output_options_set(
+		    BRIDGE_ATTN_PORT, GPIO_OTYPE_PP, GPIO_OSPEED_12MHZ, BRIDGE_ATTN_PIN);
+		gpio_mode_set(BRIDGE_ATTN_PORT, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, BRIDGE_ATTN_PIN);
+		attn_ev       = 0u;
+		attn_quiesced = false;
+		attn_on       = true;
+	} else if (!enable && attn_on) {
+		/* Drive low, then hand PA14 back to SWD: AF0 with its reset
+		 * pull-down.  Pending events die with the line. */
+		attn_on = false;
+		attn_ev = 0u;
+		attn_pin_low();
+		gpio_af_set(BRIDGE_ATTN_PORT, GPIO_AF_0, BRIDGE_ATTN_PIN);
+		gpio_mode_set(BRIDGE_ATTN_PORT, GPIO_MODE_AF, GPIO_PUPD_PULLDOWN, BRIDGE_ATTN_PIN);
+	}
+	bridge_irq_unlock(st);
+	return BRIDGE_HW_OK;
+}
+
+void bridge_hw_attn_event_set(uint8_t stream_id)
+{
+	const uint32_t st = bridge_irq_lock();
+	if (attn_on && attn_streams_on) {
+		attn_ev = (uint8_t)(attn_ev | (1u << stream_id));
+		/* PA8 high = CS idle; a pending EXTI line-8 bit means an edge this
+		 * handler has not serviced yet, and the CS-rising exit re-evaluates. */
+		if (!attn_quiesced &&
+		    gpio_input_bit_get(BRIDGE_SPI_NSS_PORT, BRIDGE_SPI_NSS_PIN) != RESET &&
+		    (EXTI_PD0 & (1u << 8)) == 0u) {
+			attn_pin_high();
+		}
+	}
+	bridge_irq_unlock(st);
+}
+
+void bridge_hw_attn_event_clear(uint8_t stream_id)
+{
+	const uint32_t st = bridge_irq_lock();
+	attn_ev           = (uint8_t)(attn_ev & ~(1u << stream_id));
+	bridge_irq_unlock(st);
+}
+
+void bridge_hw_attn_streams_enable(bool enable)
+{
+	const uint32_t st = bridge_irq_lock();
+	attn_streams_on   = enable;
+	if (!enable) attn_ev = 0u;
+	bridge_irq_unlock(st);
+}
+
+void bridge_hw_attn_quiesce(void)
+{
+	/* Under the lock, so a prio-3 watermark event either ran before (and is
+	 * pulled low here) or sees the flag and only latches. */
+	const uint32_t st = bridge_irq_lock();
+	if (attn_on) {
+		attn_quiesced = true;
+		attn_pin_low();
+	}
+	bridge_irq_unlock(st);
+}
+
+/* CS falling and CS-rising entry: deassert.  A CS edge also ends a quiesce. */
+static void attn_cs_low_edge(void)
+{
+	if (attn_on) {
+		attn_quiesced = false;
+		attn_pin_low();
+	}
+}
+
+/* CS-rising exit: `fresh` means a reply was staged AND its TX DMA armed.  The
+ * same CS-idle gate as the event assert: if the host already re-asserted CS
+ * (a coalesced next transaction) the line stays low and the next CS-rising
+ * exit re-evaluates. */
+static void attn_cs_exit(bool fresh)
+{
+	if (attn_on && (fresh || attn_ev != 0u) &&
+	    gpio_input_bit_get(BRIDGE_SPI_NSS_PORT, BRIDGE_SPI_NSS_PIN) != RESET) {
+		attn_pin_high();
+	}
+}
+
 /* CS edge: PA8 on EXTI8.  Falling = select (reset RX, preload the staged
  * reply); rising = end of transaction (decode + stage the next reply).
  *
@@ -394,7 +550,9 @@ void BRIDGE_SPI_CS_EXTI_HANDLER(void)
 	 * 0x000003E0 = lines 5..9.  Clear exactly what was pending AT
 	 * ENTRY: an edge arriving between the read and the clear must keep
 	 * its pending bit and re-enter the handler, never be swallowed. */
-	const uint32_t group_pd = EXTI_PD0 & 0x000003E0u;
+	const uint32_t group_pd   = EXTI_PD0 & 0x000003E0u;
+	bool           attn_exit  = false; /* rising edge handled: re-evaluate ATTN at exit */
+	bool           attn_fresh = false; /* fresh reply staged and its TX DMA armed */
 	if ((group_pd & (1u << 8)) != 0u) {
 		if (RESET == gpio_input_bit_get(BRIDGE_SPI_NSS_PORT, BRIDGE_SPI_NSS_PIN)) {
 			/* CS asserted (active-low): reset the portable RX staging and
@@ -404,6 +562,7 @@ void BRIDGE_SPI_CS_EXTI_HANDLER(void)
              * the master's setup window leaves time before the first SCK).
              * The TX DMA armed at the previous CS-rising stays untouched:
              * it holds the staged reply this transaction may be reading. */
+			attn_cs_low_edge();
 			spi_slave_cs_low();
 			spi_dma_arm_rx();
 		} else {
@@ -438,6 +597,8 @@ void BRIDGE_SPI_CS_EXTI_HANDLER(void)
              * protocol_dispatch() in step 4 is deliberately outside that
              * budget (see above). */
 			TS_ONLY(timing_stats_mark_cs_edge();)
+			attn_cs_low_edge(); /* also covers a coalesced falling edge */
+			attn_exit              = true;
 			const bool rx_quiesced = spi_dma_disable_confirm(BRIDGE_SPI_RX_DMA_CH);
 			const bool tx_quiesced = spi_dma_disable_confirm(BRIDGE_SPI_TX_DMA_CH);
 			if (!rx_quiesced || !tx_quiesced) {
@@ -479,7 +640,7 @@ void BRIDGE_SPI_CS_EXTI_HANDLER(void)
 					spi_tx_dma_buf[reply_len++] = spi_slave_tx_next_byte();
 				}
 				spi_dma_arm_rx();
-				spi_dma_arm_tx(reply_len);
+				attn_fresh = spi_dma_arm_tx(reply_len); /* the IO envelope is a fresh stage */
 				goto clear_group;
 			}
 
@@ -511,18 +672,23 @@ void BRIDGE_SPI_CS_EXTI_HANDLER(void)
 			 * out above (it took the error-seam return), so this is always
 			 * the clean-decode path. */
 			spi_dma_arm_rx();
-			spi_slave_cs_high();
+			const bool fresh_stage = spi_slave_cs_high();
 
 			uint32_t reply_len = 0;
 			while (spi_slave_tx_pending() && (reply_len < BRIDGE_SPI_DMA_BUF_LEN)) {
 				spi_tx_dma_buf[reply_len++] = spi_slave_tx_next_byte();
 			}
 
-			spi_dma_arm_tx(reply_len);
+			const bool tx_armed = spi_dma_arm_tx(reply_len);
+			attn_fresh          = fresh_stage && tx_armed;
 		}
 	}
 
 clear_group:
+	/* ATTN rises (or stays low) only after the reply is armed; see the ATTN
+	 * block above.  Ahead of the group clear, which stays the last action. */
+	if (attn_exit) attn_cs_exit(attn_fresh);
+
 	/* Group clear LAST, with the entry snapshot (gh#66): every line
 	 * this vector owns that was pending at entry is cleared here.
 	 * rc_w1 pending bits have no read/clear race protection: an edge
@@ -803,7 +969,7 @@ int bridge_transport_i2c_hw_init(void)
 	 * address/enable writes touch I2C registers, not GPIO.  Nothing
 	 * else in the tree reconfigures a locked pad.  The lock is
 	 * irreversible until the next MCU reset -- that is the point. */
-	gpio_lock_port(GPIOA, 0x8700u);
+	gpio_lock_port(GPIOA, BRIDGE_GPIOA_LOCK_MASK);
 	gpio_lock_port(GPIOB, 0x8200u);
 	gpio_lock_port(GPIOC, 0x2000u);
 

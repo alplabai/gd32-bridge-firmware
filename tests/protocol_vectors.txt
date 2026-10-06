@@ -45,8 +45,8 @@ spi_ping_request               = A50084FF
 spi_ping_reply_ok              = A50084FF
 # SOF | CMD=0x01 (GET_VERSION) | CRC -- empty payload
 spi_get_version_request        = A501A5EF
-# SOF | STATUS=0x00 | major=0 | minor=15 | patch=0 | CRC
-spi_get_version_reply_v0_15_0  = A500000F000108
+# SOF | STATUS=0x00 | major=0 | minor=16 | patch=0 | CRC
+spi_get_version_reply_v0_16_0  = A5000010004C1B
 
 # ---------------------------------------------------------------------
 # §3. I2C envelopes -- register-style framing
@@ -221,3 +221,57 @@ spi_timer_sync_t0_master_t7_slave_request = A5270001006D4D
 spi_adc_spectrum_read_stream0_request = A53A00000004FDA6
 # SOF | STATUS=0x00 | seq=1 (LE) | total_bins=10 (LE) | got=2 | bins[0]=4.0f | bins[1]=8.0f | bins[2..3]=0 (zero-padded, i >= got) | CRC -- REPRESENTATIVE of the wired gd32 HAL body, not the stub backend's STATUS_NOSUPPORT reply
 spi_adc_spectrum_read_reply_example = A500010000000A00020000804000000041000000000000000096ED
+
+# ---------------------------------------------------------------------
+# §16. v0.15 additions -- extended LINK_FEATURES, I2C opcode policy,
+#       ADC_STREAM_BEGIN2 / READ2, CMD_BATCH, the >65 B enforcement
+#       (docs/protocol-v0.15-design.md section 9)
+# ---------------------------------------------------------------------
+# SOF | CMD=0x81 | want=0x0000001F (STATUS_SEQ|BIG_FRAME|ATTN|ADC_STREAM2|BATCH, u32 LE) | max_payload_req=252 (u16 LE) | CRC -- the 6-byte v0.15 form; pre-v0.15 firmware answers spi_reply_inval
+spi_link_features_ext_request_all = A5811F000000FC00DA65
+# SOF | STATUS=0x10 (OK, stamp 1) | granted=0x1F | supported=0x1F | max_payload=252 | CRC -- gd32 backend, nothing refused
+spi_link_features_ext_reply_all_seq1 = A5101F0000001F000000FC006850
+# SOF | STATUS=0x10 | granted=0x1B | supported=0x1F | max_payload=252 | CRC -- ATTN (bit 2) is in `supported` but not `granted`: a debugger is attached (DHCSR.C_DEBUGEN), PA14 is SWCLK
+spi_link_features_ext_reply_attn_refused_seq1 = A5101B0000001F000000FC005DFD
+# SOF | STATUS=0x10 | granted=0x13 | supported=0x13 | max_payload=252 | CRC -- stub backend: no ATTN, no ADC_STREAM2
+spi_link_features_ext_reply_stub_seq1 = A5101300000013000000FC00F5BC
+# SOF | STATUS=0x01 (INVAL) | empty payload | CRC -- also the v0.7..v0.14 answer to the 6-byte LINK_FEATURES form, a BATCH that fails validation, and a non-BATCH request over 65 bytes
+spi_reply_inval                = A501A5EF
+# reg=0x00 | CMD=0x81 | want=0x1F | max_payload_req=252 | CRC(CMD..) -- the I2C link supports only STATUS_SEQ
+i2c_link_features_ext_write    = 00811F000000FC007D6B
+# STATUS=0x00 | granted=0x00000001 | supported=0x00000001 | max_payload=65 | CRC -- I2C never grants BIG_FRAME / ATTN / ADC_STREAM2 / BATCH, and never stamps
+i2c_link_features_ext_read     = 000100000001000000410017C0
+# reg=0x00 | CMD=0x30 (ADC_READ) | channel=0 | samples=4 | CRC -- ADC_READ is not on the I2C allow-list
+i2c_adc_read_ch0_4_write_denied = 00300004BD49
+# STATUS=0x06 (NOSUPPORT) | empty payload | CRC -- the handler never ran; bridge_i2c_denied_count++ and bridge_i2c_denied_last_cmd=0x30
+i2c_adc_read_ch0_4_read_denied = 063681
+# reg=0x00 | CMD=0xF5 (OTA_GET_STATE) | CRC -- 0xF0..0xFF stay reachable over I2C (Linux tools/gd32-ota-host)
+i2c_ota_get_state_write_allowed = 00F54A5E
+# SOF | CMD=0x3B | stream_id=0 | channel=0 | trigger_src=0 (PACE_TIMER) | trigger_arg=0 | sample_rate_hz=1000 | watermark=256 | reserved=0 | CRC (12-byte payload)
+spi_adc_stream_begin2_s0_ch0_1khz_w256_request = A53B00000000E8030000000100006D9B
+# SOF | STATUS=0x00 | tick_hz=1000000 | period_ticks=1000 | full_scale=4095 | vref_mv=1800 | flags=0x01 (VREF_MEASURED) | watermark=256 | ring_depth=512 (2*W) | CRC (17-byte payload)
+spi_adc_stream_begin2_reply_1khz_w256 = A50040420F00E8030000FF0F080701000100026843
+# SOF | STATUS=0x00 | tick_hz=1000000 | period_ticks=3333 (floor of 1000000/300: the REALISED rate is tick_hz/period_ticks = 300.03 Hz) | full_scale=4095 | vref_mv=1800 | flags=0x00 (the 1800 mV fallback, not measured) | watermark=0 | ring_depth=1024 | CRC
+spi_adc_stream_begin2_reply_300hz_truncation = A50040420F00050D0000FF0F08070000000004D527
+# SOF | CMD=0x3C | stream_id=0 | max_samples=121 (the ceiling at max_payload 252: (252-9)/2) | CRC
+spi_adc_stream_read2_s0_max121_request = A53C0079898D
+# SOF | STATUS=0x00 | first_index=256 | dropped=0 | got=3 | codes=0x0800,0x0801,0x0FFF (u16 LE, right-aligned raw) | CRC at offset 11+2*got -- the host clocks 13+2*max_samples bytes and finds the CRC from `got`
+spi_adc_stream_read2_reply_got3 = A50000010000000000000300080108FF0F47D4
+# SOF | STATUS=0x00 | first_index=259 | dropped=0 | got=0 | CRC -- an empty ring is STATUS_OK, not an error
+spi_adc_stream_read2_reply_empty = A5000301000000000000004614
+# SOF | STATUS=0x00 | first_index=291 | dropped=32 | got=2 | codes | CRC -- overrun is STATUS_OK with `dropped` set, never BUSY
+spi_adc_stream_read2_reply_overrun_dropped32 = A50023010000200000000200080108D4AB
+# SOF | STATUS=0x00 | first_index=293 | dropped=0xFFFFFFFF (a discontinuity of UNKNOWN length: ROVF recovery, a DSP pump gap) | got=0 | CRC
+spi_adc_stream_read2_reply_discontinuity = A50025010000FFFFFFFF00A234
+# SOF | CMD=0x04 | count=3 | {0x11 len 8 mask=1 levels=1} | {0x21 len 1 ch=0} | {0x3C len 2 stream=0 max=16} | CRC
+spi_batch_request_gpiow_pwmget_read2 = A50403110801000000010000002101003C0200109904
+# SOF | CMD=0x04 | count=3 | GPIO_WRITE | READ2 on stream 1 (not running) | PING | CRC -- execution stops at the INVAL
+spi_batch_request_gpiow_read2_inactive_ping = A50403110801000000010000003C0201100000E7FB
+# SOF | STATUS=0x00 (outer OK: the batch validated) | executed=2 | {status=0x00 len=0} | {status=0x01 (INVAL) len=0} | CRC -- the third op (PING) never ran; a non-OK sub-status always has len 0
+spi_batch_reply_stop_at_first_error = A5000200000100D43A
+# SOF | CMD=0x04 | count=1 | {0x04 len 0} | CRC -- a nested BATCH is not on the allow-list; reply = spi_reply_inval, nothing executed
+spi_batch_request_nested_rejected = A5040104003A29
+# SOF | CMD=0x04 | count=1 | {0x00 len 0} | one TRAILING 0x00 | CRC -- the request length must equal 1 + sum(2+len) exactly; reply = spi_reply_inval (the defence against zero-extended captures)
+spi_batch_request_trailing_byte_rejected = A504010000008B53
+# SOF | CMD=0xF1 | offset=0 | len=61 | 61 data bytes (66-byte payload) | CRC -- only BATCH and READ2 may exceed 65 bytes, even on a BIG_FRAME link, so OTA keeps its 56-byte chunks; reply = spi_reply_inval
+spi_ota_write_chunk_over_65_rejected_on_big_link = A5F1000000003DA5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5B962

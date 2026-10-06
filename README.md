@@ -163,6 +163,53 @@ breaks every host that has not been rebuilt against the matching
 [`<alp/chips/gd32g553.h>`](https://github.com/alplabai/alp-sdk/blob/main/include/alp/chips/gd32g553.h) -- treat
 it as a wire-incompatible change and stage carefully.
 
+## Protocol v0.15 (negotiated)
+
+`GET_VERSION` reports `0.16.0` (0.16 = v0.15 plus GPIO bits 21/22, E1M IO15/IO26). The full design -- wire layouts, the grant
+algorithm, the ATTN pin rules -- is
+[`docs/protocol-v0.15-design.md`](docs/protocol-v0.15-design.md); the points a
+firmware reader needs:
+
+* **Everything new is opt-in per link.** The 6-byte form of `CMD_LINK_FEATURES`
+  (`want:u32`, `max_payload_req:u16`; 10-byte reply `granted`, `supported`,
+  `max_payload`) negotiates `STATUS_SEQ`, `BIG_FRAME`, `ATTN`, `ADC_STREAM2` and
+  `BATCH` on the SPI link. The legacy 1-byte form still keeps only `STATUS_SEQ`
+  and clears the rest, so an un-negotiated SPI link is byte-identical to v0.14
+  in both directions.
+* **`BIG_FRAME`** lifts the payload ceiling to at most 252 bytes (a 256-byte SPI
+  frame) for exactly two things: `CMD_BATCH` (`0x04`) requests and replies, and
+  `CMD_ADC_STREAM_READ2` (`0x3C`) replies. Every other opcode -- OTA
+  `0xF0..0xFF` included -- keeps the 65-byte limit, which
+  `src/transport_spi.c` enforces after the CRC check. `OTA_CHUNK_MAX` stays 56
+  (asserted in `src/ota.c`).
+* **`ATTN`** is a level on GD32 `PA14` (`P71` on the RZ/V2N): high means a reply
+  is armed or a watermark event is pending. `PA14` is also SWCLK, so the
+  firmware drives it only while `ATTN` is in the link's feature word, never
+  while a debugger is attached (`DHCSR.C_DEBUGEN`), and never adds it to a GPIO
+  lock mask. Any reset returns it to SWCLK. The drive points live in
+  `hal/transport_hw_gd32.c`; the pin is `BRIDGE_ATTN_*` in
+  [`hal/bridge_board_config.h`](hal/bridge_board_config.h).
+* **`CMD_ADC_STREAM_BEGIN2` / `_READ2`** report the *realised* sample rate
+  (`tick_hz / period_ticks`), refuse a rate whose conversion time does not fit
+  the pacing period, size the ring for at least a 5 ms lap at the realised rate (at least `2 x watermark`, so the granted watermark can exceed the requested one), and report overrun as
+  `dropped` on an `OK` reply (never `BUSY`) with a `first_index` delivered
+  index; `dropped = 0xFFFFFFFF` means a gap of unknown length. The
+  vendor-header-free arithmetic is `hal/gd32/adc_stream2.c`, host-tested in
+  `tests/unit/adc_stream2/`.
+* **`CMD_BATCH`** runs up to 16 allow-listed operations through the same
+  handlers as standalone requests, validates the whole request before executing
+  anything, and stops at the first non-`OK` sub-status.
+* **The one unconditional change is the I2C opcode allow-list**: the I2C link
+  carries only `0x00..0x03`, `0x10`, `0x11`, `0x41`, `0x81` and `0xF0..0xFF`;
+  every other opcode answers an empty `STATUS_NOSUPPORT` and never reaches its
+  handler. `bridge_i2c_denied_count` / `bridge_i2c_denied_last_cmd` (SWD-readable)
+  record the refusals. SPI is unrestricted.
+
+The cost: `.bss` grows by about 1 KB (256-byte SPI buffers, a 252-byte static
+reply scratch in place of a 65-byte stack buffer), and `BRIDGE_SPI_DMA_BUF_LEN`
+is 260. Bench items that remain open are in
+[`docs/BENCH.md`](docs/BENCH.md) Phase 11.
+
 ## GPIO + PWM channel maps
 
 The wire-side **logical** ids that the protocol uses do **not**
@@ -253,8 +300,8 @@ yet); firmware v0.12 and earlier do the same for bit 20. A host
 relying on bits 18/19 must require `PROTOCOL_VERSION_MINOR >= 11`,
 and on bit 20 must require `PROTOCOL_VERSION_MINOR >= 13` (both via
 `GET_VERSION`), before trusting that the write actually took effect.
-Bits 21/22 (E1M IO15/IO26) likewise need `PROTOCOL_VERSION_MINOR >= 15`;
-older firmware ignores them and still returns `STATUS_OK`. Like the other
+Bits 21/22 (E1M IO15/IO26) need `PROTOCOL_VERSION_MINOR >= 16` (0.15 firmware
+lacks them); older firmware ignores them and still returns `STATUS_OK`. Like the other
 E1M pads they have no boot-time drive; the first host read/write promotes
 them. `PC14` (bit 8) is untouched and `LXTAL` stays disabled.
 
