@@ -2,26 +2,23 @@
  * Copyright 2026 Alp Lab AB
  * SPDX-License-Identifier: Apache-2.0
  *
- * GD32G5x3 bridge HAL backend -- I2C3 master proxy (protocol v0.17,
+ * GD32G5x3 bridge HAL backend -- I2C master proxy (protocol v0.17,
  * CMD_I2CM_CONFIG / _XFER / _RESULT), register driver half.  The job
- * state machine lives in i2cm_core.c; this file is the polled I2C3 master
+ * state machine lives in i2cm_core.c; this file is the polled master
  * behind its i2cm_ops_t plus the bridge_hw_i2cm_*() HAL entry points.
  *
- * Wiring (SoM 2625-R2 + X-EVK V2): GD32 U41 PC8 = I2C3_SCL (E1M-X pad
- * A24), PC9 = I2C3_SDA (pad A23).  No pull-ups on the SoM: the carrier /
- * module provides them.  The pads are hi-Z (analog) until the first
- * CMD_I2CM_CONFIG and again after a Deep-sleep wake.
+ * E1M-X I2C3 bus = GD32 I2C2 peripheral (PC8/PC9, AF8).  Wiring (SoM
+ * 2625-R2 + X-EVK V2): PC8 = SCL (E1M-X pad A24), PC9 = SDA (pad A23).
+ * Source: GD32G553xx Datasheet Rev1.5, pin alternate-function table:
+ * PC8 AF8 = I2C2_SCL, PC9 AF8 = I2C2_SDA; cross-check vendor
+ * Examples/I2C/I2C_EEPROM/i2c.h (GD32G533 branch: I2C2 on PC8/PC9,
+ * GPIO_AF_8).  No pull-ups on the SoM: the carrier / module provides
+ * them.  The pads are hi-Z (analog) until the first CMD_I2CM_CONFIG and
+ * again after a Deep-sleep wake.
  *
- * UNVERIFIED (no board access when this was written -- bench before
- * relying on it):
- *   - the alternate-function number for I2C3_SCL/SDA on PC8/PC9
- *     (BRIDGE_I2CM_GPIO_AF, hal/bridge_board_config.h): no GD32G553
- *     datasheet AF table was available, so the driver refuses CONFIG with
- *     BRIDGE_HW_ERR_NOTIMPL unless the build defines it;
- *   - the master state-machine details (automatic STOP after a NACK, TC
- *     handling, NBYTES = 0 address-only probe) follow the vendor SPL
- *     (gd32g5x3_i2c.h, Examples/I2C) and the I2C-bus spec, not a silicon
- *     run.
+ * Not yet run on silicon: the master state-machine details (automatic
+ * STOP after a NACK, TC handling, NBYTES = 0 address-only probe) follow
+ * the vendor SPL (gd32g5x3_i2c.h, Examples/I2C) and the I2C-bus spec.
  */
 
 #include <stdbool.h>
@@ -185,8 +182,8 @@ static void clear_errors(void)
 
 static int i2cm_bus_enable(uint16_t bus_khz)
 {
-	/* TODO(unverified): BRIDGE_I2CM_GPIO_AF -- see bridge_board_config.h.
-	 * Refuse rather than mux PC8/PC9 to a guessed function. */
+	/* Refuse rather than mux PC8/PC9 to an unverified function (only
+	 * reachable if a build overrides the AF number to a bad value). */
 	if (!BRIDGE_I2CM_AF_VERIFIED) return BRIDGE_HW_ERR_NOTIMPL;
 
 	const uint32_t primask = bridge_irq_lock();

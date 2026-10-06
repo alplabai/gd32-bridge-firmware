@@ -72,7 +72,7 @@
  * v0.17: the GPIO mask grew from 23 to 27 bits -- bits 23..26 are
  * CAM_EN_LDO0..3 (PC3, PE8, PE7, PE10), output-only, booted LOW (LDOs
  * off).  And the I2C3 master proxy, CMD_I2CM_CONFIG / _XFER / _RESULT
- * (0xA0..0xA2, I2C link only; E1M-X I2C3 on PC8/PC9).  Hosts relying on
+ * (0xA0..0xA2, I2C link only; E1M-X I2C3 bus = GD32 I2C2 on PC8/PC9).  Hosts relying on
  * either must require MINOR >= 17. */
 #define PROTOCOL_VERSION_MINOR 17u
 #define PROTOCOL_VERSION_PATCH 0u
@@ -181,7 +181,10 @@ typedef enum {
      * Hosts relying on bit 20 must require MINOR >= 13.
      * v0.16: grew again, 21 to 23 bits -- bits 21/22 are E1M IO15
      * (PB4) and IO26 (PC2).  Hosts relying on them must require
-     * MINOR >= 16 (v0.16; 0.15 firmware ignores them). */
+     * MINOR >= 16 (v0.16; 0.15 firmware ignores them).
+     * v0.17: grew again, 23 to 27 bits -- bits 23..26 are
+     * CAM_EN_LDO0..3 (PC3, PE8, PE7, PE10), output-only, booted LOW.
+     * Hosts relying on them must require MINOR >= 17. */
 	CMD_PWM_SET = 0x20,
 	CMD_PWM_GET = 0x21,
 	/* v0.3: sticky per-channel PWM tuning (align mode, dead time, fault
@@ -335,7 +338,7 @@ typedef enum {
      * The legacy 1-byte form keeps only STATUS_SEQ and clears every 0.15
      * bit on that link. */
 	CMD_LINK_FEATURES = 0x81,
-	/* v0.17: I2C3 master proxy (E1M-X I2C3 = GD32 PC8 SCL / PC9 SDA).
+	/* v0.17: I2C3 master proxy (E1M-X I2C3 bus = GD32 I2C2 peripheral, PC8 SCL / PC9 SDA, AF8).
 	 * I2C link ONLY (answers STATUS_NOSUPPORT on SPI), not in
 	 * CMD_BATCH.  A transfer is asynchronous: XFER only validates and
 	 * queues, the base-level tick runs it, RESULT collects it.
@@ -349,7 +352,12 @@ typedef enum {
 	 *   S W.. Sr R.. P; write only; read only; both 0 = quick write
 	 *   probe.  STATUS_OK = queued, STATUS_BUSY = a job is running,
 	 *   STATUS_NOT_READY = no CONFIG yet.  A new XFER discards an
-	 *   uncollected result.
+	 *   uncollected result.  Timing: the job starts at the top of the next
+	 *   bridge_hw_tick() pass (the XFER ISR wakes the main loop), so the
+	 *   worst start latency is the remainder of a pass already running
+	 *   (OTA erase step <= 40 ms); the job itself is bounded by 20 ms
+	 *   (10 ms SCL-low timeout) plus one ~100 us bus recovery.  Worst
+	 *   XFER-to-RESULT-OK ~ 60 ms; poll RESULT, do not busy-loop it.
 	 * CMD_I2CM_RESULT  req empty; reply STATUS_BUSY (empty) while the job
 	 *   runs; STATUS_OK `tag:u8 result:u8 nread:u8 rdata[nread]`;
 	 *   STATUS_NOT_READY when no job ran since CONFIG.  The result stays

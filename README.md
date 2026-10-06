@@ -200,7 +200,7 @@ firmware reader needs:
   handlers as standalone requests, validates the whole request before executing
   anything, and stops at the first non-`OK` sub-status.
 * **The one unconditional change is the I2C opcode allow-list**: the I2C link
-  carries only `0x00..0x03`, `0x10`, `0x11`, `0x41`, `0x81` and `0xF0..0xFF`;
+  carries only `0x00..0x03`, `0x10`, `0x11`, `0x20`, `0x21` (PWM_SET/GET, v0.17), `0x41`, `0x81` and `0xF0..0xFF`;
   every other opcode answers an empty `STATUS_NOSUPPORT` and never reaches its
   handler. `bridge_i2c_denied_count` / `bridge_i2c_denied_last_cmd` (SWD-readable)
   record the refusals. SPI is unrestricted.
@@ -313,7 +313,7 @@ E1M pads they have no boot-time drive; the first host read/write promotes
 them. `PC14` (bit 8) is untouched and `LXTAL` stays disabled.
 
 Bits 23..26 (`CAM_EN_LDO0..3`, GD32 `PC3`, `PE8`, `PE7`, `PE10`) are the
-camera LDO enables on the SoM power-supply sheet (SoM 2625-R2) -- sideband,
+camera LDO enables (SoM 2625-R2) -- sideband,
 not E1M pads. They are **output-only** and boot **OUTPUT driven LOW** (LDOs
 off), like the REG_ON lines: a host powers a camera rail by writing the bit
 high via `CMD_GPIO_WRITE`, and a read reports the measured pad level without
@@ -326,8 +326,9 @@ added.
 
 ## I2C3 master proxy (protocol 0.17)
 
-The E1M-X I2C3 bus (GD32 `PC8` = I2C3_SCL, pad A24; `PC9` = I2C3_SDA, pad A23;
-SoM 2625-R2, no SoM pull-ups -- the carrier / module provides them) is
+The E1M-X I2C3 bus = GD32 I2C2 peripheral (`PC8` = SCL, pad A24; `PC9` = SDA,
+pad A23, both AF8; the E1M-X numbers the bus from 3, the GD32 from 0; SoM
+2625-R2, no SoM pull-ups -- the carrier / module provides them) is
 exposed to the Linux host as a master over three opcodes, **I2C link only**
 (BRD_I2C `0x70`, 65 B payload; `STATUS_NOSUPPORT` on SPI, never in
 `CMD_BATCH`). All three need `PROTOCOL_VERSION_MINOR >= 17`.
@@ -360,18 +361,18 @@ exposed to the Linux host as a master over three opcodes, **I2C link only**
   function); `PC9` still low afterwards is `BUS_STUCK`. `POWER_MODE_SET`
   answers `STATUS_BUSY` while a job is queued or running.
 * Layout: `hal/gd32/i2cm_core.[ch]` (vendor-header-free job state machine,
-  host-tested in `tests/unit/i2cm/`) and `hal/gd32/i2cm.c` (the polled I2C3
+  host-tested in `tests/unit/i2cm/`) and `hal/gd32/i2cm.c` (the polled I2C2
   register driver).
 
-**Unverified (no board access, no GD32G553 datasheet on hand when written):**
-the alternate-function number that routes I2C3_SCL/SDA onto `PC8`/`PC9`.
+Pin routing: GD32G553xx Datasheet Rev1.5, pin alternate-function table: PC8
+AF8 = I2C2_SCL, PC9 AF8 = I2C2_SDA (cross-check: vendor
+Examples/I2C/I2C_EEPROM/i2c.h, GD32G533 branch: I2C2 on PC8/PC9, `GPIO_AF_8`).
 `BRIDGE_I2CM_GPIO_AF` in [`hal/bridge_board_config.h`](hal/bridge_board_config.h)
-is left undefined on purpose: until a build passes
-`-DBRIDGE_I2CM_GPIO_AF=GPIO_AF_<n>` with the number read from the datasheet's
-alternate-function table, `CMD_I2CM_CONFIG` answers `STATUS_NOSUPPORT` and the
-pads stay hi-Z. The SCL high/low times (`I2CM_SCL*_NS_*` in
-`hal/gd32/i2cm_core.c`) are the I2C-bus spec minimums plus margin; trim them
-from a scope capture on the carrier.
+defaults to `GPIO_AF_8` and can be overridden at build time. Not yet run on
+silicon. The SCL high/low times (`I2CM_SCL*_NS_*` in `hal/gd32/i2cm_core.c`)
+are sized so `fSCL` never exceeds 100/400 kHz even with zero rise time, while
+staying at or above the I2C-bus spec minimums; trim them from a scope capture
+on the carrier.
 
 ## Cross-link
 

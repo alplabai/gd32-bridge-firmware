@@ -80,6 +80,9 @@ int i2cm_core_xfer(uint8_t tag, uint8_t addr7, const uint8_t *wdata, uint8_t wle
 	s_job_wlen = wlen;
 	s_job_rlen = rlen;
 	if (wlen != 0u) memcpy(s_job_w, wdata, wlen);
+	/* The tick runs from base level while this runs from an ISR: the job
+	 * fields must be visible before the state that hands them over. */
+	__atomic_thread_fence(__ATOMIC_RELEASE);
 	s_state = I2CM_QUEUED; /* publish last; discards an uncollected result */
 	return BRIDGE_HW_OK;
 }
@@ -89,6 +92,7 @@ int i2cm_core_result(uint8_t *tag, uint8_t *result, uint8_t *nread, uint8_t *rda
 	const uint8_t st = s_state;
 	if (st == I2CM_QUEUED || st == I2CM_RUNNING) return BRIDGE_HW_ERR_BUSY;
 	if (st != I2CM_DONE) return BRIDGE_HW_ERR_NOT_READY;
+	__atomic_thread_fence(__ATOMIC_ACQUIRE);
 	*tag    = s_res_tag;
 	*result = s_res_code;
 	*nread  = s_res_nread;
@@ -99,6 +103,7 @@ int i2cm_core_result(uint8_t *tag, uint8_t *result, uint8_t *nread, uint8_t *rda
 void i2cm_core_tick(void)
 {
 	if (s_state != I2CM_QUEUED) return;
+	__atomic_thread_fence(__ATOMIC_ACQUIRE); /* job fields published before QUEUED */
 	s_state = I2CM_RUNNING;
 	/* ponytail: the transfer blocks base level for up to its 20 ms
 	 * deadline (polled driver, no DMA/IRQ).  The transport ISRs keep
@@ -110,7 +115,8 @@ void i2cm_core_tick(void)
 	if (s_res_code != (uint8_t)I2CM_RES_OK || nread > s_job_rlen) nread = 0u;
 	s_res_tag   = s_job_tag;
 	s_res_nread = nread;
-	s_state     = I2CM_DONE;
+	__atomic_thread_fence(__ATOMIC_RELEASE); /* result visible before DONE */
+	s_state = I2CM_DONE;
 }
 
 void i2cm_core_mark_unconfigured(void)
@@ -121,16 +127,17 @@ void i2cm_core_mark_unconfigured(void)
 	i2cm_khz = 0u;
 }
 
-/* Nominal SCL times (ns).  100 kHz: Standard-mode tLOW >= 4700 / tHIGH >=
- * 4000 (I2C-bus specification UM10204, timing table) -- 4.7 + 4.0 us = 8.7 us
- * nominal, ~10 us once rise/fall and sync are added.  400 kHz: Fast-mode
- * tLOW >= 1300 / tHIGH >= 600 (same table) with margin on both phases --
- * 1.4 + 0.8 us = 2.2 us nominal, ~2.5-2.7 us achieved.  Calibration knobs:
- * measure SCL on the carrier and trim these. */
+/* Nominal SCL times (ns), sized so tLOW + tHIGH >= 1 / fSCLmax even with
+ * zero rise/fall time, i.e. fSCL never exceeds 100 / 400 kHz: 100 kHz =
+ * 4700 + 5300 = 10 us; 400 kHz = 1400 + 1100 = 2.5 us.  Both phases stay at
+ * or above the I2C-bus specification (UM10204, timing table) minimums:
+ * Standard-mode tLOW >= 4700 / tHIGH >= 4000; Fast-mode tLOW >= 1300 /
+ * tHIGH >= 600.  Rise/fall and synchronisation only lengthen the period
+ * further.  Calibration knobs: measure SCL on the carrier and trim these. */
 #define I2CM_SCLL_NS_100K 4700u
-#define I2CM_SCLH_NS_100K 4000u
+#define I2CM_SCLH_NS_100K 5300u
 #define I2CM_SCLL_NS_400K 1400u
-#define I2CM_SCLH_NS_400K 800u
+#define I2CM_SCLH_NS_400K 1100u
 
 static bool counts_for(uint64_t t_psc_ps, uint32_t ns, uint32_t *out)
 {

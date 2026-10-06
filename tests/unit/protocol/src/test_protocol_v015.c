@@ -357,6 +357,8 @@ static bool i2c_allowed(unsigned cmd)
 	case 0x03:
 	case 0x10:
 	case 0x11:
+	case 0x20: /* v0.17 PWM_SET / PWM_GET allowed on I2C */
+	case 0x21:
 	case 0x41:
 	case 0x81:
 	case 0xA0: /* v0.17 I2C3 proxy */
@@ -431,6 +433,25 @@ ZTEST(protocol, test_v015_i2c_allowed_opcodes_still_run)
 	zassert_equal(disp(GD32_BRIDGE_LINK_I2C, CMD_GPIO_READ, mask, 4u, reply, sizeof reply, &n),
 	              STATUS_OK);
 	zassert_equal(bridge_hw_fake_call_count(FAKE_FN_GPIO_READ), 1u);
+	reset_links();
+}
+
+/* v0.17: PWM_SET / PWM_GET run on the I2C link (Linux PWM provider). */
+ZTEST(protocol, test_v017_pwm_runs_on_i2c)
+{
+	uint8_t       reply[CAP];
+	size_t        n;
+	const uint8_t set[10] = { 0u, 0u, 0x40, 0x42, 0x0F, 0x00, 0x20, 0xA1, 0x07, 0x00 };
+	const uint8_t get[1]  = { 0u };
+
+	reset_links();
+	const uint32_t before = bridge_i2c_denied_count;
+	zassert_equal(disp(GD32_BRIDGE_LINK_I2C, CMD_PWM_SET, set, 10u, reply, sizeof reply, &n),
+	              STATUS_OK);
+	zassert_equal(bridge_hw_fake_call_count(FAKE_FN_PWM_SET), 1u);
+	zassert_equal(disp(GD32_BRIDGE_LINK_I2C, CMD_PWM_GET, get, 1u, reply, sizeof reply, &n),
+	              STATUS_OK);
+	zassert_equal(bridge_i2c_denied_count, before, "PWM is not denied on I2C");
 	reset_links();
 }
 

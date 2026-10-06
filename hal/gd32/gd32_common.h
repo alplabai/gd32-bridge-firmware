@@ -234,7 +234,7 @@ _Static_assert(GPIO_PAD_WL_REG_ON == GPIO_PAD_BT_REG_ON + 1 &&
 #define GPIO_PAD_E1M_IO15 21u
 #define GPIO_PAD_E1M_IO26 22u
 /* Bits 23..26 are sideband, not E1M pads: the camera LDO enables
- * CAM_EN_LDO0..3 (PC3, PE8, PE7, PE10) on the SoM power-supply sheet.
+ * CAM_EN_LDO0..3 (PC3, PE8, PE7, PE10).
  * Output-only: hal/gd32/init.c boots them OUTPUT LOW (LDOs off).  Power
  * policy is the HOST's; the GD32 only proxies a CMD_GPIO_WRITE. */
 #define GPIO_PAD_CAM_EN_LDO0 23u

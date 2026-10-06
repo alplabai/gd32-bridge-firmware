@@ -123,8 +123,8 @@ const gd32_gpio_pad_t gpio_pad_map[] = {
 	 * (unverified, see TODO in init.c). */
 	{ GPIOB, GPIO_PIN_4 }, /* bit 21 = E1M IO15 */
 	{ GPIOC, GPIO_PIN_2 }, /* bit 22 = E1M IO26 */
-	/* Camera LDO enables on the SoM power-supply sheet (sideband, NOT
-	 * E1M pads; SoM 2625-R2).  Output-only: booted OUTPUT driven LOW =
+	/* Camera LDO enables (sideband, NOT E1M
+	 * pads; SoM 2625-R2).  Output-only: booted OUTPUT driven LOW =
 	 * LDO off, see the GPIO_PAD_CAM_EN_LDO0..3 boot loop in
 	 * hal/gd32/init.c.  Power policy is the HOST's -- the GD32 only
 	 * proxies a host CMD_GPIO_WRITE, never enables a rail on its own. */

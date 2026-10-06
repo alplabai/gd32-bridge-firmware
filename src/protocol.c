@@ -1418,7 +1418,9 @@ static atomic_flag dispatch_in_flight = ATOMIC_FLAG_INIT;
 
 /* Opcodes the I2C link may carry (v0.15 policy; design section 7).  The
  * kernel gpio-gd32-bridge driver, tools/gd32-ota-host and the BRD_I2C
- * bring-up example use exactly these. */
+ * bring-up example use these, plus PWM_SET / PWM_GET (v0.17: the Linux
+ * host needs a PWM provider, e.g. a panel backlight; both handlers are
+ * short and ownership is unchanged -- the CM33 keeps using SPI). */
 static bool i2c_opcode_allowed(uint8_t cmd)
 {
 	switch (cmd) {
@@ -1428,6 +1430,8 @@ static bool i2c_opcode_allowed(uint8_t cmd)
 	case CMD_RESET_REASON:
 	case CMD_GPIO_READ:
 	case CMD_GPIO_WRITE:
+	case CMD_PWM_SET:
+	case CMD_PWM_GET:
 	case CMD_SE_RESET:
 	case CMD_LINK_FEATURES:
 	case CMD_I2CM_CONFIG:
