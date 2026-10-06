@@ -309,10 +309,9 @@ ZTEST(protocol_vectors, test_spi_requests_match_committed_replies)
 	const pv_vector_t *nosupp = pv_find("spi_reply_nosupport");
 
 	for (size_t i = 0; i < N_SPI_CASES; i++) {
-		const pv_case_t   *c   = &SPI_CASES[i];
-		const pv_vector_t *req = pv_find(c->req_name);
-		const pv_vector_t *want =
-		    (c->class == PV_EXACT) ? pv_find(c->reply_name) : nosupp;
+		const pv_case_t   *c    = &SPI_CASES[i];
+		const pv_vector_t *req  = pv_find(c->req_name);
+		const pv_vector_t *want = (c->class == PV_EXACT) ? pv_find(c->reply_name) : nosupp;
 
 		size_t n = spi_roundtrip(req, reply, sizeof reply);
 		zassert_equal(n, want->len, "%s: reply length", c->req_name);
