@@ -86,6 +86,16 @@ static bool deadline_expired(const i2cm_deadline_t *d)
 /* Pads                                                               */
 /* ----------------------------------------------------------------- */
 
+/* Bench fallback only: with BRIDGE_I2CM_INTERNAL_PULLUP the pads use the
+ * weak internal pull-up (~40 kOhm typ., check the GD32G553 datasheet) because
+ * the V2M103 SoM and X-EVK I2C3 net have no external pull-ups.  Production
+ * needs external pull-ups; leave the option OFF. */
+#if defined(BRIDGE_I2CM_INTERNAL_PULLUP) && BRIDGE_I2CM_INTERNAL_PULLUP
+#define I2CM_PAD_PUPD GPIO_PUPD_PULLUP
+#else
+#define I2CM_PAD_PUPD GPIO_PUPD_NONE
+#endif
+
 static void pads_hiz(void)
 {
 	gpio_mode_set(BRIDGE_I2CM_SCL_PORT, GPIO_MODE_ANALOG, GPIO_PUPD_NONE, BRIDGE_I2CM_SCL_PIN);
@@ -102,8 +112,8 @@ static void pads_gpio_od(void)
 	    BRIDGE_I2CM_SCL_PORT, GPIO_OTYPE_OD, GPIO_OSPEED_12MHZ, BRIDGE_I2CM_SCL_PIN);
 	gpio_output_options_set(
 	    BRIDGE_I2CM_SDA_PORT, GPIO_OTYPE_OD, GPIO_OSPEED_12MHZ, BRIDGE_I2CM_SDA_PIN);
-	gpio_mode_set(BRIDGE_I2CM_SCL_PORT, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, BRIDGE_I2CM_SCL_PIN);
-	gpio_mode_set(BRIDGE_I2CM_SDA_PORT, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, BRIDGE_I2CM_SDA_PIN);
+	gpio_mode_set(BRIDGE_I2CM_SCL_PORT, GPIO_MODE_OUTPUT, I2CM_PAD_PUPD, BRIDGE_I2CM_SCL_PIN);
+	gpio_mode_set(BRIDGE_I2CM_SDA_PORT, GPIO_MODE_OUTPUT, I2CM_PAD_PUPD, BRIDGE_I2CM_SDA_PIN);
 }
 
 static void pads_af(void)
@@ -116,8 +126,8 @@ static void pads_af(void)
 	    BRIDGE_I2CM_SDA_PORT, GPIO_OTYPE_OD, GPIO_OSPEED_12MHZ, BRIDGE_I2CM_SDA_PIN);
 	gpio_af_set(BRIDGE_I2CM_SCL_PORT, BRIDGE_I2CM_GPIO_AF, BRIDGE_I2CM_SCL_PIN);
 	gpio_af_set(BRIDGE_I2CM_SDA_PORT, BRIDGE_I2CM_GPIO_AF, BRIDGE_I2CM_SDA_PIN);
-	gpio_mode_set(BRIDGE_I2CM_SCL_PORT, GPIO_MODE_AF, GPIO_PUPD_NONE, BRIDGE_I2CM_SCL_PIN);
-	gpio_mode_set(BRIDGE_I2CM_SDA_PORT, GPIO_MODE_AF, GPIO_PUPD_NONE, BRIDGE_I2CM_SDA_PIN);
+	gpio_mode_set(BRIDGE_I2CM_SCL_PORT, GPIO_MODE_AF, I2CM_PAD_PUPD, BRIDGE_I2CM_SCL_PIN);
+	gpio_mode_set(BRIDGE_I2CM_SDA_PORT, GPIO_MODE_AF, I2CM_PAD_PUPD, BRIDGE_I2CM_SDA_PIN);
 }
 
 static bool sda_high(void)
