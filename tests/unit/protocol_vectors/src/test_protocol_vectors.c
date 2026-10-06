@@ -50,11 +50,9 @@
  *                 (SOF + STATUS with a 0-byte payload has the same CRC every
  *                 time), so the file's own spi_reply_nosupport vector
  *                 legitimately stands in for the whole class.
- *   PV_IO      -- STATUS_IO, 0-byte payload: GPIO_READ/GPIO_WRITE, the one
- *                 HAL-backed pair whose handlers do NOT route through the
- *                 central status_from_hw() mapper (`if (rv < 0) return
- *                 STATUS_IO;`).  Same constant-reply reasoning, against
- *                 spi_reply_io.
+ *   PV_IO      -- STATUS_IO, 0-byte payload, compared against spi_reply_io.
+ *                 No vector uses it now that GPIO_READ/GPIO_WRITE route
+ *                 through status_from_hw(); kept for HAL handlers that do not.
  *
  * NOT COVERED (checked against this tree at commit bbd5c99; each reason is
  * why closing it is bigger than this bounded suite, not an oversight):
@@ -185,10 +183,10 @@ static const pv_case_t SPI_CASES[] = {
 	{ "spi_reset_reason_request",                        PV_EXACT,  "spi_reset_reason_reply_unknown" },
 	{ "spi_da9292_status_forward_request",               PV_EXACT,  "spi_da9292_status_forward_reply_no_sample" },
 
-	/* PV_IO: GPIO_READ/WRITE map BRIDGE_HW_ERR_NOTIMPL to STATUS_IO, not
-	 * STATUS_NOSUPPORT (src/protocol.c: `if (rv < 0) return STATUS_IO;`). */
-	{ "spi_gpio_read_mask_bit0_request",                 PV_IO,     NULL },
-	{ "spi_gpio_write_mask_bit0_high_request",           PV_IO,     NULL },
+	/* GPIO_READ/WRITE route BRIDGE_HW_ERR_* through status_from_hw() (#340), so the
+	 * stub's NOTIMPL answers STATUS_NOSUPPORT like every other stub-backed opcode. */
+	{ "spi_gpio_read_mask_bit0_request",                 PV_NOSUPP, NULL },
+	{ "spi_gpio_write_mask_bit0_high_request",           PV_NOSUPP, NULL },
 
 	/* PV_NOSUPP: every other stub-backed HAL opcode, v0.2..v0.5, plus the
 	 * reserved 0x36 probe. */

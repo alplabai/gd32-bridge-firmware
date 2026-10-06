@@ -377,11 +377,20 @@ Pin routing: GD32G553xx Datasheet Rev1.5, pin alternate-function table: PC8
 AF8 = I2C2_SCL, PC9 AF8 = I2C2_SDA (cross-check: vendor
 Examples/I2C/I2C_EEPROM/i2c.h, GD32G533 branch: I2C2 on PC8/PC9, `GPIO_AF_8`).
 `BRIDGE_I2CM_GPIO_AF` in [`hal/bridge_board_config.h`](hal/bridge_board_config.h)
-defaults to `GPIO_AF_8` and can be overridden at build time. Not yet run on
-silicon. The SCL high/low times (`I2CM_SCL*_NS_*` in `hal/gd32/i2cm_core.c`)
+defaults to `GPIO_AF_8` and can be overridden at build time. Run on silicon
+(V2M103): CONFIG ok, NACK on absent addresses, AF/open-drain/clocks verified
+by register dump. The SCL high/low times (`I2CM_SCL*_NS_*` in `hal/gd32/i2cm_core.c`)
 are sized so `fSCL` never exceeds 100/400 kHz even with zero rise time, while
 staying at or above the I2C-bus spec minimums; trim them from a scope capture
 on the carrier.
+
+**Pull-ups.** The I2C3 net has NO pull-ups on the SoM and none on the carrier
+I2C3 segment, so with no pull `PC8`/`PC9` float low (I2C2 `TIMEOUT` /
+`BUS_STUCK`). Production needs external pull-ups (module or carrier). As a
+bench fallback only, `-DBRIDGE_I2CM_INTERNAL_PULLUP=ON` (default OFF) selects
+`GPIO_PUPD_PULLUP` (~40 kOhm internal) on both pads in `pads_af()` /
+`pads_gpio_od()`; that is too weak for 400 kHz or long cables and must not
+ship.
 
 ## Cross-link
 
