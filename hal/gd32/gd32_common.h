@@ -195,7 +195,7 @@ typedef struct {
 /* _Static_assert that the sizeof-derived size matches these).        */
 /* ----------------------------------------------------------------- */
 
-#define GPIO_PAD_MAP_COUNT 23u /* _Static_assert against sizeof in gpio.c       */
+#define GPIO_PAD_MAP_COUNT 27u /* _Static_assert against sizeof in gpio.c       */
 /* gpio_pad_map bits whose E1M IO is not routed to the GD32 on the SoM
  * (rev 2625-R2): bit 8 = E1M IO24, driven by the DX-M1 on V2M and
  * unconnected on V2N (gh#298).  Read/write naming one of these bits
@@ -233,7 +233,15 @@ _Static_assert(GPIO_PAD_WL_REG_ON == GPIO_PAD_BT_REG_ON + 1 &&
 /* Bits 21/22 are ordinary E1M pads (IO15 = PB4, IO26 = PC2). */
 #define GPIO_PAD_E1M_IO15 21u
 #define GPIO_PAD_E1M_IO26 22u
-_Static_assert(GPIO_PAD_E1M_IO26 + 1u == GPIO_PAD_MAP_COUNT, "gpio_pad_map ends at E1M IO26");
+/* Bits 23..26 are sideband, not E1M pads: the camera LDO enables
+ * CAM_EN_LDO0..3 (PC3, PE8, PE7, PE10).
+ * Output-only: hal/gd32/init.c boots them OUTPUT LOW (LDOs off).  Power
+ * policy is the HOST's; the GD32 only proxies a CMD_GPIO_WRITE. */
+#define GPIO_PAD_CAM_EN_LDO0 23u
+#define GPIO_PAD_CAM_EN_LDO3 26u
+_Static_assert(GPIO_PAD_CAM_EN_LDO3 == GPIO_PAD_CAM_EN_LDO0 + 3u &&
+                   GPIO_PAD_CAM_EN_LDO3 + 1u == GPIO_PAD_MAP_COUNT,
+               "gpio_pad_map ends at CAM_EN_LDO3; init.c walks LDO0..LDO3 inclusive");
 _Static_assert(GPIO_PAD_CAN_STBY < GPIO_PAD_MAP_COUNT,
                "GPIO_PAD_CAN_STBY must be in-range -- init.c's boot loop treats it "
                "as a single-bit sideband pad, same posture as BT/WL_REG_ON");
@@ -424,6 +432,13 @@ bool bridge_clock_restore_after_deepsleep(void);
 /* ----------------------------------------------------------------- */
 /* Shared tables (defined in the TU named per line).                  */
 /* ----------------------------------------------------------------- */
+
+/* I2C3 master proxy (v0.17, i2cm.c): init at bridge_hw_init(), job pump at
+ * base level from bridge_hw_tick() (never a transport ISR), wake hook from
+ * the Deep-sleep exit in power.c. */
+void bridge_hw_i2cm_init(void);
+void bridge_hw_i2cm_tick(void);
+void bridge_hw_i2cm_wake(void);
 
 extern const gd32_gpio_pad_t gpio_pad_map[GPIO_PAD_MAP_COUNT];   /* gpio.c */
 extern bool                  gpio_is_output[GPIO_PAD_MAP_COUNT]; /* gpio.c */

@@ -45,8 +45,8 @@ spi_ping_request               = A50084FF
 spi_ping_reply_ok              = A50084FF
 # SOF | CMD=0x01 (GET_VERSION) | CRC -- empty payload
 spi_get_version_request        = A501A5EF
-# SOF | STATUS=0x00 | major=0 | minor=16 | patch=0 | CRC
-spi_get_version_reply_v0_16_0  = A5000010004C1B
+# SOF | STATUS=0x00 | major=0 | minor=17 | patch=0 | CRC
+spi_get_version_reply_v0_17_0  = A5000011007D28
 
 # ---------------------------------------------------------------------
 # §3. I2C envelopes -- register-style framing
@@ -283,3 +283,26 @@ spi_batch_request_nested_rejected = A5040104003A29
 spi_batch_request_trailing_byte_rejected = A504010000008B53
 # SOF | CMD=0xF1 | offset=0 | len=61 | 61 data bytes (66-byte payload) | CRC -- only BATCH and READ2 may exceed 65 bytes, even on a BIG_FRAME link, so OTA keeps its 56-byte chunks; reply = spi_reply_inval
 spi_ota_write_chunk_over_65_rejected_on_big_link = A5F1000000003DA5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5B962
+
+# ---------------------------------------------------------------------
+# v0.17 -- I2C3 master proxy (CMD_I2CM_CONFIG / _XFER / _RESULT)
+#       I2C link only; the same opcodes on SPI answer NOSUPPORT
+# ---------------------------------------------------------------------
+# reg=0x00 | CMD=0xA0 | bus_khz=100 (LE) | CRC(CMD..) -- 100 or 400; 0 releases PC8/PC9 to hi-Z; reply = i2c_i2cm_reply_ok
+i2c_i2cm_config_100khz_write   = 00A06400EEB6
+# STATUS=0x00 | empty payload | CRC -- CONFIG done / XFER queued
+i2c_i2cm_reply_ok              = 00F0E1
+# STATUS=0x03 (BUSY) | empty payload | CRC -- XFER/CONFIG while a job is queued or running, RESULT while it runs
+i2c_i2cm_reply_busy            = 0393D1
+# STATUS=0x02 (NOT_READY) | empty payload | CRC -- XFER before CONFIG (or after a Deep-sleep wake), RESULT with no job since CONFIG
+i2c_i2cm_reply_not_ready       = 02B2C1
+# reg=0x00 | CMD=0xA1 | tag=7 | addr7=0x50 | flags=0 | wlen=1 | rlen=4 | wdata=10 | CRC -- S W.. Sr R.. P; reply = i2c_i2cm_reply_ok
+i2c_i2cm_xfer_write_then_read_write = 00A107500001041016B8
+# reg=0x00 | CMD=0xA2 | empty payload | CRC
+i2c_i2cm_result_write          = 00A25874
+# STATUS=0x00 | tag=7 | result=0 (OK) | nread=4 | rdata=DEADBEEF | CRC
+i2c_i2cm_result_reply_ok_4_bytes = 00070004DEADBEEF2B65
+# STATUS=0x00 | tag=9 | result=1 (NACK_ADDR) | nread=0 | CRC -- the outer STATUS stays OK: result carries the bus outcome
+i2c_i2cm_result_reply_nack_addr = 000901006029
+# SOF | CMD=0xA1 | tag=7 | addr7=0x50 | flags=0 | wlen=0 | rlen=0 | CRC -- quick write probe; refused on SPI with spi_reply_nosupport
+spi_i2cm_xfer_request          = A5A1075000000001FB

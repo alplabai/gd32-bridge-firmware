@@ -286,6 +286,44 @@ int bridge_hw_power_mode_set(uint8_t  mode,
 }
 
 /* --------------------------------------------------------------- */
+/* v0.17 -- I2C3 master proxy                                        */
+/* --------------------------------------------------------------- */
+
+int bridge_hw_i2cm_config(uint16_t bus_khz)
+{
+	(void)bus_khz;
+	return BRIDGE_HW_ERR_NOTIMPL;
+}
+
+int bridge_hw_i2cm_xfer(uint8_t        tag,
+                        uint8_t        addr7,
+                        const uint8_t *wdata,
+                        uint8_t        wlen,
+                        uint8_t        rlen)
+{
+	(void)tag;
+	(void)addr7;
+	(void)wdata;
+	(void)wlen;
+	(void)rlen;
+	return BRIDGE_HW_ERR_NOTIMPL;
+}
+
+int bridge_hw_i2cm_result(uint8_t *tag, uint8_t *result, uint8_t *nread, uint8_t *rdata)
+{
+	(void)tag;
+	(void)result;
+	(void)nread;
+	(void)rdata;
+	return BRIDGE_HW_ERR_NOTIMPL;
+}
+
+bool bridge_hw_i2cm_busy(void)
+{
+	return false;
+}
+
+/* --------------------------------------------------------------- */
 /* v0.5 (§2B wave-2) -- chunked DSP-chain upload                     */
 /* --------------------------------------------------------------- */
 

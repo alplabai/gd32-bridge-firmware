@@ -98,6 +98,7 @@ ZTEST(power_wake, test_deep_sleep_entry_and_wake_sequence)
 	zassert_equal(mock_primask, 0u, "interrupts re-enabled after the wake");
 	zassert_equal(mock_system_core_clock_updates > 0u, true, "clock restore ran");
 	zassert_equal(mock_i2c_inits, 1u, "I2C re-initialised after the wake");
+	zassert_equal(mock_i2cm_wakes, 1u, "I2C3 proxy marked unconfigured after the wake");
 	zassert_equal(mock_fwdgt_feeds, 1u);
 	zassert_equal(mock_systick.CTRL, SysTick_CTRL_ENABLE_Msk | SysTick_CTRL_TICKINT_Msk);
 	zassert_equal(mock_systick.VAL, 0u);
@@ -269,6 +270,25 @@ static void inject_rtc_pending(void)
 static void inject_i2c_busy(void)
 {
 	mock_i2c_busy = SET;
+}
+
+/* An I2C3 proxy job queued after the request but before the tick holds the
+ * entry back (it would otherwise be carried through the sleep) and the entry
+ * proceeds once the job drains. */
+ZTEST(power_wake, test_deep_sleep_waits_for_queued_i2cm_job)
+{
+	mock_power_reset();
+	zassert_equal(bridge_hw_power_mode_set(2u, 0u, 100u, 0u), BRIDGE_HW_OK);
+	mock_i2cm_busy = 1u;
+	bridge_power_tick();
+	zassert_equal(mock_deepsleep_entries, 0u, "no entry with a job queued");
+	zassert_equal(mock_i2cm_wakes, 0u);
+	zassert_equal(mock_primask, 0u);
+	mock_i2cm_busy = 0u;
+	RCU_CTL        = RCU_CTL_PLLSTB;
+	RCU_CFG0       = RCU_SCSS_PLLP;
+	bridge_power_tick();
+	zassert_equal(mock_deepsleep_entries, 1u, "request retained, entry after the job drains");
 }
 
 /* The ~185 us settle window has interrupts enabled: an event landing there

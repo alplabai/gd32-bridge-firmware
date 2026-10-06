@@ -357,7 +357,7 @@ The length is self-delimiting, and its maximum can be computed from the request.
 
 Enforced in `protocol_dispatch_inner()` **after** the trial gate (unchanged: any CRC-valid frame on either link confirms a trial) and before the opcode switch.
 
-- **Allowed on `GD32_BRIDGE_LINK_I2C`:** `0x00` PING, `0x01` GET_VERSION, `0x02` GET_BUILD_ID, `0x03` RESET_REASON, `0x10` GPIO_READ, `0x11` GPIO_WRITE, `0x41` SE_RESET, `0x42` BOOT_CONFIG, `0x81` LINK_FEATURES (I2C grants only STATUS_SEQ, `mp` = 65), and `0xF0..0xFF` OTA.
+- **Allowed on `GD32_BRIDGE_LINK_I2C`:** `0x00` PING, `0x01` GET_VERSION, `0x02` GET_BUILD_ID, `0x03` RESET_REASON, `0x10` GPIO_READ, `0x11` GPIO_WRITE, `0x20` PWM_SET and `0x21` PWM_GET (added in v0.17 for a Linux PWM provider), `0x41` SE_RESET, `0x42` BOOT_CONFIG, `0x81` LINK_FEATURES (I2C grants only STATUS_SEQ, `mp` = 65), and `0xF0..0xFF` OTA.
 - Any other opcode: `STATUS_NOSUPPORT` (`0x06`) with an empty payload; the handler never runs.
 - Add SWD-readable diagnostics `bridge_i2c_denied_count:u32` and `bridge_i2c_denied_last_cmd:u8`, in the same style as `bridge_i2c_rx_diag`.
 - SPI is unrestricted. No per-pad GPIO ownership is enforced (§11 Q9).
@@ -391,7 +391,7 @@ Unless noted, `STATUS` is shown un-stamped (`0x00`), with a stamped variant wher
 
 | Name | Bytes before CRC |
 |---|---|
-| `spi_get_version_reply_v0_16_0` | `A5 00 00 10 00` (v0.16 = v0.15 + GPIO bits 21/22; the 0.15 reply was `A5 00 00 0F 00`) |
+| `spi_get_version_reply_v0_17_0` | `A5 00 00 11 00` (v0.17 = v0.16 + GPIO bits 23..26 and the I2C3 proxy, README "I2C3 master proxy"; v0.16 was `A5 00 00 10 00`, v0.15 `A5 00 00 0F 00`) |
 | `spi_link_features_ext_request_all` | `A5 81 1F000000 FC00` |
 | `spi_link_features_ext_reply_all_seq1` | `A5 10 1F000000 1F000000 FC00` |
 | `spi_link_features_ext_reply_attn_refused_seq1` | `A5 10 1B000000 1F000000 FC00` (debugger attached) |

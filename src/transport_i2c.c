@@ -256,7 +256,7 @@ void transport_i2c_init(void)
      * Return value ignored here on purpose: at boot CK_APB1 is whatever
      * SystemInit already brought up (216 MHz on this board) before
      * main() runs, so the out-of-range refusal
-     * (hal/transport_hw_gd32.c's i2c_timing_derive()) is not a live
+     * (hal/transport_hw_gd32.c's bridge_i2c_timing_derive()) is not a live
      * boot-time concern the way it is on the Deep-sleep wake path
      * (hal/gd32/power.c, which DOES propagate it) -- and there is no
      * host link yet at boot to report a failure to. */

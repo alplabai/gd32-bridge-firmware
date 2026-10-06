@@ -382,6 +382,8 @@ void bridge_hw_init(void)
      * re-enables it harmlessly for the rest of port C's pads. */
 	rcu_periph_clock_enable(RCU_GPIOC);
 	se_reset_init();
+	/* I2C3 proxy: state machine only; PC8/PC9 stay parked until CONFIG. */
+	bridge_hw_i2cm_init();
 
 	/* #127: sample the clock the vendor's SystemInit() ACTUALLY left
      * running, before anything derived from it is programmed.  Until this
@@ -587,6 +589,20 @@ void bridge_hw_init(void)
 	 * and gpio_is_output[] is reset, the earliest point where the pad
 	 * write is not undone by the reset loop above. */
 	boot_config_apply();
+
+	/* CAM_EN_LDO0..3 (bits 23..26): camera LDO enables, boot OUTPUT
+	 * driven LOW = LDOs off.  Same posture as BT/WL_REG_ON above: the
+	 * HOST turns a rail on with CMD_GPIO_WRITE, this firmware never
+	 * does.  Output-only: gpio_is_output[i] is set, so a read never
+	 * demotes the pad to INPUT and reports the measured level. */
+	for (size_t i = GPIO_PAD_CAM_EN_LDO0; i <= GPIO_PAD_CAM_EN_LDO3; ++i) {
+		gpio_bit_reset(gpio_pad_map[i].periph, gpio_pad_map[i].pin);
+		gpio_output_options_set(
+		    gpio_pad_map[i].periph, GPIO_OTYPE_PP, GPIO_OSPEED_12MHZ, gpio_pad_map[i].pin);
+		gpio_mode_set(
+		    gpio_pad_map[i].periph, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, gpio_pad_map[i].pin);
+		gpio_is_output[i] = true;
+	}
 
 	/* TRNG bring-up: configure + enable only.  The NIST pipeline's
      * first conditioned word can lag past any boot-time wait we are
@@ -855,13 +871,16 @@ extern void ota_confirm_tick(void);
  *     221184 B / 216 MHz ~= 66 ms (172 ms if built -O0);
  *   - ota_erase_tick(): one 2 KB region = 20 ms single-bank, 40 ms
  *     dual-bank (tERASE max 20 ms/page, Datasheet p.126);
+ *   - bridge_hw_i2cm_tick(): one I2C3 proxy job, polled at base level,
+ *     bounded by I2CM_JOB_DEADLINE_MS = 20 ms (hal/gd32/i2cm.c) plus at most
+ *     one ~100 us bus recovery (SCL-low hardware timeout 10 ms inside it);
  *   - COMMIT: CRC + one metadata page erase/program ~ 66 + 21 ms;
  *   - ADC calibrate wedged: ~200000 iterations (adc.c) ~ 63 ms at
  *     314.8 ns/iter (hal/fmc_ota.c derivation), plus the ~400000
  *     iteration EOC bound ~ 126 ms;
  *   - OTA_FMC_ERASE_TIMEOUT_ITERS (2.2 M) on a WEDGED FMC: 204 ms -Os /
  *     693 ms -O0 -- that case is meant to end in a reset.
- * Worst legitimate sum ~ 190 ms ISR + 40 ms erase step + pumps, under
+ * Worst legitimate sum ~ 190 ms ISR + 40 ms erase step + 20 ms I2C3 job + pumps, under
  * half the 445 ms minimum window.
  *
  * Warm resets: like an IWDG, a started FWDGT is only stopped by a
@@ -927,6 +946,13 @@ extern bool ota_trial_unconfirmed(void);
 
 void bridge_hw_tick(void)
 {
+	/* The I2C proxy job runs first: a queued job starts at the top of the
+	 * next pass, not behind the vref / DSP / OTA-erase steps (it touches
+	 * only I2C2 / PC8 / PC9, independent of them).  The XFER ISR itself
+	 * retires the main loop's __WFI(), so the start latency is just the
+	 * remainder of a pass already in progress (OTA erase step <= 40 ms,
+	 * see protocol.h CMD_I2CM_XFER), not a 50 ms tick period. */
+	bridge_hw_i2cm_tick();
 	bridge_hw_dsp_pump();
 	vref_late_tick();
 	ota_erase_tick();

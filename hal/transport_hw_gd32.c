@@ -853,8 +853,10 @@ static void i2c_gpio_init(void)
  * refuse loudly, not silently clamp into a wrong-but-plausible value --
  * that silent-clamp failure mode is exactly what gh#38 fixed once
  * already, for PSC alone). */
-static bool
-i2c_timing_derive(uint32_t apb1_hz, uint32_t *psc, uint32_t *scl_dely, uint32_t *sda_dely)
+bool bridge_i2c_timing_derive(uint32_t  apb1_hz,
+                              uint32_t *psc,
+                              uint32_t *scl_dely,
+                              uint32_t *sda_dely)
 {
 	if (apb1_hz < I2C_APB1_MIN_HZ_FAST_MODE) {
 		return false;
@@ -938,13 +940,13 @@ int bridge_transport_i2c_hw_init(void)
 	const uint32_t apb1_hz = s_i2c_wake_mode ? I2C_IRC8M_HZ : rcu_clock_freq_get(CK_APB1);
 	uint32_t       psc, scl_dely, sda_dely;
 	uint16_t       stretch_timeout_reload;
-	if (!i2c_timing_derive(apb1_hz, &psc, &scl_dely, &sda_dely) ||
+	if (!bridge_i2c_timing_derive(apb1_hz, &psc, &scl_dely, &sda_dely) ||
 	    !bridge_i2c_stretch_timeout_reload(apb1_hz, &stretch_timeout_reload)) {
 		/* Refuse rather than clamp: no i2c_timing_config()/i2c_enable()
          * below, so I2C0 stays disabled and every access on the bus
          * gets a hard failure the host/analyser can see, instead of a
          * peripheral that answers with silently wrong timing.  See
-         * i2c_timing_derive()'s banner (gh#12/gh#38/gh#41) for why a
+         * bridge_i2c_timing_derive()'s banner (gh#12/gh#38/gh#41) for why a
          * silent clamp is exactly the defect this refusal avoids. */
 		return BRIDGE_HW_ERR_RANGE;
 	}

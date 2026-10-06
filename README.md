@@ -215,7 +215,7 @@ it as a wire-incompatible change and stage carefully.
 
 ## Protocol v0.15 (negotiated)
 
-`GET_VERSION` reports `0.16.0` (0.16 = v0.15 plus GPIO bits 21/22, E1M IO15/IO26). The full design -- wire layouts, the grant
+`GET_VERSION` reports `0.17.0` (0.16 = v0.15 plus GPIO bits 21/22, E1M IO15/IO26; 0.17 = 0.16 plus GPIO bits 23..26, CAM_EN_LDO0..3, and the I2C3 master proxy, see below). The full design -- wire layouts, the grant
 algorithm, the ATTN pin rules -- is
 [`docs/protocol-v0.15-design.md`](docs/protocol-v0.15-design.md); the points a
 firmware reader needs:
@@ -250,7 +250,7 @@ firmware reader needs:
   handlers as standalone requests, validates the whole request before executing
   anything, and stops at the first non-`OK` sub-status.
 * **The one unconditional change is the I2C opcode allow-list**: the I2C link
-  carries only `0x00..0x03`, `0x10`, `0x11`, `0x41`, `0x42`, `0x81` and `0xF0..0xFF`;
+  carries only `0x00..0x03`, `0x10`, `0x11`, `0x20`, `0x21` (PWM_SET/GET, v0.17), `0x41`, `0x42`, `0x81` and `0xF0..0xFF`;
   every other opcode answers an empty `STATUS_NOSUPPORT` and never reaches its
   handler. `bridge_i2c_denied_count` / `bridge_i2c_denied_last_cmd` (SWD-readable)
   record the refusals. SPI is unrestricted.
@@ -365,8 +365,9 @@ reset.  `duty_ns` must be 0 for a stop (`STATUS_INVAL` otherwise).  The
 shared auto-reload is left unchanged.  This needs no protocol minor bump:
 firmware before this change answers period 0 with `STATUS_OUT_OF_RANGE`.
 
-`gpio_pad_map[]` is 23 entries: 20 E1M IO pads (bits 0-17, 21, 22) plus three
-sideband bits (18, 19, 20) that are not E1M pads at all -- `BT_REG_ON`
+`gpio_pad_map[]` is 27 entries: 20 E1M IO pads (bits 0-17, 21, 22) plus seven
+sideband bits (18, 19, 20, 23..26) that are not E1M pads at all -- the
+camera LDO enables `CAM_EN_LDO0..3` (bits 23..26, described after the table) and `BT_REG_ON`
 (GD32 `PE14`) and `WL_REG_ON` (GD32 `PE15`), the Murata
 LBEE5HY2FY-922 Wi-Fi/BT module's power enables, and `CAN_STBY` (GD32
 `PB13`), the shared standby line for the two on-module TCAN1044
@@ -411,6 +412,10 @@ repeating it:
 |  20 | PB13     | CAN_STBY    |
 |  21 | PB4      | E1M IO15    |
 |  22 | PC2      | E1M IO26    |
+|  23 | PC3      | CAM_EN_LDO0 |
+|  24 | PE8      | CAM_EN_LDO1 |
+|  25 | PE7      | CAM_EN_LDO2 |
+|  26 | PE10     | CAM_EN_LDO3 |
 
 Bit 21 (`PB4`) is believed to be the JTAG NJTRST pin at reset (AF mode with
 a pull-up), so `bridge_hw_init` parks it analog / no pull at boot; debug
@@ -447,6 +452,68 @@ Bits 21/22 (E1M IO15/IO26) need `PROTOCOL_VERSION_MINOR >= 16` (0.15 firmware
 lacks them); older firmware ignores them and still returns `STATUS_OK`. Like the other
 E1M pads they have no boot-time drive; the first host read/write promotes
 them. `PC14` (bit 8) is untouched and `LXTAL` stays disabled.
+
+Bits 23..26 (`CAM_EN_LDO0..3`, GD32 `PC3`, `PE8`, `PE7`, `PE10`) are the
+camera LDO enables (SoM 2625-R2) -- sideband,
+not E1M pads. They are **output-only** and boot **OUTPUT driven LOW** (LDOs
+off), like the REG_ON lines: a host powers a camera rail by writing the bit
+high via `CMD_GPIO_WRITE`, and a read reports the measured pad level without
+ever demoting the pad to input. As with bits 18..20, any GD32 reset puts them
+back to LOW, so the host must re-assert them after `CMD_RESET_REASON` reports a
+reset. A host relying on bits 23..26 must require
+`PROTOCOL_VERSION_MINOR >= 17`; 0.16 firmware ignores them and still returns
+`STATUS_OK`. `PC14` is unused on SoM 2625-R2 (next revision) and is **not**
+added.
+
+## I2C3 master proxy (protocol 0.17)
+
+The E1M-X I2C3 bus = GD32 I2C2 peripheral (`PC8` = SCL, pad A24; `PC9` = SDA,
+pad A23, both AF8; the E1M-X numbers the bus from 3, the GD32 from 0; SoM
+2625-R2, no SoM pull-ups -- the carrier / module provides them) is
+exposed to the Linux host as a master over three opcodes, **I2C link only**
+(BRD_I2C `0x70`, 65 B payload; `STATUS_NOSUPPORT` on SPI, never in
+`CMD_BATCH`). All three need `PROTOCOL_VERSION_MINOR >= 17`.
+
+| Opcode | Request | Reply |
+|-------:|---------|-------|
+| `0xA0` `I2CM_CONFIG` | `bus_khz:u16` -- `100` or `400`; `0` releases `PC8`/`PC9` to hi-Z | empty |
+| `0xA1` `I2CM_XFER`   | `tag:u8 addr7:u8 flags:u8(=0) wlen:u8(<=60) rlen:u8(<=62) wdata[wlen]` | empty |
+| `0xA2` `I2CM_RESULT` | empty | `tag:u8 result:u8 nread:u8 rdata[nread]` |
+
+* `CONFIG` runs the 9-clock bus recovery, then takes the pads. Any other speed
+  is `STATUS_INVAL`; the stub HAL answers `STATUS_NOSUPPORT`; `STATUS_BUSY`
+  while a job runs. The pads stay hi-Z until the first `CONFIG`, and are
+  released again (proxy "unconfigured") after a Deep-sleep wake.
+* `XFER` only validates and queues: `STATUS_OK` queued, `STATUS_BUSY` a job is
+  queued or running, `STATUS_NOT_READY` no `CONFIG` yet. `wlen > 0 && rlen > 0`
+  is `S W.. Sr R.. P`; write only; read only; `wlen = rlen = 0` is a quick
+  write probe. A new `XFER` discards an uncollected result.
+* `RESULT`: `STATUS_BUSY` (empty) while the job runs, `STATUS_NOT_READY` if no
+  job ran since `CONFIG`, otherwise `STATUS_OK` with the payload above. The
+  result stays readable until the next `XFER` / `CONFIG`, so a lost read can
+  be repeated. The outer `STATUS` keeps its generic meaning; the bus outcome
+  is `result`: `0` OK, `1` NACK_ADDR (-ENXIO), `2` NACK_DATA (-EIO),
+  `3` ARB_LOST (-EAGAIN), `4` BUS_ERROR (-EIO), `5` TIMEOUT (-ETIMEDOUT),
+  `6` BUS_STUCK (-EBUSY).
+* The transfer runs at base level from `bridge_hw_tick()` (like
+  `ota_erase_tick()`), polled, no DMA: ~10 ms SCL-low timeout, 20 ms job
+  deadline. After a failed job the driver recovers the bus (up to 9 SCL pulses
+  at ~100 kHz on `PC8` as open-drain GPIO, a STOP, back to the I2C alternate
+  function); `PC9` still low afterwards is `BUS_STUCK`. `POWER_MODE_SET`
+  answers `STATUS_BUSY` while a job is queued or running.
+* Layout: `hal/gd32/i2cm_core.[ch]` (vendor-header-free job state machine,
+  host-tested in `tests/unit/i2cm/`) and `hal/gd32/i2cm.c` (the polled I2C2
+  register driver).
+
+Pin routing: GD32G553xx Datasheet Rev1.5, pin alternate-function table: PC8
+AF8 = I2C2_SCL, PC9 AF8 = I2C2_SDA (cross-check: vendor
+Examples/I2C/I2C_EEPROM/i2c.h, GD32G533 branch: I2C2 on PC8/PC9, `GPIO_AF_8`).
+`BRIDGE_I2CM_GPIO_AF` in [`hal/bridge_board_config.h`](hal/bridge_board_config.h)
+defaults to `GPIO_AF_8` and can be overridden at build time. Not yet run on
+silicon. The SCL high/low times (`I2CM_SCL*_NS_*` in `hal/gd32/i2cm_core.c`)
+are sized so `fSCL` never exceeds 100/400 kHz even with zero rise time, while
+staying at or above the I2C-bus spec minimums; trim them from a scope capture
+on the carrier.
 
 ## Cross-link
 

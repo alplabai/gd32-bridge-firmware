@@ -213,6 +213,8 @@ static const pv_case_t SPI_CASES[] = {
 	{ "spi_pwm_single_pulse_probe_request",              PV_NOSUPP, NULL },
 	{ "spi_power_mode_set_probe_request",                PV_NOSUPP, NULL },
 	{ "spi_power_mode_set_deepsleep_wake_i2c_request",   PV_NOSUPP, NULL },
+	/* v0.17 I2C3 proxy: I2C link only, refused on SPI. */
+	{ "spi_i2cm_xfer_request",                           PV_NOSUPP, NULL },
 	{ "spi_adc_dsp_chain_open_probe_request",            PV_NOSUPP, NULL },
 	{ "spi_adc_dsp_stage_push_window_hann_request",      PV_NOSUPP, NULL },
 	{ "spi_adc_dsp_chain_bind_probe_request",            PV_NOSUPP, NULL },

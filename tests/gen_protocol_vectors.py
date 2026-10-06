@@ -132,11 +132,15 @@ _REQUIRED_CMD_NAMES = (
     "CMD_BATCH",
     "CMD_ADC_STREAM_BEGIN2",
     "CMD_ADC_STREAM_READ2",
+    "CMD_I2CM_CONFIG",
+    "CMD_I2CM_XFER",
+    "CMD_I2CM_RESULT",
 )
 _REQUIRED_STATUS_NAMES = (
     "STATUS_OK",
     "STATUS_INVAL",
     "STATUS_NOT_READY",
+    "STATUS_BUSY",
     "STATUS_IO",
     "STATUS_NOSUPPORT",
 )
@@ -1319,6 +1323,68 @@ def build_vectors() -> list[tuple[str, str, str | None] | _Section]:
         " payload) | CRC -- only BATCH and READ2 may exceed 65 bytes, even"
         " on a BIG_FRAME link, so OTA keeps its 56-byte chunks; reply ="
         " spi_reply_inval",
+    ))
+
+    # ----- v0.17: I2C3 master proxy (I2C link only) -----------------
+    out.append(_Section([
+        "v0.17 -- I2C3 master proxy (CMD_I2CM_CONFIG / _XFER / _RESULT)",
+        "      I2C link only; the same opcodes on SPI answer NOSUPPORT",
+    ]))
+    out.append((
+        "i2c_i2cm_config_100khz_write",
+        i2c_write(CMD_I2CM_CONFIG, le16(100)).hex().upper(),
+        "reg=0x00 | CMD=0xA0 | bus_khz=100 (LE) | CRC(CMD..) -- 100 or 400;"
+        " 0 releases PC8/PC9 to hi-Z; reply = i2c_i2cm_reply_ok",
+    ))
+    out.append((
+        "i2c_i2cm_reply_ok",
+        i2c_read(STATUS_OK).hex().upper(),
+        "STATUS=0x00 | empty payload | CRC -- CONFIG done / XFER queued",
+    ))
+    out.append((
+        "i2c_i2cm_reply_busy",
+        i2c_read(STATUS_BUSY).hex().upper(),
+        "STATUS=0x03 (BUSY) | empty payload | CRC -- XFER/CONFIG while a"
+        " job is queued or running, RESULT while it runs",
+    ))
+    out.append((
+        "i2c_i2cm_reply_not_ready",
+        i2c_read(STATUS_NOT_READY).hex().upper(),
+        "STATUS=0x02 (NOT_READY) | empty payload | CRC -- XFER before CONFIG"
+        " (or after a Deep-sleep wake), RESULT with no job since CONFIG",
+    ))
+    out.append((
+        "i2c_i2cm_xfer_write_then_read_write",
+        i2c_write(CMD_I2CM_XFER,
+                  bytes([0x07, 0x50, 0x00, 0x01, 0x04, 0x10])).hex().upper(),
+        "reg=0x00 | CMD=0xA1 | tag=7 | addr7=0x50 | flags=0 | wlen=1 |"
+        " rlen=4 | wdata=10 | CRC -- S W.. Sr R.. P; reply ="
+        " i2c_i2cm_reply_ok",
+    ))
+    out.append((
+        "i2c_i2cm_result_write",
+        i2c_write(CMD_I2CM_RESULT).hex().upper(),
+        "reg=0x00 | CMD=0xA2 | empty payload | CRC",
+    ))
+    out.append((
+        "i2c_i2cm_result_reply_ok_4_bytes",
+        i2c_read(STATUS_OK, bytes([0x07, 0x00, 0x04, 0xDE, 0xAD, 0xBE, 0xEF])
+                 ).hex().upper(),
+        "STATUS=0x00 | tag=7 | result=0 (OK) | nread=4 | rdata=DEADBEEF |"
+        " CRC",
+    ))
+    out.append((
+        "i2c_i2cm_result_reply_nack_addr",
+        i2c_read(STATUS_OK, bytes([0x09, 0x01, 0x00])).hex().upper(),
+        "STATUS=0x00 | tag=9 | result=1 (NACK_ADDR) | nread=0 | CRC -- the"
+        " outer STATUS stays OK: result carries the bus outcome",
+    ))
+    out.append((
+        "spi_i2cm_xfer_request",
+        spi_frame(SOF, CMD_I2CM_XFER,
+                  bytes([0x07, 0x50, 0x00, 0x00, 0x00])).hex().upper(),
+        "SOF | CMD=0xA1 | tag=7 | addr7=0x50 | flags=0 | wlen=0 | rlen=0 |"
+        " CRC -- quick write probe; refused on SPI with spi_reply_nosupport",
     ))
 
     return out
