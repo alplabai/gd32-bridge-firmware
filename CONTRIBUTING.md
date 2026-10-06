@@ -63,14 +63,10 @@ commits die with the branch instead of becoming permanent history.
 ## Before you open a PR
 
 ```sh
-# stub build -- the same one CI runs. This repo does not vendor the GD32
-# firmware library, so the stub backend is the compile coverage available to
-# you locally without one; CI's `gd32 backend build` job fetches the real
-# library from the pinned public mirror and compiles the gd32 backend too --
-# see .github/workflows/ci.yml -- but that coverage is CI-only unless you
-# have your own copy of vendors/gd32_firmware_library (e.g. an alp-sdk
-# checkout) to point at with -DBRIDGE_HAL_BACKEND=gd32
-# -DGD32_VENDOR_DIR=<path> (see README.md).
+# stub build -- the same one CI runs. The GD32 firmware library is not in
+# this repo (GigaDevice's code, own terms); `tools/fetch_gd32_library.sh`
+# fetches it from GigaDevice, pin- and hash-verified, so you can also build the
+# gd32 backend locally with -DBRIDGE_HAL_BACKEND=gd32 (see README.md).
 # CMAKE_TOOLCHAIN_FILE is not optional: this is Cortex-M33 firmware linked
 # against a device linker script. Without it CMake configures against the host
 # compiler and the build then dies on the first source file, which rejects

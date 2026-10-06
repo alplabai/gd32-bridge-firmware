@@ -8,7 +8,7 @@
  * (adc_enable -> calibrate, ROVF-clear-before-enable, DMA FTF clear on
  * ROVF recovery) can be pinned without hardware (#77: no CI job compiles
  * hal/gd32/ sources today).  Function names/signatures mirror the real
- * vendor headers (vendors/gd32_firmware_library/upstream/.../
+ * vendor headers (vendor/gd32_firmware_library/upstream/.../
  * gd32g5x3_adc.h, gd32g5x3_dma.h, gd32g5x3_timer.h, gd32g5x3_trigsel.h,
  * gd32g5x3_fac.h, gd32g5x3_fft.h, gd32g5x3_misc.h) exactly, checked by
  * hand against those files -- ONLY the call sites the two source files

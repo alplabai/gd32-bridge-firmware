@@ -12,3 +12,7 @@ build*/
 # `python3 -m compileall -q tests tools` both create these under tests/ and
 # tools/.
 __pycache__/
+
+# GigaDevice firmware library, fetched by tools/fetch_gd32_library.sh;
+# GigaDevice IP, never committed (see THIRD_PARTY_NOTICES.md).
+vendor/gd32_firmware_library/upstream/
