@@ -42,6 +42,22 @@ signed release or rebuild from the tagged source (`README.md`). A `.sig` that
 fails to verify, or a `sha256sum -c` failure, means stop: re-download, and if it
 still fails do not flash. Never flash an image whose checksum you have not run.
 
+### Metadata region layout
+
+The metadata region is 8192 bytes (`0x2000`) at `0x08008000`. The shipped
+GD32G553 runs with OBCTL.DBS = 1 (dual-bank), so the physical flash pages are
+1 KB; the 2 KB `OTA_PAGE_SIZE` in `src/ota_layout.h` is only the layout
+granule (a multiple of the real page in both bank modes), and `hal/fmc_ota.c`
+erases by the real page size. Record 0 sits at `0x08008000` and record 1 at
+`0x08008800`; the rest of the region is unused and stays erased (`0xFF`). The
+release asset `ota-meta-rec0.bin` is only the 44-byte record 0 (slot A active,
+struct version 2, written by `tools/gen_ota_metadata.py`), not the whole
+region. Erase `0x08008000..0x0800A000` first, then write the 44 bytes at
+`0x08008000`; everything else in the region is then `0xFF`, which is the
+intended state. With record 1 erased, record 0 is the only valid record; in
+general the valid record with the highest counter wins
+(`tools/gen_ota_metadata.py`).
+
 ## 2. Path A: external SWD probe (J-Link or OpenOCD)
 
 Connect the probe to the GD32 SWDIO/SWCLK on the module's programming header
@@ -79,10 +95,11 @@ A recovered board is functional without them; they are a factory step.
 
 ## 3. Path B: host-driven SWD from the V2N A55
 
-The SoM routes the GD32 SWDIO/SWCLK (and NRST) back to SoC pads, so the Linux
-side can act as the SWD probe with no external hardware. The public alp-sdk
-repository documents the pin routing and carries a working SWD master:
-`chips/gd32_swd/` (driver) and `examples/v2n/v2n-gd32-swd-flash/` (example and
+The SoM routes the GD32 SWD lines (SWDIO, SWCLK, NRST) back to SoC pads, so the
+Linux side can act as the SWD probe with no external hardware, driven by
+bit-bang. The public alp-sdk repository is the single source for the pad
+routing and carries a working SWD master: `chips/gd32_swd/` (driver) and
+`examples/v2n/v2n-gd32-swd-flash/` (example and
 README with the resolved pads). Use it, or any SWD master on those pads, to:
 
 1. Copy the verified `.bin` files to the V2N.
