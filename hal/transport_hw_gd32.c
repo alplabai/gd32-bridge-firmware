@@ -56,7 +56,8 @@
 
 #include "bridge_board_config.h"
 #include "gd32/bridge_critical.h"
-#include "bridge_hw.h" /* BRIDGE_HW_OK / BRIDGE_HW_ERR_RANGE */
+#include "gd32/clock_source.h" /* bridge_clock_apb1_hz() */
+#include "bridge_hw.h"         /* BRIDGE_HW_OK / BRIDGE_HW_ERR_RANGE */
 #include "gd32/fault_handlers.h"
 #include "gd32/i2c_event_priority.h"
 #include "gd32/i2c_recovery.h"
@@ -712,7 +713,7 @@ int bridge_transport_i2c_hw_init(void)
 	bridge_rcu_periph_clock_enable(BRIDGE_I2C_RCU);
 	i2c_gpio_init();
 
-	const uint32_t apb1_hz = rcu_clock_freq_get(CK_APB1);
+	const uint32_t apb1_hz = bridge_clock_apb1_hz();
 	uint32_t       psc, scl_dely, sda_dely;
 	uint16_t       stretch_timeout_reload;
 	if (!i2c_timing_derive(apb1_hz, &psc, &scl_dely, &sda_dely) ||

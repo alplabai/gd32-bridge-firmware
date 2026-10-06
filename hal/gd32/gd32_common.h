@@ -97,11 +97,13 @@ typedef struct {
  * INVAL at the call site, anything above the cap is RANGE. */
 #define BRIDGE_ADC_STREAM_RATE_MAX_HZ 100000u
 
-/* Pacing-timer clock.  TIMER5/6 are APB1 basic timers; with APB1 at
- * DIV1 they tick at the full 216 MHz core clock (same base the PWM
- * timers use -- see PWM_TIMER_CLK_HZ).  The silicon validation
- * cross-checks this constant: a wrong base shows up directly as a
- * got-count mismatch over a timed dwell. */
+/* Pacing-timer clock, NOMINAL.  TIMER5/6 are APB1 basic timers; with APB1 at
+ * DIV1 they tick at the core clock (same base the PWM timers use -- see
+ * PWM_TIMER_CLK_HZ).  This is the IRC8M-path value only: the prescalers are
+ * derived from the live core clock (bridge_timer_prescaler() below), because
+ * an HXTAL PLL tuple can land elsewhere (215.04 MHz for 24.576 MHz, see
+ * clock_source.h).  The silicon validation cross-checks the result: a wrong
+ * base shows up directly as a got-count mismatch over a timed dwell. */
 #define BRIDGE_ADC_PACE_CLK_HZ 216000000u
 
 /* gh#149 per-consumer DMA position tracker (see adc_stream_state_t's
@@ -358,7 +360,7 @@ _Static_assert(GPIO_PAD_CAN_STBY < GPIO_PAD_MAP_COUNT,
  * counter ticks at exactly 1 MHz.  ARR fits edge-aligned periods up
  * to 65.536 ms and center-aligned periods up to 131.070 ms. */
 #define PWM_TIMER_CLK_HZ    216000000u
-#define PWM_TIMER_PRESCALER (216u - 1u) /* 216 MHz -> 1 MHz tick    */
+#define PWM_TIMER_PRESCALER (216u - 1u) /* NOMINAL 216 MHz -> 1 MHz tick; see below */
 #define PWM_TIMER_TICK_NS   1000u       /* 1 us per timer tick      */
 #define PWM_TIMER_ARR_MAX   0xFFFFu     /* 16-bit auto-reload limit */
 
@@ -390,16 +392,29 @@ _Static_assert(PWM_TIMER_CLK_HZ / (PWM_TIMER_PRESCALER + 1u) == 1000000000u / PW
  * checked.
  *
  * `bridge_core_clock_matches` is false when the running clock disagrees
- * with PWM_TIMER_CLK_HZ, i.e. when every PWM period, ADC pacing interval
- * and DWT timestamp this firmware produces is wrong by that ratio.
- * Both are non-static so a bench SWD read can see them without a wire
- * change.  ACTING on the mismatch -- refusing supervised outputs, or
- * deriving PWM_TIMER_PRESCALER from SystemCoreClock at runtime so the
- * timer math self-corrects -- lands in hal/gd32/pwm.c, which open PR #82
- * is rewriting; it is deliberately left to a follow-up rather than
- * conflicting with that work.  Tracked on #127. */
+ * with the SYSCLK the active clock selection is meant to produce
+ * (bridge_clock_core_matches(): 216 MHz on the IRC8M PLL, the table entry
+ * on HXTAL, hal/gd32/clock_source.h) -- e.g. after a failed relock leaves the
+ * part on the bare 8 MHz IRC8M.  The PWM and ADC-pacing prescalers are
+ * derived from bridge_core_clock_hz at run time (bridge_timer_prescaler()
+ * below), so a legitimate non-216 MHz SYSCLK keeps their ticks right; the
+ * 216 MHz literals above are the nominal IRC8M-path values.  Both variables
+ * are non-static so a bench SWD read can see them without a wire change. */
 extern uint32_t bridge_core_clock_hz;      /* init.c */
 extern bool     bridge_core_clock_matches; /* init.c */
+
+/* Timer prescaler field for a `tick_hz` tick from the LIVE core clock
+ * (APB prescalers are DIV1, so the timers run at SYSCLK).  Rounded to the
+ * nearest divider: 215.04 MHz -> /215 -> 1.0002 MHz where the fixed
+ * (216 - 1) would be 0.44% slow.  A timer programmed BEFORE a core-clock
+ * change keeps its old prescaler, which is why the host-requested HXTAL
+ * switch (bridge_clock_try_hxtal) is REFUSED while any PWM channel or ADC
+ * stream is active; anything started after a switch picks up the live clock. */
+static inline uint32_t bridge_timer_prescaler(uint32_t tick_hz)
+{
+	const uint32_t div = (bridge_core_clock_hz + tick_hz / 2u) / tick_hz;
+	return (div != 0u ? div : 1u) - 1u;
+}
 
 /* power.c: re-select the PLL after a Deep-sleep exit (gh#12); false on timeout. */
 bool bridge_clock_restore_after_deepsleep(void);
@@ -476,9 +491,12 @@ void     adc_apply_conv_format(uint32_t periph, uint8_t channel); /* adc.c */
 void     qenc_channel_init(const gd32_qenc_t *e);                 /* qenc.c */
 void     pwm_timer_init(uint32_t periph);                         /* pwm.c */
 void     pwm_channel_init(const gd32_pwm_ch_t *ch);               /* pwm.c */
-void     pwm_channel_claim(uint8_t channel);                      /* pwm.c */
-void     pwm_channel_release(uint8_t channel);                    /* pwm.c */
-void     se_reset_init(void);                                     /* se_reset.c */
+bool     pwm_any_claimed(void);                /* pwm.c: a continuous output or capture is live */
+bool     adc_stream_any_active(void);          /* adc_stream.c */
+bool     bridge_link_quiet(void);              /* power.c: CS high, no I2C txn / pending edge */
+void     pwm_channel_claim(uint8_t channel);   /* pwm.c */
+void     pwm_channel_release(uint8_t channel); /* pwm.c */
+void     se_reset_init(void);                  /* se_reset.c */
 
 /* Per-timer CAR shadow-promotion tracking (pwm_capture.c owns the
  * state; see the comment above pwm_capture_active_car).  pwm.c calls

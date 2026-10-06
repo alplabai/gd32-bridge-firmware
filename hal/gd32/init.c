@@ -165,6 +165,7 @@
  * independently; libopt controls declarations, not which driver units link. */
 #include "gd32g5x3.h"
 #include "gd32g5x3_dbg.h"
+#include "clock_source.h"
 #include "gd32_common.h"
 #include "reset_reason.h"
 
@@ -211,6 +212,14 @@ extern uint32_t _stack_limit[];
  * bounded spin.  Volatile so a bench probe can read it after boot;
  * no functional consumer today -- the cell is enable-and-forget. */
 volatile bool gpio_compensation_ready;
+
+/* FWDGT arm (defined with the watchdog notes below) and its once-only latch;
+ * bridge_hw_init() arms early only for the HXTAL-at-boot build. */
+static void bridge_fwdgt_arm(void);
+static bool s_fwdgt_armed;
+
+/* Read-only OTA trial probe, valid BEFORE ota_boot_init() (src/ota.c). */
+extern bool ota_trial_peek(void);
 
 void bridge_hw_init(void)
 {
@@ -394,9 +403,32 @@ void bridge_hw_init(void)
      * The result is recorded, not acted on.  See the declarations in
      * gd32_common.h for why refusing supervised outputs on a mismatch is
      * a follow-up rather than part of this change. */
-	SystemCoreClockUpdate();
+	/* Clock source.  The part stays on the IRC8M 216 MHz PLL the vendor
+	 * SystemInit() built; the external clock (HXTAL bypass) is switched to
+	 * only on the host's request (bridge_clock_try_hxtal(), run from
+	 * bridge_hw_tick()) because SE2 is not final until U-Boot has configured
+	 * it.  -DBRIDGE_CLOCK_HXTAL_AT_BOOT=ON attempts it here instead, for an
+	 * SoM whose SE2 is right from POR; that attempt is time-bounded
+	 * (hal/gd32/clock_source.h, ~3 ms typical, ~23 ms worst) and runs with
+	 * the FWDGT already armed, except under an OTA trial where the
+	 * bootloader's dog is already counting. */
+#ifdef BRIDGE_CLOCK_HXTAL_AT_BOOT
+	{
+		const bool trial = ota_trial_peek(); /* ota_boot_init() has not run yet */
+		if (!trial) {
+			bridge_fwdgt_arm();
+			s_fwdgt_armed = true;
+		}
+		bridge_clock_init(!trial);
+		if (!trial) fwdgt_counter_reload(); /* full window for the rest of init */
+	}
+#else
+	bridge_clock_init(false);
+#endif
+
+	bridge_clock_core_update();
 	bridge_core_clock_hz      = SystemCoreClock;
-	bridge_core_clock_matches = (SystemCoreClock == PWM_TIMER_CLK_HZ);
+	bridge_core_clock_matches = bridge_clock_core_matches();
 
 	/* --- Explicit NMI-source arming (gh#36) ---------------------------
 	 *
@@ -806,7 +838,8 @@ extern void ota_confirm_tick(void);
 /* Free watchdog (FWDGT, gh#54).  Armed from bridge_hw_tick() on the first
  * healthy pass and fed only from there, never from SysTick_Handler().
  *
- * Why not in bridge_hw_init(): a TRIAL image (src/ota.c) runs under the
+ * Why not in bridge_hw_init() (except the HXTAL-at-boot build, which arms
+ * it there only when no trial is running): a TRIAL image (src/ota.c) runs under the
  * bootloader's ~32.8 s FWDGT (OTA_TRIAL_FWDGT_RELOAD, DIV256), which IS
  * the confirm deadline -- it reverts a slot the host never confirms.  The
  * counter cannot be disarmed, so re-arming it here with a 501 ms window
@@ -848,7 +881,12 @@ extern void ota_confirm_tick(void);
  *     100000 ~ 31 ms, four ADC calibrations ~ 4 x 63 ms) is ~ 350 ms,
  *     which is inside the 445 ms minimum only because the bootloader fed
  *     immediately before the jump.  A hardware wedge that long is meant to
- *     end in a reset;
+ *     end in a reset.  The default build adds nothing here (it stays on the
+ *     IRC8M PLL).  With -DBRIDGE_CLOCK_HXTAL_AT_BOOT=ON bridge_clock_init()
+ *     adds an HXTAL attempt bounded by TIME, not spins (clock_source.h):
+ *     ~3 ms typical, 5 ms with SE2 off, 23 ms worst; the FWDGT is armed
+ *     BEFORE it (except under an OTA trial, where the bootloader's dog is
+ *     already counting) and fed inside the waits;
  *   - the first bridge_hw_tick() then arms/feeds within one 50 ms tick.
  * Deep-sleep/Standby entry has its own feed + spacing rule in
  * hal/gd32/power.c, and refuses a wake longer than the window whenever the
@@ -900,6 +938,12 @@ void bridge_hw_tick(void)
 	vref_late_tick();
 	ota_erase_tick();
 	ota_confirm_tick();
+	/* Host-requested HXTAL switch, else clear the HXTAL attempt marker.  Runs
+	 * BEFORE the trial gate below on purpose: the marker must clear on the
+	 * first healthy tick of a trial boot too (a confirm reboot would
+	 * otherwise always report fallback 5), and a trial image may switch the
+	 * clock under the bootloader's dog. */
+	bridge_clock_tick();
 	bridge_transport_i2c_stuck_poll();
 	bridge_power_tick();
 	/* Feed the free watchdog LAST (gh#54), and only from this healthy
@@ -908,10 +952,9 @@ void bridge_hw_tick(void)
 	 * a silent wedge.  See bridge_fwdgt_arm() for the window sizing and
 	 * the TRIAL exception. */
 	if (ota_trial_unconfirmed()) return;
-	static bool fwdgt_armed;
-	if (!fwdgt_armed) {
+	if (!s_fwdgt_armed) {
 		bridge_fwdgt_arm();
-		fwdgt_armed = true;
+		s_fwdgt_armed = true;
 	} else {
 		fwdgt_counter_reload();
 	}

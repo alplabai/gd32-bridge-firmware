@@ -531,3 +531,148 @@ jobs:
             exit 1
           fi
           echo 'bank-crossing slot rejected'
+
+  # The `gd32 backend build` job above links the STOCK vendor SystemInit()
+  # (compile-and-link only).  This job builds what is actually flashed: the
+  # IRC8M clock override staged from the pinned alp-sdk commit, exactly as
+  # release.yml does, in the three shapes the clock code has (default, HXTAL-at-boot, IRC8M-only), and checks the
+  # LINKED images (tools/check_clock_override.py):
+  #   - default (HXTAL host-requested): app images carry the HXTAL-bypass path;
+  #   - -DBRIDGE_CLOCK_HXTAL=OFF (IRC8M-only): app images do NOT;
+  #   - the bootloader never links the HXTAL path in either shape (named with
+  #     --bootloader, not guessed from its file name).
+  # ALP_SDK_PIN / WRAPPER_SHA256 / OVERRIDE_SHA256 / the vendor pin mirror
+  # release.yml: move them together, deliberately.
+  clock-images:
+    name: clock override and HXTAL path in the linked images
+    runs-on: ubuntu-latest
+    env:
+      ALP_SDK_PIN: ff136d79278c85596c1af1ce9c63ed2ae8efe9fd
+      WRAPPER_SHA256: 763243a4dc60b3525fb8b19126137104803a8935c1d1cece8063c10c75a43b9c
+      OVERRIDE_SHA256: 38ea3d9fe2d30afb5270f81622acb652d169f42cf0cc597424eab9ba9330a8fb
+      GD32_VENDOR_PIN: 4a0258080c45227a31fd4c32fa2c4860ba11c16a
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: install the Arm GNU toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            gcc-arm-none-eabi libnewlib-arm-none-eabi
+          arm-none-eabi-gcc --version | head -1
+
+      - name: stage the vendor wrapper and the IRC8M override (pinned alp-sdk commit)
+        run: |
+          set -euo pipefail
+          d="$RUNNER_TEMP/gd32_vendor/gd32_firmware_library"
+          mkdir -p "$d/overrides"
+          base="https://raw.githubusercontent.com/alplabai/alp-sdk/$ALP_SDK_PIN/vendors/gd32_firmware_library"
+          curl -fsSL --retry 3 -o "$d/CMakeLists.txt" "$base/CMakeLists.txt"
+          echo "$WRAPPER_SHA256  $d/CMakeLists.txt" | sha256sum -c -
+          curl -fsSL --retry 3 -o "$d/overrides/system_gd32g5x3.c" "$base/overrides/system_gd32g5x3.c"
+          echo "$OVERRIDE_SHA256  $d/overrides/system_gd32g5x3.c" | sha256sum -c -
+
+      - name: fetch the GD32 vendor firmware library (pinned commit, via tag)
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          git clone --branch v1.5.0 --depth 1 \
+            https://github.com/alplabai/gd32g5x3-firmware-library.git \
+            "$RUNNER_TEMP/gd32_vendor/gd32_firmware_library/upstream"
+          actual="$(git -C "$RUNNER_TEMP/gd32_vendor/gd32_firmware_library/upstream" rev-parse HEAD)"
+          if [ "$actual" != "$GD32_VENDOR_PIN" ]; then
+            echo "::error::vendor firmware library HEAD is $actual, expected $GD32_VENDOR_PIN"
+            exit 1
+          fi
+
+      - name: build the default shape (partitioned set + full-flash image)
+        run: |
+          set -euo pipefail
+          for cfg in "build-clk-ota -DBRIDGE_OTA_PARTITIONED=ON" "build-clk-flash"; do
+            set -- $cfg
+            dir=$1; shift
+            cmake -B "$dir" -S . \
+              -DCMAKE_TOOLCHAIN_FILE=toolchain/arm-none-eabi.cmake \
+              -DBRIDGE_HAL_BACKEND=gd32 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON "$@" \
+              -DGD32_VENDOR_DIR="$RUNNER_TEMP/gd32_vendor/gd32_firmware_library"
+            cmake --build "$dir" -j"$(nproc)"
+          done
+
+      - name: build the IRC8M-only shape (-DBRIDGE_CLOCK_HXTAL=OFF)
+        run: |
+          set -euo pipefail
+          for cfg in "build-clk-off-ota -DBRIDGE_OTA_PARTITIONED=ON" "build-clk-off-flash"; do
+            set -- $cfg
+            dir=$1; shift
+            cmake -B "$dir" -S . \
+              -DCMAKE_TOOLCHAIN_FILE=toolchain/arm-none-eabi.cmake \
+              -DBRIDGE_HAL_BACKEND=gd32 -DBRIDGE_CLOCK_HXTAL=OFF \
+              -DCMAKE_EXPORT_COMPILE_COMMANDS=ON "$@" \
+              -DGD32_VENDOR_DIR="$RUNNER_TEMP/gd32_vendor/gd32_firmware_library"
+            cmake --build "$dir" -j"$(nproc)"
+          done
+
+      - name: build the HXTAL-at-boot shape (-DBRIDGE_CLOCK_HXTAL_AT_BOOT=ON)
+        run: |
+          set -euo pipefail
+          for cfg in "build-clk-boot-ota -DBRIDGE_OTA_PARTITIONED=ON" "build-clk-boot-flash"; do
+            set -- $cfg
+            dir=$1; shift
+            cmake -B "$dir" -S . \
+              -DCMAKE_TOOLCHAIN_FILE=toolchain/arm-none-eabi.cmake \
+              -DBRIDGE_HAL_BACKEND=gd32 -DBRIDGE_CLOCK_HXTAL_AT_BOOT=ON \
+              -DCMAKE_EXPORT_COMPILE_COMMANDS=ON "$@" \
+              -DGD32_VENDOR_DIR="$RUNNER_TEMP/gd32_vendor/gd32_firmware_library"
+            cmake --build "$dir" -j"$(nproc)"
+          done
+
+      - name: check the linked images (default shape)
+        run: |
+          set -euo pipefail
+          python3 tools/check_clock_override.py \
+            --bootloader build-clk-ota/gd32-bootloader.elf \
+            build-clk-ota/compile_commands.json \
+            build-clk-ota/gd32-bridge-slot-a.elf \
+            build-clk-ota/gd32-bridge-slot-b.elf
+          python3 tools/check_clock_override.py \
+            build-clk-flash/compile_commands.json \
+            build-clk-flash/gd32-bridge.elf
+
+      - name: check the linked images (HXTAL-at-boot shape)
+        run: |
+          set -euo pipefail
+          python3 tools/check_clock_override.py \
+            --bootloader build-clk-boot-ota/gd32-bootloader.elf \
+            build-clk-boot-ota/compile_commands.json \
+            build-clk-boot-ota/gd32-bridge-slot-a.elf \
+            build-clk-boot-ota/gd32-bridge-slot-b.elf
+          python3 tools/check_clock_override.py \
+            build-clk-boot-flash/compile_commands.json \
+            build-clk-boot-flash/gd32-bridge.elf
+
+      - name: check the linked images (IRC8M-only shape)
+        run: |
+          set -euo pipefail
+          python3 tools/check_clock_override.py --irc8m-only \
+            --bootloader build-clk-off-ota/gd32-bootloader.elf \
+            build-clk-off-ota/compile_commands.json \
+            build-clk-off-ota/gd32-bridge-slot-a.elf \
+            build-clk-off-ota/gd32-bridge-slot-b.elf
+          python3 tools/check_clock_override.py --irc8m-only \
+            build-clk-off-flash/compile_commands.json \
+            build-clk-off-flash/gd32-bridge.elf
+
+      - name: verify core-fault vector ownership (all shapes)
+        run: |
+          python3 tools/check_fault_vectors.py \
+            build-clk-ota/gd32-bootloader.elf \
+            build-clk-ota/gd32-bridge-slot-a.elf \
+            build-clk-ota/gd32-bridge-slot-b.elf \
+            build-clk-flash/gd32-bridge.elf \
+            build-clk-off-ota/gd32-bridge-slot-a.elf \
+            build-clk-off-flash/gd32-bridge.elf \
+            build-clk-boot-ota/gd32-bridge-slot-a.elf \
+            build-clk-boot-flash/gd32-bridge.elf

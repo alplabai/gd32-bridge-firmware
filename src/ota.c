@@ -609,6 +609,19 @@ void ota_boot_init(void)
 	}
 }
 
+/* Read-only twin of ota_boot_init()'s trial decision, for the one caller that
+ * must know BEFORE ota_boot_init() runs (the FWDGT-vs-trial decision in
+ * bridge_hw_init()).  No writes, no self-heal; flash reads only. */
+bool ota_trial_peek(void)
+{
+	if (!ota_fmc_supported()) {
+		return false;
+	}
+	ota_meta_record_t rec;
+	uint32_t          which;
+	return find_running_slot_record(&rec, &which) && (rec.flags & OTA_META_FLAG_TRIAL) != 0u;
+}
+
 bool ota_trial_unconfirmed(void)
 {
 	return s_trial;
@@ -1304,6 +1317,11 @@ void ota_erase_tick(void)
 /* OTA inert: no trial ever gets armed, so nothing to reconcile/gate/confirm. */
 void ota_boot_init(void)
 {
+}
+
+bool ota_trial_peek(void)
+{
+	return false;
 }
 
 bool ota_trial_unconfirmed(void)
