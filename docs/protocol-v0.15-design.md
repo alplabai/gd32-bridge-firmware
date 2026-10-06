@@ -391,7 +391,7 @@ Unless noted, `STATUS` is shown un-stamped (`0x00`), with a stamped variant wher
 
 | Name | Bytes before CRC |
 |---|---|
-| `spi_get_version_reply_v0_15_0` | `A5 00 00 0F 00` |
+| `spi_get_version_reply_v0_16_0` | `A5 00 00 10 00` (v0.16 = v0.15 + GPIO bits 21/22; the 0.15 reply was `A5 00 00 0F 00`) |
 | `spi_link_features_ext_request_all` | `A5 81 1F000000 FC00` |
 | `spi_link_features_ext_reply_all_seq1` | `A5 10 1F000000 1F000000 FC00` |
 | `spi_link_features_ext_reply_attn_refused_seq1` | `A5 10 1B000000 1F000000 FC00` (debugger attached) |

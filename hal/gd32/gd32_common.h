@@ -195,7 +195,7 @@ typedef struct {
 /* _Static_assert that the sizeof-derived size matches these).        */
 /* ----------------------------------------------------------------- */
 
-#define GPIO_PAD_MAP_COUNT 21u /* _Static_assert against sizeof in gpio.c       */
+#define GPIO_PAD_MAP_COUNT 23u /* _Static_assert against sizeof in gpio.c       */
 /* gpio_pad_map bits whose E1M IO is not routed to the GD32 on the SoM
  * (rev 2625-R2): bit 8 = E1M IO24, driven by the DX-M1 on V2M and
  * unconnected on V2N (gh#298).  Read/write naming one of these bits
@@ -230,6 +230,10 @@ _Static_assert(GPIO_PAD_WL_REG_ON == GPIO_PAD_BT_REG_ON + 1 &&
  * HOST's, not this firmware's: the GD32 only proxies the line; it
  * never takes the bus out of standby on its own. */
 #define GPIO_PAD_CAN_STBY 20u
+/* Bits 21/22 are ordinary E1M pads (IO15 = PB4, IO26 = PC2). */
+#define GPIO_PAD_E1M_IO15 21u
+#define GPIO_PAD_E1M_IO26 22u
+_Static_assert(GPIO_PAD_E1M_IO26 + 1u == GPIO_PAD_MAP_COUNT, "gpio_pad_map ends at E1M IO26");
 _Static_assert(GPIO_PAD_CAN_STBY < GPIO_PAD_MAP_COUNT,
                "GPIO_PAD_CAN_STBY must be in-range -- init.c's boot loop treats it "
                "as a single-bit sideband pad, same posture as BT/WL_REG_ON");
