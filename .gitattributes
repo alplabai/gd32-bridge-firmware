@@ -4,3 +4,7 @@
 # which breaks the `git diff --exit-code tests/protocol_vectors.txt` gate
 # documented in CONTRIBUTING.md and run in .github/workflows/ci.yml.
 tests/protocol_vectors.txt text eol=lf
+
+# Patches must apply byte-exact: never EOL-convert.
+*.patch -text
+*.sh text eol=lf

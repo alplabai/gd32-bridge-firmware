@@ -350,8 +350,8 @@ _Static_assert(GPIO_PAD_CAN_STBY < GPIO_PAD_MAP_COUNT,
 #endif
 
 /* TIMER core clock.  This SoM's SystemInit override runs SYSCLK at
- * 216 MHz (216M-PLL-IRC8M -- see vendors/gd32_firmware_library/
- * overrides/system_gd32g5x3.c) with APB1/APB2 at DIV1, so CK_TIMER =
+ * 216 MHz (216M-PLL-IRC8M -- see vendor/gd32_firmware_library/
+ * patches/system_gd32g5x3-irc8m.patch) with APB1/APB2 at DIV1, so CK_TIMER =
  * 216 MHz at every timer counter input.  GigaDevice's own PWM
  * example states the same base ("TIMER0 frequency is fixed to
  * 216MHz").  NOTE 2026-06-04: this was wrongly coded as 240 MHz
