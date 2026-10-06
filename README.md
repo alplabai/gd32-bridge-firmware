@@ -160,6 +160,56 @@ Development flashing uses an external SWD probe on `GD32_SWDIO` /
 > (`tests/unit/adc_dsp/`).  The stub backend stays HW-free for host
 > protocol round-trip tests.
 
+## SPI fast re-init (gh#165)
+
+At CS rising the handler used to pulse `RCU_SPI1RST` on every transaction
+(~28 us floor): the GD32G5x3 SPI has no FIFO flush bit and nothing documents
+discarding stale TX FIFO bytes (User Manual Rev1.3).  With `BRIDGE_SPI_FAST_REINIT`
+(CMake option, default ON) the reset is skipped when `SPI_STAT`, read after
+the RX drain, shows TXLVL==00, TRANS==0, RXLVL==00 and no CRCERR / CONFERR /
+RXORERR / FERR **and** the master clocked the whole armed TX reply with the TX
+DMA drained (TXLVL counts the FIFO only, not the shift register: a reply read
+one byte short leaves a stale byte there with TXLVL==0, TRANS==0);
+BYTEN / DMAREN / DMATEN / SPIEN are untouched by a skipped reset, so only the existing RX re-arm follows.  Anything else, and the DMA
+quiesce-timeout / DMA-error / overrun exits, take the unchanged full reset.
+`-DBRIDGE_SPI_FAST_REINIT=OFF` restores always-reset.  SWD-readable counters:
+`bridge_spi_reinit_stats.fast` / `.slow` (RAM, `hal/gd32/spi_fast_reinit.h`;
+the three fault exits are not counted).
+
+Host tests (`tests/unit/transport_hw_cs_exti`) model the reset as the only
+thing that empties the TX path (shift register + FIFO + DMA) and prove, for
+every armed-length / clocked-length pair including clocked == armed-1, that no
+stale TX byte survives the handler and that the fast path is taken exactly
+when the master clocked the whole armed reply.  They cannot prove silicon
+behaviour: the default-ON setting is **unvalidated on hardware until the plan
+below passes**, and must be flipped to OFF if it does not.
+
+### Bench plan (not yet run)
+
+Build the partitioned gd32 image with `-DBRIDGE_TIMING_STATS=ON`, once with
+`-DBRIDGE_SPI_FAST_REINIT=OFF` (baseline) and once with `=ON`, same host, same
+clock, protocol 0.15 negotiated with BIG_FRAME 256-B frames and ATTN enabled.
+
+1. **Per-transaction floor.**  PING and a 256-B BIG_FRAME read loop, >=10k
+   transactions each; record the minimum and p99 CS-rising-to-reply-staged and
+   host round-trip (`bridge_timing_stats`, docs/timing-stats.md) for both
+   builds.  Expect the ON floor ~28 us lower; report both.
+2. **Soak.**  20 rows clean, same matrix as the issue's existing soak, on the ON
+   build.  Any CRC / `STATUS_IO` / STATUS_SEQ mismatch that the OFF build does
+   not show fails the change.
+3. **linkbench.**  ~105k frames with zero errors on the ON build, including
+   mixed request/reply lengths, a reply read directly after a request whose
+   staged reply was never read (the stale-TX hazard), a reply read exactly one
+   byte short (armed_len-1 clocked) followed by a full read, and ATTN-driven
+   reads.  Record the `bridge_spi_reinit_stats` ratio for the short-read step
+   separately: every short read must count as `slow`.
+4. **Counters.**  Over SWD read `bridge_spi_reinit_stats` after each run:
+   expect `fast` to dominate; a large `slow` share means the fast path is
+   rarely eligible and the win is smaller than hoped.  Record the ratio.
+5. **Verdict.**  Zero errors and a measured floor reduction -> keep default ON.
+   Any error -> default OFF, and attach the failing frame + `SPI_STAT` at CS
+   rising.
+
 ## Protocol majorset
 
 The firmware ships with a build-time `PROTOCOL_VERSION_MAJOR`
