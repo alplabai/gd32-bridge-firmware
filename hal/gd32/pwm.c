@@ -352,6 +352,25 @@ int pwm_apply_counter_values(uint8_t channel, uint32_t arr, uint32_t compare)
 	return BRIDGE_HW_OK;
 }
 
+/* PWM_SET period 0: release the channel.  Compare 0 in PWM0 holds the pad at
+ * its idle low level (the boot default); the shared ARR is kept as-is so
+ * sibling channels keep their period.  Going through
+ * pwm_apply_counter_values reuses its TIMER_SYNC master guard (BUSY, no state
+ * change), PRIMASK locking, OPM/PWM1 leftover clear and the forced transfer
+ * a one-shot-halted timer needs, then the claim is dropped so a sibling
+ * bridge_hw_pwm_single_pulse is allowed again.
+ * ponytail: the counter keeps running after the last release (pad stays low);
+ * single_pulse halts it itself when it takes over the timer. */
+int pwm_channel_stop(uint8_t channel)
+{
+	if (channel >= PWM_CHANNEL_COUNT) return BRIDGE_HW_ERR_RANGE;
+	const uint32_t car = TIMER_CAR(pwm_channels[channel].periph) & PWM_TIMER_ARR_MAX;
+	const int      rv  = pwm_apply_counter_values(channel, car, 0u);
+	if (rv != BRIDGE_HW_OK) return rv;
+	pwm_channel_release(channel);
+	return BRIDGE_HW_OK;
+}
+
 int bridge_hw_pwm_get(uint8_t channel, uint32_t *period_ns, uint32_t *duty_ns)
 {
 	if (period_ns == 0 || duty_ns == 0) return BRIDGE_HW_ERR_INVAL;

@@ -168,6 +168,11 @@ typedef enum {
      * shared standby line for the two on-module TCAN1044 CAN-FD
      * transceivers (sideband, not an E1M pad; GPIO_PAD_CAN_STBY).
      * Hosts relying on bit 20 must require MINOR >= 13. */
+	/* PWM_SET with period_ns == 0 (duty_ns must be 0, else STATUS_INVAL) is
+     * STOP: the channel's pad goes to its idle low level and its timer
+     * claim is released, so a sibling PWM_SINGLE_PULSE is accepted again.
+     * No protocol bump: firmware before this change answers period 0 with
+     * STATUS_OUT_OF_RANGE, which a host can use to detect it. */
 	CMD_PWM_SET = 0x20,
 	CMD_PWM_GET = 0x21,
 	/* v0.3: sticky per-channel PWM tuning (align mode, dead time, fault

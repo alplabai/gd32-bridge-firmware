@@ -14,5 +14,6 @@
 
 bool pwm_channel_center_aligned(uint8_t channel);
 int  pwm_apply_counter_values(uint8_t channel, uint32_t arr, uint32_t compare);
+int  pwm_channel_stop(uint8_t channel);
 
 #endif /* GD32_BRIDGE_HAL_GD32_PWM_INTERNAL_H */
