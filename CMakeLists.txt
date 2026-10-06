@@ -83,6 +83,7 @@ option(BRIDGE_SPI_FAST_REINIT "Skip SPI reset at CS rising when SPI_STAT proves 
 # transaction cycles for request CRC / protocol_dispatch / reply stage / CS-edge
 # to reply-staged, in the RAM struct `bridge_timing_stats` (layout:
 # docs/timing-stats.md).  OFF adds no code and no data to the image.
+option(BRIDGE_BENCH_DIAG "Bench-only CMD 0xAF I2CM_DIAG register dump (never ship)" OFF)
 option(BRIDGE_TIMING_STATS "Record SPI round-trip DWT cycle stats in RAM (bench only)" OFF)
 if(BRIDGE_TIMING_STATS)
     list(APPEND GD32_BRIDGE_SOURCES src/timing_stats.c)
@@ -269,6 +270,9 @@ function(gd32_firmware_target tgt linker_script)
     add_dependencies(${tgt} gd32-build-id)
     if(BRIDGE_TIMING_STATS)
         target_compile_definitions(${tgt} PRIVATE BRIDGE_TIMING_STATS=1)
+    endif()
+    if(BRIDGE_BENCH_DIAG)
+        target_compile_definitions(${tgt} PRIVATE BRIDGE_BENCH_DIAG=1)
     endif()
     if(BRIDGE_SPI_FAST_REINIT)
         target_compile_definitions(${tgt} PRIVATE BRIDGE_SPI_FAST_REINIT=1)

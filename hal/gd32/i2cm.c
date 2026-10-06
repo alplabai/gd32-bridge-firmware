@@ -130,6 +130,47 @@ static bool scl_high(void)
 	return (GPIO_ISTAT(BRIDGE_I2CM_SCL_PORT) & BRIDGE_I2CM_SCL_PIN) != 0u;
 }
 
+#if defined(BRIDGE_BENCH_DIAG) && BRIDGE_BENCH_DIAG
+/* Bench capture of the pad state right before a BUS_STUCK decision, packed
+ * as described in i2cm_core.h (slot 0 = i2cm_run, slot 1 = fail_and_recover).
+ * Silent: nothing is logged, the DIAG reply returns it. */
+static volatile uint8_t s_diag_cap[2];
+
+static void diag_capture(uint32_t slot)
+{
+	const uint32_t istat = GPIO_ISTAT(BRIDGE_I2CM_SCL_PORT);
+	const uint32_t ctl   = GPIO_CTL(BRIDGE_I2CM_SCL_PORT);
+	s_diag_cap[slot]     = (uint8_t)(0x80u | ((istat >> 8) & 1u) | (((istat >> 9) & 1u) << 1) |
+	                             (((ctl >> 16) & 3u) << 2) | (((ctl >> 18) & 3u) << 4));
+}
+
+size_t bridge_hw_i2cm_diag(uint8_t *out)
+{
+	const bool     i2c_clk = (RCU_APB1EN & RCU_APB1EN_I2C2EN) != 0u;
+	const uint32_t regs[I2CM_DIAG_NREGS] = {
+		GPIO_CTL(GPIOC),
+		GPIO_OMODE(GPIOC),
+		GPIO_PUD(GPIOC),
+		GPIO_ISTAT(GPIOC),
+		GPIO_OCTL(GPIOC),
+		GPIO_AFSEL1(GPIOC),
+		RCU_AHB2EN,
+		RCU_APB1EN,
+		RCU_CFG2,
+		i2c_clk ? I2C_CTL0(BRIDGE_I2CM_PERIPH) : 0u,
+		i2c_clk ? I2C_STAT(BRIDGE_I2CM_PERIPH) : 0u,
+		i2c_clk ? I2C_TIMING(BRIDGE_I2CM_PERIPH) : 0u,
+		GPIO_LOCK(GPIOC),
+	};
+	uint8_t state, last;
+	i2cm_core_diag_state(&state, &last);
+	i2cm_diag_pack(out, regs, s_diag_cap[0], s_diag_cap[1], state, last);
+	return I2CM_DIAG_LEN;
+}
+#else
+#define diag_capture(slot) ((void)0)
+#endif
+
 /* 9-clock bus recovery: pulse SCL (PC8 as GPIO open-drain, ~100 kHz) until
  * a slave that was mid-byte releases SDA, then a STOP.  Leaves the pads in
  * GPIO mode; the caller restores the AF.  Returns true when SDA and SCL are
@@ -264,6 +305,7 @@ static uint8_t fail_and_recover(uint8_t res)
 {
 	periph_soft_reset();
 	clear_errors();
+	diag_capture(1u);
 	if (!sda_high() || !scl_high()) {
 		i2c_disable(BRIDGE_I2CM_PERIPH);
 		const bool freed = bus_recover();
@@ -310,6 +352,7 @@ static uint8_t i2cm_run(uint8_t        addr7,
 	 * is busy with lines idle is cleared by the soft reset. */
 	if ((I2C_STAT(BRIDGE_I2CM_PERIPH) & I2C_FLAG_I2CBSY) != 0u) periph_soft_reset();
 	clear_errors();
+	diag_capture(0u);
 	if (!sda_high() || !scl_high()) return fail_and_recover(I2CM_RES_BUS_STUCK);
 
 	/* ---- write phase (or the address-only quick probe) ---- */

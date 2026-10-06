@@ -502,6 +502,15 @@ int bridge_hw_power_mode_set(uint8_t  mode,
 /* v0.17 -- I2C master proxy (E1M-X I2C3 bus = GD32 I2C2, PC8 SCL / PC9 SDA) */
 /* --------------------------------------------------------------- */
 
+/* Bench-only (-DBRIDGE_BENCH_DIAG=1) CMD_I2CM_DIAG reply: 56 bytes used of
+ * I2CM_DIAG_LEN, layout in hal/gd32/i2cm_core.h.  The pack function is
+ * always built (host-tested); the HAL entry point only exists with the flag. */
+#define I2CM_DIAG_LEN 64u
+#if defined(BRIDGE_BENCH_DIAG) && BRIDGE_BENCH_DIAG
+/* Fills @p out (I2CM_DIAG_LEN bytes), returns the byte count. */
+size_t bridge_hw_i2cm_diag(uint8_t *out);
+#endif
+
 /* Set the I2C3 bus speed and take the pads.  @p bus_khz is 100 or 400;
  * 0 releases PC8/PC9 to hi-Z and marks the proxy unconfigured; anything
  * else answers BRIDGE_HW_ERR_INVAL.  Runs the 9-clock bus recovery first.

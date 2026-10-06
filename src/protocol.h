@@ -389,6 +389,12 @@ typedef enum {
 	CMD_I2CM_CONFIG = 0xA0,
 	CMD_I2CM_XFER   = 0xA1,
 	CMD_I2CM_RESULT = 0xA2,
+#if defined(BRIDGE_BENCH_DIAG) && BRIDGE_BENCH_DIAG
+	/* Bench-only (-DBRIDGE_BENCH_DIAG=1, never in a release build): I2C link
+	 * only, empty request, 64-byte reply = register dump, layout in
+	 * hal/gd32/i2cm_core.h (I2CM_DIAG_*).  Not part of the wire contract. */
+	CMD_I2CM_DIAG = 0xAF,
+#endif
 } gd32_bridge_cmd_t;
 
 /* CMD_I2CM_RESULT `result` byte.  Linux maps these to errnos:

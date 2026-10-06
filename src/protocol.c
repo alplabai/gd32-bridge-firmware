@@ -969,6 +969,21 @@ static gd32_bridge_status_t handle_i2cm_result(const uint8_t *req,
 	return STATUS_OK;
 }
 
+#if defined(BRIDGE_BENCH_DIAG) && BRIDGE_BENCH_DIAG
+static gd32_bridge_status_t handle_i2cm_diag(const uint8_t *req,
+                                             size_t         req_len,
+                                             uint8_t       *reply,
+                                             size_t         reply_cap,
+                                             size_t        *reply_len)
+{
+	(void)req;
+	if (req_len != 0u) return STATUS_INVAL;
+	if (reply_cap < I2CM_DIAG_LEN) return STATUS_NOMEM;
+	*reply_len = bridge_hw_i2cm_diag(reply);
+	return STATUS_OK;
+}
+#endif
+
 /* ----------------------------------------------------------------- */
 /* v0.5 (§2B wave-2) -- chunked DSP-chain upload                      */
 /*                                                                    */
@@ -1658,6 +1673,15 @@ static gd32_bridge_status_t protocol_dispatch_inner(gd32_bridge_link_t link,
 		    : (cmd == CMD_I2CM_XFER) ? handle_i2cm_xfer
 		                             : handle_i2cm_result;
 		break;
+#if defined(BRIDGE_BENCH_DIAG) && BRIDGE_BENCH_DIAG
+	case CMD_I2CM_DIAG:
+		if (link != GD32_BRIDGE_LINK_I2C) {
+			*reply_payload_len = 0u;
+			return STATUS_NOSUPPORT;
+		}
+		h = handle_i2cm_diag;
+		break;
+#endif
 	case CMD_LINK_FEATURES:
 		/* Link-scoped: called directly, not through the table (#130). */
 		return handle_link_features(link,

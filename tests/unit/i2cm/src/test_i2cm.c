@@ -473,4 +473,27 @@ ZTEST(i2cm, test_power_mode_refused_busy_while_a_job_runs)
 	bridge_hw_fake_reset();
 }
 
+ZTEST(i2cm, test_diag_frame_is_64_bytes_little_endian)
+{
+	uint32_t regs[I2CM_DIAG_NREGS];
+	uint8_t  out[I2CM_DIAG_LEN];
+
+	zassert_equal(I2CM_DIAG_LEN, 64u, "fits the I2C reply");
+	zassert_true(4u * I2CM_DIAG_NREGS + 4u <= I2CM_DIAG_LEN);
+	for (uint32_t i = 0u; i < I2CM_DIAG_NREGS; ++i) regs[i] = 0x04030201u + (i << 24);
+	memset(out, 0xEE, sizeof out);
+	i2cm_diag_pack(out, regs, 0x83u, 0x80u, 3u, 6u);
+	zassert_equal(out[0], 0x01u);
+	zassert_equal(out[3], 0x04u);
+	zassert_equal(out[4], 0x01u);
+	zassert_equal(out[7], 0x05u, "reg 1 top byte");
+	zassert_equal(out[48], 0x01u, "GPIO_LOCK at offset 48");
+	zassert_equal(out[51], 0x04u + 12u);
+	zassert_equal(out[52], 0x83u);
+	zassert_equal(out[53], 0x80u);
+	zassert_equal(out[54], 3u);
+	zassert_equal(out[55], 6u);
+	for (size_t i = 56u; i < sizeof out; ++i) zassert_equal(out[i], 0u, "tail zeroed");
+}
+
 ZTEST_SUITE(i2cm, NULL, NULL, NULL, NULL, NULL);

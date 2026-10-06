@@ -119,6 +119,32 @@ void i2cm_core_tick(void)
 	s_state = I2CM_DONE;
 }
 
+void i2cm_core_diag_state(uint8_t *state, uint8_t *last_result)
+{
+	*state       = s_state;
+	*last_result = s_res_code;
+}
+
+void i2cm_diag_pack(uint8_t        out[I2CM_DIAG_LEN],
+                    const uint32_t regs[I2CM_DIAG_NREGS],
+                    uint8_t        cap1,
+                    uint8_t        cap2,
+                    uint8_t        state,
+                    uint8_t        last_result)
+{
+	memset(out, 0, I2CM_DIAG_LEN);
+	for (uint32_t i = 0u; i < I2CM_DIAG_NREGS; ++i) {
+		out[4u * i + 0u] = (uint8_t)regs[i];
+		out[4u * i + 1u] = (uint8_t)(regs[i] >> 8);
+		out[4u * i + 2u] = (uint8_t)(regs[i] >> 16);
+		out[4u * i + 3u] = (uint8_t)(regs[i] >> 24);
+	}
+	out[52] = cap1;
+	out[53] = cap2;
+	out[54] = state;
+	out[55] = last_result;
+}
+
 void i2cm_core_mark_unconfigured(void)
 {
 	if (i2cm_core_busy()) return;

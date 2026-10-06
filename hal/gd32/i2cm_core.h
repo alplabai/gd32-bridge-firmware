@@ -21,6 +21,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "bridge_hw.h" /* I2CM_DIAG_LEN */
 #include "protocol.h" /* I2CM_MAX_WRITE / I2CM_MAX_READ, gd32_bridge_i2cm_result_t */
 
 typedef struct {
@@ -40,6 +41,42 @@ typedef struct {
 	               uint8_t        rlen,
 	               uint8_t       *nread);
 } i2cm_ops_t;
+
+/* ---- CMD_I2CM_DIAG (bench only) reply layout, all little-endian ----------
+ * off  size  field
+ *   0   u32  GPIO_CTL(GPIOC)      2 bits/pin; PC8 = bits 17:16, PC9 = 19:18
+ *   4   u32  GPIO_OMODE(GPIOC)    1 = open-drain
+ *   8   u32  GPIO_PUD(GPIOC)
+ *  12   u32  GPIO_ISTAT(GPIOC)    PC8 = bit 8, PC9 = bit 9
+ *  16   u32  GPIO_OCTL(GPIOC)
+ *  20   u32  GPIO_AFSEL1(GPIOC)   PC8 = bits 3:0, PC9 = bits 7:4
+ *  24   u32  RCU_AHB2EN           bit 19 = GPIOC clock
+ *  28   u32  RCU_APB1EN           bit 23 = I2C2 clock
+ *  32   u32  RCU_CFG2             bits 5:4 = I2C2SEL
+ *  36   u32  I2C_CTL0(I2C2)       0 while the I2C2 clock is off
+ *  40   u32  I2C_STAT(I2C2)       0 while the I2C2 clock is off
+ *  44   u32  I2C_TIMING(I2C2)     0 while the I2C2 clock is off
+ *  48   u32  GPIO_LOCK(GPIOC)     bit 16 = LKK, 15:0 = locked pins
+ *  52   u8   capture 1: i2cm_run, right before the first BUS_STUCK decision
+ *  53   u8   capture 2: fail_and_recover, right before its BUS_STUCK decision
+ *            capture byte: b0 = PC8 ISTAT, b1 = PC9 ISTAT, b3:2 = PC8 CTL
+ *            mode, b5:4 = PC9 CTL mode, b7 = valid (0 = never captured)
+ *  54   u8   i2cm_core state (0 UNCONF 1 IDLE 2 QUEUED 3 RUNNING 4 DONE)
+ *  55   u8   last job result (gd32_bridge_i2cm_result_t, 0 before any job)
+ *  56   8*u8 zero
+ * ------------------------------------------------------------------------ */
+#define I2CM_DIAG_NREGS 13u
+
+/* Pure serialiser behind the register reads (host-testable). */
+void i2cm_diag_pack(uint8_t        out[I2CM_DIAG_LEN],
+                    const uint32_t regs[I2CM_DIAG_NREGS],
+                    uint8_t        cap1,
+                    uint8_t        cap2,
+                    uint8_t        state,
+                    uint8_t        last_result);
+
+/* Current state byte and last job result, for the diag reply. */
+void i2cm_core_diag_state(uint8_t *state, uint8_t *last_result);
 
 /* Resets the state machine to "unconfigured, no job".  Does not touch pads. */
 void i2cm_core_init(const i2cm_ops_t *ops);
