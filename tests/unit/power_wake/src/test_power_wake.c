@@ -269,6 +269,25 @@ static void inject_i2c_busy(void)
 	mock_i2c_busy = SET;
 }
 
+/* An I2C3 proxy job queued after the request but before the tick holds the
+ * entry back (it would otherwise be carried through the sleep) and the entry
+ * proceeds once the job drains. */
+ZTEST(power_wake, test_deep_sleep_waits_for_queued_i2cm_job)
+{
+	mock_power_reset();
+	zassert_equal(bridge_hw_power_mode_set(2u, 0u, 100u), BRIDGE_HW_OK);
+	mock_i2cm_busy = 1u;
+	bridge_power_tick();
+	zassert_equal(mock_deepsleep_entries, 0u, "no entry with a job queued");
+	zassert_equal(mock_i2cm_wakes, 0u);
+	zassert_equal(mock_primask, 0u);
+	mock_i2cm_busy = 0u;
+	RCU_CTL        = RCU_CTL_PLLSTB;
+	RCU_CFG0       = RCU_SCSS_PLLP;
+	bridge_power_tick();
+	zassert_equal(mock_deepsleep_entries, 1u, "request retained, entry after the job drains");
+}
+
 /* The ~185 us settle window has interrupts enabled: an event landing there
  * (after the entry gates passed) must be caught by the re-check under the
  * lock and abort the entry cleanly. */

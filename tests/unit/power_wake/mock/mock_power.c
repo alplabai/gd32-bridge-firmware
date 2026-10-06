@@ -33,7 +33,13 @@ uint32_t mock_i2c_enables, mock_rtc_disables, mock_rtc_flag_clears, mock_exti19_
 uint32_t mock_seq, mock_seq_clock_restore, mock_seq_i2c_init, mock_seq_rtc_disable;
 int      mock_i2c_init_rc;
 uint32_t mock_i2cm_wakes;
+uint32_t mock_i2cm_busy;
 int      mock_rtc_clock_config_saw_irq_masked;
+
+bool bridge_hw_i2cm_busy(void)
+{
+	return mock_i2cm_busy;
+}
 
 void bridge_hw_i2cm_wake(void)
 {
@@ -58,6 +64,7 @@ void mock_power_reset(void)
 	mock_i2c_inits               = 0u;
 	mock_primask_at_deepsleep    = 0u;
 	mock_i2c_busy                = RESET;
+	mock_i2cm_busy               = 0u;
 	mock_cs_level                = SET;
 	mock_nvic_pending            = 0u;
 	mock_on_settle               = NULL;
