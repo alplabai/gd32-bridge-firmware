@@ -896,16 +896,11 @@ def build_vectors() -> list[tuple[str, str, str | None] | _Section]:
     # CMD_GET_BUILD_ID, CMD_RESET_REASON, CMD_GPIO_{READ,WRITE},
     # CMD_PWM_{SET,GET}, CMD_ADC_READ and CMD_DA9292_STATUS_FORWARD
     # predate the versioned §4+ additions above but had no wire vector
-    # until now.  GPIO_READ/WRITE still share one reply vector
-    # (spi_reply_io): handle_gpio_read/write (protocol.c) are out of
-    # scope for #23 and still fall through to
-    # `if (rv < 0) return STATUS_IO;` on any BRIDGE_HW_ERR, so on the
-    # stub HAL backend (the only one CI compiles, #31 E1) they answer
-    # STATUS_IO, not NOSUPPORT.  PWM_SET/GET and ADC_READ used to share
-    # that same STATUS_IO reply but were fixed under #23 to route
-    # through status_from_hw() like the rest of the v0.5+ handlers, so
-    # their stub-backend reply is spi_reply_nosupport instead (see
-    # §14's status_from_hw() note for the pattern).  Their real
+    # until now.  GPIO_READ/WRITE, PWM_SET/GET and ADC_READ all route
+    # HAL errors through status_from_hw() (#23; GPIO since the
+    # unrouted-pad fix), so on the stub HAL backend (the only one CI
+    # compiles, #31 E1) they answer spi_reply_nosupport (see §14's
+    # status_from_hw() note for the pattern).  Their real
     # success-reply payloads carry live GPIO/PWM/ADC state and are not
     # a wire-format constant, so only the request framing is
     # vectorized here.
@@ -936,7 +931,7 @@ def build_vectors() -> list[tuple[str, str, str | None] | _Section]:
         "spi_gpio_read_mask_bit0_request",
         spi_frame(SOF, CMD_GPIO_READ, bytes([0x01, 0x00, 0x00, 0x00])).hex().upper(),
         "SOF | CMD=0x10 | mask=0x00000001 (LE) | CRC -- reply (on the"
-        " gd32 backend) is levels:u32(LE); see spi_reply_io for what"
+        " gd32 backend) is levels:u32(LE); see spi_reply_nosupport for what"
         " the stub backend answers today",
     ))
     out.append((
@@ -946,7 +941,7 @@ def build_vectors() -> list[tuple[str, str, str | None] | _Section]:
                          0x01, 0x00, 0x00, 0x00,   # levels = bit0 high (LE)
                   ])).hex().upper(),
         "SOF | CMD=0x11 | mask=0x00000001 (LE) | levels=0x00000001 (LE)"
-        " | CRC -- empty-payload reply on success; see spi_reply_io for"
+        " | CRC -- empty-payload reply on success; see spi_reply_nosupport for"
         " what the stub backend answers today",
     ))
     out.append((
@@ -990,19 +985,6 @@ def build_vectors() -> list[tuple[str, str, str | None] | _Section]:
         " both the stub HAL and this SoM revision's real hardware (no"
         " DA9292 net reaches the GD32 on this SoM rev; see"
         " hal/bridge_hw_stub.c)",
-    ))
-    out.append((
-        "spi_reply_io",
-        spi_frame(SOF, STATUS_IO).hex().upper(),
-        "SOF | STATUS=0x05 (IO) | empty payload | CRC -- the reply"
-        " handle_gpio_read/write (protocol.c) give on the STUB HAL"
-        " backend for any BRIDGE_HW_ERR (they don't special-case"
-        " BRIDGE_HW_ERR_NOTIMPL the way the status_from_hw()-routed"
-        " handlers do -- see spi_reply_nosupport for that family's stub"
-        " reply instead).  handle_pwm_set/get and handle_adc_read used"
-        " to share this reply too until #23 routed them through"
-        " status_from_hw(); GPIO_READ/WRITE are out of scope for #23"
-        " and still land here",
     ))
 
     # ----- §14. v0.5 additions (§2B.2), continued (#31 E4) ------------

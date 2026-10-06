@@ -186,9 +186,9 @@ spi_get_build_id_request       = A502C6DF
 spi_reset_reason_request       = A503E7CF
 # SOF | STATUS=0x00 | reason=0(UNKNOWN) | CRC -- the STUB HAL's bridge_hw_reset_reason() hardcodes 0u; on real hardware this reports the reset cause captured at boot, so this vector pins only the stub-backend value, not a representative live one
 spi_reset_reason_reply_unknown = A50000F09A
-# SOF | CMD=0x10 | mask=0x00000001 (LE) | CRC -- reply (on the gd32 backend) is levels:u32(LE); see spi_reply_io for what the stub backend answers today
+# SOF | CMD=0x10 | mask=0x00000001 (LE) | CRC -- reply (on the gd32 backend) is levels:u32(LE); see spi_reply_nosupport for what the stub backend answers today
 spi_gpio_read_mask_bit0_request = A51001000000D7DE
-# SOF | CMD=0x11 | mask=0x00000001 (LE) | levels=0x00000001 (LE) | CRC -- empty-payload reply on success; see spi_reply_io for what the stub backend answers today
+# SOF | CMD=0x11 | mask=0x00000001 (LE) | levels=0x00000001 (LE) | CRC -- empty-payload reply on success; see spi_reply_nosupport for what the stub backend answers today
 spi_gpio_write_mask_bit0_high_request = A5110100000001000000CA77
 # SOF | CMD=0x20 | channel=0 | period_ns=1000000 (LE) | duty_ns=500000 (LE, 50%) | CRC -- empty-payload reply on success; see spi_reply_nosupport for what the stub backend answers today (status_from_hw(), #23)
 spi_pwm_set_ch0_1ms_period_500us_duty_request = A520000040420F0020A107008A4E
@@ -200,8 +200,6 @@ spi_adc_read_ch0_4samples_request = A5300004D257
 spi_da9292_status_forward_request = A54040B7
 # SOF | STATUS=0x00 | status=0xFF ("no sample available") | CRC -- bridge_hw_da9292_status_cached() returns this sentinel on both the stub HAL and this SoM revision's real hardware (no DA9292 net reaches the GD32 on this SoM rev; see hal/bridge_hw_stub.c)
 spi_da9292_status_forward_reply_no_sample = A500FF0084
-# SOF | STATUS=0x05 (IO) | empty payload | CRC -- the reply handle_gpio_read/write (protocol.c) give on the STUB HAL backend for any BRIDGE_HW_ERR (they don't special-case BRIDGE_HW_ERR_NOTIMPL the way the status_from_hw()-routed handlers do -- see spi_reply_nosupport for that family's stub reply instead).  handle_pwm_set/get and handle_adc_read used to share this reply too until #23 routed them through status_from_hw(); GPIO_READ/WRITE are out of scope for #23 and still land here
-spi_reply_io                   = A50521AF
 
 # ---------------------------------------------------------------------
 # §14. v0.5 additions (§2B.2), continued (#31 E4) -- PWM_CAPTURE_READ/
