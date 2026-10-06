@@ -271,9 +271,11 @@ repeating it:
 |  21 | PB4      | E1M IO15    |
 |  22 | PC2      | E1M IO26    |
 
-Bit 21 (`PB4`) is the JTAG NJTRST pin at reset on GD32 parts (AF mode with
+Bit 21 (`PB4`) is believed to be the JTAG NJTRST pin at reset (AF mode with
 a pull-up), so `bridge_hw_init` parks it analog / no pull at boot; debug
-access on this board is SWD only.
+access on this board is believed to be SWD only. TODO(unverified): no User
+Manual or datasheet page is cited for either claim yet; confirm by reading
+GPIOB CTL/PUD before and after init over SWD.
 
 Bits 8/9 (`PC14`/`PC15`, E1M IO24/IO25) are not ordinary pads: they are
 supplied through the backup-domain power switch together with SE_RST
