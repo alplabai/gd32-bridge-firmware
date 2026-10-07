@@ -50,11 +50,6 @@
  *                 (SOF + STATUS with a 0-byte payload has the same CRC every
  *                 time), so the file's own spi_reply_nosupport vector
  *                 legitimately stands in for the whole class.
- *   PV_IO      -- STATUS_IO, 0-byte payload: GPIO_READ/GPIO_WRITE, the one
- *                 HAL-backed pair whose handlers do NOT route through the
- *                 central status_from_hw() mapper (`if (rv < 0) return
- *                 STATUS_IO;`).  Same constant-reply reasoning, against
- *                 spi_reply_io.
  *
  * NOT COVERED (checked against this tree at commit bbd5c99; each reason is
  * why closing it is bigger than this bounded suite, not an oversight):
@@ -126,7 +121,7 @@ static size_t spi_roundtrip(const pv_vector_t *req, uint8_t *reply, size_t cap)
 	return n;
 }
 
-/* ---- PV_EXACT / PV_NOSUPP / PV_IO classification table --------------- */
+/* ---- PV_EXACT / PV_NOSUPP classification table ---------------------- */
 /*
  * CMD_LINK_FEATURES is deliberately NOT a row here: granting it is a
  * side effect on protocol.c's own `static uint8_t link_features`, which
@@ -134,7 +129,7 @@ static size_t spi_roundtrip(const pv_vector_t *req, uint8_t *reply, size_t cap)
  * protocol.c's) -- see test_protocol.c's file header for the same fact
  * documented from the fake-HAL suite's side.  Arming it here would stamp
  * every STATUS byte this loop checks AFTER that row, corrupting every
- * PV_EXACT/PV_NOSUPP/PV_IO comparison that follows.
+ * PV_EXACT/PV_NOSUPP comparison that follows.
  *
  * "AFTER that row" is why this is load-bearing, and it is not something this
  * file can arrange: the loop is one ZTEST body, and the LINK_FEATURES case is
@@ -147,7 +142,6 @@ static size_t spi_roundtrip(const pv_vector_t *req, uint8_t *reply, size_t cap)
 typedef enum {
 	PV_EXACT,
 	PV_NOSUPP,
-	PV_IO,
 } pv_class_t;
 
 typedef struct {
@@ -185,13 +179,11 @@ static const pv_case_t SPI_CASES[] = {
 	{ "spi_reset_reason_request",                        PV_EXACT,  "spi_reset_reason_reply_unknown" },
 	{ "spi_da9292_status_forward_request",               PV_EXACT,  "spi_da9292_status_forward_reply_no_sample" },
 
-	/* PV_IO: GPIO_READ/WRITE map BRIDGE_HW_ERR_NOTIMPL to STATUS_IO, not
-	 * STATUS_NOSUPPORT (src/protocol.c: `if (rv < 0) return STATUS_IO;`). */
-	{ "spi_gpio_read_mask_bit0_request",                 PV_IO,     NULL },
-	{ "spi_gpio_write_mask_bit0_high_request",           PV_IO,     NULL },
-
-	/* PV_NOSUPP: every other stub-backed HAL opcode, v0.2..v0.5, plus the
+	/* PV_NOSUPP: every stub-backed HAL opcode, v0.2..v0.5 (GPIO_READ/WRITE
+	 * included since they route through status_from_hw()), plus the
 	 * reserved 0x36 probe. */
+	{ "spi_gpio_read_mask_bit0_request",                 PV_NOSUPP, NULL },
+	{ "spi_gpio_write_mask_bit0_high_request",           PV_NOSUPP, NULL },
 	{ "spi_dac_set_ch0_1650mv_request",                  PV_NOSUPP, NULL },
 	{ "spi_dac_get_ch1_request",                         PV_NOSUPP, NULL },
 	{ "spi_qenc_read_ch0_request",                       PV_NOSUPP, NULL },
@@ -210,6 +202,7 @@ static const pv_case_t SPI_CASES[] = {
 	{ "spi_pwm_capture_begin_probe_request",             PV_NOSUPP, NULL },
 	{ "spi_pwm_single_pulse_probe_request",              PV_NOSUPP, NULL },
 	{ "spi_power_mode_set_probe_request",                PV_NOSUPP, NULL },
+	{ "spi_power_mode_set_deepsleep_wake_i2c_request",   PV_NOSUPP, NULL },
 	{ "spi_adc_dsp_chain_open_probe_request",            PV_NOSUPP, NULL },
 	{ "spi_adc_dsp_stage_push_window_hann_request",      PV_NOSUPP, NULL },
 	{ "spi_adc_dsp_chain_bind_probe_request",            PV_NOSUPP, NULL },
@@ -220,6 +213,12 @@ static const pv_case_t SPI_CASES[] = {
 	{ "spi_pwm_capture_end_ch0_request",                 PV_NOSUPP, NULL },
 	{ "spi_timer_sync_t0_master_t7_slave_request",       PV_NOSUPP, NULL },
 	{ "spi_adc_spectrum_read_stream0_request",           PV_NOSUPP, NULL },
+
+	/* PV_NOSUPP: v0.15's BEGIN2 / READ2 on an UN-negotiated link (and on the
+	 * stub backend, which never grants ADC_STREAM2): the feature gate answers
+	 * NOSUPPORT before any handler runs. */
+	{ "spi_adc_stream_begin2_s0_ch0_1khz_w256_request",  PV_NOSUPP, NULL },
+	{ "spi_adc_stream_read2_s0_max121_request",          PV_NOSUPP, NULL },
 
 	/* PV_NOSUPP: the WHOLE 0xF0..0xFF OTA range, unpartitioned build. */
 	{ "spi_ota_begin_request",                           PV_NOSUPP, NULL },
@@ -309,13 +308,11 @@ ZTEST(protocol_vectors, test_spi_requests_match_committed_replies)
 	pv_build_get_version_reply_name();
 
 	const pv_vector_t *nosupp = pv_find("spi_reply_nosupport");
-	const pv_vector_t *io     = pv_find("spi_reply_io");
 
 	for (size_t i = 0; i < N_SPI_CASES; i++) {
-		const pv_case_t   *c   = &SPI_CASES[i];
-		const pv_vector_t *req = pv_find(c->req_name);
-		const pv_vector_t *want =
-		    (c->class == PV_EXACT) ? pv_find(c->reply_name) : (c->class == PV_IO ? io : nosupp);
+		const pv_case_t   *c    = &SPI_CASES[i];
+		const pv_vector_t *req  = pv_find(c->req_name);
+		const pv_vector_t *want = (c->class == PV_EXACT) ? pv_find(c->reply_name) : nosupp;
 
 		size_t n = spi_roundtrip(req, reply, sizeof reply);
 		zassert_equal(n, want->len, "%s: reply length", c->req_name);
@@ -519,3 +516,181 @@ ZTEST(protocol_vectors, test_crc16_matches_committed_self_test_vector)
 }
 
 ZTEST_SUITE(protocol_vectors, NULL, NULL, NULL, NULL, NULL);
+
+/* ---- v0.15 ------------------------------------------------------------ */
+/*
+ * The vectors that need ONLY the stub backend: the stub's extended
+ * LINK_FEATURES grant (0x13: no ATTN, no ADC_STREAM2), the I2C opcode policy,
+ * the BATCH validation refusals and the >65 B enforcement.  The ones that need
+ * a backend that implements BEGIN2/READ2/ATTN (the gd32-shaped 0x1F grant, the
+ * ATTN refusal, the BEGIN2/READ2 replies, a BATCH that executes) are driven
+ * through the fake HAL by tests/unit/protocol_vectors_fake.
+ *
+ * Every case that arms protocol.c's process-lifetime link state disarms it
+ * again before returning (the 1-byte `features = 0` form clears the whole
+ * word, the 0.15 bits included), so the suite stays order-independent.
+ */
+
+static size_t pv_send(const uint8_t *bytes, size_t len, uint8_t *reply, size_t cap)
+{
+	pv_vector_t v = { "adhoc", bytes, len };
+	return spi_roundtrip(&v, reply, cap);
+}
+
+/* Hand-built extended LINK_FEATURES (no committed vector for these wants). */
+static size_t pv_negotiate(uint32_t want, uint16_t mp, uint8_t *reply, size_t cap)
+{
+	uint8_t f[10] = { GD32_BRIDGE_SOF, CMD_LINK_FEATURES, 0, 0, 0, 0, 0, 0, 0, 0 };
+
+	f[2]               = (uint8_t)(want & 0xFFu);
+	f[3]               = (uint8_t)((want >> 8) & 0xFFu);
+	f[4]               = (uint8_t)((want >> 16) & 0xFFu);
+	f[5]               = (uint8_t)((want >> 24) & 0xFFu);
+	f[6]               = (uint8_t)(mp & 0xFFu);
+	f[7]               = (uint8_t)(mp >> 8);
+	const uint16_t crc = crc16_ccitt_false(f, 8u);
+	f[8]               = (uint8_t)(crc & 0xFFu);
+	f[9]               = (uint8_t)(crc >> 8);
+	return pv_send(f, sizeof f, reply, cap);
+}
+
+static void pv_disarm(void)
+{
+	uint8_t        lf_off[5] = { GD32_BRIDGE_SOF, CMD_LINK_FEATURES, 0x00u, 0, 0 };
+	const uint16_t crc       = crc16_ccitt_false(lf_off, 3u);
+	uint8_t        reply[16];
+
+	lf_off[3] = (uint8_t)(crc & 0xFFu);
+	lf_off[4] = (uint8_t)(crc >> 8);
+	(void)pv_send(lf_off, sizeof lf_off, reply, sizeof reply);
+}
+
+/* The stub backend grants 0x13 and echoes the same word as `supported`. */
+ZTEST(protocol_vectors, test_link_features_ext_stub_reply_matches_committed_vector)
+{
+	const pv_vector_t *req  = pv_find("spi_link_features_ext_request_all");
+	const pv_vector_t *want = pv_find("spi_link_features_ext_reply_stub_seq1");
+	uint8_t            reply[32];
+
+	size_t n = spi_roundtrip(req, reply, sizeof reply);
+	zassert_equal(n, want->len, "ext LINK_FEATURES reply length");
+	zassert_mem_equal(reply, want->bytes, want->len, "ext LINK_FEATURES reply (stub: 0x13)");
+	pv_disarm();
+}
+
+/* The v0.7..v0.14 firmware answered the 6-byte form with INVAL; the 1-byte
+ * form is still answered with the 1-byte reply on this firmware. */
+ZTEST(protocol_vectors, test_one_byte_features_form_keeps_its_one_byte_reply)
+{
+	const pv_vector_t *req  = pv_find("spi_link_features_request");
+	const pv_vector_t *want = pv_find("spi_link_features_reply_granted_seq1");
+	uint8_t            reply[32];
+
+	size_t n = spi_roundtrip(req, reply, sizeof reply);
+	zassert_equal(n, want->len, "legacy form: 1-byte reply, byte-identical to 0.14");
+	zassert_mem_equal(reply, want->bytes, want->len, "legacy form reply bytes");
+	pv_disarm();
+}
+
+ZTEST(protocol_vectors, test_i2c_extended_link_features_echoes_status_seq_only)
+{
+	const pv_vector_t *req  = pv_find("i2c_link_features_ext_write");
+	const pv_vector_t *want = pv_find("i2c_link_features_ext_read");
+	uint8_t            reply[16];
+
+	transport_i2c_init();
+	i2c_slave_write_start();
+	for (size_t i = 0; i < req->len; i++) {
+		i2c_slave_rx_byte(req->bytes[i]);
+	}
+	zassert_true(i2c_slave_write_end());
+	for (size_t i = 0; i < want->len; i++) {
+		reply[i] = i2c_slave_tx_next_byte();
+	}
+	zassert_mem_equal(reply, want->bytes, want->len, "I2C grants STATUS_SEQ only, max_payload 65");
+	zassert_equal(protocol_link_features(GD32_BRIDGE_LINK_SPI) & GD32_BRIDGE_LINK_FEAT_BATCH,
+	              0u,
+	              "an I2C negotiation never arms the SPI link");
+	zassert_equal(protocol_link_max_payload(GD32_BRIDGE_LINK_I2C), 65u);
+}
+
+ZTEST(protocol_vectors, test_i2c_opcode_policy_matches_committed_vectors)
+{
+	const pv_vector_t *denied_w = pv_find("i2c_adc_read_ch0_4_write_denied");
+	const pv_vector_t *denied_r = pv_find("i2c_adc_read_ch0_4_read_denied");
+	const pv_vector_t *ota_w    = pv_find("i2c_ota_get_state_write_allowed");
+	uint8_t            reply[16];
+
+	transport_i2c_init();
+	const uint32_t before = bridge_i2c_denied_count;
+
+	i2c_slave_write_start();
+	for (size_t i = 0; i < denied_w->len; i++) {
+		i2c_slave_rx_byte(denied_w->bytes[i]);
+	}
+	zassert_true(i2c_slave_write_end());
+	for (size_t i = 0; i < denied_r->len; i++) {
+		reply[i] = i2c_slave_tx_next_byte();
+	}
+	zassert_mem_equal(reply, denied_r->bytes, denied_r->len, "denied opcode: empty NOSUPPORT");
+	zassert_equal(bridge_i2c_denied_count, before + 1u);
+	zassert_equal(bridge_i2c_denied_last_cmd, CMD_ADC_READ);
+
+	/* An OTA opcode is allow-listed: it dispatches (no denial recorded). */
+	i2c_slave_write_start();
+	for (size_t i = 0; i < ota_w->len; i++) {
+		i2c_slave_rx_byte(ota_w->bytes[i]);
+	}
+	zassert_true(i2c_slave_write_end());
+	zassert_equal(bridge_i2c_denied_count, before + 1u, "OTA stays reachable over I2C");
+}
+
+/* A BATCH that fails validation answers an empty INVAL and executes nothing. */
+ZTEST(protocol_vectors, test_batch_validation_refusals_match_committed_replies)
+{
+	const pv_vector_t *inval = pv_find("spi_reply_inval");
+	uint8_t            reply[32];
+
+	/* BATCH only (no STATUS_SEQ), so the reply is the UNSTAMPED committed one. */
+	pv_negotiate(GD32_BRIDGE_LINK_FEAT_BATCH, 65u, reply, sizeof reply);
+
+	size_t n = spi_roundtrip(pv_find("spi_batch_request_nested_rejected"), reply, sizeof reply);
+	zassert_equal(n, inval->len);
+	zassert_mem_equal(reply, inval->bytes, inval->len, "nested BATCH");
+
+	n = spi_roundtrip(pv_find("spi_batch_request_trailing_byte_rejected"), reply, sizeof reply);
+	zassert_equal(n, inval->len);
+	zassert_mem_equal(reply, inval->bytes, inval->len, "trailing byte");
+
+	pv_disarm();
+}
+
+/* Without the BATCH grant the same request is NOSUPPORT (the gate), not INVAL. */
+ZTEST(protocol_vectors, test_batch_without_the_feature_is_nosupport)
+{
+	const pv_vector_t *nosupp = pv_find("spi_reply_nosupport");
+	uint8_t            reply[32];
+
+	pv_disarm();
+	size_t n = spi_roundtrip(pv_find("spi_batch_request_nested_rejected"), reply, sizeof reply);
+	zassert_equal(n, nosupp->len);
+	zassert_mem_equal(reply, nosupp->bytes, nosupp->len);
+}
+
+/* Only BATCH and READ2 may exceed 65 bytes, even on a BIG_FRAME link. */
+ZTEST(protocol_vectors, test_ota_chunk_over_65_is_rejected_on_a_big_link)
+{
+	const pv_vector_t *inval = pv_find("spi_reply_inval");
+	uint8_t            reply[32];
+
+	pv_negotiate(GD32_BRIDGE_LINK_FEAT_BIG_FRAME, 252u, reply, sizeof reply);
+	zassert_equal(protocol_link_max_payload(GD32_BRIDGE_LINK_SPI), 252u, "BIG_FRAME granted");
+
+	size_t n = spi_roundtrip(
+	    pv_find("spi_ota_write_chunk_over_65_rejected_on_big_link"), reply, sizeof reply);
+	zassert_equal(n, inval->len);
+	zassert_mem_equal(reply, inval->bytes, inval->len, "66-byte OTA chunk refused");
+
+	pv_disarm();
+	zassert_equal(protocol_link_max_payload(GD32_BRIDGE_LINK_SPI), 65u, "1-byte form restores 65");
+}

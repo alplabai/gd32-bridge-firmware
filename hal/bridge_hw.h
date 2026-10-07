@@ -16,6 +16,7 @@
 #ifndef GD32_BRIDGE_HAL_BRIDGE_HW_H
 #define GD32_BRIDGE_HAL_BRIDGE_HW_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -200,6 +201,60 @@ int bridge_hw_adc_spectrum_read(uint8_t   stream_id,
                                 uint16_t *total_bins_out,
                                 uint8_t  *got_bins_out,
                                 float    *bins_out);
+
+/* v0.15 BEGIN2 / READ2 (docs/protocol-v0.15-design.md section 5).  Both
+ * answer BRIDGE_HW_ERR_NOTIMPL on a backend without the ADC streaming
+ * hardware (the stub).
+ *
+ * What the realised-rate fields mean: the pacing timer runs at
+ * tick_hz / period_ticks exactly (tick_hz = 1000000 for rates >= 16 Hz,
+ * 10000 below), so a requested 300 Hz really is 1000000 / 3333 =
+ * 300.03 Hz and the reply says so. */
+typedef struct {
+	uint32_t tick_hz;      /* pace-timer tick; always non-zero for PACE_TIMER */
+	uint32_t period_ticks; /* floor(tick_hz / sample_rate_hz) */
+	uint16_t full_scale;   /* (1 << res_bits) - 1 captured at BEGIN2 */
+	uint16_t vref_mv;      /* adc_vref_mv captured at BEGIN2 */
+	uint16_t watermark;    /* granted watermark (0 = no events) */
+	uint16_t ring_depth;   /* >= 2 * watermark and >= 5 ms of samples; 1024 when watermark == 0 */
+	uint8_t  flags;        /* BRIDGE_HW_ADC_STREAM2_FLAG_* */
+} bridge_hw_adc_stream2_info_t;
+
+/* The reference is a real VREFINT measurement, not the 1800 mV fallback. */
+#define BRIDGE_HW_ADC_STREAM2_FLAG_VREF_MEASURED 0x01u
+
+/* Start a PACE_TIMER stream with a hardware watermark.  `watermark` is
+ * one of {0, 16, 32, 64, 128, 256, 512} (protocol.c validates it).
+ * Beyond the legacy BEGIN checks (RANGE for an unmapped channel, IO for a
+ * dead VREF, INVAL for a slot in use or a converter shared with a running
+ * stream, BUSY for a claimed converter, IO for DMA/calibration failure):
+ * RANGE when one conversion (ratio * (sample_cycles + 12.5) ADCCK) does not
+ * fit in one pacing period, IO when the core clock is not the 216 MHz the
+ * pace timer constants assume, NOT_READY while a late VREF re-measure is
+ * pending.  Never silently degrades the rate. */
+int bridge_hw_adc_stream_begin2(uint8_t                       stream_id,
+                                uint8_t                       channel,
+                                uint32_t                      sample_rate_hz,
+                                uint16_t                      watermark,
+                                bridge_hw_adc_stream2_info_t *info);
+
+/* Drain up to `max_samples` raw codes (right-aligned, clamped to
+ * full_scale) of a BEGIN2 stream into `codes_le`, two little-endian bytes
+ * each (the caller points it straight into the wire reply, so it is not
+ * u16-aligned).  `*first_index` is the
+ * stream-sequence index of codes[0] since BEGIN2 (mod 2^32); `*dropped` is
+ * the number of samples discarded immediately before codes[0] since the
+ * previous READ2, or 0xFFFFFFFF for a discontinuity of unknown length (then
+ * *got == 0).  Overrun is reported through `dropped`, never as BUSY.
+ * INVAL: stream not running or started with the legacy BEGIN; NOTIMPL:
+ * FFT-bound; RANGE: sticky DSP config fault; IO: DMA error, ROVF
+ * recalibration failure or sticky DSP saturation. */
+int bridge_hw_adc_stream_read2(uint8_t   stream_id,
+                               uint8_t   max_samples,
+                               uint32_t *first_index,
+                               uint32_t *dropped,
+                               uint8_t  *got,
+                               uint8_t  *codes_le);
 
 /* --------------------------------------------------------------- */
 /* TRNG -- true random number generator (NIST SP800-90B)             */
@@ -415,11 +470,20 @@ int bridge_hw_timer_sync(uint8_t master, uint8_t slave, uint8_t mode);
  * the Renesas SoC to enter the matching mode, then re-runs the bridge
  * handshake on wakeup so the host can resume bridge calls.
  *
- * Mode 2 and mode 3 both REQUIRE a timer wake (wake_after_ms > 0 or the
- * RTC/TIMER bit; else BRIDGE_HW_ERR_INVAL).  Mode 2 (deep-sleep) also wakes
+ * @p flags is POWER_FLAG_* (hal/gd32/power_policy.h; 0 from every host that
+ * predates it): WAKE_I2C lets a BRD_I2C address match end Deep-sleep.  Unknown
+ * bits, or any flag on mode 0/1/3, return BRIDGE_HW_ERR_INVAL.
+ *
+ * Mode 2 and mode 3 REQUIRE a bounded sleep (wake_after_ms > 0 or the RTC/TIMER
+ * bit; else BRIDGE_HW_ERR_INVAL, or BRIDGE_HW_ERR_RANGE when WAKE_I2C asks for
+ * an untimed sleep, refused until the I2C0 wake line is bench-proven).  Mode 2/3 return BRIDGE_HW_ERR_BUSY while an ADC stream, a
+ * PWM output / capture, a DAC output, an OTA session or an unconfirmed trial
+ * is live (mode 1 is never refused); mode 0 cancels a latched request.
+ * Mode 2 (deep-sleep) also wakes
  * on a falling edge of the SPI CS line and resumes in place with the clock
- * tree and I2C0 restored; the frame in flight during that wake is lost and
- * the host must retry it.  The I2C slave cannot wake the part.  The RTC
+ * tree restored; the frame in flight during a CS wake is lost and
+ * the host must retry it (an I2C wake instead completes the transaction
+ * that woke the part, SCL stretched).  The RTC
  * timer is armed when the request is accepted, not at entry, and
  * auto-reloads: the sleep lasts from the entry (the next quiet-link tick
  * after the reply drains) to the next timer period boundary, i.e. at most
@@ -428,7 +492,10 @@ int bridge_hw_timer_sync(uint8_t master, uint8_t slave, uint8_t mode);
  * state with interrupts masked; if anything is pending it backs out and
  * retries on the next tick, so an accepted request may sleep later than
  * requested but never with a transaction in flight. */
-int bridge_hw_power_mode_set(uint8_t mode, uint32_t wake_bitmap, uint32_t wake_after_ms);
+int bridge_hw_power_mode_set(uint8_t  mode,
+                             uint32_t wake_bitmap,
+                             uint32_t wake_after_ms,
+                             uint8_t  flags);
 
 /* --------------------------------------------------------------- */
 /* v0.5 (§2B wave-2) -- chunked DSP-chain upload                     */
@@ -497,5 +564,44 @@ int bridge_hw_adc_dsp_stage_push(uint8_t        chain_id,
  * realisable, just contended -- so retrying the SAME chain_id (typically
  * after the contending stream's STREAM_END) is the supported recovery. */
 int bridge_hw_adc_dsp_chain_bind(uint8_t chain_id, uint8_t stream_id);
+
+/* --------------------------------------------------------------- */
+/* v0.15 link-feature hardware (ATTN, ADC_STREAM2, debugger probe)   */
+/* --------------------------------------------------------------- */
+
+/* The SPI link can be granted ATTN only when the backend drives PA14;
+ * ADC_STREAM2 only when it implements BEGIN2/READ2.  The stub backend
+ * reports both false, so its SPI `supported` word is 0x13. */
+bool bridge_hw_attn_supported(void);
+bool bridge_hw_adc_stream2_supported(void);
+
+/* DHCSR.C_DEBUGEN (0xE000EDF0 bit 0): a debugger is attached, so the
+ * GD32 must not drive PA14 (it is SWCLK).  ATTN is refused while true. */
+bool bridge_hw_debugger_attached(void);
+
+/* Enable / disable the ATTN line.  Enable: PA14 low, push-pull, slowest
+ * speed class, no pull, then output mode.  Disable: PA14 low, then back to
+ * its SWCLK alternate function with the reset pull-down; all pending
+ * events are discarded.  Idempotent.  BRIDGE_HW_ERR_NOTIMPL when ATTN is
+ * unsupported. */
+int bridge_hw_attn_enable(bool enable);
+
+/* A watermark was reached on stream `stream_id` (DMA IRQ or base-level
+ * pump context).  Latches the event and, when ATTN is enabled, the CS line
+ * is idle and no CS edge is pending, drives ATTN high. */
+void bridge_hw_attn_event_set(uint8_t stream_id);
+
+/* Gate the watermark events: true while ADC_STREAM2 is granted on the SPI
+ * link.  Disabling discards pending events and makes bridge_hw_attn_event_set()
+ * a no-op, so ATTN cannot keep rising with nothing able to clear it. */
+void bridge_hw_attn_streams_enable(bool enable);
+
+/* READ2 / STREAM_END consumed or cancelled `stream_id`'s event. */
+void bridge_hw_attn_event_clear(uint8_t stream_id);
+
+/* Drive ATTN low (POWER_MODE_SET transition) and keep it low, under the IRQ
+ * lock, until the next CS edge: watermark events latch but do not drive during
+ * SLEEP / DEEP_SLEEP.  No-op when disabled. */
+void bridge_hw_attn_quiesce(void);
 
 #endif /* GD32_BRIDGE_HAL_BRIDGE_HW_H */

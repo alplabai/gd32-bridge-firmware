@@ -80,6 +80,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "../../../hal/bridge_hw.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -101,6 +103,9 @@ typedef enum {
 	FAKE_FN_ADC_STREAM_BEGIN,
 	FAKE_FN_ADC_STREAM_READ,
 	FAKE_FN_ADC_STREAM_END,
+	FAKE_FN_ADC_STREAM_BEGIN2,
+	FAKE_FN_ADC_STREAM_READ2,
+	FAKE_FN_ATTN_ENABLE,
 	FAKE_FN_ADC_SPECTRUM_READ,
 	FAKE_FN_TRNG_READ,
 	FAKE_FN_TMU_COMPUTE,
@@ -152,6 +157,46 @@ void bridge_hw_fake_set_call_hook(bridge_hw_fake_fn_t        fn,
  * later call returns it until a test resets or re-seeds this fake. */
 void bridge_hw_fake_set_reset_reason(uint8_t reason);
 void bridge_hw_fake_set_da9292_status(uint8_t status);
+
+/* --------------------------------------------------------------- */
+/* v0.15 -- link-feature hardware, BEGIN2/READ2, ATTN                */
+/* --------------------------------------------------------------- */
+
+/* What the fake HAL claims to support.  bridge_hw_fake_reset() makes the
+ * fake look like the gd32 backend (ATTN + ADC_STREAM2 supported, no
+ * debugger attached), so SPI `supported` reads 0x1F; a test wanting the
+ * stub's 0x13 clears both. */
+void bridge_hw_fake_set_link_hw(int attn_supported, int stream2_supported);
+void bridge_hw_fake_set_debugger_attached(int attached);
+
+/* ATTN pin model: the last enable value, how many times bridge_hw_attn_enable
+ * was called, how many quiesce calls were made, and per-stream event
+ * set/clear call counts. */
+int      bridge_hw_fake_attn_enabled(void);
+int      bridge_hw_fake_attn_streams_enabled(void);
+uint32_t bridge_hw_fake_attn_streams_off_calls(void);
+uint32_t bridge_hw_fake_attn_enable_calls(void);
+uint32_t bridge_hw_fake_attn_quiesce_calls(void);
+uint32_t bridge_hw_fake_attn_event_set_calls(uint8_t stream_id);
+uint32_t bridge_hw_fake_attn_event_clear_calls(uint8_t stream_id);
+
+/* BEGIN2: the info the next successful begin2 hands back; the last call's
+ * arguments are captured for assertion. */
+void bridge_hw_fake_begin2_set_info(const bridge_hw_adc_stream2_info_t *info);
+void bridge_hw_fake_begin2_get_last(uint8_t  *stream_id,
+                                    uint8_t  *channel,
+                                    uint32_t *sample_rate_hz,
+                                    uint16_t *watermark);
+
+/* READ2: what the next successful read2 reports.  `got` is clamped to the
+ * caller's max_samples unless `unclamped`; `codes` (up to 255 entries) are
+ * the raw codes handed back, copied. */
+void    bridge_hw_fake_read2_seed(uint32_t        first_index,
+                                  uint32_t        dropped,
+                                  uint8_t         got,
+                                  const uint16_t *codes,
+                                  int             unclamped);
+uint8_t bridge_hw_fake_read2_last_max_samples(void);
 
 /* --------------------------------------------------------------- */
 /* GPIO -- one pad-level word.                                       */
@@ -296,6 +341,9 @@ uint8_t  bridge_hw_fake_se_reset_last_assert(void);
 void bridge_hw_fake_power_mode_get_last_call(uint8_t  *mode,
                                              uint32_t *wake_bitmap,
                                              uint32_t *wake_after_ms);
+
+/* req[1] (POWER_FLAG_*) of the last bridge_hw_power_mode_set() call. */
+uint8_t bridge_hw_fake_power_mode_last_flags(void);
 
 /* --------------------------------------------------------------- */
 /* DSP chain-open id + stage-push argument capture.                  */

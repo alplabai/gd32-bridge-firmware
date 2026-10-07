@@ -56,7 +56,14 @@
  * the wire; the reply already decodes by opcode) -- an older host that
  * only reads the first 5 bytes keeps working unchanged, so this is a
  * MINOR bump ("adding an opcode/payload field = MINOR"), not MAJOR. */
-#define PROTOCOL_VERSION_MINOR 14u
+/* v0.15: negotiated extensions over v0.14 (docs/protocol-v0.15-design.md).
+ * Everything new -- BIG_FRAME, ATTN, ADC_STREAM2, BATCH -- stays OFF until
+ * the host enables it on a link with the 6-byte CMD_LINK_FEATURES form, so
+ * an un-negotiated SPI link is byte-identical to v0.14.  The one
+ * unconditional change is the I2C opcode allow-list (see
+ * protocol_dispatch_inner): opcodes outside it answer STATUS_NOSUPPORT on
+ * the I2C link. */
+#define PROTOCOL_VERSION_MINOR 15u
 #define PROTOCOL_VERSION_PATCH 0u
 
 /* v0.7: opt-in link features negotiated via CMD_LINK_FEATURES.
@@ -74,9 +81,37 @@
  * (silicon-fingerprinted 2026-06-06 on back-to-back COUNTER_READs).
  * I2C replies are NEVER stamped: the I2C-only STATUS_NO_PENDING
  * (0x80) owns bit 7 there, and the hazard is SPI-specific. */
-#define GD32_BRIDGE_LINK_FEAT_STATUS_SEQ 0x01u
+#define GD32_BRIDGE_LINK_FEAT_STATUS_SEQ 0x00000001u
 #define GD32_BRIDGE_STATUS_CODE_MASK     0x0Fu
 #define GD32_BRIDGE_STATUS_SEQ_SHIFT     4u
+
+/* v0.15 link features (the per-link feature word is a u32 from v0.15; the
+ * 1-byte CMD_LINK_FEATURES form only ever carries STATUS_SEQ).  Bits 5..31
+ * are reserved and never granted.  All four are SPI-only. */
+/* BIG_FRAME: BATCH requests/replies and READ2 replies may exceed 65 bytes,
+ * up to the negotiated per-link max_payload (<= 252 -> 256-byte SPI frame). */
+#define GD32_BRIDGE_LINK_FEAT_BIG_FRAME 0x00000002u
+/* ATTN: PA14 drives a level data-ready / attention line (needs STATUS_SEQ). */
+#define GD32_BRIDGE_LINK_FEAT_ATTN 0x00000004u
+/* ADC_STREAM2: gates CMD_ADC_STREAM_BEGIN2 / CMD_ADC_STREAM_READ2. */
+#define GD32_BRIDGE_LINK_FEAT_ADC_STREAM2 0x00000008u
+/* BATCH: gates CMD_BATCH. */
+#define GD32_BRIDGE_LINK_FEAT_BATCH 0x00000010u
+
+/* BIG_FRAME ceiling: 1 SOF + 1 CMD/STATUS + 252 payload + 2 CRC = 256 bytes. */
+#define GD32_BRIDGE_SPI_BIG_MAX_PAYLOAD_BYTES 252u
+/* READ2 reply header: first_index:u32 dropped:u32 got:u8. */
+#define GD32_BRIDGE_READ2_HDR_BYTES 9u
+/* Most sub-operations one CMD_BATCH may carry. */
+#define GD32_BRIDGE_BATCH_MAX_OPS 16u
+/* READ2 overrun guard band, in samples (docs/protocol-v0.15-design.md 5.4). */
+#define GD32_BRIDGE_ADC_STREAM2_GUARD 8u
+/* BEGIN2 PACE_TIMER sample-rate ceiling (BRIDGE_ADC_STREAM_RATE_MAX_HZ in
+ * hal/gd32/gd32_common.h is the same value; adc_stream.c asserts it). */
+#define GD32_BRIDGE_ADC_STREAM2_RATE_MAX_HZ 100000u
+/* CMD_ADC_STREAM_BEGIN2 request / reply sizes. */
+#define GD32_BRIDGE_BEGIN2_REQ_BYTES   12u
+#define GD32_BRIDGE_BEGIN2_REPLY_BYTES 17u
 
 /* Number of concurrent DMA-backed ADC streams the firmware supports.
  * Bounded by the GD32G553's two DMA controllers (DMA0 + DMA1 with
@@ -85,11 +120,13 @@
  * different sample rates against different ADC channels. */
 #define GD32_BRIDGE_ADC_STREAM_COUNT 2u
 
-/* Number of ADC samples the bridge's streaming ring buffer can hold
- * per stream (firmware-side DMA destination).  Host polls
- * CMD_ADC_STREAM_READ for batches; a non-empty ring lets the firmware
- * decouple DMA cadence from host poll cadence.  Sized in u16 mV slots. */
-#define GD32_BRIDGE_ADC_STREAM_RING_SAMPLES 128u
+/* Host-visible ring depth ceiling per stream (firmware-side DMA
+ * destination; BRIDGE_ADC_STREAM_RING_SAMPLES in hal/gd32/gd32_common.h is
+ * the same 1024).  A legacy CMD_ADC_STREAM_BEGIN stream uses the whole
+ * ring; a BEGIN2 stream uses the smallest power of two >= max(2*W, 5 ms of samples).  Host polls
+ * CMD_ADC_STREAM_READ / _READ2 for batches; a non-empty ring lets the
+ * firmware decouple DMA cadence from host poll cadence.  Slots are u16. */
+#define GD32_BRIDGE_ADC_STREAM_RING_SAMPLES 1024u
 
 /* Maximum samples returned by a single CMD_ADC_STREAM_READ reply.
  * Bounded by the wire's MAX_PAYLOAD_BYTES; tuned to keep the SPI
@@ -116,8 +153,11 @@ typedef enum {
 	CMD_GET_VERSION  = 0x01,
 	CMD_GET_BUILD_ID = 0x02,
 	CMD_RESET_REASON = 0x03,
-	CMD_GPIO_READ    = 0x10,
-	CMD_GPIO_WRITE   = 0x11,
+	/* v0.15: up to GD32_BRIDGE_BATCH_MAX_OPS allow-listed sub-operations in
+	 * one transaction.  SPI only; needs the BATCH link feature. */
+	CMD_BATCH      = 0x04,
+	CMD_GPIO_READ  = 0x10,
+	CMD_GPIO_WRITE = 0x11,
 	/* v0.11: the GPIO mask these two opcodes address grew from 18 to
      * 20 bits -- bits 18/19 are BT_REG_ON/WL_REG_ON, the Murata
      * LBEE5HY2FY-922 Wi-Fi/BT module's power enables (sideband, not
@@ -142,8 +182,10 @@ typedef enum {
 	CMD_PWM_CONFIGURE = 0x22,
 	CMD_ADC_READ      = 0x30,
 	/* v0.3: sticky per-channel ADC tuning -- oversampling ratio,
-     * sample-and-hold count (a raw RSMP value in ADCCK cycles, sample time = value + 2.5
-     * cycles; not microseconds, not a rung selector),
+     * sample-and-hold count (a raw RSMP value in ADCCK cycles; one conversion
+     * takes value + 12.5 ADCCK cycles, the model hal/gd32/gd32_common.h uses for
+     * the ADC_READ residency budget and the BEGIN2 rate check; not microseconds,
+     * not a rung selector),
      * resolution (6/8/10/12-bit; the GD32G5 DRES field has no 14/16-bit
      * mode, so those widths reply STATUS_NOSUPPORT).  CMD_ADC_READ honours
      * the configured tuning on the next call. */
@@ -237,6 +279,11 @@ typedef enum {
 	 * roll mid-fetch.  STREAM_READ on an FFT-bound stream answers
 	 * NOSUPPORT; a filter (FIR/IIR) chain uses STREAM_READ instead. */
 	CMD_ADC_SPECTRUM_READ = 0x3A,
+	/* v0.15: BEGIN2 / READ2 -- hardware-realised rate reported back,
+	 * watermark events, and lossless-accounting reads (first_index +
+	 * dropped).  SPI only; need the ADC_STREAM2 link feature. */
+	CMD_ADC_STREAM_BEGIN2 = 0x3B,
+	CMD_ADC_STREAM_READ2  = 0x3C,
 	/* v0.5 (§2B.2): advanced timer extras.  PWM_CAPTURE turns a
      * PWM channel's pin into an input-capture source for frequency
      * / pulse-width measurement; PWM_SINGLE_PULSE drives a one-shot
@@ -267,7 +314,12 @@ typedef enum {
      * answers STATUS_NOSUPPORT via the dispatch default -- the host
      * degrades to the legacy framing.  The reply to THIS command is
      * already stamped when STATUS_SEQ is granted; the host uses that
-     * stamp as its sequence baseline. */
+     * stamp as its sequence baseline.
+     * v0.15: a second, 6-byte request form `want:u32 max_payload_req:u16`
+     * negotiates the whole u32 feature word and the link's max_payload;
+     * its reply is `granted:u32 supported:u32 max_payload:u16` (10 B).
+     * The legacy 1-byte form keeps only STATUS_SEQ and clears every 0.15
+     * bit on that link. */
 	CMD_LINK_FEATURES = 0x81,
 } gd32_bridge_cmd_t;
 
@@ -408,7 +460,8 @@ gd32_bridge_status_t protocol_dispatch(gd32_bridge_link_t link,
 
 /* Link features currently armed ON `link` (GD32_BRIDGE_LINK_FEAT_* bits,
  * set by a CMD_LINK_FEATURES that arrived on that same link).  Consulted
- * by the SPI transport when staging replies; 0 = legacy framing.
+ * by the SPI transport when staging replies; 0 = legacy framing.  u32
+ * from v0.15.
  *
  * Per-link since #132's sibling #130: the feature set used to be one
  * process-wide byte, so an I2C-side negotiation re-framed the SPI wire
@@ -416,7 +469,20 @@ gd32_bridge_status_t protocol_dispatch(gd32_bridge_link_t link,
  * disarmed an active SPI STATUS_SEQ session mid-flight, switching off the
  * SPI host's ONLY detector for the stale-reply residual hazard
  * fingerprinted on silicon 2026-06-06. */
-uint8_t protocol_link_features(gd32_bridge_link_t link);
+uint32_t protocol_link_features(gd32_bridge_link_t link);
+
+/* Effective payload ceiling on `link` (65, or 66..252 once BIG_FRAME is
+ * granted on the SPI link).  Only CMD_BATCH requests/replies and
+ * CMD_ADC_STREAM_READ2 replies may use more than 65 (the SPI transport
+ * enforces that for requests; protocol_dispatch() is handed the matching
+ * reply capacity). */
+uint16_t protocol_link_max_payload(gd32_bridge_link_t link);
+
+/* I2C opcode-policy diagnostics (SWD-readable, same style as
+ * bridge_i2c_rx_diag): how many I2C requests were refused because their
+ * opcode is outside the I2C allow-list, and the last such opcode. */
+extern volatile uint32_t bridge_i2c_denied_count;
+extern volatile uint8_t  bridge_i2c_denied_last_cmd;
 
 /* --------------------------------------------------------------- */
 /* CRC-16 / CCITT-FALSE -- shared between transports.                */

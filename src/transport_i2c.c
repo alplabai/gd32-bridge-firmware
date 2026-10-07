@@ -67,6 +67,13 @@ static bool pending_reply_valid;
 /* Set once a write's frame failed framing/CRC; cleared by write_start(). */
 static bool frame_rejected;
 
+/* The staged reply has not yet been read out by the host: set when a request's
+ * reply is staged, cleared at the STOP that ends the reply read (or when a new
+ * write abandons it).  hal/gd32/power.c waits on it before a Deep-sleep entry,
+ * the I2C twin of spi_slave_reply_undrained(). */
+static volatile bool i2c_reply_undrained;
+static bool          i2c_read_started; /* a read byte was served since the last STOP */
+
 /* Bench diagnostics for #315 (content-dependent write failure): plain
  * globals so a SWD mem_rd can read them by map address after a failed
  * write.  prev_rx_len is the byte count the PREVIOUS addressed write had
@@ -117,6 +124,21 @@ void i2c_slave_write_start(void)
 	i2c_rx_len                     = 0u;
 	pending_reply_valid            = false;
 	frame_rejected                 = false;
+	i2c_reply_undrained            = false; /* a new write abandons the old reply */
+	i2c_read_started               = false;
+}
+
+bool i2c_slave_reply_undrained(void)
+{
+	return i2c_reply_undrained;
+}
+
+/* Call on STOP BEFORE i2c_slave_write_end(): a STOP that ends a read means the
+ * host has taken its reply; a STOP after a write has not. */
+void i2c_slave_stop(void)
+{
+	if (i2c_read_started) i2c_reply_undrained = false;
+	i2c_read_started = false;
 }
 
 /* Call on a bus-error resync (BRIDGE_I2C_ER_HANDLER's bus_error arm):
@@ -226,6 +248,7 @@ bool i2c_slave_write_end(void)
 	                                                  &reply_pl_len);
 	stage_reply((uint8_t)st, reply_pl, reply_pl_len);
 	pending_reply_valid = true;
+	i2c_reply_undrained = true;
 	return true;
 }
 
@@ -237,6 +260,7 @@ uint8_t i2c_slave_tx_next_byte(void)
 		/* Read before any matching write since the last START. */
 		stage_no_pending();
 	}
+	i2c_read_started = true;
 	if (i2c_tx_cursor < i2c_tx_len) {
 		return i2c_tx_buf[i2c_tx_cursor++];
 	}
@@ -250,6 +274,8 @@ void transport_i2c_init(void)
 	i2c_tx_cursor       = 0u;
 	pending_reply_valid = false;
 	frame_rejected      = false;
+	i2c_reply_undrained = false;
+	i2c_read_started    = false;
 	/* I2C0 slave bring-up (PA15/PB9, addr GD32_BRIDGE_DEFAULT_I2C_ADDR)
      * lives in the gd32 HAL backend (hal/transport_hw_gd32.c); the stub
      * backend's weak no-op keeps this hardware-free for host tests.

@@ -128,9 +128,13 @@ _REQUIRED_CMD_NAMES = (
     "CMD_SE_RESET",
     "CMD_DA9292_STATUS_FORWARD",
     "CMD_LINK_FEATURES",
+    "CMD_BATCH",
+    "CMD_ADC_STREAM_BEGIN2",
+    "CMD_ADC_STREAM_READ2",
 )
 _REQUIRED_STATUS_NAMES = (
     "STATUS_OK",
+    "STATUS_INVAL",
     "STATUS_NOT_READY",
     "STATUS_IO",
     "STATUS_NOSUPPORT",
@@ -653,6 +657,23 @@ def build_vectors() -> list[tuple[str, str, str | None] | _Section]:
         " backend still answers STATUS_NOSUPPORT (BRIDGE_HW_ERR_NOTIMPL)",
     ))
 
+    # Request byte 1 is the POWER_FLAG_* byte (0 from a host that predates
+    # it).  WAKE_I2C (0x01) adds an early wake on a BRD_I2C address match to a
+    # TIMED Deep-sleep (an untimed one answers STATUS_OUT_OF_RANGE).
+    out.append((
+        "spi_power_mode_set_deepsleep_wake_i2c_request",
+        spi_frame(SOF, CMD_POWER_MODE_SET,
+                  bytes([0x02,                            # mode = DEEP_SLEEP
+                         0x01,                            # flags = WAKE_I2C
+                         0x00, 0x00, 0x00, 0x00,          # wake_bitmap = none
+                         0x64, 0x00, 0x00, 0x00,          # wake_after_ms = 100 (LE)
+                  ])).hex().upper(),
+        "SOF | CMD=0x28 | mode=DEEP_SLEEP | flags=WAKE_I2C | wake_bitmap=0 |"
+        " wake_after_ms=100 | CRC -- answers STATUS_BUSY while an ADC stream,"
+        " PWM, DAC or OTA session is live; an untimed WAKE_I2C request answers"
+        " STATUS_OUT_OF_RANGE",
+    ))
+
     # ----- §10. v0.5 additions (§2B wave-2): chunked DSP-chain upload -
     out.append(_Section([
         "§10. v0.5 additions (§2B wave-2) -- chunked DSP-chain upload",
@@ -892,16 +913,11 @@ def build_vectors() -> list[tuple[str, str, str | None] | _Section]:
     # CMD_GET_BUILD_ID, CMD_RESET_REASON, CMD_GPIO_{READ,WRITE},
     # CMD_PWM_{SET,GET}, CMD_ADC_READ and CMD_DA9292_STATUS_FORWARD
     # predate the versioned §4+ additions above but had no wire vector
-    # until now.  GPIO_READ/WRITE still share one reply vector
-    # (spi_reply_io): handle_gpio_read/write (protocol.c) are out of
-    # scope for #23 and still fall through to
-    # `if (rv < 0) return STATUS_IO;` on any BRIDGE_HW_ERR, so on the
-    # stub HAL backend (the only one CI compiles, #31 E1) they answer
-    # STATUS_IO, not NOSUPPORT.  PWM_SET/GET and ADC_READ used to share
-    # that same STATUS_IO reply but were fixed under #23 to route
-    # through status_from_hw() like the rest of the v0.5+ handlers, so
-    # their stub-backend reply is spi_reply_nosupport instead (see
-    # §14's status_from_hw() note for the pattern).  Their real
+    # until now.  GPIO_READ/WRITE, PWM_SET/GET and ADC_READ all route
+    # HAL errors through status_from_hw() (#23; GPIO since the
+    # unrouted-pad fix), so on the stub HAL backend (the only one CI
+    # compiles, #31 E1) they answer spi_reply_nosupport (see §14's
+    # status_from_hw() note for the pattern).  Their real
     # success-reply payloads carry live GPIO/PWM/ADC state and are not
     # a wire-format constant, so only the request framing is
     # vectorized here.
@@ -932,7 +948,7 @@ def build_vectors() -> list[tuple[str, str, str | None] | _Section]:
         "spi_gpio_read_mask_bit0_request",
         spi_frame(SOF, CMD_GPIO_READ, bytes([0x01, 0x00, 0x00, 0x00])).hex().upper(),
         "SOF | CMD=0x10 | mask=0x00000001 (LE) | CRC -- reply (on the"
-        " gd32 backend) is levels:u32(LE); see spi_reply_io for what"
+        " gd32 backend) is levels:u32(LE); see spi_reply_nosupport for what"
         " the stub backend answers today",
     ))
     out.append((
@@ -942,7 +958,7 @@ def build_vectors() -> list[tuple[str, str, str | None] | _Section]:
                          0x01, 0x00, 0x00, 0x00,   # levels = bit0 high (LE)
                   ])).hex().upper(),
         "SOF | CMD=0x11 | mask=0x00000001 (LE) | levels=0x00000001 (LE)"
-        " | CRC -- empty-payload reply on success; see spi_reply_io for"
+        " | CRC -- empty-payload reply on success; see spi_reply_nosupport for"
         " what the stub backend answers today",
     ))
     out.append((
@@ -986,19 +1002,6 @@ def build_vectors() -> list[tuple[str, str, str | None] | _Section]:
         " both the stub HAL and this SoM revision's real hardware (no"
         " DA9292 net reaches the GD32 on this SoM rev; see"
         " hal/bridge_hw_stub.c)",
-    ))
-    out.append((
-        "spi_reply_io",
-        spi_frame(SOF, STATUS_IO).hex().upper(),
-        "SOF | STATUS=0x05 (IO) | empty payload | CRC -- the reply"
-        " handle_gpio_read/write (protocol.c) give on the STUB HAL"
-        " backend for any BRIDGE_HW_ERR (they don't special-case"
-        " BRIDGE_HW_ERR_NOTIMPL the way the status_from_hw()-routed"
-        " handlers do -- see spi_reply_nosupport for that family's stub"
-        " reply instead).  handle_pwm_set/get and handle_adc_read used"
-        " to share this reply too until #23 routed them through"
-        " status_from_hw(); GPIO_READ/WRITE are out of scope for #23"
-        " and still land here",
     ))
 
     # ----- §14. v0.5 additions (§2B.2), continued (#31 E4) ------------
@@ -1079,6 +1082,208 @@ def build_vectors() -> list[tuple[str, str, str | None] | _Section]:
         " bins[0]=4.0f | bins[1]=8.0f | bins[2..3]=0 (zero-padded, i >="
         " got) | CRC -- REPRESENTATIVE of the wired gd32 HAL body, not"
         " the stub backend's STATUS_NOSUPPORT reply",
+    ))
+
+    # ----- §16. v0.15 additions ---------------------------------------
+    out.append(_Section([
+        "§16. v0.15 additions -- extended LINK_FEATURES, I2C opcode policy,",
+        "      ADC_STREAM_BEGIN2 / READ2, CMD_BATCH, the >65 B enforcement",
+        "      (docs/protocol-v0.15-design.md section 9)",
+    ]))
+
+    def le32(v: int) -> bytes:
+        return v.to_bytes(4, "little")
+
+    def le16(v: int) -> bytes:
+        return v.to_bytes(2, "little")
+
+    # -- extended CMD_LINK_FEATURES (6-byte request, 10-byte reply) --
+    lf_req = le32(0x1F) + le16(252)
+    out.append((
+        "spi_link_features_ext_request_all",
+        spi_frame(SOF, CMD_LINK_FEATURES, lf_req).hex().upper(),
+        "SOF | CMD=0x81 | want=0x0000001F (STATUS_SEQ|BIG_FRAME|ATTN|"
+        "ADC_STREAM2|BATCH, u32 LE) | max_payload_req=252 (u16 LE) | CRC --"
+        " the 6-byte v0.15 form; pre-v0.15 firmware answers spi_reply_inval",
+    ))
+    out.append((
+        "spi_link_features_ext_reply_all_seq1",
+        spi_frame(SOF, 0x10 | STATUS_OK, le32(0x1F) + le32(0x1F) + le16(252)).hex().upper(),
+        "SOF | STATUS=0x10 (OK, stamp 1) | granted=0x1F | supported=0x1F |"
+        " max_payload=252 | CRC -- gd32 backend, nothing refused",
+    ))
+    out.append((
+        "spi_link_features_ext_reply_attn_refused_seq1",
+        spi_frame(SOF, 0x10 | STATUS_OK, le32(0x1B) + le32(0x1F) + le16(252)).hex().upper(),
+        "SOF | STATUS=0x10 | granted=0x1B | supported=0x1F | max_payload=252"
+        " | CRC -- ATTN (bit 2) is in `supported` but not `granted`: a"
+        " debugger is attached (DHCSR.C_DEBUGEN), PA14 is SWCLK",
+    ))
+    out.append((
+        "spi_link_features_ext_reply_stub_seq1",
+        spi_frame(SOF, 0x10 | STATUS_OK, le32(0x13) + le32(0x13) + le16(252)).hex().upper(),
+        "SOF | STATUS=0x10 | granted=0x13 | supported=0x13 | max_payload=252"
+        " | CRC -- stub backend: no ATTN, no ADC_STREAM2",
+    ))
+    out.append((
+        "spi_reply_inval",
+        spi_frame(SOF, STATUS_INVAL).hex().upper(),
+        "SOF | STATUS=0x01 (INVAL) | empty payload | CRC -- also the"
+        " v0.7..v0.14 answer to the 6-byte LINK_FEATURES form, a BATCH"
+        " that fails validation, and a non-BATCH request over 65 bytes",
+    ))
+
+    # -- I2C: extended negotiation is echoed, opcode policy is enforced --
+    out.append((
+        "i2c_link_features_ext_write",
+        i2c_write(CMD_LINK_FEATURES, lf_req).hex().upper(),
+        "reg=0x00 | CMD=0x81 | want=0x1F | max_payload_req=252 | CRC(CMD..)"
+        " -- the I2C link supports only STATUS_SEQ",
+    ))
+    out.append((
+        "i2c_link_features_ext_read",
+        i2c_read(STATUS_OK, le32(0x01) + le32(0x01) + le16(65)).hex().upper(),
+        "STATUS=0x00 | granted=0x00000001 | supported=0x00000001 |"
+        " max_payload=65 | CRC -- I2C never grants BIG_FRAME / ATTN /"
+        " ADC_STREAM2 / BATCH, and never stamps",
+    ))
+    out.append((
+        "i2c_adc_read_ch0_4_write_denied",
+        i2c_write(CMD_ADC_READ, bytes([0x00, 0x04])).hex().upper(),
+        "reg=0x00 | CMD=0x30 (ADC_READ) | channel=0 | samples=4 | CRC --"
+        " ADC_READ is not on the I2C allow-list",
+    ))
+    out.append((
+        "i2c_adc_read_ch0_4_read_denied",
+        i2c_read(STATUS_NOSUPPORT).hex().upper(),
+        "STATUS=0x06 (NOSUPPORT) | empty payload | CRC -- the handler never"
+        " ran; bridge_i2c_denied_count++ and bridge_i2c_denied_last_cmd=0x30",
+    ))
+    out.append((
+        "i2c_ota_get_state_write_allowed",
+        i2c_write(CMD_OTA_GET_STATE).hex().upper(),
+        "reg=0x00 | CMD=0xF5 (OTA_GET_STATE) | CRC -- 0xF0..0xFF stay"
+        " reachable over I2C (Linux tools/gd32-ota-host)",
+    ))
+
+    # -- BEGIN2 / READ2 --
+    out.append((
+        "spi_adc_stream_begin2_s0_ch0_1khz_w256_request",
+        spi_frame(SOF, CMD_ADC_STREAM_BEGIN2,
+                  bytes([0x00, 0x00, 0x00, 0x00]) + le32(1000) + le16(256) + le16(0)
+                  ).hex().upper(),
+        "SOF | CMD=0x3B | stream_id=0 | channel=0 | trigger_src=0 (PACE_TIMER)"
+        " | trigger_arg=0 | sample_rate_hz=1000 | watermark=256 | reserved=0"
+        " | CRC (12-byte payload)",
+    ))
+    out.append((
+        "spi_adc_stream_begin2_reply_1khz_w256",
+        spi_frame(SOF, STATUS_OK,
+                  le32(1000000) + le32(1000) + le16(0x0FFF) + le16(1800)
+                  + bytes([0x01]) + le16(256) + le16(512)).hex().upper(),
+        "SOF | STATUS=0x00 | tick_hz=1000000 | period_ticks=1000 |"
+        " full_scale=4095 | vref_mv=1800 | flags=0x01 (VREF_MEASURED) |"
+        " watermark=256 | ring_depth=512 (2*W) | CRC (17-byte payload)",
+    ))
+    out.append((
+        "spi_adc_stream_begin2_reply_300hz_truncation",
+        spi_frame(SOF, STATUS_OK,
+                  le32(1000000) + le32(3333) + le16(0x0FFF) + le16(1800)
+                  + bytes([0x00]) + le16(0) + le16(1024)).hex().upper(),
+        "SOF | STATUS=0x00 | tick_hz=1000000 | period_ticks=3333 (floor of"
+        " 1000000/300: the REALISED rate is tick_hz/period_ticks = 300.03 Hz)"
+        " | full_scale=4095 | vref_mv=1800 | flags=0x00 (the 1800 mV"
+        " fallback, not measured) | watermark=0 | ring_depth=1024 | CRC",
+    ))
+    out.append((
+        "spi_adc_stream_read2_s0_max121_request",
+        spi_frame(SOF, CMD_ADC_STREAM_READ2, bytes([0x00, 121])).hex().upper(),
+        "SOF | CMD=0x3C | stream_id=0 | max_samples=121 (the ceiling at"
+        " max_payload 252: (252-9)/2) | CRC",
+    ))
+    out.append((
+        "spi_adc_stream_read2_reply_got3",
+        spi_frame(SOF, STATUS_OK,
+                  le32(0x100) + le32(0) + bytes([3])
+                  + le16(0x0800) + le16(0x0801) + le16(0x0FFF)).hex().upper(),
+        "SOF | STATUS=0x00 | first_index=256 | dropped=0 | got=3 |"
+        " codes=0x0800,0x0801,0x0FFF (u16 LE, right-aligned raw) | CRC at"
+        " offset 11+2*got -- the host clocks 13+2*max_samples bytes and"
+        " finds the CRC from `got`",
+    ))
+    out.append((
+        "spi_adc_stream_read2_reply_empty",
+        spi_frame(SOF, STATUS_OK, le32(0x103) + le32(0) + bytes([0])).hex().upper(),
+        "SOF | STATUS=0x00 | first_index=259 | dropped=0 | got=0 | CRC --"
+        " an empty ring is STATUS_OK, not an error",
+    ))
+    out.append((
+        "spi_adc_stream_read2_reply_overrun_dropped32",
+        spi_frame(SOF, STATUS_OK,
+                  le32(0x123) + le32(32) + bytes([2]) + le16(0x0800) + le16(0x0801)
+                  ).hex().upper(),
+        "SOF | STATUS=0x00 | first_index=291 | dropped=32 | got=2 | codes |"
+        " CRC -- overrun is STATUS_OK with `dropped` set, never BUSY",
+    ))
+    out.append((
+        "spi_adc_stream_read2_reply_discontinuity",
+        spi_frame(SOF, STATUS_OK, le32(0x125) + le32(0xFFFFFFFF) + bytes([0])).hex().upper(),
+        "SOF | STATUS=0x00 | first_index=293 | dropped=0xFFFFFFFF (a"
+        " discontinuity of UNKNOWN length: ROVF recovery, a DSP pump gap)"
+        " | got=0 | CRC",
+    ))
+
+    # -- CMD_BATCH --
+    batch_ok = bytes([3]) \
+        + bytes([CMD_GPIO_WRITE, 8]) + le32(1) + le32(1) \
+        + bytes([CMD_PWM_GET, 1, 0]) \
+        + bytes([CMD_ADC_STREAM_READ2, 2, 0, 16])
+    out.append((
+        "spi_batch_request_gpiow_pwmget_read2",
+        spi_frame(SOF, CMD_BATCH, batch_ok).hex().upper(),
+        "SOF | CMD=0x04 | count=3 | {0x11 len 8 mask=1 levels=1} |"
+        " {0x21 len 1 ch=0} | {0x3C len 2 stream=0 max=16} | CRC",
+    ))
+    batch_stop = bytes([3]) \
+        + bytes([CMD_GPIO_WRITE, 8]) + le32(1) + le32(1) \
+        + bytes([CMD_ADC_STREAM_READ2, 2, 1, 16]) \
+        + bytes([CMD_PING, 0])
+    out.append((
+        "spi_batch_request_gpiow_read2_inactive_ping",
+        spi_frame(SOF, CMD_BATCH, batch_stop).hex().upper(),
+        "SOF | CMD=0x04 | count=3 | GPIO_WRITE | READ2 on stream 1 (not"
+        " running) | PING | CRC -- execution stops at the INVAL",
+    ))
+    out.append((
+        "spi_batch_reply_stop_at_first_error",
+        spi_frame(SOF, STATUS_OK, bytes([2, 0x00, 0x00, 0x01, 0x00])).hex().upper(),
+        "SOF | STATUS=0x00 (outer OK: the batch validated) | executed=2 |"
+        " {status=0x00 len=0} | {status=0x01 (INVAL) len=0} | CRC -- the"
+        " third op (PING) never ran; a non-OK sub-status always has len 0",
+    ))
+    out.append((
+        "spi_batch_request_nested_rejected",
+        spi_frame(SOF, CMD_BATCH, bytes([1, CMD_BATCH, 0])).hex().upper(),
+        "SOF | CMD=0x04 | count=1 | {0x04 len 0} | CRC -- a nested BATCH is"
+        " not on the allow-list; reply = spi_reply_inval, nothing executed",
+    ))
+    out.append((
+        "spi_batch_request_trailing_byte_rejected",
+        spi_frame(SOF, CMD_BATCH, bytes([1, CMD_PING, 0, 0])).hex().upper(),
+        "SOF | CMD=0x04 | count=1 | {0x00 len 0} | one TRAILING 0x00 | CRC"
+        " -- the request length must equal 1 + sum(2+len) exactly; reply ="
+        " spi_reply_inval (the defence against zero-extended captures)",
+    ))
+
+    # -- >65 B enforcement --
+    out.append((
+        "spi_ota_write_chunk_over_65_rejected_on_big_link",
+        spi_frame(SOF, CMD_OTA_WRITE_CHUNK,
+                  le32(0) + bytes([61]) + bytes([0xA5] * 61)).hex().upper(),
+        "SOF | CMD=0xF1 | offset=0 | len=61 | 61 data bytes (66-byte"
+        " payload) | CRC -- only BATCH and READ2 may exceed 65 bytes, even"
+        " on a BIG_FRAME link, so OTA keeps its 56-byte chunks; reply ="
+        " spi_reply_inval",
     ))
 
     return out

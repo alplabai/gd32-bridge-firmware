@@ -1081,6 +1081,81 @@ purpose is to make that less necessary.
 
 ---
 
+## Phase 11 — wire protocol v0.15 (BIG_FRAME, ATTN, BATCH, BEGIN2/READ2)
+
+Everything in [`protocol-v0.15-design.md`](protocol-v0.15-design.md) is
+host-tested only: the register-level pieces run against mocks, and nothing here
+has been through silicon. The numbers in design section 4.4 are provisional and
+live in the design document, not in firmware constants; these items are what
+turns them into measurements. Not brick-class: ATTN only ever drives PA14 while
+a debugger is *not* attached, and every reset returns PA14 to SWCLK.
+
+### 11.1 — PA14 reset state and series resistor (design Q3, F3)
+
+- **Proves** — the disable sequence in `bridge_hw_attn_enable(false)`
+  (PA14 low, `GPIO_AF_0`, AF mode with pull-down) restores exactly the part's
+  reset SWD configuration, and nothing on the SWCLK net fights an enabled ATTN.
+- **Procedure** — before enabling ATTN, SWD-read `GPIOA_CTL/OMODE/OSPD/PUD/AFSEL`
+  for PA14; negotiate ATTN on, then off; read them again. Compare against the UM
+  Rev1.2 GPIOA reset values. Look for a series resistor on the net.
+- **PASS** — the two reads are identical; PA14 reads low whenever ATTN is off.
+- **FAIL** — any field differs (fix `bridge_hw_attn_enable()`), or a probe cannot
+  reattach after an enable/disable cycle.
+- **Falsifies** — design rule F3.
+- **Brick risk** — none; recovery is connect-under-reset (`NRST`, P74).
+
+### 11.2 — ATTN drive points and timing, scope on P71 / P97 (design Q4, 4.4)
+
+- **Proves** — ATTN falls at CS falling, falls at CS-rising entry, and rises
+  only after the reply is armed; the low time around a fresh stage is >= 1 us;
+  CS falling -> ATTN low <= 2 us; CS rising -> ATTN high is
+  `t_frame + t_dispatch(op)`.
+- **Procedure** — build with `-DBRIDGE_TIMING_STATS=ON`
+  ([`timing-stats.md`](timing-stats.md)); drive PING, a 256-byte BATCH and
+  `ADC_READ`; scope P97 (CS) against P71 (ATTN).
+- **PASS** — every guarantee in design 4.4 holds; record the measured values in
+  the design document.
+- **FAIL** — ATTN high before the TX DMA is armed, or a CS edge that coalesces
+  with an event assert.
+- **Falsifies** — design 4.3 drive points.
+- **Brick risk** — none.
+
+### 11.3 — Handler residency on 256-byte frames and per BATCH op (design Q8, 6.4)
+
+- **Proves** — the non-dispatch part of the CS-rising handler on maximum frames
+  is <= ~30 us, and each allow-listed BATCH op costs <= 20 us.
+- **Procedure** — `timing_stats` over a 252-byte BATCH of each allow-listed op
+  in turn.
+- **PASS** — a full 16-op batch stays well under `ADC_READ_ISR_BUDGET_US`.
+- **FAIL** — any op above its budget: take it off the allow-list in
+  `batch_ops[]` (`src/protocol.c`).
+- **Falsifies** — design 6.3's allow-list.
+- **Brick risk** — none; I2C0 (prio 2) and base level stall for the batch's
+  duration, so a long batch can clock-stretch BRD_I2C.
+
+### 11.4 — C_DEBUGEN after a probe detaches (design Q10, F2)
+
+- **Proves** — whether `DHCSR.C_DEBUGEN` clears when a probe disconnects.
+- **Procedure** — attach a probe, detach it, send the extended
+  `LINK_FEATURES` with ATTN wanted.
+- **PASS** — ATTN is granted after a clean detach (or: it stays refused until
+  reset, which is the documented fail-safe — record which).
+- **Falsifies** — only the usability of the debugger check, never its safety.
+
+### 11.5 — BEGIN2 realised rate and conversion-time model (design Q7, 5.2)
+
+- **Proves** — `tick_hz / period_ticks` is the rate the pacing timer really
+  runs at, and the `sample_cycles + 12.5` ADCCK conversion-time model refuses a
+  rate the converter cannot achieve.
+- **Procedure** — BEGIN2 at 300 Hz and 1 kHz on a free-running source; count
+  samples over a timed dwell. Then `ADC_CONFIGURE` ratio 256 / 638 cycles and
+  BEGIN2 at 1 kHz (expect OUT_OF_RANGE), and at a rate just inside the model's
+  limit (expect the stream to keep up with no `dropped`).
+- **PASS** — sample counts match the reported realised rate; no overrun just
+  inside the limit.
+- **FAIL** — the converter drops triggers at a rate the model admits: the model
+  under-estimates (the 12.5-cycle figure is the 12-bit one).
+
 ## Open questions the bench can answer (not PR validations)
 
 These are not covered by any of the fifteen PRs' own bench sections — they

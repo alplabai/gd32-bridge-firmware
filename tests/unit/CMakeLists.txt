@@ -411,6 +411,7 @@ add_executable(test_adc_seq
     adc_seq/mock/mock_gd32.c
     ${FW}/hal/gd32/adc.c
     ${FW}/hal/gd32/adc_stream.c
+    ${FW}/hal/gd32/adc_stream2.c
     ${FW}/hal/gd32/vref.c
     # adc_dsp_chain.c carries the chain pool + adc_dsp_chain_p1_capable()
     # that adc_stream.c's pump-side config functions call.  It was split
@@ -423,6 +424,7 @@ add_executable(test_adc_seq
 target_include_directories(test_adc_seq PRIVATE
     ${FW}/hal
     ${FW}/hal/gd32
+    ${FW}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/adc_seq/mock
 )
 target_compile_options(test_adc_seq PRIVATE ${TEST_FLAGS})
@@ -431,6 +433,21 @@ target_compile_options(test_adc_seq PRIVATE ${TEST_FLAGS})
 # this because CMSIS-DSP/arm-none-eabi's libm supplies them implicitly.
 target_link_libraries(test_adc_seq PRIVATE ztest_shim m)
 add_test(NAME adc_seq COMMAND test_adc_seq)
+
+# --- adc_stream2: READ2 accounting + BEGIN2 arithmetic (v0.15) ---------------
+#
+# Links ONLY hal/gd32/adc_stream2.c, the vendor-header-free half of BEGIN2/READ2
+# (overrun skip / GUARD / delivered index / discontinuity sentinel, the pace
+# timer's realised rate, the conversion-time model, VREF_MEASURED).  The
+# hardware half runs against the register mock in the adc_seq suite above.
+add_executable(test_adc_stream2
+    adc_stream2/src/test_adc_stream2.c
+    ${FW}/hal/gd32/adc_stream2.c
+)
+target_include_directories(test_adc_stream2 PRIVATE ${FW}/hal ${FW}/hal/gd32 ${FW}/src)
+target_compile_options(test_adc_stream2 PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_adc_stream2 PRIVATE ztest_shim)
+add_test(NAME adc_stream2 COMMAND test_adc_stream2)
 
 # --- fmc_ota_guard: the #79 address guard, header-only, no GD32 register
 # dependency (see hal/fmc_ota_guard.h) -------------------------------------
@@ -461,6 +478,21 @@ target_compile_options(test_transport_i2c PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_transport_i2c PRIVATE ztest_shim)
 add_test(NAME transport_i2c COMMAND test_transport_i2c)
 
+# --- transport_i2c_maxlen: full-capacity I2C reply staging --------------------
+#
+# v0.15's I2C opcode allow-list means no real opcode yields a 65-byte reply on
+# I2C, so transport_i2c.c is linked here against a stand-in protocol_dispatch()
+# that fabricates one.  Pins the staging buffer capacity the end-to-end
+# transport_i2c suite can no longer reach.
+add_executable(test_transport_i2c_maxlen
+    transport_i2c_maxlen/src/test_transport_i2c_maxlen.c
+    ${FW}/src/transport_i2c.c
+)
+target_include_directories(test_transport_i2c_maxlen PRIVATE ${FW}/src ${FW}/hal)
+target_compile_options(test_transport_i2c_maxlen PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_transport_i2c_maxlen PRIVATE ztest_shim)
+add_test(NAME transport_i2c_maxlen COMMAND test_transport_i2c_maxlen)
+
 # --- protocol: dispatcher over a TEST-ONLY injectable fake HAL -------------
 #
 # hal/bridge_hw_stub.c answers BRIDGE_HW_ERR_NOTIMPL for essentially every
@@ -474,6 +506,7 @@ add_test(NAME transport_i2c COMMAND test_transport_i2c)
 # range is exercised here only as the inert, unpartitioned default.
 add_executable(test_protocol
     protocol/src/test_protocol.c
+    protocol/src/test_protocol_v015.c
     fake/bridge_hw_fake.c
     ${FW}/src/protocol.c
     ${FW}/src/bootloader/bootloader.c
@@ -546,6 +579,28 @@ target_include_directories(test_protocol_vectors PRIVATE ${FW}/src ${FW}/hal ${P
 target_compile_options(test_protocol_vectors PRIVATE ${TEST_FLAGS})
 target_link_libraries(test_protocol_vectors PRIVATE ztest_shim)
 add_test(NAME protocol_vectors COMMAND test_protocol_vectors)
+
+# --- protocol_vectors_fake: the v0.15 vectors the stub cannot reach ----------
+#
+# The gd32-shaped 0x1F grant, the ATTN refusal under a debugger, the BEGIN2 /
+# READ2 replies and a BATCH that executes need a backend that implements
+# ADC_STREAM2 / ATTN.  Same generated vector header as protocol_vectors above,
+# driven through the real transport_spi.c -> protocol.c over the fake HAL.
+add_executable(test_protocol_vectors_fake
+    protocol_vectors_fake/src/test_protocol_vectors_fake.c
+    fake/bridge_hw_fake.c
+    ${FW}/src/transport_spi.c
+    ${FW}/src/protocol.c
+    ${FW}/src/bootloader/bootloader.c
+    ${FW}/src/ota.c
+    ${FW}/src/crc32.c
+)
+add_dependencies(test_protocol_vectors_fake protocol-vectors-header)
+target_include_directories(test_protocol_vectors_fake PRIVATE
+    ${FW}/src ${FW}/hal ${CMAKE_CURRENT_SOURCE_DIR}/fake ${PV_GEN_DIR})
+target_compile_options(test_protocol_vectors_fake PRIVATE ${TEST_FLAGS})
+target_link_libraries(test_protocol_vectors_fake PRIVATE ztest_shim)
+add_test(NAME protocol_vectors_fake COMMAND test_protocol_vectors_fake)
 
 # --- spi_dma_arm_status: gh#268 arm-failure status/counter -----------------
 #
