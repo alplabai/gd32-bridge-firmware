@@ -215,12 +215,16 @@ static volatile uint8_t s_lp_flags;
 /* The latched request armed the RTC timer (a bounded sleep). */
 static volatile bool s_lp_timed;
 
-/* Ticks (~50 ms each) the latched request has waited for the host to read
- * its reply.  Entering before the read ends makes the host's reply-read CS
- * falling edge the wake source (SPI_CS) instead of the timer and costs the
- * reply; past the bound the request is abandoned (refused_late). */
-#define POWER_LP_REPLY_DRAIN_TICKS 10u
-static uint8_t s_lp_drain_ticks;
+/* How long the latched request waits for the host to read its reply.
+ * Entering before the read ends makes the host's reply-read CS falling edge
+ * the wake source (SPI_CS) instead of the timer and costs the reply; past
+ * the bound the request is abandoned (refused_late).  Measured on the DWT
+ * cycle counter (SystemCoreClock cycles/s), NOT in bridge_power_tick()
+ * passes: the main loop ticks after every interrupt, not only the 50 ms
+ * SysTick.  Unsigned subtraction is wrap-safe for a 500 ms span. */
+#define POWER_LP_REPLY_DRAIN_MS 500u
+static uint32_t s_lp_drain_t0;      /* DWT->CYCCNT when the wait began */
+static bool     s_lp_drain_waiting; /* s_lp_drain_t0 is valid */
 
 /* SWD-readable low-power counters (see power_policy.h). */
 volatile bridge_power_diag_t bridge_power_diag;
@@ -247,10 +251,10 @@ static bool power_entry_refused(uint8_t mode)
 /* Drop a latched request and stop the RTC timer armed for it. */
 static void power_cancel_pending(void)
 {
-	s_lp_pending_mode = 0u;
-	s_lp_flags        = 0u;
-	s_lp_timed        = false;
-	s_lp_drain_ticks  = 0u;
+	s_lp_pending_mode  = 0u;
+	s_lp_flags         = 0u;
+	s_lp_timed         = false;
+	s_lp_drain_waiting = false;
 	if (rtc_wakeup_ready) {
 		(void)rtc_wakeup_disable();
 		rtc_flag_clear(RTC_FLAG_WT);
@@ -574,7 +578,7 @@ static int lp_final_gate(uint8_t mode)
 /* Base-level low-power entry (gh#63): the deferred half of
  * bridge_hw_power_mode_set().  Runs from bridge_hw_tick() -- base level,
  * AFTER the host has read the accepted request's reply out (the entry
- * waits on spi_slave_reply_undrained(), bounded by POWER_LP_REPLY_DRAIN_TICKS), with
+ * waits on spi_slave_reply_undrained(), bounded by POWER_LP_REPLY_DRAIN_MS), with
  * no transport state machine mid-transaction.
  *
  * The pre-entry gates below run with interrupts ENABLED and so only
@@ -631,13 +635,19 @@ void bridge_power_tick(void)
 	/* 0. Wait for the host to read the reply out.  Bounded: a host that never
 	 *    reads it must not leave the request latched forever. */
 	if (spi_slave_reply_undrained()) {
-		if (++s_lp_drain_ticks > POWER_LP_REPLY_DRAIN_TICKS) {
+		const uint32_t now = DWT->CYCCNT;
+		if (!s_lp_drain_waiting) {
+			s_lp_drain_waiting = true;
+			s_lp_drain_t0      = now;
+		}
+		if ((uint32_t)(now - s_lp_drain_t0) >=
+		    (SystemCoreClock / 1000u) * POWER_LP_REPLY_DRAIN_MS) {
 			++bridge_power_diag.refused_late;
 			power_cancel_pending();
 		}
 		return;
 	}
-	s_lp_drain_ticks = 0u;
+	s_lp_drain_waiting = false;
 
 	/* 1. Only sleep on a quiet link: CS de-asserted (PA8 high).  An
 	 *    asserted CS means a transaction is in flight (or about to

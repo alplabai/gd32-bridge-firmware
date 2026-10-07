@@ -227,7 +227,7 @@ host-tested in `tests/unit/power_wake/`); the entry/wake sequence is
 |---|---|---|---|
 | 0 RUN | everything | | Also cancels a latched, not yet executed mode 2/3 request and stops its RTC timer. |
 | 1 SLEEP | clocks and peripherals; CPU in `WFI` | any interrupt | Already the idle state of `main()`; never refused, ADC/PWM/DAC/OTA keep running. Only `entries[1]` is countable. |
-| 2 DEEP_SLEEP | RAM and registers kept, core + PLL/IRC8M gated | SPI CS falling (EXTI 8), I2C address match (flag `WAKE_I2C`, EXTI 31 unconfirmed, timed requests only), RTC timer (EXTI 19) | Executed at base level once the host has read the reply out (SPI; waits up to ~500 ms, then the request is dropped and counted in `refused_late`). Resumes in place; the PLL (`system_clock_216m_irc8m` configuration) is re-locked before any handler runs. |
+| 2 DEEP_SLEEP | RAM and registers kept, core + PLL/IRC8M gated | SPI CS falling (EXTI 8), I2C address match (flag `WAKE_I2C`, EXTI 31 unconfirmed, timed requests only), RTC timer (EXTI 19) | Executed at base level once the host has read the reply out (SPI; waits up to 500 ms of wall time (DWT-measured), then the request is dropped and counted in `refused_late`). Resumes in place; the PLL (`system_clock_216m_irc8m` configuration) is re-locked before any handler runs. |
 | 3 STANDBY | nothing; SRAM lost | NRST, RTC timer (no WKUP pad is free on this SoM) | The wake is a reset: re-handshake, all link features cleared (design F5). |
 
 * **Refusals (`STATUS_BUSY`)** for modes 2 and 3 while an ADC stream, a PWM

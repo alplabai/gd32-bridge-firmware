@@ -545,9 +545,13 @@ ZTEST(power_wake, test_entry_waits_for_the_reply_to_be_read)
 	diag_reset();
 	clock_ready();
 	zassert_equal(bridge_hw_power_mode_set(2u, 0u, 250u, 0u), BRIDGE_HW_OK);
+	SystemCoreClock      = PWM_TIMER_CLK_HZ;
 	mock_reply_undrained = 1;
-	for (unsigned i = 0u; i < 5u; i++)
+	/* Many ticks, little time: ticks are not a time base. */
+	for (unsigned i = 0u; i < 50u; i++) {
+		mock_dwt.CYCCNT += (SystemCoreClock / 1000u) * 5u; /* 5 ms */
 		bridge_power_tick();
+	}
 	zassert_equal(mock_deepsleep_entries, 0u, "no entry while the reply is unread");
 	zassert_equal(bridge_power_diag.refused_late, 0u);
 	mock_reply_undrained = 0; /* host's reply read ended */
@@ -561,11 +565,16 @@ ZTEST(power_wake, test_unread_reply_times_out_without_entry)
 	diag_reset();
 	clock_ready();
 	zassert_equal(bridge_hw_power_mode_set(2u, 0u, 250u, 0u), BRIDGE_HW_OK);
+	SystemCoreClock      = PWM_TIMER_CLK_HZ;
 	mock_reply_undrained = 1;
-	for (unsigned i = 0u; i < 20u; i++)
-		bridge_power_tick();
+	bridge_power_tick(); /* wait starts */
+	mock_dwt.CYCCNT += (SystemCoreClock / 1000u) * 499u;
+	bridge_power_tick();
+	zassert_equal(bridge_power_diag.refused_late, 0u, "still inside the bound");
+	mock_dwt.CYCCNT += (SystemCoreClock / 1000u) * 1u;
+	bridge_power_tick();
 	zassert_equal(mock_deepsleep_entries, 0u);
-	zassert_equal(bridge_power_diag.refused_late, 1u, "abandoned and counted once");
+	zassert_equal(bridge_power_diag.refused_late, 1u, "abandoned at 500 ms, counted once");
 	mock_reply_undrained = 0;
 	bridge_power_tick();
 	zassert_equal(mock_deepsleep_entries, 0u, "the abandoned request is not resurrected");
