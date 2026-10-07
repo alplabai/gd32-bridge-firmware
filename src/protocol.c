@@ -263,7 +263,7 @@ static gd32_bridge_status_t handle_gpio_read(const uint8_t *req,
 	const uint32_t mask   = get_le32(req);
 	uint32_t       levels = 0u;
 	const int      rv     = bridge_hw_gpio_read(mask, &levels);
-	if (rv < 0) return STATUS_IO;
+	if (rv != BRIDGE_HW_OK) return status_from_hw(rv);
 	put_le32(reply, levels);
 	*reply_len = 4u;
 	return STATUS_OK;
@@ -281,7 +281,7 @@ static gd32_bridge_status_t handle_gpio_write(const uint8_t *req,
 	const uint32_t mask   = get_le32(&req[0]);
 	const uint32_t levels = get_le32(&req[4]);
 	const int      rv     = bridge_hw_gpio_write(mask, levels);
-	if (rv < 0) return STATUS_IO;
+	if (rv != BRIDGE_HW_OK) return status_from_hw(rv);
 	*reply_len = 0u;
 	return STATUS_OK;
 }

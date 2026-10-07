@@ -4,13 +4,10 @@
  *
  * GD32G5x3 backend for the bridge HAL.  Selected by setting
  * BRIDGE_HAL_BACKEND=gd32 in CMakeLists.txt.  Links
- * against the GigaDevice firmware-library wrapper.  This repo does NOT
- * vendor that tree: pass -DGD32_VENDOR_DIR=<path> pointing at a checkout
- * of alp-sdk's vendors/gd32_firmware_library/ (a verbatim mirror of GD's
- * v1.5.0 release).  Left unset, the build falls back to
- * ../../vendors/gd32_firmware_library resolved against this source tree
- * -- the pre-split layout, when this tree was nested at
- * <alp-sdk>/firmware/gd32-bridge/.  See README.md "Build".
+ * against the GigaDevice firmware-library wrapper in
+ * vendor/gd32_firmware_library/.  This repo does NOT contain the library:
+ * tools/fetch_gd32_library.sh fetches it from GigaDevice (pinned, hash-
+ * verified).  See README.md "Build".
  *
  * Status:
  *   The hooks below have real bodies -- selecting this backend drives
@@ -146,9 +143,8 @@
  * Build assumptions:
  *   - arm-none-eabi-gcc on PATH (toolchain file
  *     toolchain/arm-none-eabi.cmake handles the rest).
- *   - the GigaDevice firmware-library tree reachable, either via
- *     -DGD32_VENDOR_DIR=<path> or the ../../vendors/gd32_firmware_library
- *     fallback (see the note at the top of this file).
+ *   - the GigaDevice firmware-library tree fetched (tools/fetch_gd32_library.sh; see
+ *     the note at the top of this file).
  *   - Cortex-M33 + Thumb + soft-float ABI (matches the GigaDevice
  *     library's compile flags).
  *

@@ -10,7 +10,7 @@
  * BRIDGE_HW_ERR_NOTIMPL so the protocol round-trip can be smoke-tested
  * without the GigaDevice library on the workspace.  The real
  * implementations live in the per-peripheral TUs under hal/gd32/
- * (BRIDGE_HAL_BACKEND=gd32, against vendors/gd32_firmware_library/).
+ * (BRIDGE_HAL_BACKEND=gd32, against vendor/gd32_firmware_library/).
  */
 
 #ifndef GD32_BRIDGE_HAL_BRIDGE_HW_H

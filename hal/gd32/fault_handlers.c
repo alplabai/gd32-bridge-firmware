@@ -8,7 +8,7 @@
  * https://github.com/alplabai/gd32-bridge-firmware/issues/36.
  *
  * Vendor confirmation (before writing anything here): all five names are
- * declared `.weak` in vendors/gd32_firmware_library/upstream/Firmware/
+ * declared `.weak` in vendor/gd32_firmware_library/upstream/Firmware/
  * CMSIS/GD/GD32G5x3/Source/GCC/startup_gd32g5x3.S, each `.thumb_set` to
  * Default_Handler (lines 266-279), and the vector table at that same
  * file's __gVectors (lines 108-113) references them by exactly these

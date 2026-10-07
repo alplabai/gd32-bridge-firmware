@@ -32,8 +32,8 @@ host-side driver lives at [`chips/gd32g553/` (alp-sdk)](https://github.com/alpla
 gd32-bridge-firmware/
 ├── CMakeLists.txt          ← top-level build entry (host-built, cross-compiled)
 ├── README.md               ← this file
-├── ci/                     ← CI-only glue (e.g. the vendor-library wrapper CMakeLists
-│                              staged by the `gd32 backend build` job; not GigaDevice IP)
+├── vendor/                 ← Alp-authored build glue for the GigaDevice library (wrapper
+│                              CMake + clock patch); the library itself is fetched, not committed
 ├── toolchain/              ← ARM-GCC + linker script for GD32G553MEY7TR
 ├── hal/                    ← thin shims around the GigaDevice firmware library
 ├── src/
@@ -71,45 +71,40 @@ cmake --build build
 `BRIDGE_HAL_BACKEND` defaults to `stub`, so this command emits only
 `build/gd32-bridge.elf` — the stub backend links no vendor
 `Reset_Handler`, so there's nothing for objcopy to extract into
-`.hex`/`.bin`. For a flashable image, select the `gd32` backend and
-point `GD32_VENDOR_DIR` at a checkout of alp-sdk's
-`vendors/gd32_firmware_library/` (this repo does not vendor the
-GigaDevice SDK):
+`.hex`/`.bin`. For a flashable image, select the `gd32` backend. The
+GigaDevice firmware library is **not** in this repository (it is GigaDevice's
+code under its own terms, see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md));
+fetch it once from GigaDevice's official repository:
 
 ```bash
+tools/fetch_gd32_library.sh        # pinned commit + tree-hash verified
 cmake -B build -DCMAKE_TOOLCHAIN_FILE=toolchain/arm-none-eabi.cmake \
-    -DBRIDGE_HAL_BACKEND=gd32 \
-    -DGD32_VENDOR_DIR=<path to alp-sdk checkout>/vendors/gd32_firmware_library
+    -DBRIDGE_HAL_BACKEND=gd32
 cmake --build build
 ```
 
-`GD32_VENDOR_DIR` is empty by default.  Left empty, the build falls
-back to `../../vendors/gd32_firmware_library` **resolved against this
-source tree** — the pre-split layout, when this tree was nested at
-`<alp-sdk>/firmware/gd32-bridge/`.  A standalone clone has no such
-parent tree, so pass the flag explicitly; a relative value you pass is
-resolved against your shell's working directory, not the source tree,
-so prefer an absolute path. That build emits the monolithic
+The script clones `GigaDevice-GD32-MCU/GD32G5x3_Firmware_Library` tag `V1.5.0`
+into `vendor/gd32_firmware_library/upstream/` (gitignored) and fails closed
+unless the commit and the `Firmware/` tree hash match its pins. A verified
+checkout is reused, so a cached `upstream/` works offline;
+`GD32_LIBRARY_URL` points it at a local mirror (pins still enforced).
+`GD32_VENDOR_DIR` is empty by default and only needed to substitute your own
+wrapper directory. The build emits the monolithic
 `build/gd32-bridge.elf` + `.hex` + `.bin` (OTA inert — the whole
 `0xF0..0xFF` range answers `STATUS_NOSUPPORT`, so the image cannot
 brick itself).
 
-**A flashable image needs the IRC8M clock override, not just a vendor
-tree.** The stock vendor `system_gd32g5x3.c` selects
-`__SYSTEM_CLOCK_216M_PLL_HXTAL`, whose startup spins `while(1){}`
-waiting for `HXTALSTB` — which never sets on this SoM, so the part
-hangs before `main()` and the flashed board looks bricked, with SPI
-and I2C never coming up. `GD32_VENDOR_DIR` must therefore point at a
-tree that also carries `overrides/system_gd32g5x3.c` (selects
-`__SYSTEM_CLOCK_216M_PLL_IRC8M` instead) — an alp-sdk checkout's
-`vendors/gd32_firmware_library/` carries this override; the public
-[`gd32g5x3-firmware-library`](https://github.com/alplabai/gd32g5x3-firmware-library)
-mirror alone does not. Configure fails fast with a clear message if
-the override is missing. **`-DBRIDGE_ALLOW_STOCK_SYSTEM_INIT=ON`**
-silences that failure and links the stock, hanging `SystemInit()`
-instead — it exists only for compile-and-link coverage (CI's `gd32
-backend build` job, which never runs on silicon); never pass it for an
-image you intend to flash.
+**A flashable image needs the IRC8M clock patch.** The stock vendor
+`system_gd32g5x3.c` selects `__SYSTEM_CLOCK_216M_PLL_HXTAL`, whose startup
+spins `while(1){}` waiting for `HXTALSTB` — which never sets on this SoM, so the
+part hangs before `main()` and the flashed board looks bricked, with SPI and I2C
+never coming up. The in-repo wrapper (`vendor/gd32_firmware_library/`) applies
+`patches/system_gd32g5x3-irc8m.patch` to a build-directory copy of that file
+(selects `__SYSTEM_CLOCK_216M_PLL_IRC8M` instead). A custom `GD32_VENDOR_DIR`
+without `patches/system_gd32g5x3-irc8m.patch` fails configure with a clear
+message. **`-DBRIDGE_ALLOW_STOCK_SYSTEM_INIT=ON`** silences that failure and links
+the stock, hanging `SystemInit()` — compile-and-link coverage only; never pass
+it for an image you intend to flash.
 
 **`-DBRIDGE_TIMING_STATS=ON`** (bench only, default OFF) records per-SPI-transaction
 DWT cycle counts in a RAM struct read over SWD; see
