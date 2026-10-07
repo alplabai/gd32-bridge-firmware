@@ -59,12 +59,12 @@ static inline uint8_t power_wake_source_from_pd0(uint32_t pd0)
  * is in bridge_reset_reason.  SLEEP is WFI between interrupts, so only its
  * entries are countable. */
 typedef struct {
-	uint32_t entries[4];            /* requests accepted / executed per mode */
-	uint32_t wakes[4];              /* completed wakes per mode (2 only) */
-	uint32_t refused_busy;          /* STATUS_BUSY: activity blocked the entry */
-	uint32_t refused_late;          /* latched request dropped: late activity / reply unread 500 ms */
-	uint32_t cancelled;             /* latched request superseded by RUN / SLEEP before the entry */
-	uint32_t last_wake_pd0;         /* raw EXTI_PD0 at the last wake */
+	uint32_t entries[4];    /* requests accepted / executed per mode */
+	uint32_t wakes[4];      /* completed wakes per mode (2 only) */
+	uint32_t refused_busy;  /* STATUS_BUSY: activity blocked the entry */
+	uint32_t refused_late;  /* latched request dropped: late activity / reply unread 500 ms */
+	uint32_t cancelled;     /* latched request superseded by RUN / SLEEP before the entry */
+	uint32_t last_wake_pd0; /* raw EXTI_PD0 at the last wake */
 	uint32_t last_wake_restore_cyc; /* DWT cycles, WFI return -> clock/I2C restored */
 	uint8_t  last_mode;
 	uint8_t  last_wake_source; /* POWER_WAKE_SRC_* */
