@@ -359,7 +359,10 @@ exposed to the Linux host as a master over three opcodes, **I2C link only**
 * `RESULT`: `STATUS_BUSY` (empty) while the job runs, `STATUS_NOT_READY` if no
   job ran since `CONFIG`, otherwise `STATUS_OK` with the payload above. The
   result stays readable until the next `XFER` / `CONFIG`, so a lost read can
-  be repeated. The outer `STATUS` keeps its generic meaning; the bus outcome
+  be repeated. A Deep-sleep wake leaves the proxy unconfigured, so an
+  uncollected result is lost across a sleep (`RESULT` then answers
+  `STATUS_NOT_READY`): collect it before requesting Deep-sleep, and send
+  `CONFIG` again after the wake. The outer `STATUS` keeps its generic meaning; the bus outcome
   is `result`: `0` OK, `1` NACK_ADDR (-ENXIO), `2` NACK_DATA (-EIO),
   `3` ARB_LOST (-EAGAIN), `4` BUS_ERROR (-EIO), `5` TIMEOUT (-ETIMEDOUT),
   `6` BUS_STUCK (-EBUSY).
