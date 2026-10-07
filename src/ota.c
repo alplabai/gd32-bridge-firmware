@@ -1323,6 +1323,12 @@ bool ota_trial_unconfirmed(void)
 	return false;
 }
 
+/* OTA inert: no session can open, so power entry never waits on one. */
+bool ota_session_active(void)
+{
+	return false;
+}
+
 void ota_note_frame(void)
 {
 }
