@@ -192,6 +192,9 @@ void i2c_slave_rx_byte(uint8_t b)
 void i2c_slave_tx_abort(void)
 {
 }
+void i2c_slave_stop(void)
+{
+}
 uint8_t i2c_slave_tx_next_byte(void)
 {
 	return 0xFFu;

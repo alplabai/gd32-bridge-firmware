@@ -78,11 +78,14 @@ bool    spi_slave_reply_undrained(void); /* true from staging until the host's r
                                           * say: the backend copies it to DMA at stage */
 
 /* ---- I2C slave seams (defined in transport_i2c.c) -------------- */
-void    i2c_slave_write_start(void);  /* START + addressed write: reset RX    */
-void    i2c_slave_rx_byte(uint8_t b); /* one received byte (write phase)      */
-bool    i2c_slave_write_end(void);    /* STOP / repeated-START: dispatch+stage */
-uint8_t i2c_slave_tx_next_byte(void); /* next reply byte (read phase), 0xFF idle */
-void    i2c_slave_tx_abort(void);     /* bus-error resync: drop a half-consumed
+void    i2c_slave_write_start(void);     /* START + addressed write: reset RX    */
+void    i2c_slave_rx_byte(uint8_t b);    /* one received byte (write phase)      */
+bool    i2c_slave_write_end(void);       /* STOP / repeated-START: dispatch+stage */
+uint8_t i2c_slave_tx_next_byte(void);    /* next reply byte (read phase), 0xFF idle */
+bool    i2c_slave_reply_undrained(void); /* true from staging until the STOP that ends
+                                          * the host's reply read */
+void    i2c_slave_stop(void);            /* STOP seen: call BEFORE i2c_slave_write_end() */
+void    i2c_slave_tx_abort(void);        /* bus-error resync: drop a half-consumed
                                         * staged reply so a retried read gets a
                                         * clean STATUS_NO_PENDING, not a resumed
                                         * or exhausted stale cursor */

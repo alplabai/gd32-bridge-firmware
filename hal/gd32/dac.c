@@ -61,7 +61,8 @@ _Static_assert(sizeof(dac_channels) / sizeof(dac_channels[0]) == DAC_CHANNEL_COU
 #define DAC_BUFFERED_MAX_MV ((uint16_t)(DAC_VREF_MV - 200u))
 
 /* Set once the host drives a DAC output; there is no "disable" opcode, so it
- * stays set until reset.  A Deep-sleep would gate the converter clock. */
+ * stays set until reset (DAC_SET 0 mV is clamped to
+ * DAC_BUFFERED_MIN_MV, so the output is still driven).  A Deep-sleep would gate the converter clock. */
 static volatile bool s_dac_driven;
 
 bool bridge_dac_driven(void)

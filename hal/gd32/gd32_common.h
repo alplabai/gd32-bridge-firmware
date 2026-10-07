@@ -504,6 +504,7 @@ void     se_reset_init(void);                                     /* se_reset.c 
 bool bridge_adc_streams_active(void); /* adc_stream.c */
 bool bridge_pwm_claims_active(void);  /* pwm.c */
 bool bridge_dac_driven(void);         /* dac.c */
+bool bridge_hw_i2cm_busy(void);       /* i2cm proxy job live; weak idle default in power.c */
 
 /* Per-timer CAR shadow-promotion tracking (pwm_capture.c owns the
  * state; see the comment above pwm_capture_active_car).  pwm.c calls

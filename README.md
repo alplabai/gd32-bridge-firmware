@@ -260,10 +260,23 @@ host-tested in `tests/unit/power_wake/`); the entry/wake sequence is
   2/3 so nothing is lost, and in SLEEP the first CS edge re-evaluates it.
 * **Host retry rule.** A CS wake ends on IRC8M: the frame clocked during the
   waking transaction is lost (it fails the CRC and is never executed). After a
-  mode-2 request the host pulses one throw-away transaction (a PING), waits the
-  wake latency (default 2 ms, covers the PLL relock), then sends the real frame
-  and retries once on `ALP_ERR_IO`. All opcodes are safe to resend in that case
-  because a lost frame never reached its handler.
+  mode-2 request the host (alp-sdk) sends a PING to wake the part, waits the
+  wake latency (default 2 ms, covers the PLL relock), sends a RUN
+  (`POWER_MODE_SET` mode 0), and retries up to `wake_retries` (default 2, so 3
+  attempts) on `ALP_ERR_IO` / timeout. All opcodes are safe to resend in that
+  case because a lost frame never reached its handler.
+* **Protocol version.** The `flags` byte, `STATUS_BUSY` refusals,
+  `STATUS_OUT_OF_RANGE` and the RUN / SLEEP cancel semantics described here
+  ship as part of protocol 0.17 together with the 0.15 to 0.17 stack
+  (`PROTOCOL_VERSION_MINOR` is not bumped by this change). A host gates them on
+  `GET_VERSION` minor >= 17.
+* **Gated activity.** The gate also refuses while an I2C3 proxy (i2cm) job is
+  in flight (a weak `bridge_hw_i2cm_busy()` defaults to idle until the proxy
+  lands), and the entry waits for the reply to be read out on either link: SPI
+  until CS rises, I2C until the STOP that ends the reply read.
+* **DAC limitation.** There is no DAC disable opcode and `DAC_SET` 0 mV is
+  clamped to the buffer's 200 mV floor (the output is still driven), so a
+  channel stays "driven" until reset and mode 2/3 answers `BUSY` from then on.
 * **Diagnostics (SWD).** `bridge_power_diag` (`power_policy.h`): `entries[4]`,
   `wakes[4]` (mode 2 only), `refused_busy`, `refused_late`, `last_mode`,
   `last_wake_source` (1 CS, 2 I2C, 3 RTC, 4 other), `last_wake_pd0` (raw

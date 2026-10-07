@@ -38,7 +38,8 @@ int        mock_act_adc, mock_act_pwm, mock_act_dac, mock_act_ota;
 uint32_t   mock_pd0_on_wake;
 uint32_t   mock_exti31_enables, mock_exti31_disables, mock_wake_mode_sets, mock_i2c_init_wake_mode;
 int        mock_i2c_wake_mode;
-int        mock_reply_undrained;
+int        mock_reply_undrained, mock_i2c_reply_undrained, mock_act_i2cm;
+void (*mock_on_reply_check)(void);
 
 void mock_power_reset(void)
 {
@@ -60,6 +61,9 @@ void mock_power_reset(void)
 	mock_i2c_busy                = RESET;
 	mock_cs_level                = SET;
 	mock_reply_undrained         = 0;
+	mock_i2c_reply_undrained     = 0;
+	mock_act_i2cm                = 0;
+	mock_on_reply_check          = NULL;
 	mock_nvic_pending            = 0u;
 	mock_on_settle               = NULL;
 	mock_on_i2c_disable          = NULL;
@@ -276,7 +280,22 @@ void bridge_transport_i2c_wake_mode_set(bool wake)
 
 bool spi_slave_reply_undrained(void)
 {
+	void (*cb)(void) = mock_on_reply_check;
+	if (cb != NULL) {
+		mock_on_reply_check = NULL;
+		cb();
+	}
 	return mock_reply_undrained != 0;
+}
+
+bool i2c_slave_reply_undrained(void)
+{
+	return mock_i2c_reply_undrained != 0;
+}
+
+bool bridge_hw_i2cm_busy(void)
+{
+	return mock_act_i2cm != 0;
 }
 
 bool bridge_transport_i2c_wake_mode(void)

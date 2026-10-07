@@ -229,6 +229,14 @@ static bool     s_lp_drain_waiting; /* s_lp_drain_t0 is valid */
 /* SWD-readable low-power counters (see power_policy.h). */
 volatile bridge_power_diag_t bridge_power_diag;
 
+/* I2C3 proxy (i2cm) job state.  The proxy (#341) is not in this branch's
+ * ancestry; this weak default reports idle so the integration merge only has
+ * to provide the real strong definition. */
+__attribute__((weak)) bool bridge_hw_i2cm_busy(void)
+{
+	return false;
+}
+
 /* Everything the Deep-sleep / Standby gate looks at, sampled now. */
 static power_activity_t power_activity_get(void)
 {
@@ -238,6 +246,7 @@ static power_activity_t power_activity_get(void)
 		.dac         = bridge_dac_driven(),
 		.ota         = ota_session_active(),
 		.boot_commit = ota_trial_unconfirmed(),
+		.i2cm        = bridge_hw_i2cm_busy(),
 	};
 	return a;
 }
@@ -428,9 +437,10 @@ int bridge_hw_power_mode_set(uint8_t  mode,
 		 * re-init and probe" contract applies unchanged.  Deep-sleep instead
 		 * resumes in place: bridge_power_tick() restores the PLL and I2C0
 		 * on wake, and an RTC timer is mandatory so the sleep is bounded. */
-		s_lp_flags        = flags;
-		s_lp_timed        = !no_timer;
-		s_lp_pending_mode = mode;
+		s_lp_flags         = flags;
+		s_lp_timed         = !no_timer;
+		s_lp_drain_waiting = false; /* a stale t0 from a cancelled request must not leak in */
+		s_lp_pending_mode  = mode;
 		return BRIDGE_HW_OK;
 	default:
 		return BRIDGE_HW_ERR_INVAL;
@@ -547,7 +557,7 @@ static bool lp_link_quiet(void)
 	if (mode_i2c_busy()) return false;
 	/* The reply to the request that latched this entry is still queued: the
 	 * host's read of it would wake the part (SPI_CS) and lose the reply. */
-	if (spi_slave_reply_undrained()) return false;
+	if (spi_slave_reply_undrained() || i2c_slave_reply_undrained()) return false;
 	if ((EXTI_PD0 != 0u) || ((EXTI_PD1 & 0x0000007Fu) != 0u)) return false;
 	if (NVIC_GetPendingIRQ(BRIDGE_SPI_CS_EXTI_IRQN) != 0u) return false;
 	if (NVIC_GetPendingIRQ(BRIDGE_I2C_EV_IRQN) != 0u) return false;
@@ -578,7 +588,7 @@ static int lp_final_gate(uint8_t mode)
 /* Base-level low-power entry (gh#63): the deferred half of
  * bridge_hw_power_mode_set().  Runs from bridge_hw_tick() -- base level,
  * AFTER the host has read the accepted request's reply out (the entry
- * waits on spi_slave_reply_undrained(), bounded by POWER_LP_REPLY_DRAIN_MS), with
+ * waits on spi/i2c_slave_reply_undrained(), bounded by POWER_LP_REPLY_DRAIN_MS), with
  * no transport state machine mid-transaction.
  *
  * The pre-entry gates below run with interrupts ENABLED and so only
@@ -634,7 +644,7 @@ void bridge_power_tick(void)
 
 	/* 0. Wait for the host to read the reply out.  Bounded: a host that never
 	 *    reads it must not leave the request latched forever. */
-	if (spi_slave_reply_undrained()) {
+	if (spi_slave_reply_undrained() || i2c_slave_reply_undrained()) {
 		const uint32_t now = DWT->CYCCNT;
 		if (!s_lp_drain_waiting) {
 			s_lp_drain_waiting = true;

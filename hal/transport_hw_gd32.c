@@ -1163,6 +1163,7 @@ void BRIDGE_I2C_EV_HANDLER(void)
          * TI race that slipped in before this STPDET was serviced
          * cannot strand itself across into the next transaction. */
 		I2C_STAT(BRIDGE_I2C_PERIPH) |= I2C_STAT_TBE;
+		i2c_slave_stop(); /* a STOP that ends a read delivers the staged reply */
 		/* STOP after a write with no read: stage the reply so a later
          * separate read transaction can fetch it. */
 		(void)i2c_slave_write_end();

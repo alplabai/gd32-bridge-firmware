@@ -155,7 +155,9 @@ extern uint32_t mock_pd0_on_wake;
 extern uint32_t mock_exti31_enables, mock_exti31_disables, mock_wake_mode_sets,
     mock_i2c_init_wake_mode;
 extern int mock_i2c_wake_mode;
-extern int mock_reply_undrained;
+extern int mock_reply_undrained, mock_i2c_reply_undrained, mock_act_i2cm;
+/* Runs once inside spi_slave_reply_undrained(): lands an ISR event mid-tick. */
+extern void (*mock_on_reply_check)(void);
 
 void mock_power_reset(void);
 

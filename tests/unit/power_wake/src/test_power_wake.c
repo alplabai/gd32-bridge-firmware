@@ -492,7 +492,9 @@ static void clock_ready(void)
 
 ZTEST(power_wake, test_busy_gate_refuses_deep_sleep_and_standby_but_not_sleep)
 {
-	int *const acts[] = { &mock_act_adc, &mock_act_pwm, &mock_act_dac, &mock_act_ota };
+	int *const acts[] = {
+		&mock_act_adc, &mock_act_pwm, &mock_act_dac, &mock_act_ota, &mock_act_i2cm
+	};
 	for (size_t i = 0; i <= sizeof acts / sizeof acts[0]; ++i) {
 		mock_power_reset();
 		diag_reset();
@@ -567,7 +569,8 @@ ZTEST(power_wake, test_unread_reply_times_out_without_entry)
 	zassert_equal(bridge_hw_power_mode_set(2u, 0u, 250u, 0u), BRIDGE_HW_OK);
 	SystemCoreClock      = PWM_TIMER_CLK_HZ;
 	mock_reply_undrained = 1;
-	bridge_power_tick(); /* wait starts */
+	mock_dwt.CYCCNT      = 0xFFFFFF00u; /* the 500 ms span wraps the 32-bit counter */
+	bridge_power_tick();                /* wait starts */
 	mock_dwt.CYCCNT += (SystemCoreClock / 1000u) * 499u;
 	bridge_power_tick();
 	zassert_equal(bridge_power_diag.refused_late, 0u, "still inside the bound");
@@ -578,6 +581,82 @@ ZTEST(power_wake, test_unread_reply_times_out_without_entry)
 	mock_reply_undrained = 0;
 	bridge_power_tick();
 	zassert_equal(mock_deepsleep_entries, 0u, "the abandoned request is not resurrected");
+}
+
+/* The I2C twin: the reply is unread until the STOP that ends its read. */
+ZTEST(power_wake, test_entry_waits_for_the_i2c_reply_to_be_read)
+{
+	mock_power_reset();
+	diag_reset();
+	clock_ready();
+	zassert_equal(bridge_hw_power_mode_set(2u, 0u, 250u, 0u), BRIDGE_HW_OK);
+	SystemCoreClock          = PWM_TIMER_CLK_HZ;
+	mock_i2c_reply_undrained = 1;
+	for (unsigned i = 0u; i < 50u; i++) {
+		mock_dwt.CYCCNT += (SystemCoreClock / 1000u) * 5u;
+		bridge_power_tick();
+	}
+	zassert_equal(mock_deepsleep_entries, 0u, "no entry while the I2C reply is unread");
+	zassert_equal(bridge_power_diag.refused_late, 0u);
+	mock_i2c_reply_undrained = 0; /* STOP of the reply read */
+	bridge_power_tick();
+	zassert_equal(mock_deepsleep_entries, 1u, "entry once the reply is out");
+}
+
+ZTEST(power_wake, test_unread_i2c_reply_times_out_without_entry)
+{
+	mock_power_reset();
+	diag_reset();
+	clock_ready();
+	zassert_equal(bridge_hw_power_mode_set(2u, 0u, 250u, 0u), BRIDGE_HW_OK);
+	SystemCoreClock          = PWM_TIMER_CLK_HZ;
+	mock_i2c_reply_undrained = 1;
+	bridge_power_tick();
+	mock_dwt.CYCCNT += (SystemCoreClock / 1000u) * 500u;
+	bridge_power_tick();
+	zassert_equal(mock_deepsleep_entries, 0u);
+	zassert_equal(bridge_power_diag.refused_late, 1u);
+}
+
+/* An RUN from the CS ISR lands inside the tick's drain check: the tick then
+ * records a wait start for a request that no longer exists.  A new latch must
+ * not inherit that stale t0. */
+static void isr_run_cancel(void)
+{
+	(void)bridge_hw_power_mode_set(0u, 0u, 0u, 0u);
+}
+
+ZTEST(power_wake, test_new_latch_does_not_inherit_a_stale_drain_start)
+{
+	mock_power_reset();
+	diag_reset();
+	clock_ready();
+	SystemCoreClock = PWM_TIMER_CLK_HZ;
+	zassert_equal(bridge_hw_power_mode_set(2u, 0u, 250u, 0u), BRIDGE_HW_OK);
+	mock_reply_undrained = 1;
+	mock_on_reply_check  = isr_run_cancel;
+	bridge_power_tick(); /* cancelled mid-tick, then the stale wait start is recorded */
+	mock_dwt.CYCCNT += (SystemCoreClock / 1000u) * 600u;
+	zassert_equal(bridge_hw_power_mode_set(2u, 0u, 250u, 0u), BRIDGE_HW_OK);
+	bridge_power_tick();
+	zassert_equal(bridge_power_diag.refused_late, 0u, "fresh wait, not 600 ms old");
+	mock_reply_undrained = 0;
+	bridge_power_tick();
+	zassert_equal(mock_deepsleep_entries, 1u);
+}
+
+ZTEST(power_wake, test_i2cm_busy_drops_a_latched_request_and_never_refuses_run)
+{
+	mock_power_reset();
+	diag_reset();
+	clock_ready();
+	zassert_equal(bridge_hw_power_mode_set(2u, 0u, 100u, 0u), BRIDGE_HW_OK);
+	mock_act_i2cm = 1; /* an I2C3 proxy job started after the accepted request */
+	bridge_power_tick();
+	zassert_equal(mock_deepsleep_entries, 0u);
+	zassert_equal(bridge_power_diag.refused_late, 1u);
+	zassert_equal(bridge_hw_power_mode_set(0u, 0u, 0u, 0u), BRIDGE_HW_OK);
+	zassert_equal(bridge_hw_power_mode_set(1u, 0u, 0u, 0u), BRIDGE_HW_OK);
 }
 
 ZTEST(power_wake, test_run_cancels_a_latched_request)

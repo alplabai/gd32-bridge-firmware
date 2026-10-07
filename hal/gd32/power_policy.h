@@ -27,12 +27,13 @@ typedef struct {
 	bool dac;         /* a DAC output has been driven by the host */
 	bool ota;         /* an OTA session is open (BEGIN..COMMIT) or an erase runs */
 	bool boot_commit; /* a trial image / boot-config commit is unconfirmed */
+	bool i2cm;        /* an I2C3 proxy job is in flight */
 } power_activity_t;
 
 static inline bool power_entry_blocked(uint8_t mode, const power_activity_t *a)
 {
 	if (mode != 2u && mode != 3u) return false;
-	return a->adc_stream || a->pwm || a->dac || a->ota || a->boot_commit;
+	return a->adc_stream || a->pwm || a->dac || a->ota || a->boot_commit || a->i2cm;
 }
 
 /* Last wake source (bridge_power_diag.last_wake_source). */
@@ -63,7 +64,8 @@ typedef struct {
 	uint32_t wakes[4];      /* completed wakes per mode (2 only) */
 	uint32_t refused_busy;  /* STATUS_BUSY: activity blocked the entry */
 	uint32_t refused_late;  /* latched request dropped: late activity / reply unread 500 ms */
-	uint32_t cancelled;     /* latched request superseded by RUN / SLEEP before the entry */
+	uint32_t cancelled;     /* cancel EVENTS: a RUN / SLEEP request dropping a latch, plus the
+	                         * final gate finding it already gone (one cancel can count twice) */
 	uint32_t last_wake_pd0; /* raw EXTI_PD0 at the last wake */
 	uint32_t last_wake_restore_cyc; /* DWT cycles, WFI return -> clock/I2C restored */
 	uint8_t  last_mode;
