@@ -645,18 +645,57 @@ ZTEST(power_wake, test_new_latch_does_not_inherit_a_stale_drain_start)
 	zassert_equal(mock_deepsleep_entries, 1u);
 }
 
-ZTEST(power_wake, test_i2cm_busy_drops_a_latched_request_and_never_refuses_run)
+/* A job that is running at entry time holds the accepted request (jobs are
+ * bounded); it is entered once the job drains.  RUN / SLEEP are never refused. */
+ZTEST(power_wake, test_i2cm_busy_keeps_a_latched_request_until_the_job_drains)
 {
 	mock_power_reset();
 	diag_reset();
 	clock_ready();
+	SystemCoreClock = PWM_TIMER_CLK_HZ;
 	zassert_equal(bridge_hw_power_mode_set(2u, 0u, 100u, 0u), BRIDGE_HW_OK);
 	mock_act_i2cm = 1; /* an I2C3 proxy job started after the accepted request */
+	for (unsigned i = 0u; i < 6u; i++) {
+		mock_dwt.CYCCNT += (SystemCoreClock / 1000u) * 5u; /* 30 ms */
+		bridge_power_tick();
+	}
+	zassert_equal(mock_deepsleep_entries, 0u, "no entry while the job runs");
+	zassert_equal(bridge_power_diag.refused_late, 0u, "request kept, not dropped");
+	mock_act_i2cm = 0;
+	bridge_power_tick();
+	zassert_equal(mock_deepsleep_entries, 1u, "entered after the job drains");
+	zassert_equal(bridge_power_diag.refused_late, 0u);
+}
+
+ZTEST(power_wake, test_i2cm_job_outliving_the_bound_is_refused_late)
+{
+	mock_power_reset();
+	diag_reset();
+	clock_ready();
+	SystemCoreClock = PWM_TIMER_CLK_HZ;
+	zassert_equal(bridge_hw_power_mode_set(2u, 0u, 100u, 0u), BRIDGE_HW_OK);
+	mock_act_i2cm = 1;
+	bridge_power_tick(); /* wait starts */
+	mock_dwt.CYCCNT += (SystemCoreClock / 1000u) * 499u;
+	bridge_power_tick();
+	zassert_equal(bridge_power_diag.refused_late, 0u, "still inside the bound");
+	mock_dwt.CYCCNT += (SystemCoreClock / 1000u) * 1u;
 	bridge_power_tick();
 	zassert_equal(mock_deepsleep_entries, 0u);
-	zassert_equal(bridge_power_diag.refused_late, 1u);
+	zassert_equal(bridge_power_diag.refused_late, 1u, "abandoned at 500 ms");
+	mock_act_i2cm = 0;
+	bridge_power_tick();
+	zassert_equal(mock_deepsleep_entries, 0u, "the abandoned request is not resurrected");
+}
+
+ZTEST(power_wake, test_run_and_sleep_never_refused_for_i2cm)
+{
+	mock_power_reset();
+	mock_act_i2cm = 1;
 	zassert_equal(bridge_hw_power_mode_set(0u, 0u, 0u, 0u), BRIDGE_HW_OK);
 	zassert_equal(bridge_hw_power_mode_set(1u, 0u, 0u, 0u), BRIDGE_HW_OK);
+	zassert_equal(
+	    bridge_hw_power_mode_set(2u, 0u, 100u, 0u), BRIDGE_HW_ERR_BUSY, "request-time gate stays");
 }
 
 ZTEST(power_wake, test_run_cancels_a_latched_request)

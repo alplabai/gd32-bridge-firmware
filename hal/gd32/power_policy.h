@@ -27,7 +27,12 @@ typedef struct {
 	bool dac;         /* a DAC output has been driven by the host */
 	bool ota;         /* an OTA session is open (BEGIN..COMMIT) or an erase runs */
 	bool boot_commit; /* a trial image / boot-config commit is unconfirmed */
-	bool i2cm;        /* an I2C3 proxy job is in flight */
+	bool i2cm;        /* an I2C3 proxy job is in flight.  Request-time gate only: once a
+	                   * request is accepted a running job is waited out (500 ms DWT
+	                   * bound), not dropped.  The Linux gpio-gd32-bridge 1 Hz GPIO_WRITE
+	                   * replay starts a new I2C transaction, abandoning any unread
+	                   * staged I2C reply, so an unread reply rarely holds entry for the
+	                   * full bound -- intended (an abandoned reply is never read). */
 } power_activity_t;
 
 static inline bool power_entry_blocked(uint8_t mode, const power_activity_t *a)
@@ -60,10 +65,11 @@ static inline uint8_t power_wake_source_from_pd0(uint32_t pd0)
  * is in bridge_reset_reason.  SLEEP is WFI between interrupts, so only its
  * entries are countable. */
 typedef struct {
-	uint32_t entries[4];    /* requests accepted / executed per mode */
-	uint32_t wakes[4];      /* completed wakes per mode (2 only) */
-	uint32_t refused_busy;  /* STATUS_BUSY: activity blocked the entry */
-	uint32_t refused_late;  /* latched request dropped: late activity / reply unread 500 ms */
+	uint32_t entries[4];   /* requests accepted / executed per mode */
+	uint32_t wakes[4];     /* completed wakes per mode (2 only) */
+	uint32_t refused_busy; /* STATUS_BUSY: activity blocked the entry */
+	uint32_t
+	    refused_late; /* latched request dropped: late activity / reply unread or i2cm job running 500 ms */
 	uint32_t cancelled;     /* cancel EVENTS: a RUN / SLEEP request dropping a latch, plus the
 	                         * final gate finding it already gone (one cancel can count twice) */
 	uint32_t last_wake_pd0; /* raw EXTI_PD0 at the last wake */

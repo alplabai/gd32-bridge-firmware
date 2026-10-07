@@ -257,6 +257,16 @@ static bool power_entry_refused(uint8_t mode)
 	return power_entry_blocked(mode, &a);
 }
 
+/* Entry-time variant: an I2C3 proxy job is NOT a reason to drop an accepted
+ * request (jobs are bounded, <= 30 ms) -- bridge_power_tick() waits for it
+ * to drain instead, under the same POWER_LP_REPLY_DRAIN_MS bound. */
+static bool power_entry_refused_late(uint8_t mode)
+{
+	power_activity_t a = power_activity_get();
+	a.i2cm             = false;
+	return power_entry_blocked(mode, &a);
+}
+
 /* Drop a latched request and stop the RTC timer armed for it. */
 static void power_cancel_pending(void)
 {
@@ -558,6 +568,9 @@ static bool lp_link_quiet(void)
 	/* The reply to the request that latched this entry is still queued: the
 	 * host's read of it would wake the part (SPI_CS) and lose the reply. */
 	if (spi_slave_reply_undrained() || i2c_slave_reply_undrained()) return false;
+	/* A job queued after the pre-entry wait would survive the sleep with
+	 * timing derived for the pre-sleep APB1 clock: let it drain first. */
+	if (bridge_hw_i2cm_busy()) return false;
 	if ((EXTI_PD0 != 0u) || ((EXTI_PD1 & 0x0000007Fu) != 0u)) return false;
 	if (NVIC_GetPendingIRQ(BRIDGE_SPI_CS_EXTI_IRQN) != 0u) return false;
 	if (NVIC_GetPendingIRQ(BRIDGE_I2C_EV_IRQN) != 0u) return false;
@@ -577,7 +590,7 @@ static int lp_final_gate(uint8_t mode)
 		++bridge_power_diag.cancelled;
 		return 2;
 	}
-	if (power_entry_refused(mode)) {
+	if (power_entry_refused_late(mode)) {
 		++bridge_power_diag.refused_late;
 		power_cancel_pending();
 		return 2;
@@ -588,7 +601,7 @@ static int lp_final_gate(uint8_t mode)
 /* Base-level low-power entry (gh#63): the deferred half of
  * bridge_hw_power_mode_set().  Runs from bridge_hw_tick() -- base level,
  * AFTER the host has read the accepted request's reply out (the entry
- * waits on spi/i2c_slave_reply_undrained(), bounded by POWER_LP_REPLY_DRAIN_MS), with
+ * waits on spi/i2c_slave_reply_undrained() and bridge_hw_i2cm_busy(), bounded by POWER_LP_REPLY_DRAIN_MS), with
  * no transport state machine mid-transaction.
  *
  * The pre-entry gates below run with interrupts ENABLED and so only
@@ -636,15 +649,16 @@ void bridge_power_tick(void)
 
 	/* The reply is out; a stream / PWM / OTA session started since would be
 	 * cut off by the entry.  Drop the request rather than sleep on it. */
-	if (power_entry_refused(s_lp_pending_mode)) {
+	if (power_entry_refused_late(s_lp_pending_mode)) {
 		++bridge_power_diag.refused_late;
 		power_cancel_pending();
 		return;
 	}
 
-	/* 0. Wait for the host to read the reply out.  Bounded: a host that never
-	 *    reads it must not leave the request latched forever. */
-	if (spi_slave_reply_undrained() || i2c_slave_reply_undrained()) {
+	/* 0. Wait for the host to read the reply out and for any I2C3 proxy job to
+	 *    drain.  Bounded: a host that never reads the reply (or a job that
+	 *    never ends) must not leave the request latched forever. */
+	if (spi_slave_reply_undrained() || i2c_slave_reply_undrained() || bridge_hw_i2cm_busy()) {
 		const uint32_t now = DWT->CYCCNT;
 		if (!s_lp_drain_waiting) {
 			s_lp_drain_waiting = true;

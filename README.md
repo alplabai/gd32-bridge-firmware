@@ -270,10 +270,18 @@ host-tested in `tests/unit/power_wake/`); the entry/wake sequence is
   ship as part of protocol 0.17 together with the 0.15 to 0.17 stack
   (`PROTOCOL_VERSION_MINOR` is not bumped by this change). A host gates them on
   `GET_VERSION` minor >= 17.
-* **Gated activity.** The gate also refuses while an I2C3 proxy (i2cm) job is
-  in flight (a weak `bridge_hw_i2cm_busy()` defaults to idle until the proxy
-  lands), and the entry waits for the reply to be read out on either link: SPI
-  until CS rises, I2C until the STOP that ends the reply read.
+* **Gated activity.** At request time modes 2/3 answer `BUSY` while an I2C3
+  proxy (i2cm) job is in flight (a weak `bridge_hw_i2cm_busy()` defaults to
+  idle until the proxy lands); RUN and SLEEP are never refused for it. Once a
+  request has been accepted, a job still running at entry time does NOT drop
+  it: the entry keeps waiting (jobs are bounded, <= 30 ms) like the reply-read
+  wait, under the same 500 ms DWT bound, and is abandoned (`refused_late`) only
+  if the bound expires. The entry also waits for the reply to be read out on
+  either link: SPI until CS rises, I2C until the STOP that ends the reply read.
+  The Linux `gpio-gd32-bridge` driver's 1 Hz `GPIO_WRITE` replay starts a new
+  I2C transaction, which abandons any unread staged I2C reply, so in practice an
+  unread I2C reply rarely holds the entry for the full 500 ms. This is intended:
+  an abandoned reply is never read.
 * **DAC limitation.** There is no DAC disable opcode and `DAC_SET` 0 mV is
   clamped to the buffer's 200 mV floor (the output is still driven), so a
   channel stays "driven" until reset and mode 2/3 answers `BUSY` from then on.
