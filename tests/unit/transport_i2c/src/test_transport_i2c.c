@@ -151,6 +151,27 @@ ZTEST(gd32_bridge_transport_i2c, test_ping_stages_reply)
 /* The GD32 event ISR calls write_end() at the repeated-START read edge and
  * again at STOP.  CMD_SE_RESET makes duplicate dispatch observable: unlike
  * PING, each execution increments a fake-HAL call counter. */
+/* The Deep-sleep gate waits on this: undrained from staging until the STOP
+ * that ends the reply READ (a STOP after the write does not clear it). */
+ZTEST(gd32_bridge_transport_i2c, test_reply_undrained_until_read_stop)
+{
+	uint8_t req[4];
+	uint8_t reply[3];
+
+	transport_i2c_init();
+	zassert_false(i2c_slave_reply_undrained(), "nothing staged");
+	size_t req_len = build_write(req, CMD_PING, NULL, 0u);
+	zassert_true(write_phase(req, req_len));
+	i2c_slave_stop(); /* STOP of the write */
+	zassert_true(i2c_slave_reply_undrained(), "staged, host has not read it");
+	read_phase(reply, sizeof reply);
+	zassert_true(i2c_slave_reply_undrained(), "bytes clocked, STOP not yet seen");
+	i2c_slave_stop(); /* STOP of the read */
+	zassert_false(i2c_slave_reply_undrained(), "delivered");
+	(void)i2c_slave_write_end(); /* the STOP-time tail call restages NO_PENDING */
+	zassert_false(i2c_slave_reply_undrained(), "a NO_PENDING sentinel is not a reply");
+}
+
 ZTEST(gd32_bridge_transport_i2c, test_write_end_dispatches_non_idempotent_command_once)
 {
 	const uint8_t payload[] = { 1u };

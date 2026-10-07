@@ -49,6 +49,13 @@ void bridge_transport_spi_hw_init(void);
  * I2C0 was left disabled rather than brought up mistimed. */
 int bridge_transport_i2c_hw_init(void);
 
+/* Select the I2C0 kernel clock for the NEXT bridge_transport_i2c_hw_init():
+ * true = CK_IRC8M with WUEN armed (the I2C slave can end a Deep-sleep on an
+ * address match), false = CK_APB1 (default).  Only change it with I2C0
+ * disabled. */
+void bridge_transport_i2c_wake_mode_set(bool wake);
+bool bridge_transport_i2c_wake_mode(void);
+
 /* Periodic BRD_I2C stuck-SDA detector (gh#39, "Device limitations of
  * GD32G5x3 Rev1.0" erratum 2.3.1): called from the gd32 backend's
  * bridge_hw_tick().  The strong impl polls the SDA pad (valid in AF
@@ -66,13 +73,19 @@ bool    spi_slave_cs_high(void);         /* CS rising edge: decode + dispatch; t
 void    spi_slave_transport_error(void); /* discard RX + stage STATUS_IO        */
 uint8_t spi_slave_tx_next_byte(void);    /* next staged reply byte; 0xFF if empty */
 bool    spi_slave_tx_pending(void);      /* true while staged reply has bytes left   */
+bool    spi_slave_reply_undrained(void); /* true from staging until the host's reply
+                                          * read ends (CS rising); the TX cursor cannot
+                                          * say: the backend copies it to DMA at stage */
 
 /* ---- I2C slave seams (defined in transport_i2c.c) -------------- */
-void    i2c_slave_write_start(void);  /* START + addressed write: reset RX    */
-void    i2c_slave_rx_byte(uint8_t b); /* one received byte (write phase)      */
-bool    i2c_slave_write_end(void);    /* STOP / repeated-START: dispatch+stage */
-uint8_t i2c_slave_tx_next_byte(void); /* next reply byte (read phase), 0xFF idle */
-void    i2c_slave_tx_abort(void);     /* bus-error resync: drop a half-consumed
+void    i2c_slave_write_start(void);     /* START + addressed write: reset RX    */
+void    i2c_slave_rx_byte(uint8_t b);    /* one received byte (write phase)      */
+bool    i2c_slave_write_end(void);       /* STOP / repeated-START: dispatch+stage */
+uint8_t i2c_slave_tx_next_byte(void);    /* next reply byte (read phase), 0xFF idle */
+bool    i2c_slave_reply_undrained(void); /* true from staging until the STOP that ends
+                                          * the host's reply read */
+void    i2c_slave_stop(void);            /* STOP seen: call BEFORE i2c_slave_write_end() */
+void    i2c_slave_tx_abort(void);        /* bus-error resync: drop a half-consumed
                                         * staged reply so a retried read gets a
                                         * clean STATUS_NO_PENDING, not a resumed
                                         * or exhausted stale cursor */

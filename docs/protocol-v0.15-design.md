@@ -3,6 +3,7 @@
 ## 0. Scope and compatibility contract
 
 - `GET_VERSION` returns `0.15.0` (`PROTOCOL_VERSION_MINOR 15u`).
+- `POWER_MODE_SET` semantics (the `flags` byte, `STATUS_BUSY` / `STATUS_OUT_OF_RANGE` refusals, RUN / SLEEP cancelling a latched request) ship as part of protocol 0.17 with this stack; `PROTOCOL_VERSION_MINOR` is not bumped by the power change. A host gates them on `GET_VERSION` minor >= 17.
 - Everything new except the I2C opcode policy (§7) stays off until the host enables it on that link with the 6-byte `CMD_LINK_FEATURES` form (§2). An SPI link that has not negotiated is byte-identical to v0.14.0. This holds in all four directions: old host + new firmware, and new host + old firmware.
 - The I2C opcode policy (§7) applies unconditionally. An audit of in-tree I2C callers found they use only allow-listed opcodes:
   - the kernel `gpio-gd32-bridge` driver (`0005-gpio-add-gd32-bridge-expander-driver.patch`: `0x00/0x01/0x10/0x11/0x41`)

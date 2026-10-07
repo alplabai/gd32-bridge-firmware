@@ -90,6 +90,26 @@ ZTEST(gd32_bridge_transport, test_drain_rewinds_consumed_reply)
 	zassert_mem_equal(again, first, n_first, "identical bytes re-armed");
 }
 
+/* The HAL copies the reply to its TX DMA buffer at stage time, so the
+ * cursor reads "spent" before the host clocks a byte; the undrained flag
+ * is what the Deep-sleep entry gate waits on (power.c). */
+ZTEST(gd32_bridge_transport, test_reply_undrained_until_host_reads_it)
+{
+	uint8_t       buf[80];
+	const uint8_t zeros[8] = { 0 };
+
+	transport_spi_init();
+	zassert_false(spi_slave_reply_undrained(), "nothing staged");
+	transaction(ping_frame, sizeof ping_frame);
+	(void)hal_drain(buf, sizeof buf);
+	zassert_false(spi_slave_tx_pending(), "cursor is spent at stage time");
+	zassert_true(spi_slave_reply_undrained(), "but the host has not read it");
+	transaction(zeros, sizeof zeros); /* the host's reply read ends */
+	zassert_false(spi_slave_reply_undrained(), "delivered");
+	transaction(ping_frame, sizeof ping_frame);
+	zassert_true(spi_slave_reply_undrained(), "a fresh stage is undrained again");
+}
+
 /* Repeated drains must be idempotent -- each one re-arms the same
  * reply (the host may re-read several times down its backoff ladder). */
 ZTEST(gd32_bridge_transport, test_drain_rearm_is_idempotent)

@@ -470,11 +470,20 @@ int bridge_hw_timer_sync(uint8_t master, uint8_t slave, uint8_t mode);
  * the Renesas SoC to enter the matching mode, then re-runs the bridge
  * handshake on wakeup so the host can resume bridge calls.
  *
- * Mode 2 and mode 3 both REQUIRE a timer wake (wake_after_ms > 0 or the
- * RTC/TIMER bit; else BRIDGE_HW_ERR_INVAL).  Mode 2 (deep-sleep) also wakes
+ * @p flags is POWER_FLAG_* (hal/gd32/power_policy.h; 0 from every host that
+ * predates it): WAKE_I2C lets a BRD_I2C address match end Deep-sleep.  Unknown
+ * bits, or any flag on mode 0/1/3, return BRIDGE_HW_ERR_INVAL.
+ *
+ * Mode 2 and mode 3 REQUIRE a bounded sleep (wake_after_ms > 0 or the RTC/TIMER
+ * bit; else BRIDGE_HW_ERR_INVAL, or BRIDGE_HW_ERR_RANGE when WAKE_I2C asks for
+ * an untimed sleep, refused until the I2C0 wake line is bench-proven).  Mode 2/3 return BRIDGE_HW_ERR_BUSY while an ADC stream, a
+ * PWM output / capture, a DAC output, an OTA session or an unconfirmed trial
+ * is live (mode 1 is never refused); mode 0 cancels a latched request.
+ * Mode 2 (deep-sleep) also wakes
  * on a falling edge of the SPI CS line and resumes in place with the clock
- * tree and I2C0 restored; the frame in flight during that wake is lost and
- * the host must retry it.  The I2C slave cannot wake the part.  The RTC
+ * tree restored; the frame in flight during a CS wake is lost and
+ * the host must retry it (an I2C wake instead completes the transaction
+ * that woke the part, SCL stretched).  The RTC
  * timer is armed when the request is accepted, not at entry, and
  * auto-reloads: the sleep lasts from the entry (the next quiet-link tick
  * after the reply drains) to the next timer period boundary, i.e. at most
@@ -483,7 +492,10 @@ int bridge_hw_timer_sync(uint8_t master, uint8_t slave, uint8_t mode);
  * state with interrupts masked; if anything is pending it backs out and
  * retries on the next tick, so an accepted request may sleep later than
  * requested but never with a transaction in flight. */
-int bridge_hw_power_mode_set(uint8_t mode, uint32_t wake_bitmap, uint32_t wake_after_ms);
+int bridge_hw_power_mode_set(uint8_t  mode,
+                             uint32_t wake_bitmap,
+                             uint32_t wake_after_ms,
+                             uint8_t  flags);
 
 /* --------------------------------------------------------------- */
 /* v0.5 (§2B wave-2) -- chunked DSP-chain upload                     */

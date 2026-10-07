@@ -620,6 +620,12 @@ bool ota_trial_unconfirmed(void)
 	return s_trial;
 }
 
+bool ota_session_active(void)
+{
+	return s_state == OTA_ST_READY || s_state == OTA_ST_BUSY || s_state == OTA_ST_VERIFIED ||
+	       s_erasing;
+}
+
 void ota_note_frame(void)
 {
 	s_frame_seen = true;
@@ -1313,6 +1319,12 @@ void ota_boot_init(void)
 }
 
 bool ota_trial_unconfirmed(void)
+{
+	return false;
+}
+
+/* OTA inert: no session can open, so power entry never waits on one. */
+bool ota_session_active(void)
 {
 	return false;
 }
