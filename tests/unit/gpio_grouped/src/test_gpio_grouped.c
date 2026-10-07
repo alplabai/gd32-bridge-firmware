@@ -263,6 +263,33 @@ ZTEST(gpio_grouped, test_io15_io26_bits_route_to_pb4_pc2)
 	zassert_equal(mock_bop[mock_port_index(GPIOC)], GPIO_PIN_2 << 16);
 }
 
+ZTEST(gpio_grouped, test_cam_en_ldo_bits_route_to_pc3_pe8_pe7_pe10)
+{
+	/* Bits 23..26 = CAM_EN_LDO0..3 = PC3, PE8, PE7, PE10 (sideband, output
+	 * only: init.c boots them OUTPUT LOW, so gpio_is_output is already set
+	 * and a read never demotes them to input). */
+	zassert_equal(GPIO_PAD_MAP_COUNT, 27u);
+	mock_reset();
+	for (size_t i = GPIO_PAD_CAM_EN_LDO0; i <= GPIO_PAD_CAM_EN_LDO3; ++i)
+		gpio_is_output[i] = true;
+	mock_inputs[mock_port_index(GPIOC)] = GPIO_PIN_3;
+	mock_inputs[mock_port_index(GPIOE)] = GPIO_PIN_8 | GPIO_PIN_7 | GPIO_PIN_10;
+
+	uint32_t       levels = 0u;
+	const uint32_t mask   = 0xFu << GPIO_PAD_CAM_EN_LDO0;
+	zassert_equal(bridge_hw_gpio_read(mask, &levels), BRIDGE_HW_OK);
+	zassert_equal(levels, mask);
+	/* no input promotion: the pads stay outputs */
+	for (size_t i = GPIO_PAD_CAM_EN_LDO0; i <= GPIO_PAD_CAM_EN_LDO3; ++i)
+		zassert_false(gpio_input_promoted[i]);
+
+	/* LDO0 high, LDO1 low, LDO2 high, LDO3 low */
+	zassert_equal(bridge_hw_gpio_write(mask, (1u << 23) | (1u << 25)), BRIDGE_HW_OK);
+	zassert_equal(mock_bop[mock_port_index(GPIOC)], GPIO_PIN_3);
+	zassert_equal(mock_bop[mock_port_index(GPIOE)],
+	              GPIO_PIN_7 | ((GPIO_PIN_8 | GPIO_PIN_10) << 16));
+}
+
 ZTEST(gpio_grouped, test_null_read_output_is_rejected_without_access)
 {
 	mock_reset();

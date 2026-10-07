@@ -456,6 +456,9 @@ static bool lp_link_quiet(void)
 	if (SET != gpio_input_bit_get(BRIDGE_SPI_NSS_PORT, BRIDGE_SPI_NSS_PIN)) return false;
 	/* An in-flight I2C transaction would be cut off by i2c_disable(). */
 	if (mode_i2c_busy()) return false;
+	/* A queued/running I2C3 proxy job must drain first: it would otherwise
+	 * survive the sleep with timing derived for the pre-sleep APB1 clock. */
+	if (bridge_hw_i2cm_busy()) return false;
 	if ((EXTI_PD0 != 0u) || ((EXTI_PD1 & 0x0000007Fu) != 0u)) return false;
 	if (NVIC_GetPendingIRQ(BRIDGE_SPI_CS_EXTI_IRQN) != 0u) return false;
 	if (NVIC_GetPendingIRQ(BRIDGE_I2C_EV_IRQN) != 0u) return false;
@@ -595,6 +598,10 @@ void bridge_power_tick(void)
 		if (bridge_transport_i2c_hw_init() != BRIDGE_HW_OK) {
 			bridge_i2c_reinit_pending = 1u; /* retried by later ticks */
 		}
+		/* The I2C3 proxy's pads/peripheral are not trusted across the mode:
+		 * mark it unconfigured (Linux re-CONFIGs on NOT_READY).  No job can be
+		 * queued or running: lp_link_quiet() refuses entry while one is. */
+		bridge_hw_i2cm_wake();
 		/* The timer keeps auto-reloading after a wake; stop it so it
 		 * does not interrupt the run-mode bridge every period. */
 		(void)rtc_wakeup_disable();

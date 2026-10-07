@@ -124,6 +124,9 @@ typedef enum {
 	FAKE_FN_ADC_DSP_CHAIN_OPEN,
 	FAKE_FN_ADC_DSP_STAGE_PUSH,
 	FAKE_FN_ADC_DSP_CHAIN_BIND,
+	FAKE_FN_I2CM_CONFIG,
+	FAKE_FN_I2CM_XFER,
+	FAKE_FN_I2CM_RESULT,
 	FAKE_FN_COUNT,
 } bridge_hw_fake_fn_t;
 
@@ -341,6 +344,25 @@ uint8_t  bridge_hw_fake_se_reset_last_assert(void);
 void bridge_hw_fake_power_mode_get_last_call(uint8_t  *mode,
                                              uint32_t *wake_bitmap,
                                              uint32_t *wake_after_ms);
+
+/* --------------------------------------------------------------- */
+/* I2C3 master proxy (v0.17) -- captured last-call arguments, a canned */
+/* result, and the busy flag bridge_hw_i2cm_busy() reports.            */
+/* --------------------------------------------------------------- */
+
+uint16_t bridge_hw_fake_i2cm_last_config_khz(void);
+/* Last XFER's arguments; wdata is copied into @p wdata (>= 60 bytes). */
+void bridge_hw_fake_i2cm_last_xfer(uint8_t *tag,
+                                   uint8_t *addr7,
+                                   uint8_t *wdata,
+                                   uint8_t *wlen,
+                                   uint8_t *rlen);
+/* What the next bridge_hw_i2cm_result() returns (when not forced). */
+void bridge_hw_fake_i2cm_set_result(uint8_t        tag,
+                                    uint8_t        result,
+                                    const uint8_t *rdata,
+                                    uint8_t        nread);
+void bridge_hw_fake_i2cm_set_busy(bool busy);
 
 /* --------------------------------------------------------------- */
 /* DSP chain-open id + stage-push argument capture.                  */

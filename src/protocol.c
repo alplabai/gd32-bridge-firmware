@@ -263,7 +263,7 @@ static gd32_bridge_status_t handle_gpio_read(const uint8_t *req,
 	const uint32_t mask   = get_le32(req);
 	uint32_t       levels = 0u;
 	const int      rv     = bridge_hw_gpio_read(mask, &levels);
-	if (rv < 0) return STATUS_IO;
+	if (rv != BRIDGE_HW_OK) return status_from_hw(rv);
 	put_le32(reply, levels);
 	*reply_len = 4u;
 	return STATUS_OK;
@@ -281,7 +281,7 @@ static gd32_bridge_status_t handle_gpio_write(const uint8_t *req,
 	const uint32_t mask   = get_le32(&req[0]);
 	const uint32_t levels = get_le32(&req[4]);
 	const int      rv     = bridge_hw_gpio_write(mask, levels);
-	if (rv < 0) return STATUS_IO;
+	if (rv != BRIDGE_HW_OK) return status_from_hw(rv);
 	*reply_len = 0u;
 	return STATUS_OK;
 }
@@ -861,6 +861,13 @@ static gd32_bridge_status_t handle_power_mode_set(const uint8_t *req,
 	(void)reply_cap;
 	if (req_len != 10u) return STATUS_INVAL;
 	if (req[0] > 3u) return STATUS_INVAL; /* mode ∈ {RUN, SLEEP, DEEP_SLEEP, STANDBY} */
+	/* An I2C3 proxy job runs at base level and must not be cut off by a
+	 * Deep-sleep/Standby entry (checked before ATTN is touched).  RUN and
+	 * SLEEP never touch the bus clock, so they are never refused for it. */
+	if (req[0] >= 2u && bridge_hw_i2cm_busy()) {
+		*reply_len = 0u;
+		return STATUS_BUSY;
+	}
 	/* ATTN is driven low before any transition out of RUN (STANDBY is a
 	 * reset, which returns PA14 to SWCLK on its own). */
 	if (req[0] != 0u) bridge_hw_attn_quiesce();
@@ -870,6 +877,67 @@ static gd32_bridge_status_t handle_power_mode_set(const uint8_t *req,
 	const int      rv            = bridge_hw_power_mode_set(req[0], wake_bitmap, wake_after_ms);
 	*reply_len                   = 0u;
 	return status_from_hw(rv);
+}
+
+/* ----------------------------------------------------------------- */
+/* v0.17 -- I2C3 master proxy (I2C link only; see CMD_I2CM_* in       */
+/* protocol.h).  The handlers only validate and queue: the transfer   */
+/* itself runs at base level from bridge_hw_tick().                   */
+/* ----------------------------------------------------------------- */
+
+static gd32_bridge_status_t handle_i2cm_config(const uint8_t *req,
+                                               size_t         req_len,
+                                               uint8_t       *reply,
+                                               size_t         reply_cap,
+                                               size_t        *reply_len)
+{
+	(void)reply;
+	(void)reply_cap;
+	if (req_len != 2u) return STATUS_INVAL;
+	const int rv = bridge_hw_i2cm_config(get_le16(req));
+	*reply_len   = 0u;
+	return status_from_hw(rv);
+}
+
+static gd32_bridge_status_t handle_i2cm_xfer(const uint8_t *req,
+                                             size_t         req_len,
+                                             uint8_t       *reply,
+                                             size_t         reply_cap,
+                                             size_t        *reply_len)
+{
+	(void)reply;
+	(void)reply_cap;
+	/* tag, addr7, flags, wlen, rlen, wdata[wlen] */
+	if (req_len < 5u) return STATUS_INVAL;
+	const uint8_t wlen = req[3];
+	const uint8_t rlen = req[4];
+	if (req[2] != 0u || wlen > I2CM_MAX_WRITE || rlen > I2CM_MAX_READ || req[1] > 0x7Fu ||
+	    req_len != 5u + (size_t)wlen) {
+		return STATUS_INVAL;
+	}
+	const int rv = bridge_hw_i2cm_xfer(req[0], req[1], &req[5], wlen, rlen);
+	*reply_len   = 0u;
+	return status_from_hw(rv);
+}
+
+static gd32_bridge_status_t handle_i2cm_result(const uint8_t *req,
+                                               size_t         req_len,
+                                               uint8_t       *reply,
+                                               size_t         reply_cap,
+                                               size_t        *reply_len)
+{
+	(void)req;
+	if (req_len != 0u) return STATUS_INVAL;
+	if (reply_cap < 3u + I2CM_MAX_READ) return STATUS_NOMEM;
+	uint8_t   nread = 0u;
+	const int rv    = bridge_hw_i2cm_result(&reply[0], &reply[1], &nread, &reply[3]);
+	if (rv != BRIDGE_HW_OK) {
+		*reply_len = 0u;
+		return status_from_hw(rv);
+	}
+	reply[2]   = nread;
+	*reply_len = 3u + (size_t)nread;
+	return STATUS_OK;
 }
 
 /* ----------------------------------------------------------------- */
@@ -1351,7 +1419,9 @@ static atomic_flag dispatch_in_flight = ATOMIC_FLAG_INIT;
 
 /* Opcodes the I2C link may carry (v0.15 policy; design section 7).  The
  * kernel gpio-gd32-bridge driver, tools/gd32-ota-host and the BRD_I2C
- * bring-up example use exactly these. */
+ * bring-up example use these, plus PWM_SET / PWM_GET (v0.17: the Linux
+ * host needs a PWM provider, e.g. a panel backlight; both handlers are
+ * short and ownership is unchanged -- the CM33 keeps using SPI). */
 static bool i2c_opcode_allowed(uint8_t cmd)
 {
 	switch (cmd) {
@@ -1361,8 +1431,13 @@ static bool i2c_opcode_allowed(uint8_t cmd)
 	case CMD_RESET_REASON:
 	case CMD_GPIO_READ:
 	case CMD_GPIO_WRITE:
+	case CMD_PWM_SET:
+	case CMD_PWM_GET:
 	case CMD_SE_RESET:
 	case CMD_LINK_FEATURES:
+	case CMD_I2CM_CONFIG:
+	case CMD_I2CM_XFER:
+	case CMD_I2CM_RESULT:
 		return true;
 	default:
 		return cmd >= CMD_OTA_BEGIN;
@@ -1538,6 +1613,18 @@ static gd32_bridge_status_t protocol_dispatch_inner(gd32_bridge_link_t link,
 		                               reply_payload,
 		                               reply_payload_cap,
 		                               reply_payload_len);
+	/* v0.17: I2C3 proxy -- I2C link only, never batched. */
+	case CMD_I2CM_CONFIG:
+	case CMD_I2CM_XFER:
+	case CMD_I2CM_RESULT:
+		if (link != GD32_BRIDGE_LINK_I2C) {
+			*reply_payload_len = 0u;
+			return STATUS_NOSUPPORT;
+		}
+		h = (cmd == CMD_I2CM_CONFIG) ? handle_i2cm_config
+		    : (cmd == CMD_I2CM_XFER) ? handle_i2cm_xfer
+		                             : handle_i2cm_result;
+		break;
 	case CMD_LINK_FEATURES:
 		/* Link-scoped: called directly, not through the table (#130). */
 		return handle_link_features(link,

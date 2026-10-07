@@ -497,6 +497,93 @@ void bridge_hw_fake_power_mode_get_last_call(uint8_t  *mode,
 	if (wake_after_ms) *wake_after_ms = s_power_last.wake_after_ms;
 }
 
+/* ---- I2C3 master proxy --------------------------------------------------*/
+
+static uint16_t s_i2cm_khz;
+static struct {
+	uint8_t tag, addr7, wlen, rlen;
+	uint8_t wdata[60];
+} s_i2cm_xfer;
+static struct {
+	uint8_t tag, result, nread;
+	uint8_t rdata[62];
+} s_i2cm_res;
+static bool s_i2cm_busy;
+
+uint16_t bridge_hw_fake_i2cm_last_config_khz(void)
+{
+	return s_i2cm_khz;
+}
+
+void bridge_hw_fake_i2cm_last_xfer(uint8_t *tag,
+                                   uint8_t *addr7,
+                                   uint8_t *wdata,
+                                   uint8_t *wlen,
+                                   uint8_t *rlen)
+{
+	*tag   = s_i2cm_xfer.tag;
+	*addr7 = s_i2cm_xfer.addr7;
+	*wlen  = s_i2cm_xfer.wlen;
+	*rlen  = s_i2cm_xfer.rlen;
+	memcpy(wdata, s_i2cm_xfer.wdata, sizeof(s_i2cm_xfer.wdata));
+}
+
+void bridge_hw_fake_i2cm_set_result(uint8_t        tag,
+                                    uint8_t        result,
+                                    const uint8_t *rdata,
+                                    uint8_t        nread)
+{
+	s_i2cm_res.tag    = tag;
+	s_i2cm_res.result = result;
+	s_i2cm_res.nread  = nread;
+	if (nread != 0u) memcpy(s_i2cm_res.rdata, rdata, nread);
+}
+
+void bridge_hw_fake_i2cm_set_busy(bool busy)
+{
+	s_i2cm_busy = busy;
+}
+
+int bridge_hw_i2cm_config(uint16_t bus_khz)
+{
+	int rv = 0;
+	if (forced(FAKE_FN_I2CM_CONFIG, &rv)) return rv;
+	s_i2cm_khz = bus_khz;
+	return BRIDGE_HW_OK;
+}
+
+int bridge_hw_i2cm_xfer(uint8_t        tag,
+                        uint8_t        addr7,
+                        const uint8_t *wdata,
+                        uint8_t        wlen,
+                        uint8_t        rlen)
+{
+	int rv = 0;
+	if (forced(FAKE_FN_I2CM_XFER, &rv)) return rv;
+	s_i2cm_xfer.tag   = tag;
+	s_i2cm_xfer.addr7 = addr7;
+	s_i2cm_xfer.wlen  = wlen;
+	s_i2cm_xfer.rlen  = rlen;
+	if (wlen != 0u) memcpy(s_i2cm_xfer.wdata, wdata, wlen);
+	return BRIDGE_HW_OK;
+}
+
+int bridge_hw_i2cm_result(uint8_t *tag, uint8_t *result, uint8_t *nread, uint8_t *rdata)
+{
+	int rv = 0;
+	if (forced(FAKE_FN_I2CM_RESULT, &rv)) return rv;
+	*tag    = s_i2cm_res.tag;
+	*result = s_i2cm_res.result;
+	*nread  = s_i2cm_res.nread;
+	memcpy(rdata, s_i2cm_res.rdata, s_i2cm_res.nread);
+	return BRIDGE_HW_OK;
+}
+
+bool bridge_hw_i2cm_busy(void)
+{
+	return s_i2cm_busy;
+}
+
 /* ---- DSP chain-open id --------------------------------------------------*/
 
 static uint8_t s_dsp_next_chain_id;
@@ -543,6 +630,10 @@ void bridge_hw_fake_reset(void)
 {
 	memset(s_force_rv, 0, sizeof(s_force_rv));
 	memset(s_call_count, 0, sizeof(s_call_count));
+	s_i2cm_khz = 0u;
+	memset(&s_i2cm_xfer, 0, sizeof(s_i2cm_xfer));
+	memset(&s_i2cm_res, 0, sizeof(s_i2cm_res));
+	s_i2cm_busy         = false;
 	s_call_hook_fn      = FAKE_FN_GPIO_READ;
 	s_call_hook         = NULL;
 	s_call_hook_context = NULL;
