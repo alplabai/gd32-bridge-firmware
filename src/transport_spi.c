@@ -58,6 +58,14 @@ static uint8_t spi_tx_buf[SPI_MAX_FRAME_BYTES];
 static size_t  spi_tx_len;
 static size_t  spi_tx_cursor;
 
+/* The staged reply has not yet been read out by the host.  The gd32 backend
+ * copies the reply into its TX DMA buffer at stage time, so spi_tx_cursor is
+ * spent long before the host clocks a single reply byte and cannot tell
+ * "queued" from "delivered".  Set when a reply is staged; cleared when the
+ * host's reply-read transaction (all-0x00 dummy bytes) ends at CS rising.
+ * bridge_power_tick() holds a Deep-sleep / Standby entry while it is set. */
+static volatile bool spi_reply_undrained;
+
 /* Consecutive drain/empty rewinds since the last decoded request.
  * The host's re-read ladder legitimately drains the same staged
  * reply up to 8 times; far beyond that the staged bytes are a STALE
@@ -106,6 +114,7 @@ static void stage_reply(uint8_t status, const uint8_t *payload, size_t payload_l
 	spi_tx_buf[crc_covered]      = (uint8_t)(crc & 0xFFu);
 	spi_tx_buf[crc_covered + 1u] = (uint8_t)((crc >> 8) & 0xFFu);
 	spi_tx_len                   = crc_covered + 2u;
+	spi_reply_undrained          = true;
 	spi_tx_cursor                = 0u;
 	spi_drain_streak             = 0u; /* fresh reply staged: the drain ladder restarts */
 }
@@ -193,7 +202,8 @@ static bool decode_and_dispatch(void)
 			stage_error_reply(STATUS_IO); /* tar-pit breaker, see above */
 			return true;
 		}
-		spi_tx_cursor = 0u;
+		spi_tx_cursor       = 0u;
+		spi_reply_undrained = false; /* the host's reply read just ended */
 		return false;
 	}
 
@@ -318,13 +328,19 @@ bool spi_slave_tx_pending(void)
 	return spi_tx_cursor < spi_tx_len;
 }
 
+bool spi_slave_reply_undrained(void)
+{
+	return spi_reply_undrained;
+}
+
 void transport_spi_init(void)
 {
-	spi_rx_len       = 0u;
-	spi_tx_len       = 0u;
-	spi_tx_cursor    = 0u;
-	spi_drain_streak = 0u;
-	spi_seq          = 0u;
+	spi_reply_undrained = false;
+	spi_rx_len          = 0u;
+	spi_tx_len          = 0u;
+	spi_tx_cursor       = 0u;
+	spi_drain_streak    = 0u;
+	spi_seq             = 0u;
 	/* SPI1 slave + CS-EXTI bring-up lives in the gd32 HAL backend
      * (hal/transport_hw_gd32.c); the stub backend's weak no-op keeps
      * this hardware-free for host-side protocol tests. */

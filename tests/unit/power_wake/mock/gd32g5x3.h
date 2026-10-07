@@ -155,6 +155,7 @@ extern uint32_t mock_pd0_on_wake;
 extern uint32_t mock_exti31_enables, mock_exti31_disables, mock_wake_mode_sets,
     mock_i2c_init_wake_mode;
 extern int mock_i2c_wake_mode;
+extern int mock_reply_undrained;
 
 void mock_power_reset(void);
 

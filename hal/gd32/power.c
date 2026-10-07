@@ -215,6 +215,13 @@ static volatile uint8_t s_lp_flags;
 /* The latched request armed the RTC timer (a bounded sleep). */
 static volatile bool s_lp_timed;
 
+/* Ticks (~50 ms each) the latched request has waited for the host to read
+ * its reply.  Entering before the read ends makes the host's reply-read CS
+ * falling edge the wake source (SPI_CS) instead of the timer and costs the
+ * reply; past the bound the request is abandoned (refused_late). */
+#define POWER_LP_REPLY_DRAIN_TICKS 10u
+static uint8_t s_lp_drain_ticks;
+
 /* SWD-readable low-power counters (see power_policy.h). */
 volatile bridge_power_diag_t bridge_power_diag;
 
@@ -243,6 +250,7 @@ static void power_cancel_pending(void)
 	s_lp_pending_mode = 0u;
 	s_lp_flags        = 0u;
 	s_lp_timed        = false;
+	s_lp_drain_ticks  = 0u;
 	if (rtc_wakeup_ready) {
 		(void)rtc_wakeup_disable();
 		rtc_flag_clear(RTC_FLAG_WT);
@@ -533,6 +541,9 @@ static bool lp_link_quiet(void)
 	if (SET != gpio_input_bit_get(BRIDGE_SPI_NSS_PORT, BRIDGE_SPI_NSS_PIN)) return false;
 	/* An in-flight I2C transaction would be cut off by i2c_disable(). */
 	if (mode_i2c_busy()) return false;
+	/* The reply to the request that latched this entry is still queued: the
+	 * host's read of it would wake the part (SPI_CS) and lose the reply. */
+	if (spi_slave_reply_undrained()) return false;
 	if ((EXTI_PD0 != 0u) || ((EXTI_PD1 & 0x0000007Fu) != 0u)) return false;
 	if (NVIC_GetPendingIRQ(BRIDGE_SPI_CS_EXTI_IRQN) != 0u) return false;
 	if (NVIC_GetPendingIRQ(BRIDGE_I2C_EV_IRQN) != 0u) return false;
@@ -562,7 +573,8 @@ static int lp_final_gate(uint8_t mode)
 
 /* Base-level low-power entry (gh#63): the deferred half of
  * bridge_hw_power_mode_set().  Runs from bridge_hw_tick() -- base level,
- * AFTER the accepted request's reply has drained onto the wire, with
+ * AFTER the host has read the accepted request's reply out (the entry
+ * waits on spi_slave_reply_undrained(), bounded by POWER_LP_REPLY_DRAIN_TICKS), with
  * no transport state machine mid-transaction.
  *
  * The pre-entry gates below run with interrupts ENABLED and so only
@@ -615,6 +627,17 @@ void bridge_power_tick(void)
 		power_cancel_pending();
 		return;
 	}
+
+	/* 0. Wait for the host to read the reply out.  Bounded: a host that never
+	 *    reads it must not leave the request latched forever. */
+	if (spi_slave_reply_undrained()) {
+		if (++s_lp_drain_ticks > POWER_LP_REPLY_DRAIN_TICKS) {
+			++bridge_power_diag.refused_late;
+			power_cancel_pending();
+		}
+		return;
+	}
+	s_lp_drain_ticks = 0u;
 
 	/* 1. Only sleep on a quiet link: CS de-asserted (PA8 high).  An
 	 *    asserted CS means a transaction is in flight (or about to

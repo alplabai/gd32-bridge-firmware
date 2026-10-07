@@ -38,6 +38,7 @@ int        mock_act_adc, mock_act_pwm, mock_act_dac, mock_act_ota;
 uint32_t   mock_pd0_on_wake;
 uint32_t   mock_exti31_enables, mock_exti31_disables, mock_wake_mode_sets, mock_i2c_init_wake_mode;
 int        mock_i2c_wake_mode;
+int        mock_reply_undrained;
 
 void mock_power_reset(void)
 {
@@ -58,6 +59,7 @@ void mock_power_reset(void)
 	mock_primask_at_deepsleep    = 0u;
 	mock_i2c_busy                = RESET;
 	mock_cs_level                = SET;
+	mock_reply_undrained         = 0;
 	mock_nvic_pending            = 0u;
 	mock_on_settle               = NULL;
 	mock_on_i2c_disable          = NULL;
@@ -270,6 +272,11 @@ void bridge_transport_i2c_wake_mode_set(bool wake)
 {
 	mock_i2c_wake_mode = wake;
 	++mock_wake_mode_sets;
+}
+
+bool spi_slave_reply_undrained(void)
+{
+	return mock_reply_undrained != 0;
 }
 
 bool bridge_transport_i2c_wake_mode(void)

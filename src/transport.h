@@ -73,6 +73,9 @@ bool    spi_slave_cs_high(void);         /* CS rising edge: decode + dispatch; t
 void    spi_slave_transport_error(void); /* discard RX + stage STATUS_IO        */
 uint8_t spi_slave_tx_next_byte(void);    /* next staged reply byte; 0xFF if empty */
 bool    spi_slave_tx_pending(void);      /* true while staged reply has bytes left   */
+bool    spi_slave_reply_undrained(void); /* true from staging until the host's reply
+                                          * read ends (CS rising); the TX cursor cannot
+                                          * say: the backend copies it to DMA at stage */
 
 /* ---- I2C slave seams (defined in transport_i2c.c) -------------- */
 void    i2c_slave_write_start(void);  /* START + addressed write: reset RX    */

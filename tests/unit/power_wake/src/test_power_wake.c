@@ -537,6 +537,40 @@ ZTEST(power_wake, test_activity_started_after_the_reply_drops_the_request)
 	zassert_equal(mock_deepsleep_entries, 0u, "the dropped request is not resurrected");
 }
 
+/* Bench 2026-10-07: entering before the host read the reply made its CS
+ * falling edge the wake source and cost the reply. */
+ZTEST(power_wake, test_entry_waits_for_the_reply_to_be_read)
+{
+	mock_power_reset();
+	diag_reset();
+	clock_ready();
+	zassert_equal(bridge_hw_power_mode_set(2u, 0u, 250u, 0u), BRIDGE_HW_OK);
+	mock_reply_undrained = 1;
+	for (unsigned i = 0u; i < 5u; i++)
+		bridge_power_tick();
+	zassert_equal(mock_deepsleep_entries, 0u, "no entry while the reply is unread");
+	zassert_equal(bridge_power_diag.refused_late, 0u);
+	mock_reply_undrained = 0; /* host's reply read ended */
+	bridge_power_tick();
+	zassert_equal(mock_deepsleep_entries, 1u, "entry once the reply is out");
+}
+
+ZTEST(power_wake, test_unread_reply_times_out_without_entry)
+{
+	mock_power_reset();
+	diag_reset();
+	clock_ready();
+	zassert_equal(bridge_hw_power_mode_set(2u, 0u, 250u, 0u), BRIDGE_HW_OK);
+	mock_reply_undrained = 1;
+	for (unsigned i = 0u; i < 20u; i++)
+		bridge_power_tick();
+	zassert_equal(mock_deepsleep_entries, 0u);
+	zassert_equal(bridge_power_diag.refused_late, 1u, "abandoned and counted once");
+	mock_reply_undrained = 0;
+	bridge_power_tick();
+	zassert_equal(mock_deepsleep_entries, 0u, "the abandoned request is not resurrected");
+}
+
 ZTEST(power_wake, test_run_cancels_a_latched_request)
 {
 	mock_power_reset();
