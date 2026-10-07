@@ -862,8 +862,9 @@ static gd32_bridge_status_t handle_power_mode_set(const uint8_t *req,
 	if (req_len != 10u) return STATUS_INVAL;
 	if (req[0] > 3u) return STATUS_INVAL; /* mode ∈ {RUN, SLEEP, DEEP_SLEEP, STANDBY} */
 	/* An I2C3 proxy job runs at base level and must not be cut off by a
-	 * low-power entry (checked before ATTN is touched). */
-	if (bridge_hw_i2cm_busy()) {
+	 * Deep-sleep/Standby entry (checked before ATTN is touched).  RUN and
+	 * SLEEP never touch the bus clock, so they are never refused for it. */
+	if (req[0] >= 2u && bridge_hw_i2cm_busy()) {
 		*reply_len = 0u;
 		return STATUS_BUSY;
 	}
