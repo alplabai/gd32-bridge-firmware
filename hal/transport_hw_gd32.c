@@ -62,6 +62,7 @@
 #include "gd32/i2c_recovery.h"
 #include "gd32/i2c_timeout.h"
 #include "gd32/spi_dma_arm_status.h"
+#include "gd32/spi_fast_reinit.h"
 #include "protocol.h" /* GD32_BRIDGE_DEFAULT_I2C_ADDR */
 #include "timing_stats.h"
 #include "transport.h" /* the seams we drive */
@@ -259,8 +260,11 @@ static bool spi_dma_arm_rx(void)
 /* Arm TX with exactly the staged reply (never more: the GD32 SPI has no
  * TX-underrun error and no FIFO flush, so over-queued bytes would stick --
  * the same invariant the old per-byte path enforced via tx_pending()). */
+static uint32_t spi_tx_armed_len; /* TX DMA length armed for the current reply (fast re-init) */
+
 static bool spi_dma_arm_tx(uint32_t len)
 {
+	spi_tx_armed_len = 0u;
 	if (!spi_dma_disable_confirm(BRIDGE_SPI_TX_DMA_CH)) {
 		spi_dma_arm_record_confirm_fail(&spi_dma_tx_arm_fail_count, &spi_dma_error_pending);
 		return false;
@@ -271,6 +275,7 @@ static bool spi_dma_arm_tx(uint32_t len)
 	dma_memory_address_config(BRIDGE_SPI_DMA, BRIDGE_SPI_TX_DMA_CH, (uint32_t)spi_tx_dma_buf);
 	dma_transfer_number_config(BRIDGE_SPI_DMA, BRIDGE_SPI_TX_DMA_CH, len);
 	dma_channel_enable(BRIDGE_SPI_DMA, BRIDGE_SPI_TX_DMA_CH);
+	spi_tx_armed_len = len;
 	return true;
 }
 
@@ -350,6 +355,41 @@ void bridge_transport_spi_hw_init(void)
 	spi_cs_exti_init();
 }
 
+/* SWD-readable counters (gh#165): end-of-transaction re-inits that took the
+ * fast path (no peripheral reset) vs the full RCU reset.  Plain RAM words, no
+ * wrap handling; read them over SWD by symbol name. */
+volatile bridge_spi_reinit_stats_t bridge_spi_reinit_stats;
+
+/* End-of-transaction SPI re-init, run after the RX FIFO was drained.
+ *
+ * The GD32G5x3 SPI has no FIFO flush bit (UM Rev1.3), and nothing documents
+ * discarding stale TX FIFO bytes -- that is what the RCU reset buys.  When
+ * SPI_STAT already proves there is nothing stale (TXLVL==0, TRANS==0,
+ * RXLVL==0, no error flag) AND the master clocked the whole armed TX reply with
+ * the TX DMA drained (TXLVL misses the shift register), the reset has nothing
+ * to clean and BYTEN / DMAREN / DMATEN / SPIEN are still as
+ * bridge_spi_periph_config() left them, so it is skipped (~28 us saved).
+ * Anything else takes the unchanged full reset.  Compiled in only with
+ * BRIDGE_SPI_FAST_REINIT=1 (default OFF, bench-unvalidated). */
+static void spi_end_of_transaction_reinit(uint32_t received)
+{
+#if BRIDGE_SPI_FAST_REINIT
+	if (bridge_spi_fast_reinit_ok(SPI_STAT(BRIDGE_SPI_PERIPH),
+	                              spi_tx_armed_len,
+	                              dma_transfer_number_get(BRIDGE_SPI_DMA, BRIDGE_SPI_TX_DMA_CH),
+	                              received)) {
+		bridge_spi_reinit_stats.fast++;
+		return;
+	}
+#else
+	(void)received;
+#endif
+	bridge_spi_reinit_stats.slow++;
+	rcu_periph_reset_enable(RCU_SPI1RST);
+	rcu_periph_reset_disable(RCU_SPI1RST);
+	bridge_spi_periph_config();
+}
+
 /* CS edge: PA8 on EXTI8.  Falling = select (reset RX, preload the staged
  * reply); rising = end of transaction (decode + stage the next reply).
  *
@@ -418,7 +458,8 @@ void BRIDGE_SPI_CS_EXTI_HANDLER(void)
              *    just-finished receive makes the captured byte run just as
              *    untrustworthy as a DMA ERRIF, so it feeds the SAME error
              *    seam below rather than a second one.
-             * 3. FLUSH + re-init the SPI via the RCU reset (the only
+             * 3. spi_end_of_transaction_reinit() decides: skip when nothing is
+             *    stale (opt-in BRIDGE_SPI_FAST_REINIT), else RCU reset (the only
              *    reliable FIFO flush; it also clears BYTEN/DMAREN/DMATEN,
              *    which bridge_spi_periph_config re-applies) so the
              *    peripheral is reception-ready while the heavier decode
@@ -494,9 +535,7 @@ void BRIDGE_SPI_CS_EXTI_HANDLER(void)
 				spi_rx_dma_buf[received++] = (uint8_t)spi_data_receive(BRIDGE_SPI_PERIPH);
 			}
 
-			rcu_periph_reset_enable(RCU_SPI1RST);
-			rcu_periph_reset_disable(RCU_SPI1RST);
-			bridge_spi_periph_config();
+			spi_end_of_transaction_reinit(received);
 
 			/* Self-contained decode: reset the portable staging FIRST so a
              * swallowed falling edge cannot prepend the previous frame's
