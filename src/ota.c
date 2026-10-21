@@ -1334,7 +1334,6 @@ __attribute__((weak)) bool ota_erase_active(void)
 	return false;
 }
 
-
 __attribute__((weak)) bool ota_session_active(void)
 {
 	return false;

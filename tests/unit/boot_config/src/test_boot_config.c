@@ -30,8 +30,8 @@ bool            ota_session_active(void)
 {
 	return g_ota_active;
 }
-static bool             g_erase_walk;
-bool                    ota_erase_active(void)
+static bool g_erase_walk;
+bool        ota_erase_active(void)
 {
 	return g_erase_walk;
 }
