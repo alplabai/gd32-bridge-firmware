@@ -49,14 +49,20 @@ GD32G553 runs with OBCTL.DBS = 1 (dual-bank), so the physical flash pages are
 1 KB; the 2 KB `OTA_PAGE_SIZE` in `src/ota_layout.h` is only the layout
 granule (a multiple of the real page in both bank modes), and `hal/fmc_ota.c`
 erases by the real page size. Record 0 sits at `0x08008000` and record 1 at
-`0x08008800`; the rest of the region is unused and stays erased (`0xFF`). The
-release asset `ota-meta-rec0.bin` is only the 44-byte record 0 (slot A active,
-struct version 2, written by `tools/gen_ota_metadata.py`), not the whole
-region. Erase `0x08008000..0x0800A000` first, then write the 44 bytes at
-`0x08008000`; everything else in the region is then `0xFF`, which is the
-intended state. With record 1 erased, record 0 is the only valid record; in
-general the valid record with the highest counter wins
-(`tools/gen_ota_metadata.py`).
+`0x08008800`; the rest of the region is unused on a clean part and stays erased
+(`0xFF`). The release asset `ota-meta-rec0.bin` is only the 44-byte record 0
+(slot A active, struct version 2, written by `tools/gen_ota_metadata.py`), not
+the whole region.
+
+Always erase the whole region, `0x08008000..0x08009FFF` (8 KB), before writing
+the record. A factory write that programs only the 44-byte record (for example
+a `gd32_flash`-style write of `ota-meta-rec0.bin`) leaves any older A/B records
+in the other metadata pages untouched. The valid record with the highest
+counter wins (`tools/gen_ota_metadata.py`), so a stale record from an earlier
+OTA can outrank the new one and boot slot B instead of slot A. Erase first,
+then write the 44 bytes at `0x08008000`; with everything else `0xFF`, record 0
+is the only valid record. Found on the bench (2026-10-21); a recovery-procedure
+requirement, not a firmware change.
 
 ## 2. Path A: external SWD probe (J-Link or OpenOCD)
 
