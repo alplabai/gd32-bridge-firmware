@@ -623,6 +623,14 @@ bool ota_session_active(void)
 	return s_state != OTA_ST_IDLE && s_state != OTA_ST_ERROR;
 }
 
+/* A slot-erase walk is armed, whatever the session state: a BEGIN rejected into
+ * OTA_ST_ERROR keeps walking its erase, so ota_session_active() is false while
+ * the FMC is still owed to OTA between ota_erase_tick() steps. */
+bool ota_erase_active(void)
+{
+	return s_erasing;
+}
+
 bool ota_trial_unconfirmed(void)
 {
 	return s_trial;
@@ -1320,7 +1328,13 @@ void ota_boot_init(void)
 {
 }
 
-/* Weak so a host test can drive it; OTA-inert builds have no session. */
+/* Weak so a host test can drive them; OTA-inert builds have no session or walk. */
+__attribute__((weak)) bool ota_erase_active(void)
+{
+	return false;
+}
+
+
 __attribute__((weak)) bool ota_session_active(void)
 {
 	return false;

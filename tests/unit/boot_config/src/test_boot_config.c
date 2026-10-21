@@ -30,6 +30,11 @@ bool            ota_session_active(void)
 {
 	return g_ota_active;
 }
+static bool             g_erase_walk;
+bool                    ota_erase_active(void)
+{
+	return g_erase_walk;
+}
 static bool             g_supported, g_busy, g_write_safe;
 static ota_fmc_result_t g_erase_rv, g_program_rv;
 static int  g_ops_before_cut; /* flash ops that complete before a power cut; <0 = none */
@@ -125,6 +130,7 @@ static void fresh_unit(void) /* factory-new: both pages erased, HAL reset */
 	g_supported                                   = true;
 	g_busy                                        = false;
 	g_ota_active                                  = false;
+	g_erase_walk                                  = false;
 	g_write_safe                                  = true;
 	g_ops_before_cut                              = -1;
 	g_cut                                         = false;
@@ -285,6 +291,26 @@ ZTEST(boot_config, test_set_is_busy_while_an_ota_session_is_active)
 	zassert_equal(cfg(GD32_BRIDGE_LINK_SPI, 1u, F1, &v), STATUS_OK);
 }
 
+ZTEST(boot_config, test_erase_walk_blocks_set_and_commit_even_in_error_state)
+{
+	uint32_t v, p;
+	fresh_unit();
+	/* A rejected BEGIN: session inactive (ERROR) but its erase walk runs. */
+	g_ota_active = false;
+	g_erase_walk = true;
+	zassert_equal(cfg(GD32_BRIDGE_LINK_SPI, 1u, F1, &v), STATUS_BUSY, "SET during erase walk");
+	zassert_false(boot_config_pending(&p));
+	/* A SET queued before the walk started must not commit mid-walk. */
+	g_erase_walk = false;
+	cfg(GD32_BRIDGE_LINK_SPI, 1u, F1, &v);
+	g_erase_walk = true;
+	boot_config_tick();
+	zassert_equal(g_erase_calls, 0u, "no commit while the walk runs, funnel idle");
+	g_erase_walk = false;
+	boot_config_tick();
+	zassert_equal(boot_config_flags(), F1);
+}
+
 ZTEST(boot_config, test_tick_waits_for_the_fmc_funnel)
 {
 	uint32_t v;
@@ -415,6 +441,26 @@ ZTEST(boot_config, test_payload_is_never_read_before_the_commit_magic)
 	zassert_equal(boot_config_flags(), 0u);
 	zassert_equal(g_payload_reads, 0u);
 	zassert_equal(g_bad_reads, 0u, "the torn payload doubleword was never touched");
+}
+
+/* The boot-time read exposure after a power cut during a SET.  Whatever op is
+ * cut (erase, payload program, commit program), a boot reads at most ONE
+ * uncorrectable doubleword -- the torn page's commit doubleword -- and never a
+ * torn payload.  Silicon behaviour of that one read is a bench item (see the
+ * note on ota_fmc_read_safe in hal/fmc_ota.c). */
+ZTEST(boot_config, test_boot_read_exposure_after_a_cut_is_one_doubleword)
+{
+	for (int cut = 0; cut <= 2; cut++) {
+		uint32_t v;
+		fresh_unit();
+		set_and_commit(F1, &v);
+		g_ops_before_cut = cut;
+		set_and_commit(0u, &v);
+		g_bad_reads = 0u;
+		boot_config_load();
+		zassert_true(g_bad_reads <= 1u, "cut %d: %u uncorrectable reads at boot", cut, g_bad_reads);
+		zassert_equal(boot_config_flags(), F1, "cut %d: old record still wins", cut);
+	}
 }
 
 ZTEST(boot_config, test_foreign_or_crc_bad_page_reads_as_absent)

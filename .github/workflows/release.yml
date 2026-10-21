@@ -211,6 +211,7 @@ jobs:
             echo "Flashing guide: docs/RECOVERY.md (in this repository at this tag)."
             echo "Third-party notices (GigaDevice firmware library linked into these binaries): THIRD_PARTY_NOTICES.md asset."
             echo "Flash addresses: bootloader 0x08000000, metadata record 0x08008000, slot A 0x0800A000, slot B 0x08040000."
+            echo "Boot-config records (CMD_BOOT_CONFIG 0x42, SD-mux hold): REC0 0x08076000, REC1 0x08076800. A mass erase clears the SD-out flag; SET answers NOSUPPORT from slot B or with OBCTL.DBS=0 (change the flag after an OTA back to slot A); the hold is applied by the application's bridge_hw_init, not the bootloader, so PD11 is undriven during any GD32-only reset (watchdog, OTA commit, host reset). 0x42 shipped as a PATCH bump (protocol 0.14.1); detect it by NOSUPPORT."
           } > notes.md
           gh release create "$GITHUB_REF_NAME" dist/* \
             --title "$GITHUB_REF_NAME" --notes-file notes.md --verify-tag

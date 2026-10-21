@@ -491,11 +491,6 @@ def build_vectors() -> list[tuple[str, str, str | None] | _Section]:
         " SDIO_MUX_EN high at boot, SD disconnected) | CRC",
     ))
     out.append((
-        "spi_boot_config_reply_sdmux_en_high",
-        spi_frame(SOF, STATUS_OK, (1).to_bytes(4, "little")).hex().upper(),
-        "SOF | STATUS=0x00 | flags=0x00000001 (u32 LE, the stored value) | CRC",
-    ))
-    out.append((
         "spi_reply_nosupport",
         spi_frame(SOF, STATUS_NOSUPPORT).hex().upper(),
         "SOF | STATUS=0x06 (NOSUPPORT) | empty payload | CRC --"

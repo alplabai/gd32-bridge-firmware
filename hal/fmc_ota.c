@@ -350,7 +350,12 @@ bool ota_fmc_config_write_safe(void)
  * Interrupts are masked for the few-microsecond window so no other NMI-source
  * user of FLASHECCIE sees it off.  UNVERIFIED ON SILICON: that the NMI-masked
  * read of a real uncorrectable doubleword completes with the flag set rather
- * than a bus fault -- see docs/protocol-v0.15-design.md section 13. */
+ * than raising a bus fault.  If it does fault, hal/gd32/fault_handlers.c
+ * records it and resets, bounded by FAULT_RESET_LOOP_LIMIT consecutive
+ * fault resets, after which the unit halts; the bench must prove which of the
+ * two happens for a record page torn mid-erase and mid-commit-program.  The
+ * reader keeps the exposure to one doubleword per page: the commit
+ * doubleword is read first and the payload only once the magic is present. */
 bool ota_fmc_read_safe(uint32_t addr, void *dst, size_t len)
 {
 	if (((addr | (uint32_t)len) & 7u) != 0u) {

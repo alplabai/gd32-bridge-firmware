@@ -165,16 +165,31 @@ it as a wire-incompatible change and stage carefully.
 
 ## Boot config (`CMD_BOOT_CONFIG` 0x42, protocol 0.14.1)
 
-A persistent flags word kept in two A/B record pages at `OTA_CONFIG_REC0/1`
-([`src/ota_layout.h`](src/ota_layout.h)). Request `op:u8 flags:u32` (op 0 = GET,
-op 1 = SET); reply `flags:u32`, the stored value. Bit0 drives PD11 (E1M IO29
-`SDIO_MUX_EN`) high at every boot, so a provisioning run keeps the EVK microSD
-mux off across power cycles. SET is queued and committed from the main loop,
-takes effect at the next GD32 reset, and answers `BUSY` during an OTA session or
-while another SET is queued; `NOSUPPORT` on a build without the FMC HAL, with
-`OBCTL.DBS = 0`, or running from bank 1. Allowed on SPI and I2C. Handler:
-[`src/boot_config.c`](src/boot_config.c), `handle_boot_config()` in
-[`src/protocol.c`](src/protocol.c). Wire doc: alp-sdk `docs/gd32-bridge-protocol.md`.
+A persistent flags word in two A/B record pages: `OTA_CONFIG_REC0`
+`0x08076000` and `OTA_CONFIG_REC1` `0x08076800` ([`src/ota_layout.h`](src/ota_layout.h)).
+Request `op:u8 flags:u32` (op 0 = GET, op 1 = SET); reply `flags:u32`, the stored
+value. Bit0 drives PD11 (E1M IO29 `SDIO_MUX_EN`) high at boot, holding the EVK
+microSD mux off. SET is queued and committed from the main loop, takes effect
+at the next GD32 reset, and answers `BUSY` during an OTA session or erase walk
+(a rejected BEGIN's walk included) or while another SET is queued. Allowed on
+SPI and I2C. Handler: [`src/boot_config.c`](src/boot_config.c),
+`handle_boot_config()` in [`src/protocol.c`](src/protocol.c).
+
+* **Mass erase clears the flag.** A full-flash mass erase wipes both record pages,
+  so the SD-out hold is off afterwards; re-SET it.
+* **SET is `NOSUPPORT` from slot B (bank 1) or with `OBCTL.DBS = 0`**, and on a
+  build without the FMC HAL. On slot B the flag can only be changed after an OTA
+  back to slot A. This is a field limitation.
+* **The hold is applied by the application's `bridge_hw_init()`, not the
+  bootloader.** PD11 is undriven, and the SD mux may re-enable, during every
+  GD32-only reset (watchdog, OTA commit, host reset) until the application
+  has run `bridge_hw_init()` again.
+* **Versioning exception.** A new opcode is normally a MINOR bump. 0x42 ships as
+  a PATCH bump (0.14.1) because 0.15 is taken by the unreleased #333 line.
+  Hosts must detect 0x42 by `NOSUPPORT` (a firmware without it answers
+  `NOSUPPORT` to the unknown opcode), not by the version.
+
+Wire doc: alp-sdk `docs/gd32-bridge-protocol.md`.
 
 ## GPIO + PWM channel maps
 
