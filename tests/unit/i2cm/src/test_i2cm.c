@@ -240,14 +240,18 @@ ZTEST(i2cm, test_scl_counts)
 	/* 216 MHz kernel clock, PSC = 15: tPSC = 74.07 ns (the live boot clock). */
 	zassert_true(i2cm_scl_counts(216000000u, 15u, 100u, &h, &l));
 	zassert_equal(l, 63u, "4700 ns / 74 ns, minus 1");
-	zassert_equal(h, 54u, "4000 ns / 74 ns, minus 1");
+	zassert_equal(h, 71u, "5300 ns / 74 ns, minus 1");
 	zassert_true(i2cm_scl_counts(216000000u, 15u, 400u, &h, &l));
-	zassert_equal(l, 18u);
-	zassert_equal(h, 10u);
+	zassert_equal(l, 18u, "1400 ns / 74 ns, minus 1");
+	zassert_equal(h, 14u, "1100 ns / 74 ns, minus 1");
+	/* fSCL never above the bus rate even with zero rise time:
+	 * (l + 1 + h + 1) * tPSC >= 1 / fSCLmax. */
+	zassert_true((l + h + 2u) * 74064u >= 2500000u);
 	/* 8 MHz (IRC8M after a failed relock), PSC = 0: tPSC = 125 ns. */
 	zassert_true(i2cm_scl_counts(8000000u, 0u, 100u, &h, &l));
 	zassert_equal(l, 37u);
-	zassert_equal(h, 31u);
+	zassert_equal(h, 42u);
+	zassert_true((l + h + 2u) * 125000u >= 10000000u);
 	/* unsupported speed, bad prescaler, field overflow */
 	zassert_false(i2cm_scl_counts(216000000u, 15u, 1000u, &h, &l));
 	zassert_false(i2cm_scl_counts(216000000u, 16u, 100u, &h, &l));

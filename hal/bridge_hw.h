@@ -529,8 +529,8 @@ int bridge_hw_power_mode_set(uint8_t  mode,
                              uint32_t wake_after_ms,
                              uint8_t  flags);
 
-/* --------------------------------------------------------------- */
-/* v0.17 -- I2C3 master proxy (E1M-X I2C3, GD32 PC8 SCL / PC9 SDA)   */
+/* v0.17 -- I2C master proxy (E1M-X I2C3 = GD32 I2C2, PC8 SCL / PC9 SDA) */
+/* v0.17 -- I2C master proxy (E1M-X I2C3 bus = GD32 I2C2, PC8 SCL / PC9 SDA) */
 /* --------------------------------------------------------------- */
 
 /* Set the I2C3 bus speed and take the pads.  @p bus_khz is 100 or 400;

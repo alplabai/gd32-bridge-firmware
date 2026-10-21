@@ -965,12 +965,18 @@ bool bridge_hw_work_pending(void)
 
 void bridge_hw_tick(void)
 {
+	/* The I2C proxy job runs first: a queued job starts at the top of the
+	 * next pass, not behind the vref / DSP / OTA-erase steps (it touches
+	 * only I2C2 / PC8 / PC9, independent of them).  The XFER ISR itself
+	 * retires the main loop's __WFI(), so the start latency is just the
+	 * remainder of a pass already in progress (OTA erase step <= 40 ms,
+	 * see protocol.h CMD_I2CM_XFER), not a 50 ms tick period. */
+	bridge_hw_i2cm_tick();
 	bridge_hw_dsp_pump();
 	adc_burst_tick(); /* before vref_late_tick: frees a stuck burst's ADC0 claim first */
 	vref_late_tick();
 	ota_erase_tick();
 	boot_config_tick(); /* queued CMD_BOOT_CONFIG SET: flash write at base level only */
-	bridge_hw_i2cm_tick();
 	ota_confirm_tick();
 	bridge_transport_i2c_stuck_poll();
 	bridge_power_tick();

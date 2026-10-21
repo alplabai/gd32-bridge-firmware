@@ -126,30 +126,30 @@ _Static_assert((BRIDGE_GPIOA_LOCK_MASK & (1u << BRIDGE_ATTN_PIN_NUM)) == 0u,
 #define BRIDGE_I2C_GPIO_AF GPIO_AF_4
 
 /* =================================================================== */
-/* I2C3 master proxy (protocol v0.17, hal/gd32/i2cm.c) -- E1M-X I2C3.  */
-/* SoM 2625-R2: GD32 U41 PC8 = I2C3_SCL (pad A24), PC9 = I2C3_SDA      */
-/* (pad A23); no SoM pull-ups (carrier / module provide them).         */
+/* I2C master proxy (protocol v0.17, hal/gd32/i2cm.c).                 */
+/* E1M-X I2C3 bus = GD32 I2C2 peripheral (PC8/PC9, AF8).  The E1M-X    */
+/* names the bus I2C3; the GD32 numbers its peripherals from zero, so  */
+/* the same bus is I2C2 here.  SoM 2625-R2: PC8 = SCL (pad A24),       */
+/* PC9 = SDA (pad A23); no SoM pull-ups (carrier / module provide).    */
+/*                                                                     */
+/* Pin/AF source: GD32G553xx Datasheet Rev1.5, pin alternate-function  */
+/* table: PC8 AF8 = I2C2_SCL, PC9 AF8 = I2C2_SDA.  Cross-check: vendor */
+/* Examples/I2C/I2C_EEPROM/i2c.h (GD32G533 branch: I2C2 on PC8/PC9,    */
+/* GPIO_AF_8).                                                         */
 /* =================================================================== */
-#define BRIDGE_I2CM_PERIPH   I2C3
-#define BRIDGE_I2CM_RCU      RCU_I2C3
-#define BRIDGE_I2CM_RCU_IDX  IDX_I2C3
+#define BRIDGE_I2CM_PERIPH   I2C2
+#define BRIDGE_I2CM_RCU      RCU_I2C2
+#define BRIDGE_I2CM_RCU_IDX  IDX_I2C2
 #define BRIDGE_I2CM_CK_SRC   RCU_I2CSRC_APB1
 #define BRIDGE_I2CM_SCL_PORT GPIOC
 #define BRIDGE_I2CM_SCL_PIN  GPIO_PIN_8
 #define BRIDGE_I2CM_SDA_PORT GPIOC
 #define BRIDGE_I2CM_SDA_PIN  GPIO_PIN_9
 
-/* TODO(unverified): the alternate-function number that routes I2C3_SCL /
- * I2C3_SDA onto PC8 / PC9.  It is in the GD32G553 datasheet's pin
- * alternate-function table, which was not available when this driver was
- * written (the vendor library headers carry the GPIO_AF_n names but no pin
- * map, and no vendor example uses I2C3).  Until a build passes
- * -DBRIDGE_I2CM_GPIO_AF=GPIO_AF_<n> with the number read from that table,
- * CMD_I2CM_CONFIG answers BRIDGE_HW_ERR_NOTIMPL (wire STATUS_NOSUPPORT)
- * and the pads stay hi-Z; the placeholder below is never applied. */
+/* A build may still override the AF number with -DBRIDGE_I2CM_GPIO_AF=. */
 #ifndef BRIDGE_I2CM_GPIO_AF
-#define BRIDGE_I2CM_GPIO_AF     GPIO_AF_0
-#define BRIDGE_I2CM_AF_VERIFIED 0
+#define BRIDGE_I2CM_GPIO_AF     GPIO_AF_8
+#define BRIDGE_I2CM_AF_VERIFIED 1
 #else
 #define BRIDGE_I2CM_AF_VERIFIED 1
 #endif
