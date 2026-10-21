@@ -453,6 +453,7 @@ add_executable(test_adc_e2e
     ${FW}/src/protocol.c
     ${FW}/src/bootloader/bootloader.c
     ${FW}/src/ota.c
+    ${FW}/src/boot_config.c
     ${FW}/src/crc32.c
     ${FW}/hal/gd32/adc.c
     ${FW}/hal/gd32/adc_stream.c
@@ -511,6 +512,7 @@ add_executable(test_adc_burst_reply
     ${FW}/src/protocol.c
     ${FW}/src/bootloader/bootloader.c
     ${FW}/src/ota.c
+    ${FW}/src/boot_config.c
     ${FW}/src/crc32.c
     fake/bridge_hw_fake.c
 )
