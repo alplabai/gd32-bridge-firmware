@@ -360,10 +360,12 @@ bool bridge_hw_attn_supported(void)
 	return false;
 }
 
+#ifndef BRIDGE_HW_STUB_NO_ADC
 bool bridge_hw_adc_stream2_supported(void)
 {
 	return false;
 }
+#endif
 
 bool bridge_hw_debugger_attached(void)
 {

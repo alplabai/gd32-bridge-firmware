@@ -322,6 +322,29 @@ static void expect_log(const attn_op_t *want, unsigned n, const char *what)
 	}
 }
 
+/* A deferred reply armed while the link is idle is as fresh as a CS-rising
+ * stage: ATTN rises for it.  Mid-transaction (CS low) nothing is driven. */
+ZTEST(transport_hw_cs_exti, test_attn_rises_for_a_deferred_reply_armed_on_an_idle_link)
+{
+	static const attn_op_t want[] = { OP_HIGH };
+	reset_state();
+	bridge_hw_attn_enable(true);
+	for (uint8_t i = 0u; i < 5u; ++i) {
+		stub_reply[i] = (uint8_t)(0xA0u + i);
+	}
+	stub_reply_len = 5u;
+
+	attn_log_n    = 0u;
+	cs_level_high = false;
+	bridge_transport_spi_reply_staged();
+	zassert_equal(attn_log_n, 0u, "CS low: nothing driven");
+
+	cs_level_high = true;
+	pd0           = 0u;
+	bridge_transport_spi_reply_staged();
+	expect_log(want, 1u, "deferred reply on an idle link");
+}
+
 /* F3 enable: output latch LOW first, then push-pull / slowest speed / no pull,
  * then output mode -- PA14 never glitches high. */
 ZTEST(transport_hw_cs_exti, test_attn_enable_sequence)

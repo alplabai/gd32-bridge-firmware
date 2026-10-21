@@ -47,6 +47,11 @@ bool vref_ready_check(void)
 	return vref_ok;
 }
 
+bool vref_remeasure_pending_get(void)
+{
+	return vref_remeasure_pending;
+}
+
 /* Base level (bridge_hw_tick).  Measures under an ADC0 claim, then publishes
  * vref_ok.  A failed measurement still promotes: the buffer is locked and
  * adc_vref_mv keeps the ADC_VREF_MV default.  A busy ADC0 retries next tick. */

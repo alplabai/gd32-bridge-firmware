@@ -39,10 +39,16 @@ uint16_t crc16_ccitt_false(const uint8_t *buf, size_t len)
 	return crc;
 }
 
-uint8_t protocol_link_features(gd32_bridge_link_t link)
+uint32_t protocol_link_features(gd32_bridge_link_t link)
 {
 	(void)link;
 	return 0u;
+}
+
+uint16_t protocol_link_max_payload(gd32_bridge_link_t link)
+{
+	(void)link;
+	return GD32_BRIDGE_MAX_PAYLOAD_BYTES;
 }
 
 void protocol_deferred_attach(protocol_deferred_reply_fn sink)
