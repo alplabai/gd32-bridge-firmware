@@ -307,7 +307,7 @@ SPI-only; requires BATCH granted; returns NOSUPPORT otherwise.
 
 | Condition | Status |
 |---|---|
-| `count == 0`, length mismatch, op not on the allow-list (includes nested `0x04`, `0x81`, `0x28`, any `0xF0..0xFF`), or `len_i` ≠ the op's fixed request length | INVAL |
+| `count == 0`, length mismatch, op not on the allow-list (includes nested `0x04`, `0x81`, `0x28`, any `0xF0..0xFF`), `len_i` ≠ the op's fixed request length, or a second `0x3C` READ2 on the same `stream_id` (repeated reads inside one CS ISR see a stale lap count) | INVAL |
 | `count > 16`, or worst-case reply `1 + Σ(2 + maxreply_i) > mp` | OUT_OF_RANGE |
 
 ### 6.3 Allow-list (bounded, side-effect-local handlers)
