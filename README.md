@@ -193,7 +193,7 @@ Wire doc: alp-sdk `docs/gd32-bridge-protocol.md`.
 
 ## Protocol v0.15 (negotiated)
 
-`GET_VERSION` reports `0.15.0`. The full design -- wire layouts, the grant
+`GET_VERSION` reports `0.16.0` (v0.15 plus GPIO bits 21/22, E1M IO15/IO26). The full design -- wire layouts, the grant
 algorithm, the ATTN pin rules -- is
 [`docs/protocol-v0.15-design.md`](docs/protocol-v0.15-design.md); the points a
 firmware reader needs:
@@ -435,10 +435,11 @@ yet); firmware v0.12 and earlier do the same for bit 20. A host
 relying on bits 18/19 must require `PROTOCOL_VERSION_MINOR >= 11`,
 and on bit 20 must require `PROTOCOL_VERSION_MINOR >= 13` (both via
 `GET_VERSION`), before trusting that the write actually took effect.
-Bits 21/22 (E1M IO15/IO26) likewise need `PROTOCOL_VERSION_MINOR >= 15`;
-older firmware ignores them and still returns `STATUS_OK`. Like the other
-E1M pads they have no boot-time drive; the first host read/write promotes
-them. `PC14` (bit 8) is untouched and `LXTAL` stays disabled.
+Bits 21/22 (E1M IO15/IO26) need `PROTOCOL_VERSION_MINOR >= 16` (0.15
+firmware lacks them); older firmware ignores them and still returns
+`STATUS_OK`. Like the other E1M pads they have no boot-time drive; the first
+host read promotes them to a floating input (no pull) and the first write
+drives them. `PC14` (bit 8) is untouched and `LXTAL` stays disabled.
 
 ## Cross-link
 
