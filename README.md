@@ -229,10 +229,11 @@ firmware reader needs:
   anything, and stops at the first non-`OK` sub-status.
 * **The one unconditional change is the I2C opcode allow-list**: the I2C link
   carries only `0x00..0x03`, `0x10`, `0x11`, `0x20`, `0x21` (PWM_SET/GET, v0.17), `0x41`,
-  `0x42` (`BOOT_CONFIG`), `0x81` and `0xF0..0xFF`;
+  `0x42` (`BOOT_CONFIG`), `0x81`, `0xA0..0xA2` (`I2CM_*`, I2C only) and `0xF0..0xFF`;
   every other opcode answers an empty `STATUS_NOSUPPORT` and never reaches its
   handler. `bridge_i2c_denied_count` / `bridge_i2c_denied_last_cmd` (SWD-readable)
-  record the refusals. SPI is unrestricted.
+  record the refusals. SPI is unrestricted except that the `I2CM_*` opcodes
+  (`0xA0..0xA2`) answer `STATUS_NOSUPPORT` on SPI.
 
 The cost: `.bss` grows by about 1 KB (256-byte SPI buffers, a 252-byte static
 reply scratch in place of a 65-byte stack buffer), and `BRIDGE_SPI_DMA_BUF_LEN`

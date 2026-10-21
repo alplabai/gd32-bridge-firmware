@@ -14,8 +14,8 @@
   `GPIO_PUPD_PULLUP` on `PC8`/`PC9`. The I2C3 net has no pull-ups on the SoM or
   the carrier I2C3 segment; production needs external pull-ups.
 - `CMD_PWM_SET` with `period_ns == 0` (`duty_ns == 0`) stops the channel and
-  releases its timer claim. Hosts must require `PROTOCOL_VERSION_MINOR >= 17`
-  (older firmware underflows the shared auto-reload on period 0).
+  releases its timer claim. No protocol bump: older firmware answers period 0
+  with `STATUS_OUT_OF_RANGE`, which a host can use to detect it.
 
 ### Changed
 

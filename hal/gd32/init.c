@@ -957,10 +957,15 @@ extern bool ota_trial_unconfirmed(void);
  * the link out almost continuously.  A SET queued before a BEGIN therefore
  * sleeps (paced) while the walk runs; boot_config_tick() follows
  * ota_erase_tick() in the same tick that clears the walk, so it commits then
- * with no extra wake.  A new SET cannot be queued during a walk (BUSY). */
+ * with no extra wake.  A new SET cannot be queued during a walk (BUSY).
+ *
+ * A queued I2C3 proxy job (CMD_I2CM_XFER) is also pending work: its XFER ISR
+ * can land after bridge_hw_i2cm_tick() ran in the current pass, and without
+ * this the loop would WFI until the next unrelated interrupt.  The job runs
+ * to completion inside one tick, so this never spins. */
 bool bridge_hw_work_pending(void)
 {
-	return boot_config_pending(NULL) && !ota_erase_active();
+	return (boot_config_pending(NULL) && !ota_erase_active()) || bridge_hw_i2cm_busy();
 }
 
 void bridge_hw_tick(void)
