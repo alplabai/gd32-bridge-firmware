@@ -110,11 +110,12 @@ typedef struct {
 #define ADC_BURST_ABORTING 2u /* being torn down; completion IRQ ignores */
 
 typedef struct {
-	volatile uint8_t state;        /* ADC_BURST_*                                 */
-	uint32_t         periph;       /* converter the burst runs on                 */
-	uint8_t          samples;      /* sequence length == DMA transfer count       */
-	uint16_t         full_scale;   /* code range snapshot, for the mV conversion  */
-	uint32_t         start_cycles; /* DWT->CYCCNT at the trigger (watchdog)       */
+	volatile uint8_t state;         /* ADC_BURST_*                                 */
+	uint32_t         periph;        /* converter the burst runs on                 */
+	uint8_t          samples;       /* sequence length == DMA transfer count       */
+	uint16_t         full_scale;    /* code range snapshot, for the mV conversion  */
+	uint32_t         start_cycles;  /* DWT->CYCCNT at the trigger (watchdog)       */
+	uint32_t         start_systick; /* SysTick period count at the trigger         */
 	/* Completion callback (a bridge_hw_adc_read_done_fn).  Declared without that
 	 * typedef so this header stays free of bridge_hw.h. */
 	void (*done)(int rv, const uint16_t *mv, uint8_t samples);
@@ -140,6 +141,9 @@ void adc_format_invalidate_all(void);        /* adc.c */
 /* Deep-sleep entry (power.c): cancel any burst and distrust every converter's
  * recorded format, since the part resumes with a gated, possibly reset ADC. */
 void adc_deepsleep_quiesce(void); /* adc.c */
+
+/* SysTick_Handler (init.c): count one 50 ms period for the burst watchdog. */
+void adc_burst_systick(void); /* adc.c */
 
 /* Base-level tick (bridge_hw_tick): abort a burst that has been RUNNING longer
  * than its time bound.  Ages by elapsed DWT cycles, never by call count: the
@@ -376,8 +380,10 @@ _Static_assert(GPIO_PAD_CAN_STBY < GPIO_PAD_MAP_COUNT,
  * not an ISR residency.  It is kept as-is: tightening or dropping it would
  * change which CMD_ADC_READ requests answer STATUS_OUT_OF_RANGE. */
 #define ADC_READ_ISR_BUDGET_US        1000u
-#define ADC_READ_CONV_HALF_CYCLES_12B 25u               /* 12.5 ADCCK, doubled */
-#define ADC_READ_ADCCK_HZ             (216000000u / 6u) /* ADC_CLK_SYNC_HCLK_DIV6 */
+#define ADC_READ_CONV_HALF_CYCLES_12B 25u /* 12.5 ADCCK, doubled */
+/* Nominal core clock the ADCCK figure and the burst time bounds assume. */
+#define ADC_READ_NOMINAL_CORE_HZ 216000000u
+#define ADC_READ_ADCCK_HZ        (ADC_READ_NOMINAL_CORE_HZ / 6u) /* ADC_CLK_SYNC_HCLK_DIV6 */
 #define ADC_READ_BUDGET_HALF_CYCLES \
 	((uint32_t)((2ull * ADC_READ_ADCCK_HZ * ADC_READ_ISR_BUDGET_US) / 1000000ull))
 

@@ -560,8 +560,47 @@ static const IRQn_Type adc_burst_dma_irqn[ADC_BURST_COUNT]      = BRIDGE_ADC_BUR
  * convert for, since ADCCK is a fixed HCLK divisor.  Both bounds are a multiple
  * of it so a healthy burst never trips them; they exist only to free a converter
  * whose conversion or DMA request was lost. */
-#define ADC_BURST_RESIDENCY_CYCLES (ADC_READ_ISR_BUDGET_US * (PWM_TIMER_CLK_HZ / 1000000u))
+#define ADC_BURST_RESIDENCY_CYCLES (ADC_READ_ISR_BUDGET_US * (ADC_READ_NOMINAL_CORE_HZ / 1000000u))
 #define ADC_BURST_DEADLINE_CYCLES  (4u * ADC_BURST_RESIDENCY_CYCLES)
+
+/* Second clock, independent of the DWT: SysTick periods.  The DWT cycle counter
+ * is only as alive as DEMCR.TRCENA / DWT_CTRL.CYCCNTENA (a debugger detach can
+ * clear them) and may stop across __WFI on this core; SysTick is the part's own
+ * 50 ms wake source (init.c) and by construction keeps running while the main
+ * loop sleeps.  SysTick_Handler() counts periods here; a burst is also expired
+ * after ADC_BURST_DEADLINE_SYSTICKS of them (50..100 ms real).  Whichever clock
+ * expires a burst first wins.  Not wake-based: nothing but SysTick advances it. */
+#define ADC_BURST_DEADLINE_SYSTICKS 2u
+
+static volatile uint32_t adc_systick_count;
+
+void adc_burst_systick(void)
+{
+	adc_systick_count++;
+}
+
+/* Re-assert the DWT cycle counter before it is sampled (init.c sets TRCENA and
+ * CYCCNTENA exactly once at boot; this makes a counter a debugger switched off
+ * come back instead of freezing every time bound below). */
+static void adc_dwt_ensure(void)
+{
+	CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+	DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+}
+
+/* Start both burst clocks. */
+static void adc_burst_stamp(adc_burst_t *b)
+{
+	adc_dwt_ensure();
+	b->start_cycles  = DWT->CYCCNT;
+	b->start_systick = adc_systick_count;
+}
+
+static bool adc_burst_expired(const adc_burst_t *b)
+{
+	return (uint32_t)(DWT->CYCCNT - b->start_cycles) >= ADC_BURST_DEADLINE_CYCLES ||
+	       (uint32_t)(adc_systick_count - b->start_systick) >= ADC_BURST_DEADLINE_SYSTICKS;
+}
 
 void adc_format_invalidate(uint32_t periph)
 {
@@ -593,8 +632,8 @@ static bool adc_burst_claim(uint32_t periph)
 		adc_periph_busy[slot] = true;
 		b->periph             = periph;
 		b->done               = 0;
-		b->start_cycles       = DWT->CYCCNT;
-		b->state              = ADC_BURST_RUNNING;
+		adc_burst_stamp(b);
+		b->state = ADC_BURST_RUNNING;
 	}
 	bridge_irq_unlock(st);
 	return ok;
@@ -874,7 +913,7 @@ int bridge_hw_adc_read_start(uint8_t channel, uint8_t samples, bridge_hw_adc_rea
 	/* Go.  From here the DMA-complete interrupt owns the burst; the watchdog's
 	 * clock starts at the trigger, not at the claim (the format apply above is
 	 * not part of the conversion). */
-	b->start_cycles = DWT->CYCCNT;
+	adc_burst_stamp(b);
 	adc_software_trigger_enable(ch->periph, ADC_ROUTINE_CHANNEL);
 	return BRIDGE_HW_OK;
 }
@@ -913,6 +952,10 @@ void bridge_hw_adc_read_abort(bridge_hw_adc_read_done_fn done)
  * new request cancels it, and staging a reply from base level would race the CS
  * ISR.
  *
+ * Two clocks, whichever expires first: elapsed DWT cycles, and SysTick periods
+ * (adc_burst_systick, a second source that does not depend on the DWT staying
+ * enabled or running across __WFI).
+ *
  * Aged by TIME, not by calls.  bridge_hw_tick() runs after EVERY wake of the main
  * loop (`__WFI(); bridge_hw_tick();`): a host reply-read CS edge, a stream lap,
  * an I2C event or SysTick each invoke it, so a per-call counter would kill a
@@ -925,8 +968,7 @@ void adc_burst_tick(void)
 		bool expired = false;
 
 		const uint32_t st = bridge_irq_lock();
-		if (adc_burst[slot].state == ADC_BURST_RUNNING &&
-		    (uint32_t)(DWT->CYCCNT - adc_burst[slot].start_cycles) >= ADC_BURST_DEADLINE_CYCLES) {
+		if (adc_burst[slot].state == ADC_BURST_RUNNING && adc_burst_expired(&adc_burst[slot])) {
 			adc_burst[slot].state = ADC_BURST_ABORTING;
 			expired               = true;
 		}
@@ -962,7 +1004,9 @@ void adc_deepsleep_quiesce(void)
  * long as ADC_READ is reachable over I2C at all.  From protocol 0.15 the
  * maintainer's decision is that Linux on BRD_I2C is limited to GPIO + SE_RST +
  * OTA: ADC_READ over I2C then answers STATUS_NOSUPPORT, and this function and its
- * wait go away with it.  ADC_READ stays on SPI, deferred.
+ * wait go away with it (tracked as alplabai/gd32-bridge-firmware#330: the
+ * protocol 0.15 BRD_I2C opcode policy removes the I2C ADC_READ path).  ADC_READ
+ * stays on SPI, deferred.
  *
  * The wait is bounded by ELAPSED TIME, read from the live clock (DWT), never by
  * an iteration count (a raw count is ~5-9 ms at 216 MHz but ~27x longer on the
@@ -973,10 +1017,13 @@ void adc_deepsleep_quiesce(void)
  *     LIVE core clock, bridge_core_clock_hz, which relock/fallback keeps current:
  *     on a degraded clock the host gets STATUS_IO inside the window instead of a
  *     stretch timeout.
+ * A third bound, an iteration count, backs both up for a DWT that has stopped.
  * On expiry the burst is aborted (converter stood down) and IO reported.
  *
  * Never call this from the SPI CS ISR (or anything at the burst IRQ's priority):
  * the completion could not run. */
+#define ADC_BURST_SYNC_BACKSTOP_SPINS 400000u
+
 static uint32_t adc_sync_wait_cycles(void)
 {
 	const uint64_t stretch_cycles =
@@ -1014,10 +1061,14 @@ int bridge_hw_adc_read(uint8_t channel, uint8_t samples, uint16_t *mv)
 	const int rv  = bridge_hw_adc_read_start(channel, samples, adc_sync_done);
 	if (rv != BRIDGE_HW_OK) return rv;
 
+	adc_dwt_ensure();
 	const uint32_t t0    = DWT->CYCCNT;
 	const uint32_t limit = adc_sync_wait_cycles();
-	while (!adc_sync.done && (uint32_t)(DWT->CYCCNT - t0) < limit) {
-		/* bounded wait for the DMA-complete IRQ's flag */
+	/* Cycle bound AND an iteration backstop: if the DWT counter is frozen the
+	 * cycle bound alone would never end this loop in the I2C ISR. */
+	uint32_t spins = ADC_BURST_SYNC_BACKSTOP_SPINS;
+	while (!adc_sync.done && spins != 0u && (uint32_t)(DWT->CYCCNT - t0) < limit) {
+		--spins; /* bounded wait for the DMA-complete IRQ's flag */
 	}
 	if (!adc_sync.done) {
 		bridge_hw_adc_read_abort(adc_sync_done);

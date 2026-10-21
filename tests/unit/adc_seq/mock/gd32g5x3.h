@@ -271,10 +271,20 @@ void DMA1_Channel4_IRQHandler(void);
  * additionally advances by mock_dwt_step on every read, so a bounded spin on it
  * terminates on the host.  `DWT->CYCCNT` is a read of that model. */
 typedef struct {
+	volatile uint32_t CTRL;
 	volatile uint32_t CYCCNT;
 } DWT_Type;
-DWT_Type *mock_dwt_ptr(void);
-#define DWT (mock_dwt_ptr())
+typedef struct {
+	volatile uint32_t DEMCR;
+} CoreDebug_Type;
+#define DWT_CTRL_CYCCNTENA_Msk     (1u << 0)
+#define CoreDebug_DEMCR_TRCENA_Msk (1u << 24)
+DWT_Type       *mock_dwt_ptr(void);
+CoreDebug_Type *mock_coredebug_ptr(void);
+#define DWT       (mock_dwt_ptr())
+#define CoreDebug (mock_coredebug_ptr())
+/* The counter only runs while DEMCR.TRCENA and DWT_CTRL.CYCCNTENA are both set,
+ * as on the part; a test clears them to model a debugger detach. */
 extern uint32_t mock_dwt_cycles;      /* the counter */
 extern uint32_t mock_dwt_step;        /* added after every CYCCNT read */
 extern uint32_t bridge_core_clock_hz; /* defined here: init.c is not linked */

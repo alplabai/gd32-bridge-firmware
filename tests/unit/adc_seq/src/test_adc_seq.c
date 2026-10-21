@@ -127,9 +127,11 @@ static void adc_seq_reset(void)
 	mock_seq_reset();
 	mock_dma_reset();
 	/* DWT: a free-running counter that advances 1 cycle per read, at 216 MHz. */
-	mock_dwt_cycles      = 0u;
-	mock_dwt_step        = 1u;
-	bridge_core_clock_hz = 216000000u;
+	mock_dwt_cycles             = 0u;
+	mock_dwt_step               = 1u;
+	bridge_core_clock_hz        = 216000000u;
+	mock_dwt_ptr()->CTRL        = DWT_CTRL_CYCCNTENA_Msk;
+	mock_coredebug_ptr()->DEMCR = CoreDebug_DEMCR_TRCENA_Msk;
 	memset(mock_adc_ctl1, 0, sizeof mock_adc_ctl1);
 	memset(adc_dsp_chains, 0, sizeof adc_dsp_chains);
 	for (uint8_t s = 0u; s < BRIDGE_ADC_STREAM_COUNT; ++s) {
@@ -2147,15 +2149,15 @@ ZTEST(gd32_adc_seq, test_blocking_read_times_out_aborts_and_reports_io)
 }
 
 /* The wait is a TIME bound read from the live clock (DWT), not an iteration
- * count.  With the counter advancing 1 cycle per read, the cycles the wait burns
+ * count.  With the counter advancing 4 cycles per read, the cycles the wait burns
  * ARE the bound: the burst deadline at 216 MHz, and half the SMBus stretch window
  * at the live core clock once that clock has fallen back to IRC8M. */
 ZTEST(gd32_adc_seq, test_blocking_read_wait_is_bounded_by_time_on_the_live_clock)
 {
 	uint16_t mv[2];
 
-	burst_manual_reset(); /* trigger completes nothing */
-	mock_dwt_step        = 1u;
+	burst_manual_reset();      /* trigger completes nothing */
+	mock_dwt_step        = 4u; /* a spin iteration costs a few cycles on the part */
 	bridge_core_clock_hz = 216000000u;
 	uint32_t t0          = mock_dwt_cycles;
 	zassert_equal(bridge_hw_adc_read(BRIDGE_ADC_CH0, 2u, mv), BRIDGE_HW_ERR_IO, "timed out");
@@ -2174,6 +2176,67 @@ ZTEST(gd32_adc_seq, test_blocking_read_wait_is_bounded_by_time_on_the_live_clock
 	zassert_true(burned >= 100000u && burned < 100000u + 64u,
 	             "8 MHz: half the stretch window, 100000 cycles (%u)",
 	             burned);
+}
+
+/* A frozen DWT (a debugger detach clears TRCENA/CYCCNTENA; the counter may also
+ * stop across WFI) must not hang the I2C ISR: the cycle bound alone never
+ * expires, so the iteration backstop ends the wait and the read reports IO.  The
+ * enables are re-asserted first, so freeze the counter at the source instead. */
+ZTEST(gd32_adc_seq, test_blocking_read_returns_io_when_the_cycle_counter_is_frozen)
+{
+	uint16_t mv[2];
+
+	burst_manual_reset(); /* trigger completes nothing */
+	mock_dwt_step = 0u;
+	zassert_equal(bridge_hw_adc_read(BRIDGE_ADC_CH0, 2u, mv), BRIDGE_HW_ERR_IO, "no hang");
+	zassert_equal(adc_burst[BURST_ADC3].state, ADC_BURST_IDLE, "burst aborted, not leaked");
+	zassert_true(adc_periph_claim(ADC3), "claim released");
+	adc_periph_release(ADC3);
+}
+
+/* The enables are re-asserted before the counter is sampled: a detach that
+ * switched the DWT off cannot leave the time bounds without a clock. */
+ZTEST(gd32_adc_seq, test_burst_start_and_blocking_wait_reassert_the_dwt_enables)
+{
+	uint16_t mv[2];
+
+	burst_manual_reset();
+	mock_dwt_ptr()->CTRL        = 0u;
+	mock_coredebug_ptr()->DEMCR = 0u;
+	zassert_equal(bridge_hw_adc_read_start(BRIDGE_ADC_CH0, 1u, burst_done), BRIDGE_HW_OK, "start");
+	zassert_true((mock_dwt_ptr()->CTRL & DWT_CTRL_CYCCNTENA_Msk) != 0u, "CYCCNTENA back on");
+	zassert_true((mock_coredebug_ptr()->DEMCR & CoreDebug_DEMCR_TRCENA_Msk) != 0u,
+	             "TRCENA back on");
+	bridge_hw_adc_read_abort(burst_done);
+
+	mock_dwt_ptr()->CTRL        = 0u;
+	mock_coredebug_ptr()->DEMCR = 0u;
+	zassert_equal(bridge_hw_adc_read(BRIDGE_ADC_CH0, 2u, mv), BRIDGE_HW_ERR_IO, "times out");
+	zassert_true((mock_dwt_ptr()->CTRL & DWT_CTRL_CYCCNTENA_Msk) != 0u, "wait re-asserted it too");
+	/* and, with the clock running again, the wait ended on time, not on the backstop */
+	zassert_true(mock_dwt_cycles >= 100u, "the counter advanced during the wait");
+}
+
+/* The second clock: SysTick periods.  With the DWT frozen (the case it exists
+ * for) two periods expire a burst; one does not, and only SysTick moves it. */
+ZTEST(gd32_adc_seq, test_burst_watchdog_expires_on_systick_periods_when_the_dwt_is_frozen)
+{
+	burst_manual_reset();
+	mock_dwt_step = 0u;
+	zassert_equal(bridge_hw_adc_read_start(BRIDGE_ADC_CH0, 4u, burst_done), BRIDGE_HW_OK, "start");
+
+	for (unsigned wake = 0u; wake < 100u; ++wake) {
+		adc_burst_tick(); /* wakes are not time */
+	}
+	zassert_equal(adc_burst[BURST_ADC3].state, ADC_BURST_RUNNING, "no period elapsed");
+	adc_burst_systick();
+	adc_burst_tick();
+	zassert_equal(
+	    adc_burst[BURST_ADC3].state, ADC_BURST_RUNNING, "one 50 ms period is not a stall");
+	adc_burst_systick();
+	adc_burst_tick();
+	zassert_equal(adc_burst[BURST_ADC3].state, ADC_BURST_IDLE, "two periods: torn down");
+	zassert_equal(burst_done_calls, 0u, "no callback from base level");
 }
 
 /* A stale NVIC-pending completion vector.  The CS ISR aborts a burst whose FTF
