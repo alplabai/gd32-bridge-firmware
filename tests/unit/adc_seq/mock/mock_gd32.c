@@ -181,8 +181,7 @@ void adc_dma_request_after_last_disable(uint32_t adc_periph)
 void adc_channel_length_config(uint32_t adc_periph, uint8_t adc_sequence, uint32_t length)
 {
 	(void)adc_sequence;
-	(void)length;
-	mock_seq_log("adc_channel_length_config", adc_periph, 0u);
+	mock_seq_log("adc_channel_length_config", adc_periph, length);
 }
 void adc_routine_channel_config(uint32_t adc_periph,
                                 uint8_t  rank,
@@ -190,14 +189,23 @@ void adc_routine_channel_config(uint32_t adc_periph,
                                 uint32_t sample_time)
 {
 	(void)rank;
-	(void)adc_channel;
 	(void)sample_time;
-	mock_seq_log("adc_routine_channel_config", adc_periph, 0u);
+	mock_seq_log("adc_routine_channel_config", adc_periph, ((uint32_t)rank << 8) | adc_channel);
 }
 void adc_external_trigger_config(uint32_t adc_periph, uint8_t adc_sequence, uint32_t trigger_mode)
 {
 	(void)adc_sequence;
 	mock_seq_log("adc_external_trigger_config", adc_periph, trigger_mode);
+}
+void adc_special_function_config(uint32_t adc_periph, uint32_t function, ControlStatus newvalue)
+{
+	(void)function;
+	mock_seq_log("adc_special_function_config", adc_periph, (uint32_t)newvalue);
+}
+static mock_hook_t mock_adc_trigger_hook;
+void               mock_adc_set_trigger_hook(mock_hook_t hook)
+{
+	mock_adc_trigger_hook = hook;
 }
 bool mock_adc_eoc_stuck;
 bool mock_adc_internal_ch_on;
@@ -210,6 +218,7 @@ void adc_software_trigger_enable(uint32_t adc_periph, uint8_t adc_sequence)
 	 * mock: mark EOC so the polling loop in bridge_hw_adc_read sees
 	 * a completed conversion on its very first check. */
 	if (!mock_adc_eoc_stuck) mock_adc_flags[adc_periph] |= ADC_FLAG_EOC;
+	if (mock_adc_trigger_hook != 0) mock_adc_trigger_hook();
 }
 uint32_t adc_routine_data_read(uint32_t adc_periph)
 {
@@ -254,13 +263,41 @@ void mock_adc_set_routine_data(uint32_t code)
 {
 	mock_adc_routine_data = code;
 }
+uint32_t mock_adc_get_routine_data(void)
+{
+	return mock_adc_routine_data;
+}
+
+/* --- DWT cycle counter + live core clock (burst time bounds) -------------*/
+
+static DWT_Type       mock_dwt_regs       = { DWT_CTRL_CYCCNTENA_Msk, 0u };
+static CoreDebug_Type mock_coredebug_regs = { CoreDebug_DEMCR_TRCENA_Msk };
+uint32_t              mock_dwt_cycles;
+uint32_t              mock_dwt_step = 1u;
+/* init.c is not linked here; the live core clock the I2C sync wait scales by. */
+uint32_t bridge_core_clock_hz = 216000000u;
+
+CoreDebug_Type *mock_coredebug_ptr(void)
+{
+	return &mock_coredebug_regs;
+}
+
+DWT_Type *mock_dwt_ptr(void)
+{
+	mock_dwt_regs.CYCCNT = mock_dwt_cycles;
+	if ((mock_dwt_regs.CTRL & DWT_CTRL_CYCCNTENA_Msk) != 0u &&
+	    (mock_coredebug_regs.DEMCR & CoreDebug_DEMCR_TRCENA_Msk) != 0u) {
+		mock_dwt_cycles += mock_dwt_step;
+	}
+	return &mock_dwt_regs;
+}
 
 /* --- DMA -----------------------------------------------------------------*/
 
-static uint32_t mock_dma_remaining[2][1]; /* [dma_periph][channel] */
-static uint32_t mock_dma_chctl[2][1];
-static uint32_t mock_dma_interrupt_flags[2][1];
-static bool     mock_dma_disable_hold[2][1];
+static uint32_t mock_dma_remaining[2][MOCK_DMA_CH_COUNT]; /* [dma_periph][channel] */
+static uint32_t mock_dma_chctl[2][MOCK_DMA_CH_COUNT];
+static uint32_t mock_dma_interrupt_flags[2][MOCK_DMA_CH_COUNT];
+static bool     mock_dma_disable_hold[2][MOCK_DMA_CH_COUNT];
 static uint32_t mock_dmamux_chcfg[14];
 
 uint32_t *mock_dma_chctl_ref(uint32_t dma_periph, dma_channel_enum channelx)
@@ -329,7 +366,7 @@ uint32_t dma_transfer_number_get(uint32_t dma_periph, dma_channel_enum channelx)
 }
 void dma_flag_clear(uint32_t dma_periph, dma_channel_enum channelx, uint32_t flag)
 {
-	(void)channelx;
+	mock_dma_interrupt_flags[dma_periph][channelx] &= ~flag; /* FLAG and INT_FLAG bits coincide */
 	mock_seq_log("dma_flag_clear", dma_periph, flag);
 }
 void dma_interrupt_enable(uint32_t dma_periph, dma_channel_enum channelx, uint32_t source)

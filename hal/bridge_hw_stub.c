@@ -53,6 +53,10 @@ int bridge_hw_pwm_get(uint8_t channel, uint32_t *period_ns, uint32_t *duty_ns)
 	return BRIDGE_HW_ERR_NOTIMPL;
 }
 
+/* BRIDGE_HW_STUB_NO_ADC drops the ADC entry points so a host test can link this
+ * stub for the non-ADC bridge_hw_* while linking the real hal/gd32/adc*.c
+ * (tests/unit adc_e2e, via stub_no_adc.c); never defined in a firmware build. */
+#ifndef BRIDGE_HW_STUB_NO_ADC
 int bridge_hw_adc_read(uint8_t channel, uint8_t samples, uint16_t *mv)
 {
 	(void)channel;
@@ -61,6 +65,24 @@ int bridge_hw_adc_read(uint8_t channel, uint8_t samples, uint16_t *mv)
 	}
 	return BRIDGE_HW_ERR_NOTIMPL;
 }
+#endif
+
+#ifndef BRIDGE_HW_STUB_NO_ADC
+int bridge_hw_adc_read_start(uint8_t channel, uint8_t samples, bridge_hw_adc_read_done_fn done)
+{
+	(void)channel;
+	(void)samples;
+	(void)done;
+	return BRIDGE_HW_ERR_NOTIMPL;
+}
+#endif
+
+#ifndef BRIDGE_HW_STUB_NO_ADC
+void bridge_hw_adc_read_abort(bridge_hw_adc_read_done_fn done)
+{
+	(void)done;
+}
+#endif
 
 int bridge_hw_pwm_configure(uint8_t  channel,
                             uint8_t  align_mode,
@@ -74,6 +96,7 @@ int bridge_hw_pwm_configure(uint8_t  channel,
 	return BRIDGE_HW_ERR_NOTIMPL;
 }
 
+#ifndef BRIDGE_HW_STUB_NO_ADC
 int bridge_hw_adc_configure(uint8_t  channel,
                             uint16_t oversample_ratio,
                             uint16_t sample_cycles,
@@ -85,7 +108,9 @@ int bridge_hw_adc_configure(uint8_t  channel,
 	(void)resolution_bits;
 	return BRIDGE_HW_ERR_NOTIMPL;
 }
+#endif
 
+#ifndef BRIDGE_HW_STUB_NO_ADC
 int bridge_hw_adc_stream_begin(uint8_t stream_id, uint8_t channel, uint32_t sample_rate_hz)
 {
 	(void)stream_id;
@@ -93,7 +118,9 @@ int bridge_hw_adc_stream_begin(uint8_t stream_id, uint8_t channel, uint32_t samp
 	(void)sample_rate_hz;
 	return BRIDGE_HW_ERR_NOTIMPL;
 }
+#endif
 
+#ifndef BRIDGE_HW_STUB_NO_ADC
 int bridge_hw_adc_stream_read(uint8_t   stream_id,
                               uint8_t   max_samples,
                               uint8_t  *got_samples,
@@ -105,13 +132,17 @@ int bridge_hw_adc_stream_read(uint8_t   stream_id,
 	if (got_samples != 0) *got_samples = 0u;
 	return BRIDGE_HW_ERR_NOTIMPL;
 }
+#endif
 
+#ifndef BRIDGE_HW_STUB_NO_ADC
 int bridge_hw_adc_stream_end(uint8_t stream_id)
 {
 	(void)stream_id;
 	return BRIDGE_HW_ERR_NOTIMPL;
 }
+#endif
 
+#ifndef BRIDGE_HW_STUB_NO_ADC
 int bridge_hw_adc_spectrum_read(uint8_t   stream_id,
                                 uint16_t  bin_offset,
                                 uint8_t   max_bins,
@@ -129,6 +160,7 @@ int bridge_hw_adc_spectrum_read(uint8_t   stream_id,
 	if (got_bins_out != 0) *got_bins_out = 0u;
 	return BRIDGE_HW_ERR_NOTIMPL;
 }
+#endif
 
 int bridge_hw_trng_read(uint8_t *dest, size_t len)
 {
@@ -255,12 +287,15 @@ int bridge_hw_power_mode_set(uint8_t mode, uint32_t wake_bitmap, uint32_t wake_a
 /* v0.5 (§2B wave-2) -- chunked DSP-chain upload                     */
 /* --------------------------------------------------------------- */
 
+#ifndef BRIDGE_HW_STUB_NO_ADC
 int bridge_hw_adc_dsp_chain_open(uint8_t *chain_id)
 {
 	if (chain_id != 0) *chain_id = 0u;
 	return BRIDGE_HW_ERR_NOTIMPL;
 }
+#endif
 
+#ifndef BRIDGE_HW_STUB_NO_ADC
 int bridge_hw_adc_dsp_stage_push(uint8_t        chain_id,
                                  uint8_t        stage_index,
                                  uint8_t        kind,
@@ -278,10 +313,13 @@ int bridge_hw_adc_dsp_stage_push(uint8_t        chain_id,
 	(void)chunk_data_len;
 	return BRIDGE_HW_ERR_NOTIMPL;
 }
+#endif
 
+#ifndef BRIDGE_HW_STUB_NO_ADC
 int bridge_hw_adc_dsp_chain_bind(uint8_t chain_id, uint8_t stream_id)
 {
 	(void)chain_id;
 	(void)stream_id;
 	return BRIDGE_HW_ERR_NOTIMPL;
 }
+#endif

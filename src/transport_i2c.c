@@ -94,6 +94,14 @@ static void stage_no_pending(void)
 
 static void stage_reply(uint8_t status, const uint8_t *payload, size_t payload_len)
 {
+	/* STATUS_DEFERRED never goes on the wire (see transport_spi.c).  The I2C link
+	 * dispatches ADC_READ synchronously, so it is unreachable here; refuse it
+	 * rather than stage a frame that promises a reply that will never come. */
+	if (status == STATUS_DEFERRED) {
+		status      = STATUS_IO;
+		payload     = NULL;
+		payload_len = 0u;
+	}
 	i2c_tx_buf[0] = status;
 	if (payload_len > 0u && payload != NULL) {
 		memcpy(&i2c_tx_buf[1], payload, payload_len);

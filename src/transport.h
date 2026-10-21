@@ -34,6 +34,12 @@ void transport_i2c_init(void);
 /* ---- weak HW bring-up hooks (strong impl in transport_hw_gd32.c) - */
 void bridge_transport_spi_hw_init(void);
 
+/* A deferred reply was just staged from interrupt context (the ADC burst's
+ * DMA-complete IRQ), outside the CS-rising path that normally arms TX.  Strong
+ * impl in transport_hw_gd32.c loads the TX DMA if the link is idle; weak no-op
+ * in transport_spi.c.  Runs at the CS EXTI's NVIC group priority. */
+void bridge_transport_spi_reply_staged(void);
+
 /* I2C returns BRIDGE_HW_OK / BRIDGE_HW_ERR_RANGE (../hal/bridge_hw.h):
  * its I2C_TIMING derivation depends on the LIVE APB1 kernel clock (see
  * hal/transport_hw_gd32.c), which is not fixed once this is called from

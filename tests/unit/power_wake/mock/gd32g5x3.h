@@ -121,6 +121,10 @@ extern int      mock_trial_unconfirmed;
 /* Deep-sleep entry observations (mode 2). */
 extern uint32_t mock_deepsleep_entries, mock_i2c_disables, mock_i2c_inits,
     mock_primask_at_deepsleep;
+/* ADC burst/format quiesce (adc.c): calls so far, and the count seen when the
+ * deep-sleep entry executed. */
+extern unsigned   mock_adc_quiesce_calls, mock_adc_quiesce_calls_at_deepsleep;
+void              adc_deepsleep_quiesce(void);
 extern FlagStatus mock_i2c_busy;
 /* Race injection (gh#12 review): CS pin level, per-IRQ NVIC pending bits, and
  * hooks fired inside the pre-lock settle window (fwdgt_counter_reload) and
