@@ -123,7 +123,8 @@
 /* The per-stream DMA ring depth is firmware-private (it is not on the wire)
  * and has ONE definition: BRIDGE_ADC_STREAM_RING_SAMPLES in
  * hal/gd32/gd32_common.h.  A second copy here read 128 while the real ring
- * was 1024. */
+ * was 1024.  A legacy CMD_ADC_STREAM_BEGIN stream uses the whole ring; a BEGIN2
+ * stream uses the smallest power of two >= max(2*W, 5 ms of samples). */
 
 /* Maximum samples returned by a single CMD_ADC_STREAM_READ reply.
  * Bounded by the wire's MAX_PAYLOAD_BYTES; tuned to keep the SPI

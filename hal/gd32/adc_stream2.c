@@ -15,6 +15,7 @@ void adc_read2_plan(uint32_t          backlog,
                     uint8_t           max_samples,
                     uint32_t          d_prev,
                     bool              discontinuity,
+                    bool              undercount_prev,
                     adc_read2_plan_t *out)
 {
 	out->skip        = 0u;
@@ -24,14 +25,18 @@ void adc_read2_plan(uint32_t          backlog,
 	out->remaining   = 0u;
 	out->next_d      = d_prev;
 	out->sentinel    = false;
+	out->undercount  = false;
 
 	if (discontinuity) {
 		out->dropped  = ADC_STREAM2_DISCONTINUITY;
 		out->sentinel = true;
 		return;
 	}
-	/* Transient undercount: within one ring below zero.  Empty, not lost. */
-	if (backlog > ADC_STREAM2_BACKLOG_MAX && backlog >= (uint32_t)(0u - (uint32_t)ring_depth)) {
+	/* Transient undercount (see adc_stream2.h): at most one ring below zero,
+	 * once.  Empty, not lost. */
+	if (backlog > ADC_STREAM2_BACKLOG_MAX && backlog >= (uint32_t)(0u - (uint32_t)ring_depth) &&
+	    !undercount_prev) {
+		out->undercount = true;
 		return;
 	}
 	if (backlog > ADC_STREAM2_BACKLOG_MAX) {
@@ -55,10 +60,31 @@ void adc_read2_plan(uint32_t          backlog,
 	out->next_d      = out->first_index + out->got;
 }
 
-uint16_t adc_stream2_ring_depth(uint16_t watermark)
+bool adc_stream2_ring_plan(uint16_t  watermark,
+                           uint32_t  tick_hz,
+                           uint32_t  period_ticks,
+                           uint16_t *ring_depth,
+                           uint16_t *granted_watermark)
 {
-	return (watermark == 0u) ? (uint16_t)BRIDGE_ADC_STREAM_RING_SAMPLES
-	                         : (uint16_t)(2u * watermark);
+	/* samples in one minimum lap = ceil(tick / period * LAP_MIN_US / 1e6) */
+	const uint64_t num  = (uint64_t)tick_hz * ADC_STREAM2_LAP_MIN_US;
+	const uint64_t den  = (uint64_t)period_ticks * 1000000u;
+	const uint64_t need = (num + den - 1u) / den;
+	if (need > BRIDGE_ADC_STREAM_RING_SAMPLES) return false;
+
+	if (watermark == 0u) {
+		*ring_depth        = (uint16_t)BRIDGE_ADC_STREAM_RING_SAMPLES; /* >= one lap (<= 500) */
+		*granted_watermark = 0u;
+		return true;
+	}
+	uint32_t target = 2u * (uint32_t)watermark;
+	if (target < need) target = (uint32_t)need;
+	uint32_t ring = 32u; /* 2 * the smallest watermark */
+	while (ring < target)
+		ring <<= 1;
+	*ring_depth        = (uint16_t)ring;
+	*granted_watermark = (uint16_t)(ring / 2u);
+	return true;
 }
 
 void adc_stream2_pace(uint32_t rate_hz, uint32_t *tick_hz, uint32_t *period_ticks)
