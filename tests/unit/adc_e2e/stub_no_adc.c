@@ -7,3 +7,6 @@
  */
 #define BRIDGE_HW_STUB_NO_ADC 1
 #include "../../../hal/bridge_hw_stub.c"
+
+/* init.c's core-clock verdict, which adc_stream.c's BEGIN2 path consults. */
+bool bridge_core_clock_matches = true;

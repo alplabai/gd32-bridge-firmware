@@ -178,7 +178,7 @@ ZTEST(adc_burst_reply, test_burst_completion_stages_the_whole_reply_atomically)
 	zassert_mem_equal(f, hook_frame, hook_len, "same reply on re-read");
 }
 
-/* The SPI frame carries the same bytes the synchronous (I2C) dispatch builds. */
+/* The SPI frame carries the same bytes the synchronous dispatch builds. */
 ZTEST(adc_burst_reply, test_deferred_reply_matches_the_synchronous_reply)
 {
 	uint8_t       sync_reply[GD32_BRIDGE_MAX_PAYLOAD_BYTES];
@@ -189,11 +189,16 @@ ZTEST(adc_burst_reply, test_deferred_reply_matches_the_synchronous_reply)
 	for (uint16_t v = 10u; v < 50u; v += 10u) {
 		zassert_equal(bridge_hw_fake_adc_queue_push(v), 0, "q");
 	}
+	/* v0.15 keeps ADC_READ off the I2C link, so the synchronous reference is the
+	 * SPI link with its deferred sink detached (no sink = every command completes
+	 * synchronously); transport_spi_init() re-attaches it afterwards. */
+	protocol_deferred_attach(NULL);
 	zassert_equal(
 	    protocol_dispatch(
-	        GD32_BRIDGE_LINK_I2C, CMD_ADC_READ, req, 2u, sync_reply, sizeof sync_reply, &sync_len),
+	        GD32_BRIDGE_LINK_SPI, CMD_ADC_READ, req, 2u, sync_reply, sizeof sync_reply, &sync_len),
 	    STATUS_OK,
 	    "sync");
+	transport_spi_init();
 	zassert_equal(sync_len, 9u, "1 + 4*2");
 
 	for (uint16_t v = 10u; v < 50u; v += 10u) {
