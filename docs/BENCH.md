@@ -1029,9 +1029,13 @@ previously all five were weakly aliased to the vendor's `Default_Handler`
    (`SYSCFG_STAT`) to have `FLASHECCIF` set, and `RTC_BKP4` (`FMC_ECCCS`)
    to have `ECCDET0` set with `ECCADDR`/`BK_ECC` matching the damaged
    doubleword.
-2. **HXTAL clock failure (NMI, `CKMNMIIF`)** — pull the HXTAL
-   crystal/oscillator input while `CKNMIIE` is enabled. Expect `RTC_BKP3`
-   bit 3 set, `RTC_BKP4` = 0.
+2. **HXTAL clock failure (NMI, `CKMNMIIF`)** — the default boot never runs
+   HXTAL, so this source cannot fire there. With the host-requested HXTAL
+   switch active (Phase 11) a lone CKM NMI is RECOVERED (fallback to IRC8M,
+   execution resumes, no record): that is Phase 11 step 7, not a fault-record
+   case. A CKM NMI together with a multi-bit/flash ECC or NMI-pin bit, or a
+   second one while already on IRC8M, still records and resets: expect
+   `RTC_BKP3` bit 3 set, `RTC_BKP4` = 0.
 3. **SRAM ECC (NMI, `SRAM*ECCMEIF`)** — **first confirm `FMC_OBCTL` bit 24
    `SRAM_ECCEN`** on the bench part; issue #36 established this bit's
    state is unconfirmed and nothing in the repo reads it. If armed, write
@@ -1078,6 +1082,117 @@ with SWD (or clear `RTC_BKP7` directly) before the next fault test.
 Recovery for a genuinely wedged fault handler: bench SWD probe (same as
 everywhere else), though this is the one phase in the batch whose entire
 purpose is to make that less necessary.
+
+---
+
+## Phase 11 — external clock on OSCIN (HXTAL bypass, SE2): host-requested switch and IRC8M fallback
+
+Needs a scope on **TP88** (net `GD32_OSC`, 5L35023B SE2 through 22 ohm into
+OSCIN/PF0) and an SWD probe. Phase 1 (boot) must already pass on the
+IRC8M-only build (`-DBRIDGE_CLOCK_HXTAL=OFF`) so a failure here is the clock
+work, not the base image.
+
+Background that shapes every step: the shipped 5L35023B OTP image has SE2
+free-running 32.768 kHz (reg `0x1F` = `0x46`, bit 7 `SE2_Freerun_32K` = 0).
+SE2 reaches its final frequency only when U-Boot writes the clock generator
+volatile registers, AFTER the GD32 has booted, so the default build boots on
+the IRC8M PLL and switches only when asked. The switch is triggered over SWD
+for now: write `1` to `bridge_clock_hxtal_request` (the protocol opcode
+belongs to the 0.15 work). **Never reprogram SE2 after the switch**: the clock
+monitor detects a stopped clock, not a changed one, and the PLL would follow the
+new frequency (8 MHz x108 -> 24.576 MHz would be ~664 MHz).
+
+1. **SE2 level, frequency and VDD.** With the host-side 5L35023B configuration
+   that enables SE2, scope TP88. PASS = the intended frequency (24.576 MHz, the SE2 DIV4 route, on every board once U-Boot has configured
+   it; the next build burns the same setting into the clock generator OTP) with a
+   1.8 V swing (a clean single-ended clock, not a crystal sine), AND the GD32
+   VDD measures 1.8 V on the same session (a 1.8 V swing into a part powered at
+   another voltage is not a valid reading). FAIL = any other frequency: do not
+   request the switch (the firmware refuses it, but the bench must know why).
+2. **Default boot stays on IRC8M.** Flash the default build, boot, halt over
+   SWD. PASS = `bridge_clock_source` = 0, `bridge_clock_fallback` = 8,
+   `RCU_CTL.HXTALEN` (bit 16) clear, `SystemCoreClock` = 216000000, no change in
+   boot time against the IRC8M-only build.
+3. **Host-requested switch.** With SE2 at the intended frequency (U-Boot
+   done), write `1` to `bridge_clock_hxtal_request` and keep both buses idle: the switch
+   runs after 3 consecutive quiet 50 ms ticks, `bridge_clock_switch_status` goes
+   1 (PENDING) -> 3 (DONE_HXTAL). PASS =
+   `RCU_CTL` has `HXTALEN` (bit 16), `HXTALSTB` (bit 17), `HXTALBPS` (bit 18)
+   and `CKMEN` (bit 19) set; `RCU_CFG0.SCSS` = PLLP and `RCU_CFG0.AHBPSC` = 0
+   (AHB /1); `RCU_PLL.PLLSEL` (bit 22) = 1; `bridge_clock_source` = 1,
+   `bridge_clock_fallback` = 0; `bridge_clock_input_hz` = the table entry
+   (`README.md`: 8000000 -> PLLPSC field 1 / PLLN 108, 24576000 -> field 5 /
+   105, ...); `SystemCoreClock` = the entry SYSCLK (216000000, or 215040000 for
+   24.576 MHz). `RTC_BKP9` = `0x48545831` until the next tick, then 0. Scope a
+   PWM output at a known period and compare it with the host timebase: it must
+   now track SE2, not IRC8M. With a PWM output or ADC stream already running
+   the request must end `bridge_clock_switch_status` = 5 (REFUSED_BUSY) with
+   `bridge_clock_source` = 0, the PWM period unchanged, and nothing latched
+   (stop the PWM afterwards: no switch happens by itself). Likewise keep a
+   transfer toggling CS during the request: it must stay PENDING (or end 5 after
+   ~10 s) and never switch under the traffic.
+4. **Frequency classification.** Repeat step 3 with SE2 set to whatever the
+   bench can produce. PASS = 24.576 MHz lands on its entry (PLLPSC field 5,
+   PLLN 105, 215040000); 8, 12, 16 and 20 MHz (if producible) land on theirs
+   (216000000). Non-sources (e.g. 10 MHz, 24.000 MHz, 28 MHz) and 32.768 kHz:
+   PASS = no switch, `bridge_clock_source` = 0, `bridge_clock_fallback` = 6 (or 2
+   for 32.768 kHz, where `HXTALSTB` does not set), SYSCLK never left the IRC8M
+   PLL (probe a PWM period before and after: unchanged). Do NOT feed 25 MHz as a
+   test: it is refused unless the IRC8M is more than 0.7% fast (see README); SE2 may only be
+   programmed by the alp-sdk U-Boot fixup. Also confirm TIMER14 is idle again (`RCU_APB2EN.TIMER14EN` clear)
+   after every attempt. If a good 24.576 MHz clock always reports 6, either the
+   unit IRC8M is more than ~1% off (the +-1% band refuses an IRC8M further off than that by design) or the
+   HXTAL/32 -> TIMER14 routing needs a closer look: it is taken from the vendor
+   header and has not run on silicon.
+5. **OSCOUT stays a GPIO.** With HXTAL up, drive E1M IO13 (PF1) high and low with
+   `CMD_GPIO_WRITE` and scope the pad. PASS = it follows. FAIL = pinned or
+   loaded: bypass is not leaving OSCOUT free; stop.
+6. **Fallback, SE2 off.** Disable SE2 in the 5L35023B, request the switch. PASS
+   = the link keeps working, `bridge_clock_source` = 0, `bridge_clock_fallback`
+   = 2, `RCU_CTL.HXTALSTB` = 0 with the HXTAL bits cleared, `SystemCoreClock` =
+   216000000 from IRC8M. The only added time is the bounded 5 ms wait.
+7. **Failure NMI, SE2 off after the switch.** Switch with SE2 on (step 3 state),
+   run a PWM plus an SPI/I2C ping loop, then disable SE2 from the host. PASS =
+   the ping loop resumes without a reset, `bridge_clock_source` = 0,
+   `bridge_clock_fallback` = 4, `SYSCFG_STAT.CKMNMIIF` (bit 3) clear,
+   `RCU_INT.CKMIF` (bit 7) clear, no new fault record (`RTC_BKP0` magic
+   unchanged), PWM period back to nominal. One transfer in flight at that
+   instant may fail its CRC. A second CKM NMI after the fallback must reset
+   through the fault path (it cannot be provoked once `CKMEN` is off; this is
+   the storm guard, covered by the host tests).
+8. **Marker.** After a healthy step 3 run, `RTC_BKP9` = 0. Reset-and-halt, write
+   `RTC_BKP9` = `0x48545831`, resume. PASS = boots on IRC8M with
+   `bridge_clock_fallback` = 5, `RTC_BKP9` = 0 and a switch request this boot is
+   refused with the same code; after the next reset the request works again.
+9. **Cold boot, 100x.** Power-cycle at least 100 times, each time confirming the
+   default boot (step 2) and then the host-requested switch (step 3), with SE2
+   on, and the same count with SE2 off (step 6): any boot that fails to reach a
+   working link, or any reset after the request, is a FAIL. One hundred is the
+   floor because the AHB step and the PLL reprogramming run on every request.
+10. **Deep-sleep wake** (`CMD_POWER_MODE_SET` mode 2), a) with SE2 on and the
+    switch active, b) with SE2 switched off during the sleep. PASS = a) source 1
+    after the wake, `CKMEN` set again; b) source 0 / fallback 2, link up both
+    times. For b) measure the wake with a scope on a transport pin: the HXTAL
+    wait is bounded by 5 ms of core time (the old 1e6-spin budget would have been
+    1.2-1.9 s at 8 MHz under PRIMASK, past the 445 ms FWDGT window), so b) must
+    complete without a watchdog reset and within ~15 ms of the wake.
+    c) A wake where the WFI returns at once (provoke a CS edge or RTC tick just
+    as the entry starts; hard to hit, retry): source stays 1, `HXTALEN` is never
+    seen cleared and the PLL never leaves PLLP; only `CKMEN` is re-armed.
+11. **Autonomous mode** (`-DBRIDGE_CLOCK_HXTAL_AT_BOOT=ON`, only for an SoM whose
+    SE2 is correct from POR): steps 2-4 and 6 with the switch at boot instead of
+    on request; boot to a working link must stay well inside the FWDGT window
+    (~3 ms typical, 23 ms worst).
+
+**What the firmware cannot catch.** A frequency that changes after the switch
+(the clock monitor only sees a stop), and an SE2 frequency that falls inside the
+acceptance band of a table entry (25 MHz is taken for 24.576 MHz when the IRC8M
+is more than 0.7% fast; it must never be fed, and SE2 must only ever be programmed by
+the alp-sdk U-Boot fixup). The frequency check itself replaces the earlier "cannot measure it"
+limit: it counts HXTAL/32 against the IRC8M-derived core clock (accuracy of that
+reference is the datasheet IRC8M tolerance, to be confirmed). The `RTC_BKP9`
+marker only helps if a misclock faults or resets AND the backup domain survives.
+Recovery is the IRC8M-only build over SWD.
 
 ---
 

@@ -76,7 +76,7 @@ void pwm_timer_init(uint32_t periph)
 {
 	timer_parameter_struct ip;
 	timer_struct_para_init(&ip);
-	ip.prescaler         = (uint16_t)PWM_TIMER_PRESCALER;
+	ip.prescaler         = (uint16_t)bridge_timer_prescaler(1000000u); /* 1 us tick */
 	ip.alignedmode       = TIMER_COUNTER_EDGE;
 	ip.counterdirection  = TIMER_COUNTER_UP;
 	ip.period            = PWM_TIMER_ARR_MAX; /* 65.5 ms default; per-set */
@@ -201,6 +201,11 @@ static uint8_t pwm_timer_index(uint32_t periph)
 	 * the cast is a no-op at runtime, added only to satisfy the warning
 	 * (#109 TODO). */
 	return (uint8_t)((periph == TIMER0) ? 0u : 1u);
+}
+
+bool pwm_any_claimed(void)
+{
+	return (pwm_timer_claims[0] | pwm_timer_claims[1]) != 0u;
 }
 
 void pwm_channel_claim(uint8_t channel)

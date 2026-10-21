@@ -16,6 +16,7 @@
 
 #include "bridge_board_config.h" /* BRIDGE_I2C_PERIPH */
 #include "bridge_critical.h"
+#include "clock_source.h"
 #include "gd32_common.h"
 #include "ota.h" /* ota_trial_unconfirmed() */
 #include "power_wake.h"
@@ -378,22 +379,35 @@ static uint8_t s_clock_relock_tick;
  * SystemCoreClock plus the bridge_core_clock_* telemetry are refreshed on
  * EVERY exit so they always describe the live clock.  Called by the mode-2
  * wake path and by the bridge_power_tick() relock retry, before the
- * PWM/ADC/DWT users run: PWM_TIMER_CLK_HZ,
- * BRIDGE_ADC_PACE_CLK_HZ and the DWT cycle conversions hardcode 216 MHz.
- * (The I2C timing is NOT one of them -- bridge_transport_i2c_hw_init()
- * derives it from rcu_clock_freq_get(CK_APB1) at run time, gh#41.) */
+ * PWM/ADC/DWT users run.  The I2C timing is derived at run time from
+ * bridge_clock_apb1_hz() (gh#41), and the PWM / ADC-pacing prescalers from
+ * bridge_core_clock_hz; only the DWT cycle-to-time conversion is the host's.
+ *
+ * When HXTAL is the active source, bridge_clock_relock_prepare() restarts it
+ * and leaves the PLL running and selected (true), in which case the replay
+ * below is skipped; it also returns true, without touching HXTAL, when the WFI
+ * returned without sleeping and the PLL never stopped. */
 bool bridge_clock_restore_after_deepsleep(void)
 {
 	bool ok = false;
 
-	FMC_WS = (FMC_WS & (~FMC_WS_WSCNT)) | WS_WSCNT(7);
-	RCU_CTL |= RCU_CTL_PLLEN;
+	/* HXTAL source: restart it (or fall back to the IRC8M PLL).  true = the PLL
+	 * is already running and selected, so no replay (and CKMEN is armed only
+	 * after the PLL is up, never between a replayed PLLEN and its lock). */
+	const bool already_up = bridge_clock_relock_prepare();
+	uint32_t   to         = POWER_CLOCK_RESTORE_SPINS;
 
-	uint32_t to = POWER_CLOCK_RESTORE_SPINS;
-	while (0u == (RCU_CTL & RCU_CTL_PLLSTB) && --to != 0u) {
+	if (already_up) {
+		ok = true;
+	} else {
+		FMC_WS = (FMC_WS & (~FMC_WS_WSCNT)) | WS_WSCNT(7);
+		RCU_CTL |= RCU_CTL_PLLEN;
+
+		while (0u == (RCU_CTL & RCU_CTL_PLLSTB) && --to != 0u) {
+		}
 	}
 
-	if (0u != (RCU_CTL & RCU_CTL_PLLSTB)) {
+	if (!already_up && 0u != (RCU_CTL & RCU_CTL_PLLSTB)) {
 		RCU_CFG0 = (RCU_CFG0 & ~RCU_CFG0_SCS) | RCU_CKSYSSRC_PLLP;
 
 		to = POWER_CLOCK_RESTORE_SPINS;
@@ -411,9 +425,9 @@ bool bridge_clock_restore_after_deepsleep(void)
 	/* SysTick CTRL is preserved across Deep-sleep; LOAD is re-sized below.
 	 * SystemCoreClock and its telemetry mirror are re-derived from the
 	 * live RCU state. */
-	SystemCoreClockUpdate();
+	bridge_clock_core_update();
 	bridge_core_clock_hz      = SystemCoreClock;
-	bridge_core_clock_matches = (SystemCoreClock == PWM_TIMER_CLK_HZ);
+	bridge_core_clock_matches = bridge_clock_core_matches();
 
 	/* SysTick LOAD was sized for the boot clock.  On a failed relock the
 	 * part runs on IRC8M, where that reload stretches the 50 ms tick ~27x
@@ -462,6 +476,13 @@ static bool lp_link_quiet(void)
 	if (NVIC_GetPendingIRQ(BRIDGE_I2C_ER_IRQN) != 0u) return false;
 	if (NVIC_GetPendingIRQ(RTC_WKUP_IRQn) != 0u) return false;
 	return true;
+}
+
+/* Quiet-bus predicate for the clock switch (clock_hw.c): the same gate the
+ * low-power entry uses. */
+bool bridge_link_quiet(void)
+{
+	return lp_link_quiet();
 }
 
 /* Base-level low-power entry (gh#63): the deferred half of
@@ -581,6 +602,8 @@ void bridge_power_tick(void)
 			return;
 		}
 
+		/* HXTAL stops in Deep-sleep: take the clock monitor off it first. */
+		bridge_clock_pre_deepsleep();
 		pmu_to_deepsleepmode(PMU_LDO_LOWPOWER, WFI_CMD);
 		/* A failed relock leaves the part on IRC8M (see the
 		 * bridge_core_clock_matches telemetry); the restore already
