@@ -102,23 +102,6 @@
  *         (0x02), matching <alp/pwm.h>'s ALP_ERR_NOT_READY contract; the
  *         latter remains STATUS_NOSUPPORT for a build without capture.
  *
- *   - Unnumbered "stub/contract mismatch": CMD_GPIO_READ and CMD_GPIO_WRITE
- *     never special-case BRIDGE_HW_ERR_NOTIMPL (src/protocol.c:157, :175)
- *     the way every OTHER HAL-backed handler does -- out of scope for #23
- *     (the issue names four PWM/ADC handlers, not GPIO) and left unfixed
- *     here.  Against hal/bridge_hw_stub.c -- which answers NOTIMPL
- *     unconditionally for everything -- a real host talking to an
- *     unimplemented GD32 GPIO backend gets STATUS_IO ("retry the framing")
- *     forever instead of STATUS_NOSUPPORT ("this capability doesn't
- *     exist").  Their bare `if (rv < 0) return STATUS_IO;` (src/protocol.c:
- *     157, :175) is not NOTIMPL-specific either -- it flattens
- *     BRIDGE_HW_ERR_INVAL, _RANGE and _BUSY to STATUS_IO too, with no
- *     explicit branch for any of them.  This suite injects
- *     BRIDGE_HW_ERR_NOTIMPL nowhere for gpio_read or gpio_write; each gets
- *     only the unambiguous generic BRIDGE_HW_ERR_IO -> STATUS_IO row --
- *     GPIO's INVAL/RANGE/BUSY/NOTIMPL rows are left undeclared-by-omission,
- *     same as before this change.
- *
  *   - Unnumbered "flattened-to-IO" pair (no tracked issue; found while
  *     auditing the above): CMD_ADC_STREAM_END (src/protocol.c:583-584) and
  *     CMD_ADC_SPECTRUM_READ (src/protocol.c:545-547) each explicitly branch
@@ -585,6 +568,9 @@ static const hal_map_case_t HAL_MAP_CASES[] = {
 	/* --- "stub/contract mismatch" bucket: only the unambiguous IO row. */
 	{ "GPIO_READ/IO",  CMD_GPIO_READ,  req_gpio_read,  4u, FAKE_FN_GPIO_READ,  BRIDGE_HW_ERR_IO, STATUS_IO },
 	{ "GPIO_WRITE/IO", CMD_GPIO_WRITE, req_gpio_write, 8u, FAKE_FN_GPIO_WRITE, BRIDGE_HW_ERR_IO, STATUS_IO },
+	{ "GPIO_READ/NOTIMPL", CMD_GPIO_READ, req_gpio_read, 4u, FAKE_FN_GPIO_READ, BRIDGE_HW_ERR_NOTIMPL, STATUS_NOSUPPORT },
+	{ "GPIO_WRITE/NOTIMPL", CMD_GPIO_WRITE, req_gpio_write, 8u, FAKE_FN_GPIO_WRITE, BRIDGE_HW_ERR_NOTIMPL, STATUS_NOSUPPORT },
+	{ "GPIO_READ/BUSY", CMD_GPIO_READ, req_gpio_read, 4u, FAKE_FN_GPIO_READ, BRIDGE_HW_ERR_BUSY, STATUS_BUSY },
 
 	/* --- PWM_SET / PWM_GET: both now route through status_from_hw()
 	 * (#23 B3, FIXED) so they can no longer disagree on the shared
