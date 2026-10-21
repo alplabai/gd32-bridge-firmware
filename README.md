@@ -163,6 +163,19 @@ breaks every host that has not been rebuilt against the matching
 [`<alp/chips/gd32g553.h>`](https://github.com/alplabai/alp-sdk/blob/main/include/alp/chips/gd32g553.h) -- treat
 it as a wire-incompatible change and stage carefully.
 
+## Boot config (`CMD_BOOT_CONFIG` 0x42, protocol 0.14.1)
+
+A persistent flags word kept in two A/B record pages at `OTA_CONFIG_REC0/1`
+([`src/ota_layout.h`](src/ota_layout.h)). Request `op:u8 flags:u32` (op 0 = GET,
+op 1 = SET); reply `flags:u32`, the stored value. Bit0 drives PD11 (E1M IO29
+`SDIO_MUX_EN`) high at every boot, so a provisioning run keeps the EVK microSD
+mux off across power cycles. SET is queued and committed from the main loop,
+takes effect at the next GD32 reset, and answers `BUSY` during an OTA session or
+while another SET is queued; `NOSUPPORT` on a build without the FMC HAL, with
+`OBCTL.DBS = 0`, or running from bank 1. Allowed on SPI and I2C. Handler:
+[`src/boot_config.c`](src/boot_config.c), `handle_boot_config()` in
+[`src/protocol.c`](src/protocol.c). Wire doc: alp-sdk `docs/gd32-bridge-protocol.md`.
+
 ## GPIO + PWM channel maps
 
 The wire-side **logical** ids that the protocol uses do **not**
