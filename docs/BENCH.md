@@ -116,12 +116,16 @@ conversion has always assumed and never measured.
 **Procedure:** with the *current, unmodified* firmware still on the part
 (no flash required for this step — it can run before any other change in
 this batch lands), meter the VREFP ball (J6) against VDDA with a DMM. Then
-flash #81 and halt the part under SWD; read `VREF_CS` back and require it
-reads `0x0000 0002` (POR value — `VREFEN=0, HIPM=1`, external-reference
-mode per User Manual Rev1.2 p.520 Table 20-1, as cited in #81's own body).
+flash #81 and halt the part under SWD; read `VREF_CS` back. In the
+current (internal-buffer, 2.048 V) mode a healthy boot reads `0x0000 0009`
+(`VREFEN`|`VREFRDY`, `HIPM` clear). `0x0000 0001` means the buffer never
+locked, and `0x0000 0003` (`VREFEN`|`HIPM`) is the 2026-06-05 dead-node
+failure recorded in `hal/gd32/init.c`: both are FAIL. Only if the
+external-reference mode is later adopted does `VREF_CS` read `0x0000 0002`
+(POR value, `VREFEN=0, HIPM=1`, User Manual Rev1.2 p.520 Table 20-1).
 
 **PASS:** VREFP tracks VDDA (reads ~1.8 V, moves with VDDA if VDDA is
-perturbed) **and** `VREF_CS` reads back `0x0000 0002` post-fix.
+perturbed) **and** `VREF_CS` reads back `0x0000 0009` post-fix.
 
 **FAIL:** VREFP floats, reads an unexpected fixed voltage, or does not
 track VDDA. This does not mean #81's *code* is wrong — leaving the internal
