@@ -418,12 +418,12 @@ bool spi_slave_reply_undrained(void)
 void transport_spi_init(void)
 {
 	spi_reply_undrained = false;
-	spi_rx_len        = 0u;
-	spi_tx_len        = 0u;
-	spi_tx_cursor     = 0u;
-	spi_drain_streak  = 0u;
-	spi_seq           = 0u;
-	spi_reply_pending = false;
+	spi_rx_len          = 0u;
+	spi_tx_len          = 0u;
+	spi_tx_cursor       = 0u;
+	spi_drain_streak    = 0u;
+	spi_seq             = 0u;
+	spi_reply_pending   = false;
 	protocol_deferred_attach(spi_deferred_reply);
 	/* SPI1 slave + CS-EXTI bring-up lives in the gd32 HAL backend
      * (hal/transport_hw_gd32.c); the stub backend's weak no-op keeps
