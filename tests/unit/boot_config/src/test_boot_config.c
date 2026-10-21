@@ -302,7 +302,7 @@ ZTEST(boot_config, test_erase_walk_blocks_set_and_commit_even_in_error_state)
 	zassert_false(boot_config_pending(&p));
 	/* A SET queued before the walk started must not commit mid-walk. */
 	g_erase_walk = false;
-	cfg(GD32_BRIDGE_LINK_SPI, 1u, F1, &v);
+	zassert_equal(cfg(GD32_BRIDGE_LINK_SPI, 1u, F1, &v), STATUS_OK, "SET queued before the walk");
 	g_erase_walk = true;
 	boot_config_tick();
 	zassert_equal(g_erase_calls, 0u, "no commit while the walk runs, funnel idle");

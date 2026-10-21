@@ -70,7 +70,11 @@ ZTEST(main_boot_order, test_ota_boot_init_between_hw_and_transports)
 	zassert_true(strcmp(seq, "HOSI") == 0, "want bridge_hw_init, ota_boot_init, spi, i2c");
 }
 
-/* A SET queued by an ISR after the last tick's check must not be left behind a
+/* Host note: main_irq_off()/main_irq_on() are no-ops in a hosted build, so this
+ * proves only the skip-WFI branch.  That the mask surrounds the check (the
+ * lost-wakeup fix proper) is a bench property, proven on 2026W38-0009.
+ *
+ * A SET queued by an ISR after the last tick's check must not be left behind a
  * WFI: with work pending the loop goes straight to the tick; with none it
  * sleeps first. */
 ZTEST(main_boot_order, test_no_sleep_while_deferred_work_is_pending)

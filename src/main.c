@@ -102,8 +102,9 @@ int main(void)
 	transport_spi_init();
 	transport_i2c_init();
 
-	/* Periodic housekeeping lives inside bridge_hw_tick() (a no-op on
-     * this SoM rev); the main loop just yields. */
+	/* Housekeeping lives in bridge_hw_tick().  The loop sleeps in WFI until an
+	 * interrupt (transport or SysTick) and then ticks; it skips the sleep only
+	 * while bridge_hw_work_pending() says an ISR-queued job still needs a tick. */
 	for (;;) {
 		/* Check-then-sleep must be atomic against the transport ISRs: an ISR
 		 * that queues work after the last bridge_hw_tick() passed its check

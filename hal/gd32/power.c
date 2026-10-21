@@ -251,8 +251,8 @@ static void power_fwdgt_settle_before_lp_entry(void)
 int bridge_hw_power_mode_set(uint8_t mode, uint32_t wake_bitmap, uint32_t wake_after_ms)
 {
 	/* Mode 0 (run) + mode 1 (sleep) are accepted no-ops -- main()'s
-	 * `for (;;) { __WFI(); bridge_hw_tick(); }` already runs the CPU
-	 * in WFI between transport interrupts, which IS "sleep" on the
+	 * main()'s loop already runs the CPU in WFI between
+	 * transport interrupts and SysTick ticks, which IS "sleep" on the
 	 * GD32G5.  Mode 2 (deep-sleep) + mode 3 (standby) are LATCHED
 	 * here and executed from bridge_power_tick() at base level (gh#63)
 	 * -- never entered from this call, because this call runs INSIDE a

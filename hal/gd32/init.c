@@ -746,7 +746,8 @@ void bridge_hw_init(void)
 
 	/* --- Periodic tick (gh#54) ----------------------------------------
 	 *
-	 * The main loop is `for (;;) { __WFI(); bridge_hw_tick(); }` and
+	 * The main loop sleeps in WFI between ticks (it skips the WFI only while
+	 * a boot-config SET is queued, see main.c) and
 	 * used to have NO periodic wake source at all: nothing between
 	 * transport interrupts ever retired the wfi, so an armed OTA slot
 	 * erase stalled mid-slot the moment the host stopped polling, and
@@ -905,10 +906,17 @@ static void bridge_fwdgt_arm(void)
 extern bool ota_trial_unconfirmed(void);
 
 /* Deferred base-level work that must not be left behind a WFI (see main.c):
- * a queued boot-config SET, and an OTA erase walk (one page per tick). */
+ * a queued boot-config SET that boot_config_tick() can run now.  The OTA erase
+ * walk is deliberately NOT work that keeps the loop awake: it stays paced at
+ * one page per wake (transport IRQ or the 50 ms SysTick), because each page
+ * erases with IRQs masked for up to 20 ms and back-to-back pages would black
+ * the link out almost continuously.  A SET queued before a BEGIN therefore
+ * sleeps (paced) while the walk runs; boot_config_tick() follows
+ * ota_erase_tick() in the same tick that clears the walk, so it commits then
+ * with no extra wake.  A new SET cannot be queued during a walk (BUSY). */
 bool bridge_hw_work_pending(void)
 {
-	return boot_config_pending(NULL) || ota_erase_active();
+	return boot_config_pending(NULL) && !ota_erase_active();
 }
 
 void bridge_hw_tick(void)
