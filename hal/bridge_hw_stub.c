@@ -62,6 +62,19 @@ int bridge_hw_adc_read(uint8_t channel, uint8_t samples, uint16_t *mv)
 	return BRIDGE_HW_ERR_NOTIMPL;
 }
 
+int bridge_hw_adc_read_start(uint8_t channel, uint8_t samples, bridge_hw_adc_read_done_fn done)
+{
+	(void)channel;
+	(void)samples;
+	(void)done;
+	return BRIDGE_HW_ERR_NOTIMPL;
+}
+
+void bridge_hw_adc_read_abort(bridge_hw_adc_read_done_fn done)
+{
+	(void)done;
+}
+
 int bridge_hw_pwm_configure(uint8_t  channel,
                             uint8_t  align_mode,
                             uint32_t dead_time_ns,

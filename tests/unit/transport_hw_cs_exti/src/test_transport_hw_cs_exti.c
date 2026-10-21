@@ -23,6 +23,9 @@
 
 /* ---- mock backing store ------------------------------------------------ */
 uint32_t mock_scratch;
+uint32_t mock_dma_enable_calls;
+uint32_t mock_dma_cfg_channel;
+uint32_t mock_dma_cfg_number;
 uint32_t mock_dma_chctl;
 uint32_t mock_spi_stat;
 
@@ -104,13 +107,18 @@ void spi_slave_cs_high(void)
 void spi_slave_transport_error(void)
 {
 }
+/* Staged reply the portable layer would hold; empty unless a case loads it. */
+static uint8_t stub_reply[BRIDGE_SPI_DMA_BUF_LEN + 8u];
+static size_t  stub_reply_len;
+static size_t  stub_reply_cursor;
+
 uint8_t spi_slave_tx_next_byte(void)
 {
-	return 0xFFu;
+	return (stub_reply_cursor < stub_reply_len) ? stub_reply[stub_reply_cursor++] : 0xFFu;
 }
 bool spi_slave_tx_pending(void)
 {
-	return false;
+	return stub_reply_cursor < stub_reply_len;
 }
 void i2c_slave_write_start(void)
 {
@@ -142,6 +150,11 @@ static void reset_state(void)
 	pd0_accesses          = 0u;
 	cs_level_high         = true;
 	dma_err_flag          = false;
+	stub_reply_len        = 0u;
+	stub_reply_cursor     = 0u;
+	mock_dma_enable_calls = 0u;
+	mock_dma_cfg_channel  = 0xFFFFu;
+	mock_dma_cfg_number   = 0xFFFFu;
 	mock_dma_chctl        = 0u; /* CHEN clear: channels quiesce */
 	mock_spi_stat         = 0u;
 	spi_dma_error_pending = false;
@@ -194,4 +207,38 @@ ZTEST(transport_hw_cs_exti, test_cs_rising_spi_overrun_clears_group)
 	mock_spi_stat = SPI_STAT_RXORERR;
 	BRIDGE_SPI_CS_EXTI_HANDLER();
 	expect_group_cleared("spi overrun seam");
+}
+
+/* A reply staged from interrupt context (the ADC burst's DMA-complete IRQ) is
+ * armed on the TX DMA immediately when the link is idle, so the host's next
+ * read gets it; mid-transaction (CS low) the TX DMA may be mid-transfer from the
+ * flat buffer, so nothing is touched and the CS-rising drain path serves it. */
+ZTEST(transport_hw_cs_exti, test_deferred_reply_arms_tx_only_when_the_link_is_idle)
+{
+	reset_state();
+	for (uint8_t i = 0u; i < 11u; ++i) {
+		stub_reply[i] = (uint8_t)(0xA0u + i);
+	}
+	stub_reply_len = 11u;
+
+	cs_level_high = false; /* a transaction is in flight */
+	bridge_transport_spi_reply_staged();
+	zassert_equal(mock_dma_enable_calls, 0u, "TX DMA untouched mid-transaction");
+	zassert_equal(stub_reply_cursor, 0u, "staged reply not consumed: the drain path serves it");
+
+	cs_level_high = true; /* idle */
+	bridge_transport_spi_reply_staged();
+	zassert_equal(mock_dma_enable_calls, 1u, "TX armed once");
+	zassert_equal(mock_dma_cfg_channel, (uint32_t)BRIDGE_SPI_TX_DMA_CH, "on the TX channel");
+	zassert_equal(mock_dma_cfg_number, 11u, "for exactly the staged reply");
+	zassert_equal(spi_tx_dma_buf[0], 0xA0u, "reply copied into the flat DMA buffer");
+	zassert_equal(spi_tx_dma_buf[10], 0xAAu, "whole reply copied");
+}
+
+ZTEST(transport_hw_cs_exti, test_deferred_reply_with_nothing_staged_arms_nothing)
+{
+	reset_state();
+	cs_level_high = true;
+	bridge_transport_spi_reply_staged();
+	zassert_equal(mock_dma_enable_calls, 0u, "a zero-length arm leaves TX disabled");
 }

@@ -922,6 +922,7 @@ bool bridge_hw_work_pending(void)
 void bridge_hw_tick(void)
 {
 	bridge_hw_dsp_pump();
+	adc_burst_tick(); /* before vref_late_tick: frees a stuck burst's ADC0 claim first */
 	vref_late_tick();
 	ota_erase_tick();
 	boot_config_tick(); /* queued CMD_BOOT_CONFIG SET: flash write at base level only */

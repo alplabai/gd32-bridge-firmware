@@ -47,7 +47,8 @@
 /* * Both DMA controllers (DMA0 + DMA1, 7 channels each) are        */
 /*   available.  As built, ADC stream 0 owns DMA0 CH0 and stream 1  */
 /*   owns DMA1 CH0, so they run concurrently; the SPI transport owns */
-/*   DMA0 CH2 (TX) and CH3 (RX), while I2C remains interrupt-driven. */
+/*   DMA0 CH2 (TX) and CH3 (RX); ADC_READ bursts own DMA1 CH1 (map in */
+/*   bridge_board_config.h); I2C remains interrupt-driven.            */
 /* --------------------------------------------------------------- */
 
 /* Negative return values from any bridge_hw_* call.  Positive return
@@ -140,7 +141,37 @@ int bridge_hw_pwm_configure(uint8_t  channel,
 /* ADC                                                              */
 /* --------------------------------------------------------------- */
 
+/* Most samples one burst read takes.  Mirrors GD32_BRIDGE_ADC_MAX_SAMPLES
+ * (protocol.h); protocol.c _Static_asserts the two together. */
+#define BRIDGE_HW_ADC_READ_MAX_SAMPLES 8u
+
+/* Blocking burst read.  Returns once all `samples` conversions are in `mv`
+ * (millivolts, rounded).  The conversions run on a hardware sequence moved by
+ * DMA; this call only waits on the DMA-complete interrupt's flag, bounded.
+ * Used by the I2C link, whose reply must exist before the read phase starts.
+ * The SPI link uses the asynchronous pair below. */
 int bridge_hw_adc_read(uint8_t channel, uint8_t samples, uint16_t *mv);
+
+/* Asynchronous burst read for the SPI link.
+ *
+ * Completion callback.  Runs in the ADC burst DMA interrupt, at the same NVIC
+ * group priority as the SPI CS EXTI (so it can never preempt, or be preempted
+ * by, the code that stages SPI replies).  `rv` is BRIDGE_HW_OK with `samples`
+ * valid entries in `mv`, or a negative BRIDGE_HW_ERR_* with `mv` unusable.
+ * `mv` is only valid for the duration of the call. */
+typedef void (*bridge_hw_adc_read_done_fn)(int rv, const uint16_t *mv, uint8_t samples);
+
+/* Validate, arm and trigger the burst, then return without waiting.
+ * BRIDGE_HW_OK: the burst is running and `done` will be called exactly once,
+ * unless it is aborted first.  Any other value: nothing was started and `done`
+ * will not be called (same codes bridge_hw_adc_read returns, plus BUSY while a
+ * previous burst, on any converter, is still in flight). */
+int bridge_hw_adc_read_start(uint8_t channel, uint8_t samples, bridge_hw_adc_read_done_fn done);
+
+/* Cancel an in-flight burst that was started with `done`; `done` is NOT called.
+ * No-op if nothing started with that callback is in flight (it already
+ * completed, or another caller owns the burst). */
+void bridge_hw_adc_read_abort(bridge_hw_adc_read_done_fn done);
 
 /* v0.3: sticky ADC tuning.  oversample_ratio is one of
  * 1/2/4/8/16/32/64/128/256 (rounded down to nearest power-of-two

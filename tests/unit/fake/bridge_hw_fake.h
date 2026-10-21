@@ -77,6 +77,7 @@
 #ifndef GD32_BRIDGE_TEST_FAKE_BRIDGE_HW_FAKE_H
 #define GD32_BRIDGE_TEST_FAKE_BRIDGE_HW_FAKE_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -209,11 +210,18 @@ void bridge_hw_fake_pwm_capture_seed(uint8_t ch, uint32_t period_ns, uint32_t pu
 /* Appends one sample; asserts (via a return-value the caller should
  * check with a plain if, not a zassert -- this header has no ztest
  * dependency) rather than silently dropping on overflow. */
-int  bridge_hw_fake_adc_queue_push(uint16_t mv);
-void bridge_hw_fake_adc_get_last_configure(uint8_t  *channel,
-                                           uint16_t *oversample_ratio,
-                                           uint16_t *sample_cycles,
-                                           uint8_t  *resolution_bits);
+int bridge_hw_fake_adc_queue_push(uint16_t mv);
+/* Asynchronous burst (bridge_hw_adc_read_start): true while armed and not yet
+ * completed or aborted; complete() plays the burst-DMA interrupt, delivering
+ * the queued samples (or `rv` < 0 as the failure) to the callback; abort_count
+ * counts bridge_hw_adc_read_abort calls that cancelled a live burst. */
+bool     bridge_hw_fake_adc_async_inflight(void);
+unsigned bridge_hw_fake_adc_async_abort_count(void);
+void     bridge_hw_fake_adc_async_complete(int rv);
+void     bridge_hw_fake_adc_get_last_configure(uint8_t  *channel,
+                                               uint16_t *oversample_ratio,
+                                               uint16_t *sample_cycles,
+                                               uint8_t  *resolution_bits);
 
 /* --------------------------------------------------------------- */
 /* ADC streaming + spectrum.                                         */

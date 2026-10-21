@@ -581,6 +581,10 @@ void bridge_power_tick(void)
 			return;
 		}
 
+		/* Cancel an in-flight ADC burst and distrust every converter's recorded
+		 * format: the ADC is clock-gated across Deep-sleep and the burst DMA
+		 * channel must not resume against a half-finished sequence. */
+		adc_deepsleep_quiesce();
 		pmu_to_deepsleepmode(PMU_LDO_LOWPOWER, WFI_CMD);
 		/* A failed relock leaves the part on IRC8M (see the
 		 * bridge_core_clock_matches telemetry); the restore already

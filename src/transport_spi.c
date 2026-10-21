@@ -17,6 +17,14 @@
  * calls protocol_dispatch() to compute the reply and stages the reply
  * envelope for the next transaction's DMA burst.
  *
+ * Deferred replies: a command that needs slow hardware (CMD_ADC_READ) arms it
+ * from protocol_dispatch(), which returns STATUS_DEFERRED.  The request's old
+ * staged reply is dropped, the staged-reply buffer stays EMPTY, and the
+ * hardware's completion interrupt stages the reply later (spi_deferred_reply).
+ * Until then a host read drains nothing -- the same "not ready" the host's
+ * re-read ladder already retries on -- so a CS edge during the conversion can
+ * never serve a stale or half-written reply.
+ *
  * THIS FILE is SILICON-FREE: framing, CRC, staging and the
  * protocol_dispatch() hand-off only.  The byte-level GigaDevice
  * hookups (SPI1 slave init, CS-EXTI, ISR wiring) live in the gd32
@@ -37,6 +45,14 @@
  * library.  The gd32 backend's hal/transport_hw_gd32.c overrides it with
  * the real SPI1 slave + CS-EXTI bring-up. */
 __attribute__((weak)) void bridge_transport_spi_hw_init(void)
+{
+}
+
+/* Weak default: a deferred reply has just been staged from interrupt context
+ * (outside the CS-rising path that normally arms TX).  The gd32 backend
+ * overrides this to load the TX DMA when the link is idle; the stub backend
+ * and the host tests have no DMA and keep the no-op. */
+__attribute__((weak)) void bridge_transport_spi_reply_staged(void)
 {
 }
 
@@ -70,6 +86,22 @@ static size_t  spi_tx_cursor;
 #define SPI_DRAIN_REWIND_BOUND 12u
 static uint8_t spi_drain_streak;
 
+/* A deferred command (CMD_ADC_READ) has been armed and its reply has not been
+ * staged yet.  While set, the staged-reply buffer is EMPTY (spi_tx_len == 0):
+ * the previous command's reply was dropped when the new request decoded, so a
+ * host read that lands during the conversion drains nothing and clocks idle
+ * bytes -- the same "not ready" the host already retries on -- instead of being
+ * served a stale, CRC-valid reply for the PREVIOUS command.
+ *
+ * Context safety: the writers are the CS EXTI path (decode_and_dispatch, the
+ * drain bound) and the burst DMA-complete interrupt (spi_deferred_reply).  Both
+ * run at NVIC group priority BRIDGE_CS_IRQ_PRIO (bridge_board_config.h asserts
+ * the burst IRQ shares it), so neither can preempt the other and no critical
+ * section is needed.  The reply is built completely in spi_tx_buf, and
+ * spi_tx_len is published LAST by stage_reply, so a reader never sees a
+ * half-written envelope. */
+static bool spi_reply_pending;
+
 /* v0.7 STATUS_SEQ stamp.  A 4-bit slave-side counter advanced exactly
  * once per FRESH staged reply (this function is the single staging
  * site; the drain/rewind paths re-serve the buffer without restaging,
@@ -95,9 +127,21 @@ static void stage_reply(uint8_t status, const uint8_t *payload, size_t payload_l
 	const uint16_t crc           = crc16_ccitt_false(spi_tx_buf, crc_covered);
 	spi_tx_buf[crc_covered]      = (uint8_t)(crc & 0xFFu);
 	spi_tx_buf[crc_covered + 1u] = (uint8_t)((crc >> 8) & 0xFFu);
-	spi_tx_len                   = crc_covered + 2u;
 	spi_tx_cursor                = 0u;
 	spi_drain_streak             = 0u; /* fresh reply staged: the drain ladder restarts */
+	spi_reply_pending            = false;
+	spi_tx_len                   = crc_covered + 2u; /* publish last: the reply is whole */
+}
+
+/* Burst-complete sink (protocol_deferred_attach).  Interrupt context, see
+ * spi_reply_pending.  A completion with nothing pending is stale -- a transport
+ * error already staged STATUS_IO over the command it belonged to -- and is
+ * dropped rather than clobbering that reply. */
+static void spi_deferred_reply(gd32_bridge_status_t status, const uint8_t *payload, size_t len)
+{
+	if (!spi_reply_pending) return;
+	stage_reply((uint8_t)status, payload, len);
+	bridge_transport_spi_reply_staged();
 }
 
 /* For early-error replies that don't have a CMD context yet, fall
@@ -105,6 +149,21 @@ static void stage_reply(uint8_t status, const uint8_t *payload, size_t payload_l
 static void stage_error_reply(uint8_t status)
 {
 	stage_reply(status, NULL, 0u);
+}
+
+/* Drain/empty transaction handling shared by the two "host read, no request"
+ * branches below.  Rewinds the cursor so the backend's re-drain re-arms the
+ * staged reply, bounded by SPI_DRAIN_REWIND_BOUND; past the bound the stale (or
+ * never-arriving) reply is replaced by STATUS_IO.  A pending deferred command
+ * has no reply to rewind and, past the bound, is cancelled. */
+static void drain_rewind(void)
+{
+	if (++spi_drain_streak > SPI_DRAIN_REWIND_BOUND) {
+		if (spi_reply_pending) protocol_deferred_abort();
+		stage_error_reply(STATUS_IO); /* tar-pit breaker, see above */
+		return;
+	}
+	spi_tx_cursor = 0u;
 }
 
 /* Decode an in-buffer request envelope; on success, dispatch and
@@ -132,11 +191,7 @@ static void decode_and_dispatch(void)
      * its request was never decoded.  Hazard fingerprinted on silicon
      * 2026-06-06 (byte-exact COUNTER_READ replays, phase-dependent). */
 	if (spi_rx_len == 0u) {
-		if (++spi_drain_streak > SPI_DRAIN_REWIND_BOUND) {
-			stage_error_reply(STATUS_IO); /* tar-pit breaker, see above */
-			return;
-		}
-		spi_tx_cursor = 0u;
+		drain_rewind();
 		return;
 	}
 
@@ -173,11 +228,7 @@ static void decode_and_dispatch(void)
          * with the correct reply intact in the buffer.  Rewinding makes
          * the re-arm idempotent: every drain re-stages the same reply,
          * so the host's re-read schedule converges as documented. */
-		if (++spi_drain_streak > SPI_DRAIN_REWIND_BOUND) {
-			stage_error_reply(STATUS_IO); /* tar-pit breaker, see above */
-			return;
-		}
-		spi_tx_cursor = 0u;
+		drain_rewind();
 		return;
 	}
 
@@ -200,7 +251,19 @@ static void decode_and_dispatch(void)
 		return;
 	}
 
-	const uint8_t              cmd = spi_rx_buf[1];
+	const uint8_t cmd = spi_rx_buf[1];
+
+	/* A new, valid request supersedes whatever the host was waiting on: cancel a
+	 * deferred command still converting (its reply would otherwise land on top
+	 * of this one), then drop the previous reply.  Dropping it BEFORE dispatch
+	 * (not at stage time) is what keeps a deferred command's reply buffer empty
+	 * until the burst completes -- see spi_reply_pending. */
+	if (spi_reply_pending) protocol_deferred_abort();
+	spi_tx_len        = 0u;
+	spi_tx_cursor     = 0u;
+	spi_drain_streak  = 0u;
+	spi_reply_pending = true;
+
 	uint8_t                    reply_pl[GD32_BRIDGE_MAX_PAYLOAD_BYTES];
 	size_t                     reply_pl_len = 0u;
 	const gd32_bridge_status_t st = protocol_dispatch(GD32_BRIDGE_LINK_SPI,
@@ -211,6 +274,13 @@ static void decode_and_dispatch(void)
 	                                                  sizeof(reply_pl),
 	                                                  &reply_pl_len);
 	TS_ONLY(const uint32_t ts_disp1 = timing_stats_now();)
+	if (st == STATUS_DEFERRED) {
+		/* Burst armed; spi_deferred_reply stages the reply from the DMA-complete
+		 * interrupt.  It cannot have run yet (same priority as this ISR), but a
+		 * host harness may complete it synchronously inside dispatch -- then it
+		 * has already staged and cleared the flag, and there is nothing to do. */
+		return;
+	}
 	stage_reply((uint8_t)st, reply_pl, reply_pl_len);
 	TS_ONLY(timing_stats_record(ts_crc0, ts_crc1, ts_disp1, timing_stats_now(), cmd);)
 }
@@ -280,11 +350,13 @@ bool spi_slave_tx_pending(void)
 
 void transport_spi_init(void)
 {
-	spi_rx_len       = 0u;
-	spi_tx_len       = 0u;
-	spi_tx_cursor    = 0u;
-	spi_drain_streak = 0u;
-	spi_seq          = 0u;
+	spi_rx_len        = 0u;
+	spi_tx_len        = 0u;
+	spi_tx_cursor     = 0u;
+	spi_drain_streak  = 0u;
+	spi_seq           = 0u;
+	spi_reply_pending = false;
+	protocol_deferred_attach(spi_deferred_reply);
 	/* SPI1 slave + CS-EXTI bring-up lives in the gd32 HAL backend
      * (hal/transport_hw_gd32.c); the stub backend's weak no-op keeps
      * this hardware-free for host-side protocol tests. */

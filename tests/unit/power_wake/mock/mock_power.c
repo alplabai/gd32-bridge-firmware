@@ -34,28 +34,38 @@ uint32_t mock_seq, mock_seq_clock_restore, mock_seq_i2c_init, mock_seq_rtc_disab
 int      mock_i2c_init_rc;
 int      mock_rtc_clock_config_saw_irq_masked;
 
+unsigned mock_adc_quiesce_calls;
+unsigned mock_adc_quiesce_calls_at_deepsleep;
+
+void adc_deepsleep_quiesce(void)
+{
+	++mock_adc_quiesce_calls;
+}
+
 void mock_power_reset(void)
 {
-	mock_power_hw_calls          = 0u;
-	mock_primask                 = 0u;
-	FMC_OBCTL                    = 0u;
-	mock_fwdgt_feeds             = 0u;
-	mock_systick_ctrl_at_standby = 0u;
-	mock_trial_unconfirmed       = 0;
-	mock_systick.CTRL            = 0u;
-	mock_systick.LOAD            = 0u;
-	mock_systick.VAL             = 0u;
-	mock_scb.SCR                 = 0u;
-	mock_scb.ICSR                = 0u;
-	mock_deepsleep_entries       = 0u;
-	mock_i2c_disables            = 0u;
-	mock_i2c_inits               = 0u;
-	mock_primask_at_deepsleep    = 0u;
-	mock_i2c_busy                = RESET;
-	mock_cs_level                = SET;
-	mock_nvic_pending            = 0u;
-	mock_on_settle               = NULL;
-	mock_on_i2c_disable          = NULL;
+	mock_power_hw_calls                 = 0u;
+	mock_adc_quiesce_calls              = 0u;
+	mock_adc_quiesce_calls_at_deepsleep = 0u;
+	mock_primask                        = 0u;
+	FMC_OBCTL                           = 0u;
+	mock_fwdgt_feeds                    = 0u;
+	mock_systick_ctrl_at_standby        = 0u;
+	mock_trial_unconfirmed              = 0;
+	mock_systick.CTRL                   = 0u;
+	mock_systick.LOAD                   = 0u;
+	mock_systick.VAL                    = 0u;
+	mock_scb.SCR                        = 0u;
+	mock_scb.ICSR                       = 0u;
+	mock_deepsleep_entries              = 0u;
+	mock_i2c_disables                   = 0u;
+	mock_i2c_inits                      = 0u;
+	mock_primask_at_deepsleep           = 0u;
+	mock_i2c_busy                       = RESET;
+	mock_cs_level                       = SET;
+	mock_nvic_pending                   = 0u;
+	mock_on_settle                      = NULL;
+	mock_on_i2c_disable                 = NULL;
 	mock_i2c_enables = mock_rtc_disables = mock_rtc_flag_clears = mock_exti19_clears = 0u;
 	mock_seq = mock_seq_clock_restore = mock_seq_i2c_init = mock_seq_rtc_disable = 0u;
 	mock_i2c_init_rc                                                             = BRIDGE_HW_OK;
@@ -147,6 +157,7 @@ void pmu_to_deepsleepmode(uint32_t ldo, uint32_t command)
 {
 	(void)ldo;
 	(void)command;
+	mock_adc_quiesce_calls_at_deepsleep = mock_adc_quiesce_calls;
 	++mock_deepsleep_entries;
 	mock_primask_at_deepsleep = mock_primask;
 	++mock_power_hw_calls;

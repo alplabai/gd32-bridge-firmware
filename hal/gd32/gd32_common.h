@@ -97,6 +97,49 @@ typedef struct {
  * INVAL at the call site, anything above the cap is RANGE. */
 #define BRIDGE_ADC_STREAM_RATE_MAX_HZ 100000u
 
+/* Burst-read state (CMD_ADC_READ), owned by adc.c.  One burst runs at a time
+ * across all four converters: they share the single burst DMA channel
+ * (BRIDGE_ADC_BURST_DMA_CH, bridge_board_config.h).  Non-static so the host
+ * suite can drive the DMA-complete interrupt and inspect the lifecycle. */
+#define ADC_BURST_IDLE     0u
+#define ADC_BURST_RUNNING  1u /* armed, conversions + DMA in flight      */
+#define ADC_BURST_ABORTING 2u /* being torn down; completion IRQ ignores */
+
+typedef struct {
+	volatile uint8_t state;      /* ADC_BURST_*                                 */
+	uint32_t         periph;     /* converter the burst runs on                 */
+	uint8_t          samples;    /* sequence length == DMA transfer count       */
+	uint16_t         full_scale; /* code range snapshot, for the mV conversion  */
+	uint8_t          age_ticks;  /* base-level ticks spent RUNNING (watchdog)   */
+	/* Completion callback (a bridge_hw_adc_read_done_fn).  Declared without that
+	 * typedef so this header stays free of bridge_hw.h. */
+	void (*done)(int rv, const uint16_t *mv, uint8_t samples);
+	uint16_t codes[8]; /* DMA destination: raw right-aligned codes    */
+	uint16_t mv[8];    /* converted result handed to `done`           */
+} adc_burst_t;
+
+extern adc_burst_t adc_burst; /* adc.c */
+
+/* Code -> millivolts, ROUNDED to nearest (ties up).  One definition for the
+ * single-shot burst and both stream read paths: truncating the division read
+ * up to 1 mV low on every sample, always in the same direction.  `code` above
+ * `full_scale` is clamped first; the result never exceeds adc_vref_mv. */
+uint16_t adc_code_to_mv(uint32_t code, uint16_t full_scale); /* adc.c, pure */
+
+/* Format record -- see adc.c.  Drop the "this converter already holds the
+ * burst format" claim; the next burst then does the full ADCON-clear
+ * reconfigure + recalibration.  Every path that reprograms a converter behind
+ * the burst's back must call it. */
+void adc_format_invalidate(uint32_t periph); /* adc.c */
+void adc_format_invalidate_all(void);        /* adc.c */
+
+/* Deep-sleep entry (power.c): cancel any burst and distrust every converter's
+ * recorded format, since the part resumes with a gated, possibly reset ADC. */
+void adc_deepsleep_quiesce(void); /* adc.c */
+
+/* Base-level tick (bridge_hw_tick): abort a burst that never completed. */
+void adc_burst_tick(void); /* adc.c */
+
 /* Pacing-timer clock.  TIMER5/6 are APB1 basic timers; with APB1 at
  * DIV1 they tick at the full 216 MHz core clock (same base the PWM
  * timers use -- see PWM_TIMER_CLK_HZ).  The silicon validation
@@ -273,7 +316,10 @@ _Static_assert(GPIO_PAD_CAN_STBY < GPIO_PAD_MAP_COUNT,
 
 /* Handler-residency budget for one CMD_ADC_READ (#135).
  *
- * bridge_hw_adc_read serialises `samples x oversample_ratio` hardware
+ * (History -- this is the residency that motivated the budget.  The SPI link
+ * no longer polls conversions in the ISR; see the end of this comment.)
+ *
+ * bridge_hw_adc_read used to serialise `samples x oversample_ratio` hardware
  * conversions inside a transport ISR, and BOTH multipliers are settable
  * over the wire.  On the HEALTHY path -- no timeout, STATUS_OK -- the
  * wire-legal pair
@@ -317,11 +363,12 @@ _Static_assert(GPIO_PAD_CAN_STBY < GPIO_PAD_MAP_COUNT,
  * So the budget constrains the PRODUCT, not either factor: 256x
  * oversampling stays reachable, just not stacked on a 638-cycle window.
  *
- * The better fix is asynchronous reads -- trigger in the ISR, collect on
- * a later poll, the shape ota_erase_tick() already uses -- but that lets
- * CMD_ADC_READ answer STATUS_BUSY, which is a wire-contract change
- * needing a matching alp-sdk host update.  This bound is the part that
- * can land without one. */
+ * The SPI link no longer holds the handler for this long: its read is armed
+ * in the ISR and finished by the burst DMA-complete interrupt (adc.c), so
+ * this ceiling now bounds how long a burst may occupy the converter and the
+ * single burst DMA channel (and how long the blocking I2C read may wait),
+ * not an ISR residency.  It is kept as-is: tightening or dropping it would
+ * change which CMD_ADC_READ requests answer STATUS_OUT_OF_RANGE. */
 #define ADC_READ_ISR_BUDGET_US        1000u
 #define ADC_READ_CONV_HALF_CYCLES_12B 25u               /* 12.5 ADCCK, doubled */
 #define ADC_READ_ADCCK_HZ             (216000000u / 6u) /* ADC_CLK_SYNC_HCLK_DIV6 */
@@ -457,6 +504,9 @@ extern uint16_t adc_vref_mv;                                  /* adc.c */
 uint16_t        adc_vref_mv_from_code(uint32_t vrefint_code); /* adc.c, pure */
 bool            adc_vref_measure(void);              /* adc.c, boot / base level, ADC0 claimed */
 bool            adc_periph_restore(uint32_t periph); /* adc.c */
+/* DMAMUX request id for a converter (DMA_REQUEST_ADCn); adc.c.  Returned as
+ * uint32_t so this header stays free of the vendor device header. */
+uint32_t adc_dma_request_id(uint32_t periph); /* adc.c */
 
 /* Bounded RSTCLB/CLB calibration cycle (UM Rev1.2 17.4.1, p.424-425),
  * shared with the stream path: any ADCON toggle invalidates the
