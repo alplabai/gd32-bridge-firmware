@@ -651,18 +651,32 @@ void bridge_hw_init(void)
      * Fix: enable the buffer.  Its three targets (2.048 / 2.5 /
      * 2.9 V) all exceed the module's 1.8 V VDDA, so the buffer
      * regulates as high as the rail allows (~VDDA); the lowest
-     * target (2.048 V) is the closest fit and least headroom stress.
-     * Bench-proven: VREFEN -> VREFRDY sets, and a DAC->ADC copper
-     * loopback then tracks 1:1 (DAC 2730 -> ADC 2730).  The reference
-     * cancels ratiometrically in that loop, so correctness is
-     * independent of the exact railed reference value; the absolute mV
-     * scale is measured from VREFINT below (adc_vref_mv).
+     * target (2.048 V) is the closest fit.
+     *
+     * KNOWN OUT-OF-SPEC (alp-sdk-internal gd32-bridge-firmware#59):
+     * Datasheet Rev2.0 p.109 Table 4-3, VDDA row, condition "VREFBUF
+     * used", requires VDDA >= VREFP+0.3, i.e. 2.348 V at the 2.048 V
+     * target; the 1.8 V rail is below that, so VREFP settles at an
+     * unspecified voltage.  The bench check (VREFEN -> VREFRDY sets, a
+     * DAC->ADC copper loopback tracks 1:1) is ratiometric and cannot
+     * see this; only the VREFINT measurement below (adc_vref_mv)
+     * recovers the real absolute scale.  The spec-clean alternative is
+     * external-reference mode (VREF_CS reset value 0x0000 0002,
+     * VREFEN=0 HIPM=1, UM Rev1.2 p.520 Table 20-1; never VREFEN=0 with
+     * HIPM=0, which pulls VREFP to VSSA).  It is NOT adopted: the
+     * 2026-06-05 silicon note above found the reference node dead with
+     * HIPM set, and whether VREFP is board-tied to VDDA is unmeasured.
+     * Decision pending the VREFP (ball J6) bench measurement in #59.
      *
 	 * VREFRDY wait is BOUNDED (boot-time; the gh#54 SysTick is armed
 	 * only at the END of bridge_hw_init, after this block): a spin
 	 * cap, not an unbounded poll -- a never-ready buffer must not hang
 	 * the bridge before the transports come online. */
 	rcu_periph_clock_enable(RCU_VREF);
+	/* VREFS[1:0] can be modified only while VREFEN = 0 (UM Rev1.2 p.521): an
+	 * OTA slot entry that skipped a chip reset can arrive with VREFEN set,
+	 * and the write would be silently ignored. */
+	vref_disable();
 	vref_voltage_select(VREF_VOLTAGE_SEL_2_048V); /* lowest target = closest under VDDA */
 	/* CLEAR HIPM first.  VREF_CS resets to 0x02 (HIPM high-impedance),
      * and the SPL's vref_enable() is a read-modify-write that only
