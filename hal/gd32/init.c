@@ -157,6 +157,7 @@
 
 #include "bridge_hw.h"
 #include "bridge_board_config.h"
+#include "boot_config.h"
 
 /* The wrapper's PUBLIC include directories expose the GigaDevice device
  * header.  It supplies the CMSIS/core definitions and pulls this project's
@@ -556,6 +557,15 @@ void bridge_hw_init(void)
 	              gpio_pad_map[GPIO_PAD_CAN_STBY].pin);
 	gpio_is_output[GPIO_PAD_CAN_STBY] = true;
 
+	/* Opt-in persistent boot config (src/boot_config.h, alp-sdk #2697): with
+	 * BOOT_CONFIG_FLAG_SDMUX_EN_HIGH set by the host, drive PD11 (E1M IO29
+	 * = SDIO_MUX_EN, active-low) HIGH so the carrier keeps the microSD
+	 * disconnected before U-Boot's mmc1 scan.  No flag stored (the factory
+	 * default) = no pad touched.  Placed right after the pad map is parked
+	 * and gpio_is_output[] is reset, the earliest point where the pad
+	 * write is not undone by the reset loop above. */
+	boot_config_apply();
+
 	/* TRNG bring-up: configure + enable only.  The NIST pipeline's
      * first conditioned word can lag past any boot-time wait we are
      * willing to spin; readiness is promoted lazily by the first
@@ -736,7 +746,8 @@ void bridge_hw_init(void)
 
 	/* --- Periodic tick (gh#54) ----------------------------------------
 	 *
-	 * The main loop is `for (;;) { __WFI(); bridge_hw_tick(); }` and
+	 * The main loop sleeps in WFI between ticks (it skips the WFI only while
+	 * a boot-config SET is queued, see main.c) and
 	 * used to have NO periodic wake source at all: nothing between
 	 * transport interrupts ever retired the wfi, so an armed OTA slot
 	 * erase stalled mid-slot the moment the host stopped polling, and
@@ -785,6 +796,7 @@ extern void bridge_hw_dsp_pump(void);
  * page-region per tick so BEGIN never blocks the SPI reply inline.  No-op
  * in the OTA-inert build. */
 extern void ota_erase_tick(void);
+extern bool ota_erase_active(void);
 /* Deferred low-power entry (gh#63): executes a mode 2/3 request latched
  * by bridge_hw_power_mode_set() on a quiet link, at base level -- never
  * from a transport ISR.  Strong impl in hal/gd32/power.c. */
@@ -893,11 +905,26 @@ static void bridge_fwdgt_arm(void)
  * TRIAL image under the bootloader's watchdog. */
 extern bool ota_trial_unconfirmed(void);
 
+/* Deferred base-level work that must not be left behind a WFI (see main.c):
+ * a queued boot-config SET that boot_config_tick() can run now.  The OTA erase
+ * walk is deliberately NOT work that keeps the loop awake: it stays paced at
+ * one page per wake (transport IRQ or the 50 ms SysTick), because each page
+ * erases with IRQs masked for up to 20 ms and back-to-back pages would black
+ * the link out almost continuously.  A SET queued before a BEGIN therefore
+ * sleeps (paced) while the walk runs; boot_config_tick() follows
+ * ota_erase_tick() in the same tick that clears the walk, so it commits then
+ * with no extra wake.  A new SET cannot be queued during a walk (BUSY). */
+bool bridge_hw_work_pending(void)
+{
+	return boot_config_pending(NULL) && !ota_erase_active();
+}
+
 void bridge_hw_tick(void)
 {
 	bridge_hw_dsp_pump();
 	vref_late_tick();
 	ota_erase_tick();
+	boot_config_tick(); /* queued CMD_BOOT_CONFIG SET: flash write at base level only */
 	ota_confirm_tick();
 	bridge_transport_i2c_stuck_poll();
 	bridge_power_tick();

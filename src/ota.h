@@ -33,6 +33,15 @@ gd32_bridge_status_t ota_dispatch(uint8_t        cmd,
  * in the OTA-inert (non-partitioned) build. */
 void ota_erase_tick(void);
 
+/* True while an OTA session is in flight (READY/BUSY/VERIFIED): the FMC
+ * belongs to OTA, so other flash writers (boot_config) must back off. */
+bool ota_session_active(void);
+
+/* True while a slot-erase walk is armed, ERROR state included (a rejected
+ * BEGIN's walk keeps running).  ota_erase_tick() releases the FMC funnel
+ * between steps, so ota_fmc_funnel_busy() alone cannot see the walk. */
+bool ota_erase_active(void);
+
 /* Trial/confirm + watchdog fallback (bench fact 2026-09-26, E1M-V2M103).
  * Call once from main(), before the transports come up: reconciles the
  * A/B metadata against which slot is actually executing.  If the

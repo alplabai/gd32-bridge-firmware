@@ -28,6 +28,7 @@
  * NOSUPPORT.
  */
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #include "ota.h"
@@ -61,11 +62,33 @@ static inline void __WFI(void)
 {
 	__asm volatile("wfi" ::: "memory");
 }
+/* PRIMASK only gates taking an interrupt; WFI still wakes on a pending one. */
+static inline void main_irq_off(void)
+{
+	__asm volatile("cpsid i" ::: "memory");
+}
+static inline void main_irq_on(void)
+{
+	__asm volatile("cpsie i" ::: "memory");
+}
 #else
 __attribute__((weak)) void __WFI(void)
 {
 }
+static inline void main_irq_off(void)
+{
+}
+static inline void main_irq_on(void)
+{
+}
 #endif
+
+/* True while base-level work an ISR queued (or a multi-step walk) still needs
+ * bridge_hw_tick() before the core may sleep.  Weak default: none. */
+__attribute__((weak)) bool bridge_hw_work_pending(void)
+{
+	return false;
+}
 
 int main(void)
 {
@@ -79,10 +102,21 @@ int main(void)
 	transport_spi_init();
 	transport_i2c_init();
 
-	/* Periodic housekeeping lives inside bridge_hw_tick() (a no-op on
-     * this SoM rev); the main loop just yields. */
+	/* Housekeeping lives in bridge_hw_tick().  The loop sleeps in WFI until an
+	 * interrupt (transport or SysTick) and then ticks; it skips the sleep only
+	 * while bridge_hw_work_pending() says an ISR-queued job still needs a tick. */
 	for (;;) {
-		__WFI();
+		/* Check-then-sleep must be atomic against the transport ISRs: an ISR
+		 * that queues work after the last bridge_hw_tick() passed its check
+		 * but before WFI would otherwise sleep with the work pending until
+		 * the next unrelated interrupt (a queued CMD_BOOT_CONFIG SET was only
+		 * committed by the next bus transaction).  With IRQs masked, an ISR
+		 * arriving after the check stays pending and WFI returns at once. */
+		main_irq_off();
+		if (!bridge_hw_work_pending()) {
+			__WFI();
+		}
+		main_irq_on();
 		bridge_hw_tick();
 	}
 	/* unreachable */

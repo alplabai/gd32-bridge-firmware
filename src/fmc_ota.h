@@ -65,4 +65,19 @@ const void *ota_fmc_flash_ptr(uint32_t addr);
  * why h_begin (src/ota.c) needs this ahead of its metadata-demote call. */
 bool ota_fmc_funnel_busy(void);
 
+/* True when erasing the boot-config page (bank 1) is safe for THIS build:
+ * FMC_OBCTL.DBS = 1 (dual bank) and the running image is not itself in
+ * bank 1 (a bank-1 erase while executing from bank 1 stalls the fetch; the
+ * OTA path never does that, B->A is untested).  Weak default in ota.c is
+ * true so host tests are unaffected; the stub has no FMC anyway. */
+bool ota_fmc_config_write_safe(void);
+
+/* ECC-fault-safe flash read of `len` bytes (doubleword-aligned addr + len) into
+ * `dst`.  Returns false when the read hit an uncorrectable (double-bit) ECC
+ * error -- what a power cut mid-erase/program leaves behind -- instead of
+ * raising the flash-ECC NMI (which resets the part, gh#36); `dst` is then
+ * undefined.  The gd32 body (hal/fmc_ota.c) masks the NMI source around the
+ * read and checks FMC_ECCCS; the weak default in ota.c is a plain copy. */
+bool ota_fmc_read_safe(uint32_t addr, void *dst, size_t len);
+
 #endif /* GD32_BRIDGE_FMC_OTA_H */

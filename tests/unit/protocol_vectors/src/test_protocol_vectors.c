@@ -199,6 +199,8 @@ static const pv_case_t SPI_CASES[] = {
 	{ "spi_counter_read_ch0_request",                    PV_NOSUPP, NULL },
 	{ "spi_se_reset_assert_request",                     PV_NOSUPP, NULL },
 	{ "spi_se_reset_release_request",                    PV_NOSUPP, NULL },
+	{ "spi_boot_config_get_request",                      PV_NOSUPP, NULL },
+	{ "spi_boot_config_set_sdmux_en_high_request",       PV_NOSUPP, NULL },
 	{ "spi_pwm_configure_ch0_request",                   PV_NOSUPP, NULL },
 	{ "spi_adc_configure_ch3_request",                   PV_NOSUPP, NULL },
 	{ "spi_adc_stream_begin_stream0_ch0_1ksps_request",  PV_NOSUPP, NULL },

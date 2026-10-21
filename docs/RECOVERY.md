@@ -124,3 +124,19 @@ A healthy bridge returns `STATUS_OK` and a 3-byte payload
 `PROTOCOL_VERSION_MAJOR, MINOR, PATCH`. `CMD_GET_BUILD_ID` identifies the
 exact build; compare it with the release you flashed. If the read gets no ACK
 at `0x70`, re-check the erase step and that the metadata record was written.
+
+## 6. Boot config (SD-mux hold, `CMD_BOOT_CONFIG` 0x42)
+
+Firmware 0.3.1 and later keep a persistent flags word in two record pages,
+`0x08076000` (REC0) and `0x08076800` (REC1). Bit0 holds the EVK microSD mux off
+(PD11 / E1M IO29 `SDIO_MUX_EN` high) across power cycles.
+
+- A mass erase (Path A or B, or clearing SPC) wipes both pages: the hold is off
+  afterwards. Re-send `CMD_BOOT_CONFIG` SET `flags = 1` after recovery.
+- SET answers `NOSUPPORT` when the bridge runs from slot B or with `OBCTL.DBS = 0`.
+  On slot B the flag can only be changed after an OTA back to slot A.
+- The hold is applied by the application's `bridge_hw_init()`, not the
+  bootloader: PD11 is undriven, and the mux may re-enable, during any GD32-only
+  reset (watchdog, OTA commit, host reset).
+- Protocol 0.14.1 adds the opcode as a PATCH bump (0.15 is the unreleased #333
+  line); detect it by `NOSUPPORT`, not by version.
