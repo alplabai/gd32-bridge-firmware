@@ -209,21 +209,28 @@ static void poll_after(uint32_t periods)
 	bridge_transport_i2c_stuck_poll();
 }
 
-/* The wedge signature: SDA held low, SCL released high. */
-static void wedge_pads(void)
-{
-	sda_high = false;
-	scl_high = true;
-	ev_flags = 0u;
-	releases = 0u;
-}
-
 /* One serviced I2C0 event, as the real ISR would see it. */
 static void isr_event(uint32_t flag)
 {
 	ev_flags = flag;
 	BRIDGE_I2C_EV_HANDLER();
 	ev_flags = 0u;
+}
+
+/* The wedge signature: SDA held low, SCL released high.  The HAL's detector
+ * state (i2c_stuck, i2c_txn_open) is static and the ztest shim runs no
+ * per-case hooks, so first drive it to a known idle state: a STOP closes any
+ * open transaction and a clean (SDA high) poll zeroes the candidate count.
+ * Without this the result depends on the order the cases run in. */
+static void wedge_pads(void)
+{
+	sda_high = true;
+	scl_high = true;
+	ev_flags = 0u;
+	isr_event(I2C_INT_FLAG_STPDET);
+	poll_after(1u);
+	sda_high = false;
+	releases = 0u;
 }
 
 /* #296 cold-boot case: idle bus (no transaction), SDA held low, SCL high,
@@ -235,6 +242,17 @@ ZTEST(transport_hw_cs_exti, test_stuck_poll_idle_wedge_still_releases)
 	zassert_equal(releases, 0u, "one candidate tick must not act");
 	poll_after(1u);
 	zassert_equal(releases, 1u, "two silent candidate ticks must release the idle wedge");
+}
+
+/* The idle rule must hold even when an earlier case left a transaction open. */
+ZTEST(transport_hw_cs_exti, test_stuck_poll_idle_rule_is_independent_of_a_prior_open_txn)
+{
+	isr_event(I2C_INT_FLAG_ADDSEND); /* residue: txn open, no STOP */
+	wedge_pads();
+	poll_after(1u);
+	zassert_equal(releases, 0u, "one candidate tick must not act");
+	poll_after(1u);
+	zassert_equal(releases, 1u, "idle wedge not released on the second tick");
 }
 
 /* #315: a write whose last byte's ACK phase has SCL high / SDA low while
