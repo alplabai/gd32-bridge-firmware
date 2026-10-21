@@ -409,7 +409,8 @@ extern bool     bridge_core_clock_matches; /* init.c */
  * (216 - 1) would be 0.44% slow.  A timer programmed BEFORE a core-clock
  * change keeps its old prescaler, which is why the host-requested HXTAL
  * switch (bridge_clock_try_hxtal) is REFUSED while any PWM channel or ADC
- * stream is active; anything started after a switch picks up the live clock. */
+ * stream is active, and re-programs the idle PWM timers (pwm_timers_resync)
+ * once it succeeds; the ADC pacing is re-derived per stream. */
 static inline uint32_t bridge_timer_prescaler(uint32_t tick_hz)
 {
 	const uint32_t div = (bridge_core_clock_hz + tick_hz / 2u) / tick_hz;
@@ -490,7 +491,8 @@ uint16_t adc_full_scale_for_bits(uint8_t bits);                   /* adc.c */
 void     adc_apply_conv_format(uint32_t periph, uint8_t channel); /* adc.c */
 void     qenc_channel_init(const gd32_qenc_t *e);                 /* qenc.c */
 void     pwm_timer_init(uint32_t periph);                         /* pwm.c */
-void     pwm_channel_init(const gd32_pwm_ch_t *ch);               /* pwm.c */
+void     pwm_timers_resync(void); /* pwm.c: re-derive prescalers after a clock switch */
+void     pwm_channel_init(const gd32_pwm_ch_t *ch); /* pwm.c */
 bool     pwm_any_claimed(void);                /* pwm.c: a continuous output or capture is live */
 bool     adc_stream_any_active(void);          /* adc_stream.c */
 bool     bridge_link_quiet(void);              /* power.c: CS high, no I2C txn / pending edge */

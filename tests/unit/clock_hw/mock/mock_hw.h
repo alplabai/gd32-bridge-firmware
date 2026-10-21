@@ -23,6 +23,7 @@ typedef struct {
 	uint32_t step_cycles;                /* core cycles that elapse per time/cycle-counter read */
 	bool     trial;                      /* ota_trial_unconfirmed() */
 	bool     pwm_active;                 /* pwm_any_claimed() */
+	bool     ota_busy;                   /* ota_session_active() / ota_erase_active() */
 	bool     adc_active;                 /* adc_stream_any_active() */
 	bool     link_busy;                  /* bridge_link_quiet() == false */
 	bool     cyccnt_stalled;             /* DWT->CYCCNT does not advance */
@@ -30,6 +31,7 @@ typedef struct {
 } mock_scn_t;
 
 extern mock_scn_t mock_scn;
+extern unsigned   mock_pwm_resyncs; /* pwm_timers_resync() calls */
 
 /* Boot state: the vendor SystemInit() result (IRC8M PLL 216 MHz, AHB /1). */
 void mock_hw_reset(void);

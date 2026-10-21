@@ -45,6 +45,7 @@
 #define TIMER_COUNTER_CENTER_BOTH ((uint32_t)0x30u)
 #define TIMER_COUNTER_UP          ((uint32_t)0u)
 #define TIMER_CKDIV_DIV1          ((uint32_t)0u)
+#define TIMER_PSC_RELOAD_NOW      ((uint32_t)1u)
 #define TIMER_CCX_DISABLE         ((uint32_t)0u)
 #define TIMER_CCX_ENABLE          ((uint32_t)1u)
 #define TIMER_CCXN_DISABLE        ((uint32_t)0u)
@@ -102,6 +103,7 @@ void timer_input_trigger_source_select(uint32_t timer_periph, uint32_t intrigger
 void timer_slave_mode_select(uint32_t timer_periph, uint32_t slavemode);
 void timer_struct_para_init(timer_parameter_struct *initpara);
 void timer_deinit(uint32_t timer_periph);
+void timer_prescaler_config(uint32_t timer_periph, uint16_t prescaler, uint32_t pscreload);
 void timer_init(uint32_t timer_periph, const timer_parameter_struct *initpara);
 void timer_auto_reload_shadow_enable(uint32_t timer_periph);
 void timer_primary_output_config(uint32_t timer_periph, uint32_t newvalue);

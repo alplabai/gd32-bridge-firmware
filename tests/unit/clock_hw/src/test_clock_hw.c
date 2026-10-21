@@ -732,6 +732,22 @@ ZTEST(gd32_bridge_clock_hw, test_switch_proceeds_once_the_output_is_gone)
 	zassert_equal(bridge_clock_switch_status, BRIDGE_CLOCK_SW_DONE_HXTAL);
 }
 
+/* An OTA session or erase walk also refuses the switch, and a successful switch
+ * re-derives the PWM prescalers exactly once. */
+ZTEST(gd32_bridge_clock_hw, test_switch_refused_during_ota_and_pwm_prescaler_resynced_on_success)
+{
+	reset();
+	mock_scn.ota_busy = true;
+	zassert_false(bridge_clock_try_hxtal());
+	zassert_equal(bridge_clock_switch_status, BRIDGE_CLOCK_SW_REFUSED_BUSY);
+	zassert_equal(strlen(mock_log_text()), 0u, "nothing written: %s", mock_log_text());
+	zassert_equal(mock_pwm_resyncs, 0u);
+
+	mock_scn.ota_busy = false;
+	zassert_true(bridge_clock_try_hxtal());
+	zassert_equal(mock_pwm_resyncs, 1u);
+}
+
 /* 3: the window is measured with the cycle counter, not assumed. */
 ZTEST(gd32_bridge_clock_hw,
       test_div32_window_is_measured_so_call_overhead_at_8mhz_does_not_misclassify)

@@ -290,6 +290,19 @@ bool adc_stream_any_active(void)
 {
 	return mock_scn.adc_active;
 }
+bool ota_session_active(void)
+{
+	return mock_scn.ota_busy;
+}
+bool ota_erase_active(void)
+{
+	return mock_scn.ota_busy;
+}
+unsigned mock_pwm_resyncs;
+void     pwm_timers_resync(void)
+{
+	mock_pwm_resyncs++;
+}
 bool bridge_link_quiet(void)
 {
 	return !mock_scn.link_busy;
@@ -447,6 +460,7 @@ void mock_hw_deepsleep(void)
 void mock_hw_reset(void)
 {
 	memset(&mock_scn, 0, sizeof mock_scn);
+	mock_pwm_resyncs         = 0u;
 	mock_scn.oscin_hz        = 8000000u;
 	mock_scn.require_bypass  = true;
 	mock_scn.stb_delay_us    = 300u;

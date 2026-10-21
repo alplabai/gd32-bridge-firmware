@@ -48,6 +48,8 @@
 #endif
 
 extern bool ota_trial_unconfirmed(void);
+extern bool ota_session_active(void);
+extern bool ota_erase_active(void);
 
 volatile uint32_t bridge_clock_hxtal_request; /* SWD / protocol-seam trigger */
 
@@ -432,14 +434,18 @@ volatile bridge_clock_switch_status_t bridge_clock_switch_status = BRIDGE_CLOCK_
 
 static uint32_t s_quiet_ticks, s_pending_ticks;
 
-/* Supervised outputs must never see the ~27x period stretch of the PLL rebuild:
+/* An OTA session or erase walk also refuses the switch: ota_erase_tick() can
+ * hold IRQs masked ~20 ms per page and the switch adds up to ~23 ms of PRIMASK
+ * in the same tick (same guard as dev's BOOT_CONFIG).
+ * Supervised outputs must never see the ~27x period stretch of the PLL rebuild:
  * refuse while any PWM channel (output or capture) or ADC stream is active.
  * The quadrature encoders are not listed: they count external edges with no
  * SYSCLK-derived period (only the input filter time shifts by the clock ratio),
  * are enabled at boot, and have no session to wait for. */
 static bool switch_blocked(void)
 {
-	return pwm_any_claimed() || adc_stream_any_active();
+	return pwm_any_claimed() || adc_stream_any_active() || ota_session_active() ||
+	       ota_erase_active();
 }
 
 bool bridge_clock_try_hxtal(void)
@@ -462,7 +468,8 @@ bool bridge_clock_try_hxtal(void)
 	resync_core_clock();
 	bridge_irq_unlock(primask);
 	/* The truth is the active source: an NMI may have fallen back already. */
-	const bool ok              = (bridge_clock_source == BRIDGE_CLOCK_SRC_HXTAL);
+	const bool ok = (bridge_clock_source == BRIDGE_CLOCK_SRC_HXTAL);
+	if (ok) pwm_timers_resync(); /* idle (switch_blocked() above); tick follows the live clock */
 	bridge_clock_switch_status = ok ? BRIDGE_CLOCK_SW_DONE_HXTAL : BRIDGE_CLOCK_SW_DONE_FALLBACK;
 	return ok;
 }

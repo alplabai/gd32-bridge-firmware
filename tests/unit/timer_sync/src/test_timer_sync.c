@@ -81,6 +81,13 @@ void timer_deinit(uint32_t timer_periph)
 	(void)timer_periph;
 }
 
+void timer_prescaler_config(uint32_t timer_periph, uint16_t prescaler, uint32_t pscreload)
+{
+	(void)timer_periph;
+	(void)prescaler;
+	(void)pscreload;
+}
+
 void timer_init(uint32_t timer_periph, const timer_parameter_struct *initpara)
 {
 	mock_timer_car[timer_index(timer_periph)] = initpara->period;

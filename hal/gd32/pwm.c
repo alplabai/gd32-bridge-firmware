@@ -68,6 +68,17 @@ _Static_assert(sizeof(pwm_channels) / sizeof(pwm_channels[0]) == PWM_CHANNEL_COU
  * never a software echo of its own request (silicon lesson 2026-06-04:
  * a cache echo "verified" PWM for weeks while the pads were idle). */
 
+/* Re-derive the 1 us prescaler from the live core clock after a successful
+ * HXTAL switch (215.04 MHz -> /215; the boot value /216 would run 0.44% slow).
+ * Both timers are idle: the switch is refused while any PWM channel is claimed. */
+void pwm_timers_resync(void)
+{
+	timer_prescaler_config(
+	    TIMER0, (uint16_t)bridge_timer_prescaler(1000000u), TIMER_PSC_RELOAD_NOW);
+	timer_prescaler_config(
+	    TIMER7, (uint16_t)bridge_timer_prescaler(1000000u), TIMER_PSC_RELOAD_NOW);
+}
+
 /* Per-timer init.  Called once per peripheral from bridge_hw_init();
  * Advanced timers need timer_primary_output_config(ENABLE) before any
  * output pin actually drives (vs basic timers, where the channel
