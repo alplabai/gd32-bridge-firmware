@@ -119,7 +119,8 @@ const gd32_gpio_pad_t gpio_pad_map[] = {
 	{ GPIOB, GPIO_PIN_13 }, /* bit 20 = CAN_STBY */
 	/* E1M pads added after the sideband block, so no earlier bit moves.
 	 * Both boot parked (analog), like every other E1M pad -- PB4 is
-	 * parked explicitly in init.c because it resets as JTAG NJTRST. */
+	 * parked explicitly in init.c because it is believed to reset as JTAG NJTRST
+	 * (unverified, see TODO in init.c). */
 	{ GPIOB, GPIO_PIN_4 }, /* bit 21 = E1M IO15 */
 	{ GPIOC, GPIO_PIN_2 }, /* bit 22 = E1M IO26 */
 };
