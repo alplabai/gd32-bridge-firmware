@@ -97,20 +97,24 @@ typedef struct {
  * INVAL at the call site, anything above the cap is RANGE. */
 #define BRIDGE_ADC_STREAM_RATE_MAX_HZ 100000u
 
-/* Burst-read state (CMD_ADC_READ), owned by adc.c.  One burst runs at a time
- * across all four converters: they share the single burst DMA channel
- * (BRIDGE_ADC_BURST_DMA_CH, bridge_board_config.h).  Non-static so the host
- * suite can drive the DMA-complete interrupt and inspect the lifecycle. */
+/* Burst-read state (CMD_ADC_READ), owned by adc.c.  One context per converter,
+ * indexed by dense slot (ADC0..ADC3 -> 0..3); each owns its own burst DMA
+ * channel (BRIDGE_ADC_BURST_DMA_CHANNELS, bridge_board_config.h), so bursts on
+ * different converters run concurrently and only a same-converter request is
+ * BUSY.  Non-static so the host suite can drive the DMA-complete interrupts and
+ * inspect the lifecycle. */
+#define ADC_BURST_COUNT 4u
+
 #define ADC_BURST_IDLE     0u
 #define ADC_BURST_RUNNING  1u /* armed, conversions + DMA in flight      */
 #define ADC_BURST_ABORTING 2u /* being torn down; completion IRQ ignores */
 
 typedef struct {
-	volatile uint8_t state;      /* ADC_BURST_*                                 */
-	uint32_t         periph;     /* converter the burst runs on                 */
-	uint8_t          samples;    /* sequence length == DMA transfer count       */
-	uint16_t         full_scale; /* code range snapshot, for the mV conversion  */
-	uint8_t          age_ticks;  /* base-level ticks spent RUNNING (watchdog)   */
+	volatile uint8_t state;        /* ADC_BURST_*                                 */
+	uint32_t         periph;       /* converter the burst runs on                 */
+	uint8_t          samples;      /* sequence length == DMA transfer count       */
+	uint16_t         full_scale;   /* code range snapshot, for the mV conversion  */
+	uint32_t         start_cycles; /* DWT->CYCCNT at the trigger (watchdog)       */
 	/* Completion callback (a bridge_hw_adc_read_done_fn).  Declared without that
 	 * typedef so this header stays free of bridge_hw.h. */
 	void (*done)(int rv, const uint16_t *mv, uint8_t samples);
@@ -118,7 +122,7 @@ typedef struct {
 	uint16_t mv[8];    /* converted result handed to `done`           */
 } adc_burst_t;
 
-extern adc_burst_t adc_burst; /* adc.c */
+extern adc_burst_t adc_burst[ADC_BURST_COUNT]; /* adc.c */
 
 /* Code -> millivolts, ROUNDED to nearest (ties up).  One definition for the
  * single-shot burst and both stream read paths: truncating the division read
@@ -137,7 +141,9 @@ void adc_format_invalidate_all(void);        /* adc.c */
  * recorded format, since the part resumes with a gated, possibly reset ADC. */
 void adc_deepsleep_quiesce(void); /* adc.c */
 
-/* Base-level tick (bridge_hw_tick): abort a burst that never completed. */
+/* Base-level tick (bridge_hw_tick): abort a burst that has been RUNNING longer
+ * than its time bound.  Ages by elapsed DWT cycles, never by call count: the
+ * main loop wakes after every interrupt, not once per SysTick period. */
 void adc_burst_tick(void); /* adc.c */
 
 /* Pacing-timer clock.  TIMER5/6 are APB1 basic timers; with APB1 at
@@ -365,8 +371,8 @@ _Static_assert(GPIO_PAD_CAN_STBY < GPIO_PAD_MAP_COUNT,
  *
  * The SPI link no longer holds the handler for this long: its read is armed
  * in the ISR and finished by the burst DMA-complete interrupt (adc.c), so
- * this ceiling now bounds how long a burst may occupy the converter and the
- * single burst DMA channel (and how long the blocking I2C read may wait),
+ * this ceiling now bounds how long a burst may occupy the converter and its
+ * burst DMA channel (and how long the blocking I2C read may wait),
  * not an ISR residency.  It is kept as-is: tightening or dropping it would
  * change which CMD_ADC_READ requests answer STATUS_OUT_OF_RANGE. */
 #define ADC_READ_ISR_BUDGET_US        1000u

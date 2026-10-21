@@ -114,6 +114,14 @@ static uint8_t spi_seq;
 
 static void stage_reply(uint8_t status, const uint8_t *payload, size_t payload_len)
 {
+	/* STATUS_DEFERRED is the dispatcher's internal "reply comes later" marker; it
+	 * never goes on the wire.  Staging it would hand the host a CRC-valid frame
+	 * for a command that has no reply yet. */
+	if (status == STATUS_DEFERRED) {
+		status      = STATUS_IO;
+		payload     = NULL;
+		payload_len = 0u;
+	}
 	if ((protocol_link_features(GD32_BRIDGE_LINK_SPI) & GD32_BRIDGE_LINK_FEAT_STATUS_SEQ) != 0u) {
 		spi_seq = (uint8_t)((spi_seq + 1u) & 0x0Fu);
 		status  = (uint8_t)(status | (uint8_t)(spi_seq << GD32_BRIDGE_STATUS_SEQ_SHIFT));
@@ -145,9 +153,13 @@ static void spi_deferred_reply(gd32_bridge_status_t status, const uint8_t *paylo
 }
 
 /* For early-error replies that don't have a CMD context yet, fall
- * back to STATUS_IO so the host re-syncs gracefully. */
+ * back to STATUS_IO so the host re-syncs gracefully.  The error replaces the
+ * reply a still-converting deferred command was going to stage, so that command
+ * is cancelled here: otherwise its burst keeps the converter (and answers BUSY to
+ * the retry) until the watchdog, only for its completion to be dropped. */
 static void stage_error_reply(uint8_t status)
 {
+	if (spi_reply_pending) protocol_deferred_abort();
 	stage_reply(status, NULL, 0u);
 }
 
@@ -159,8 +171,7 @@ static void stage_error_reply(uint8_t status)
 static void drain_rewind(void)
 {
 	if (++spi_drain_streak > SPI_DRAIN_REWIND_BOUND) {
-		if (spi_reply_pending) protocol_deferred_abort();
-		stage_error_reply(STATUS_IO); /* tar-pit breaker, see above */
+		stage_error_reply(STATUS_IO); /* tar-pit breaker, see above; cancels a pending burst */
 		return;
 	}
 	spi_tx_cursor = 0u;
@@ -323,7 +334,7 @@ void spi_slave_cs_high(void)
 void spi_slave_transport_error(void)
 {
 	spi_rx_len = 0u;
-	stage_error_reply(STATUS_IO);
+	stage_error_reply(STATUS_IO); /* also aborts a burst still converting for the lost request */
 }
 
 /* Returns the next staged reply byte.  On the gd32 backend the drain

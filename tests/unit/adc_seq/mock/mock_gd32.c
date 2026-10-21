@@ -268,6 +268,21 @@ uint32_t mock_adc_get_routine_data(void)
 	return mock_adc_routine_data;
 }
 
+/* --- DWT cycle counter + live core clock (burst time bounds) -------------*/
+
+static DWT_Type mock_dwt_regs;
+uint32_t        mock_dwt_cycles;
+uint32_t        mock_dwt_step = 1u;
+/* init.c is not linked here; the live core clock the I2C sync wait scales by. */
+uint32_t bridge_core_clock_hz = 216000000u;
+
+DWT_Type *mock_dwt_ptr(void)
+{
+	mock_dwt_regs.CYCCNT = mock_dwt_cycles;
+	mock_dwt_cycles += mock_dwt_step;
+	return &mock_dwt_regs;
+}
+
 /* --- DMA -----------------------------------------------------------------*/
 
 static uint32_t mock_dma_remaining[2][MOCK_DMA_CH_COUNT]; /* [dma_periph][channel] */
@@ -342,7 +357,7 @@ uint32_t dma_transfer_number_get(uint32_t dma_periph, dma_channel_enum channelx)
 }
 void dma_flag_clear(uint32_t dma_periph, dma_channel_enum channelx, uint32_t flag)
 {
-	(void)channelx;
+	mock_dma_interrupt_flags[dma_periph][channelx] &= ~flag; /* FLAG and INT_FLAG bits coincide */
 	mock_seq_log("dma_flag_clear", dma_periph, flag);
 }
 void dma_interrupt_enable(uint32_t dma_periph, dma_channel_enum channelx, uint32_t source)

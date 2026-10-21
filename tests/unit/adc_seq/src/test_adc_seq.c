@@ -70,14 +70,44 @@ static void fac_latch_release(void);
  * the blocking bridge_hw_adc_read (I2C path) run to completion on the host.
  * Tests of the asynchronous behaviour clear it with mock_adc_set_trigger_hook(0)
  * and play the interrupt themselves. */
+/* Converter slot n (ADC<n>) owns DMA1 CH(n+1) and its own completion vector. */
+static const dma_channel_enum burst_slot_dma_ch[ADC_BURST_COUNT] = { DMA_CH1,
+	                                                                 DMA_CH2,
+	                                                                 DMA_CH3,
+	                                                                 DMA_CH4 };
+
+static void burst_slot_irq(uint8_t slot)
+{
+	switch (slot) {
+	case 0u:
+		DMA1_Channel1_IRQHandler();
+		break;
+	case 1u:
+		DMA1_Channel2_IRQHandler();
+		break;
+	case 2u:
+		DMA1_Channel3_IRQHandler();
+		break;
+	default:
+		DMA1_Channel4_IRQHandler();
+		break;
+	}
+}
+
+/* ADC3 (bridge channel 0) is converter slot 3; ADC2 (channel 2) is slot 2. */
+#define BURST_ADC3 3u
+#define BURST_ADC2 2u
+
 static void burst_autocomplete(void)
 {
-	if (adc_burst.state != ADC_BURST_RUNNING) return;
-	for (uint8_t i = 0u; i < adc_burst.samples; ++i) {
-		adc_burst.codes[i] = (uint16_t)mock_adc_get_routine_data();
+	for (uint8_t slot = 0u; slot < ADC_BURST_COUNT; ++slot) {
+		if (adc_burst[slot].state != ADC_BURST_RUNNING) continue;
+		for (uint8_t i = 0u; i < adc_burst[slot].samples; ++i) {
+			adc_burst[slot].codes[i] = (uint16_t)mock_adc_get_routine_data();
+		}
+		mock_dma_set_interrupt_flag(DMA1, burst_slot_dma_ch[slot], DMA_INT_FLAG_FTF, SET);
+		burst_slot_irq(slot);
 	}
-	mock_dma_set_interrupt_flag(DMA1, DMA_CH1, DMA_INT_FLAG_FTF, SET);
-	DMA1_Channel1_IRQHandler();
 }
 
 static void adc_seq_reset(void)
@@ -96,6 +126,10 @@ static void adc_seq_reset(void)
 	}
 	mock_seq_reset();
 	mock_dma_reset();
+	/* DWT: a free-running counter that advances 1 cycle per read, at 216 MHz. */
+	mock_dwt_cycles      = 0u;
+	mock_dwt_step        = 1u;
+	bridge_core_clock_hz = 216000000u;
 	memset(mock_adc_ctl1, 0, sizeof mock_adc_ctl1);
 	memset(adc_dsp_chains, 0, sizeof adc_dsp_chains);
 	for (uint8_t s = 0u; s < BRIDGE_ADC_STREAM_COUNT; ++s) {
@@ -1533,14 +1567,20 @@ static void burst_manual_reset(void)
 	burst_done_samples = 0u;
 }
 
-/* The hardware finishing: DMA has written `codes`, raises FTF; run the IRQ. */
-static void burst_hw_finish(const uint16_t *codes, uint8_t n)
+/* The hardware finishing converter `slot`: DMA has written `codes`, raises FTF;
+ * run that converter's IRQ. */
+static void burst_hw_finish_slot(uint8_t slot, const uint16_t *codes, uint8_t n)
 {
 	for (uint8_t i = 0u; i < n; ++i) {
-		adc_burst.codes[i] = codes[i];
+		adc_burst[slot].codes[i] = codes[i];
 	}
-	mock_dma_set_interrupt_flag(DMA1, DMA_CH1, DMA_INT_FLAG_FTF, SET);
-	DMA1_Channel1_IRQHandler();
+	mock_dma_set_interrupt_flag(DMA1, burst_slot_dma_ch[slot], DMA_INT_FLAG_FTF, SET);
+	burst_slot_irq(slot);
+}
+
+static void burst_hw_finish(const uint16_t *codes, uint8_t n)
+{
+	burst_hw_finish_slot(BURST_ADC3, codes, n);
 }
 
 static int count_events(const char *name, uint32_t periph)
@@ -1779,11 +1819,11 @@ ZTEST(gd32_adc_seq, test_burst_completes_via_dma_callback_without_polling)
 
 	/* Armed, not finished: nothing delivered, burst owns the converter + DMA. */
 	zassert_equal(burst_done_calls, 0u, "completion is the DMA IRQ's job, not start()'s");
-	zassert_equal(adc_burst.state, ADC_BURST_RUNNING, "burst in flight");
+	zassert_equal(adc_burst[BURST_ADC3].state, ADC_BURST_RUNNING, "burst in flight");
 	zassert_false(adc_periph_claim(ADC3), "converter is held for the burst");
-	zassert_equal(dma_transfer_number_get(DMA1, DMA_CH1), 4u, "DMA moves N codes");
-	zassert_equal(mock_dmamux_request_get(8u), DMA_REQUEST_ADC3, "DMA1 CH1 = DMAMUX 8 -> ADC3");
-	zassert_true((*mock_dma_chctl_ref(DMA1, DMA_CH1) & DMA_CHXCTL_CHEN) != 0u, "channel armed");
+	zassert_equal(dma_transfer_number_get(DMA1, DMA_CH4), 4u, "DMA moves N codes");
+	zassert_equal(mock_dmamux_request_get(11u), DMA_REQUEST_ADC3, "DMA1 CH4 = DMAMUX 11 -> ADC3");
+	zassert_true((*mock_dma_chctl_ref(DMA1, DMA_CH4) & DMA_CHXCTL_CHEN) != 0u, "channel armed");
 
 	/* The sequence: scan, N ranks of the same pad, DMA mode, ONE trigger, armed
 	 * BEFORE the trigger -- and not a single EOC poll or data-register read. */
@@ -1823,12 +1863,12 @@ ZTEST(gd32_adc_seq, test_burst_completes_via_dma_callback_without_polling)
 	zassert_equal(burst_done_mv[3], 0u, "code 1 -> 0.44 mV");
 
 	/* Torn down: converter + DMA free again, request released, further IRQ is inert. */
-	zassert_equal(adc_burst.state, ADC_BURST_IDLE, "idle");
-	zassert_false((*mock_dma_chctl_ref(DMA1, DMA_CH1) & DMA_CHXCTL_CHEN) != 0u, "channel off");
-	zassert_equal(mock_dmamux_request_get(8u), 0u, "DMAMUX request released");
+	zassert_equal(adc_burst[BURST_ADC3].state, ADC_BURST_IDLE, "idle");
+	zassert_false((*mock_dma_chctl_ref(DMA1, DMA_CH4) & DMA_CHXCTL_CHEN) != 0u, "channel off");
+	zassert_equal(mock_dmamux_request_get(11u), 0u, "DMAMUX request released");
 	zassert_true(adc_periph_claim(ADC3), "converter claim released");
 	adc_periph_release(ADC3);
-	DMA1_Channel1_IRQHandler();
+	DMA1_Channel4_IRQHandler();
 	zassert_equal(burst_done_calls, 1u, "a stale IRQ delivers nothing");
 }
 
@@ -1837,28 +1877,74 @@ ZTEST(gd32_adc_seq, test_burst_result_not_delivered_before_dma_complete)
 {
 	burst_manual_reset();
 	zassert_equal(bridge_hw_adc_read_start(BRIDGE_ADC_CH0, 8u, burst_done), BRIDGE_HW_OK, "start");
-	DMA1_Channel1_IRQHandler(); /* spurious vector entry, no FTF */
+	DMA1_Channel4_IRQHandler(); /* spurious vector entry, no FTF */
 	zassert_equal(burst_done_calls, 0u, "no FTF, no completion");
-	zassert_equal(adc_burst.state, ADC_BURST_RUNNING, "still converting");
+	zassert_equal(adc_burst[BURST_ADC3].state, ADC_BURST_RUNNING, "still converting");
 }
 
-ZTEST(gd32_adc_seq, test_burst_is_exclusive_across_converters)
+static unsigned burst_b_calls;
+static int      burst_b_rv;
+static uint16_t burst_b_mv[8];
+
+static void burst_done_b(int rv, const uint16_t *mv, uint8_t samples)
+{
+	burst_b_calls++;
+	burst_b_rv = rv;
+	if (rv == BRIDGE_HW_OK) memcpy(burst_b_mv, mv, (size_t)samples * sizeof(uint16_t));
+}
+
+/* Only a SAME-converter request is BUSY.  Each converter has its own burst DMA
+ * channel, so a burst on another converter runs concurrently with its own
+ * channel, DMAMUX request and completion vector. */
+ZTEST(gd32_adc_seq, test_burst_busy_only_on_the_same_converter)
 {
 	burst_manual_reset();
+	burst_b_calls = 0u;
+	mock_adc_set_routine_data(2048u);
+
 	zassert_equal(bridge_hw_adc_read_start(BRIDGE_ADC_CH0, 2u, burst_done), BRIDGE_HW_OK, "first");
 	zassert_equal(bridge_hw_adc_read_start(BRIDGE_ADC_CH0, 2u, burst_done),
 	              BRIDGE_HW_ERR_BUSY,
 	              "same converter while converting");
-	zassert_equal(bridge_hw_adc_read_start(BRIDGE_ADC_CH2, 2u, burst_done),
-	              BRIDGE_HW_ERR_BUSY,
-	              "other converter: the one burst DMA channel is taken");
+	zassert_equal(bridge_hw_adc_read_start(BRIDGE_ADC_CH2, 2u, burst_done_b),
+	              BRIDGE_HW_OK,
+	              "other converter: its own DMA channel is free");
+	zassert_equal(adc_burst[BURST_ADC3].state, ADC_BURST_RUNNING, "ADC3 burst in flight");
+	zassert_equal(adc_burst[BURST_ADC2].state, ADC_BURST_RUNNING, "ADC2 burst in flight");
+	zassert_equal(mock_dmamux_request_get(11u), DMA_REQUEST_ADC3, "DMA1 CH4 (DMAMUX 11) -> ADC3");
+	zassert_equal(mock_dmamux_request_get(10u), DMA_REQUEST_ADC2, "DMA1 CH3 (DMAMUX 10) -> ADC2");
 	zassert_equal(bridge_hw_adc_stream_begin(0u, BRIDGE_ADC_CH0, 1000u),
 	              BRIDGE_HW_ERR_BUSY,
 	              "a stream cannot reprogram a converter mid-burst");
 
-	const uint16_t codes[2] = { 1u, 2u };
-	burst_hw_finish(codes, 2u);
-	zassert_equal(bridge_hw_adc_read_start(BRIDGE_ADC_CH2, 2u, burst_done), BRIDGE_HW_OK, "after");
+	/* Finish out of order: each delivers to its own caller, exactly once. */
+	const uint16_t codes_b[2] = { 4095u, 4095u };
+	burst_hw_finish_slot(BURST_ADC2, codes_b, 2u);
+	zassert_equal(burst_b_calls, 1u, "ADC2 burst delivered");
+	zassert_equal(burst_b_mv[0], 1800u, "its own codes");
+	zassert_equal(burst_done_calls, 0u, "the ADC3 burst is untouched");
+	zassert_equal(adc_burst[BURST_ADC3].state, ADC_BURST_RUNNING, "still converting");
+
+	const uint16_t codes_a[2] = { 0u, 2048u };
+	burst_hw_finish(codes_a, 2u);
+	zassert_equal(burst_done_calls, 1u, "ADC3 burst delivered");
+	zassert_equal(burst_done_mv[1], 900u, "its own codes");
+	zassert_equal(burst_b_calls, 1u, "and ADC2 not redelivered");
+	zassert_equal(bridge_hw_adc_read_start(BRIDGE_ADC_CH0, 2u, burst_done), BRIDGE_HW_OK, "after");
+}
+
+/* Aborting a callback cancels only the burst it started. */
+ZTEST(gd32_adc_seq, test_abort_cancels_only_its_converters_burst)
+{
+	burst_manual_reset();
+	zassert_equal(bridge_hw_adc_read_start(BRIDGE_ADC_CH0, 2u, burst_done), BRIDGE_HW_OK, "a");
+	zassert_equal(bridge_hw_adc_read_start(BRIDGE_ADC_CH2, 2u, burst_done_b), BRIDGE_HW_OK, "b");
+
+	bridge_hw_adc_read_abort(burst_done_b);
+	zassert_equal(adc_burst[BURST_ADC2].state, ADC_BURST_IDLE, "b aborted");
+	zassert_equal(adc_burst[BURST_ADC3].state, ADC_BURST_RUNNING, "a untouched");
+	zassert_true((*mock_dma_chctl_ref(DMA1, DMA_CH4) & DMA_CHXCTL_CHEN) != 0u,
+	             "a's DMA still armed");
 }
 
 ZTEST(gd32_adc_seq, test_burst_start_rejects_without_arming)
@@ -1874,7 +1960,7 @@ ZTEST(gd32_adc_seq, test_burst_start_rejects_without_arming)
 	mock_vref_ready = false;
 	zassert_equal(
 	    bridge_hw_adc_read_start(BRIDGE_ADC_CH0, 1u, burst_done), BRIDGE_HW_ERR_IO, "vref");
-	zassert_equal(adc_burst.state, ADC_BURST_IDLE, "nothing armed, nothing claimed");
+	zassert_equal(adc_burst[BURST_ADC3].state, ADC_BURST_IDLE, "nothing armed, nothing claimed");
 	zassert_equal(count_events("dma_channel_enable", DMA1), 0, "DMA never touched");
 }
 
@@ -1883,16 +1969,21 @@ ZTEST(gd32_adc_seq, test_burst_abort_cancels_without_callback_and_restores_conve
 	burst_manual_reset();
 	zassert_equal(bridge_hw_adc_read_start(BRIDGE_ADC_CH0, 4u, burst_done), BRIDGE_HW_OK, "start");
 
+	const int enables_before = count_events("adc_enable", ADC3);
+	const int cals_before    = count_events("ADC_CTL1_TOUCH", ADC3);
 	bridge_hw_adc_read_abort(0); /* not our callback: no-op */
-	zassert_equal(adc_burst.state, ADC_BURST_RUNNING, "null callback cancels nothing");
+	zassert_equal(adc_burst[BURST_ADC3].state, ADC_BURST_RUNNING, "null callback cancels nothing");
 	bridge_hw_adc_read_abort(burst_done);
-	zassert_equal(adc_burst.state, ADC_BURST_IDLE, "aborted");
+	zassert_equal(adc_burst[BURST_ADC3].state, ADC_BURST_IDLE, "aborted");
 	zassert_equal(burst_done_calls, 0u, "an abort never calls back");
-	zassert_false((*mock_dma_chctl_ref(DMA1, DMA_CH1) & DMA_CHXCTL_CHEN) != 0u, "DMA stopped");
+	zassert_false((*mock_dma_chctl_ref(DMA1, DMA_CH4) & DMA_CHXCTL_CHEN) != 0u, "DMA stopped");
 	zassert_true(mock_seq_find_from("adc_disable", ADC3, 0) >= 0,
 	             "ADCON cleared: sequence stopped");
 	zassert_true(adc_periph_claim(ADC3), "claim released");
 	adc_periph_release(ADC3);
+	/* Cheap stand-down (CS EXTI context): no tSTAB dwell, no recalibration. */
+	zassert_equal(count_events("adc_enable", ADC3), enables_before, "abort never re-enables");
+	zassert_equal(count_events("ADC_CTL1_TOUCH", ADC3), cals_before, "abort never recalibrates");
 
 	/* a late FTF from the dead burst delivers nothing */
 	const uint16_t codes[4] = { 1u, 2u, 3u, 4u };
@@ -1911,15 +2002,19 @@ ZTEST(gd32_adc_seq, test_burst_dma_error_reports_io_and_recovers)
 {
 	burst_manual_reset();
 	zassert_equal(bridge_hw_adc_read_start(BRIDGE_ADC_CH0, 4u, burst_done), BRIDGE_HW_OK, "start");
-	mock_dma_set_interrupt_flag(DMA1, DMA_CH1, DMA_INT_FLAG_ERR, SET);
-	DMA1_Channel1_IRQHandler();
+	const int cals_before = count_events("ADC_CTL1_TOUCH", ADC3);
+	mock_dma_set_interrupt_flag(DMA1, DMA_CH4, DMA_INT_FLAG_ERR, SET);
+	DMA1_Channel4_IRQHandler();
 
 	zassert_equal(burst_done_calls, 1u, "failure is reported once");
 	zassert_equal(burst_done_rv, BRIDGE_HW_ERR_IO, "as IO");
-	zassert_equal(adc_burst.state, ADC_BURST_IDLE, "burst released");
+	zassert_equal(count_events("ADC_CTL1_TOUCH", ADC3),
+	              cals_before,
+	              "an error never recalibrates in the IRQ");
+	zassert_equal(adc_burst[BURST_ADC3].state, ADC_BURST_IDLE, "burst released");
 	zassert_true(adc_periph_claim(ADC3), "claim released");
 	adc_periph_release(ADC3);
-	mock_dma_set_interrupt_flag(DMA1, DMA_CH1, DMA_INT_FLAG_ERR, RESET);
+	mock_dma_set_interrupt_flag(DMA1, DMA_CH4, DMA_INT_FLAG_ERR, RESET);
 
 	mock_adc_set_trigger_hook(burst_autocomplete);
 	uint16_t mv[4];
@@ -1938,33 +2033,105 @@ ZTEST(gd32_adc_seq, test_burst_overrun_flag_fails_the_burst)
 	zassert_equal(burst_done_rv, BRIDGE_HW_ERR_IO, "overrun -> IO, never half-trusted data");
 }
 
-ZTEST(gd32_adc_seq, test_burst_watchdog_tears_down_a_burst_that_never_completes)
+/* The watchdog's bound, restated from the occupancy budget: 4 x
+ * ADC_READ_ISR_BUDGET_US of DWT cycles at the nominal 216 MHz. */
+#define TEST_BURST_DEADLINE_CYCLES (4u * ADC_READ_ISR_BUDGET_US * 216u)
+
+/* bridge_hw_tick() runs after EVERY interrupt wake, not once per 50 ms: a CS
+ * edge (the host's reply read), an I2C event or a stream lap each call it.  With
+ * no time elapsed, however many wakes there are, a healthy burst is not killed.
+ * mock_dwt_step = 0 freezes the clock so only the test moves it. */
+ZTEST(gd32_adc_seq, test_burst_watchdog_ignores_wakes_without_elapsed_time)
 {
 	burst_manual_reset();
+	mock_dwt_step = 0u;
 	zassert_equal(bridge_hw_adc_read_start(BRIDGE_ADC_CH0, 4u, burst_done), BRIDGE_HW_OK, "start");
 
+	for (unsigned wake = 0u; wake < 1000u; ++wake) {
+		adc_burst_tick(); /* a CS-falling interrupt + tick, no SysTick period in between */
+	}
+	zassert_equal(adc_burst[BURST_ADC3].state, ADC_BURST_RUNNING, "wakes are not time");
+
+	/* Time that is a legitimate worst-case conversion (the full budget) is fine. */
+	mock_dwt_cycles += ADC_READ_ISR_BUDGET_US * 216u;
 	adc_burst_tick();
-	zassert_equal(adc_burst.state, ADC_BURST_RUNNING, "one tick (< 50 ms) is not a stall");
+	zassert_equal(adc_burst[BURST_ADC3].state, ADC_BURST_RUNNING, "the budget is not a stall");
+
+	/* The burst still completes normally after all those wakes. */
+	const uint16_t codes[4] = { 1u, 2u, 3u, 4u };
+	burst_hw_finish(codes, 4u);
+	zassert_equal(burst_done_calls, 1u, "delivered");
+	zassert_equal(burst_done_rv, BRIDGE_HW_OK, "success");
+}
+
+ZTEST(gd32_adc_seq, test_burst_watchdog_tears_down_after_elapsed_time)
+{
+	burst_manual_reset();
+	mock_dwt_step = 0u;
+	zassert_equal(bridge_hw_adc_read_start(BRIDGE_ADC_CH0, 4u, burst_done), BRIDGE_HW_OK, "start");
+
+	mock_dwt_cycles += TEST_BURST_DEADLINE_CYCLES - 1u;
 	adc_burst_tick();
-	zassert_equal(adc_burst.state, ADC_BURST_IDLE, "second tick: torn down");
+	zassert_equal(adc_burst[BURST_ADC3].state, ADC_BURST_RUNNING, "just under the bound");
+	mock_dwt_cycles += 1u;
+	mock_seq_reset();
+	adc_burst_tick();
+	zassert_equal(adc_burst[BURST_ADC3].state, ADC_BURST_IDLE, "at the bound: torn down");
 	zassert_equal(burst_done_calls, 0u, "base level never stages a reply (it would race the ISR)");
+	zassert_equal(count_events("ADC_CTL1_TOUCH", ADC3), 0, "teardown does not recalibrate");
 	zassert_true(adc_periph_claim(ADC3), "converter and DMA come back");
 	adc_periph_release(ADC3);
 
 	adc_burst_tick(); /* idle: no-op, no spurious restore */
-	zassert_equal(adc_burst.state, ADC_BURST_IDLE, "idle stays idle");
+	zassert_equal(adc_burst[BURST_ADC3].state, ADC_BURST_IDLE, "idle stays idle");
+}
+
+/* The elapsed time is an unsigned difference: the DWT wrapping between the
+ * trigger and the tick neither fires early nor is missed. */
+ZTEST(gd32_adc_seq, test_burst_watchdog_is_wrap_safe)
+{
+	burst_manual_reset();
+	mock_dwt_step   = 0u;
+	mock_dwt_cycles = 0xFFFFF000u;
+	zassert_equal(bridge_hw_adc_read_start(BRIDGE_ADC_CH0, 1u, burst_done), BRIDGE_HW_OK, "start");
+
+	mock_dwt_cycles += 0x2000u; /* wraps past zero: 0x2000 elapsed */
+	adc_burst_tick();
+	zassert_equal(adc_burst[BURST_ADC3].state, ADC_BURST_RUNNING, "wrapped, but little elapsed");
+	mock_dwt_cycles += TEST_BURST_DEADLINE_CYCLES;
+	adc_burst_tick();
+	zassert_equal(adc_burst[BURST_ADC3].state, ADC_BURST_IDLE, "elapsed time is still caught");
 }
 
 ZTEST(gd32_adc_seq, test_burst_watchdog_age_restarts_with_each_burst)
 {
 	burst_manual_reset();
+	mock_dwt_step = 0u;
 	zassert_equal(bridge_hw_adc_read_start(BRIDGE_ADC_CH0, 1u, burst_done), BRIDGE_HW_OK, "start");
+	mock_dwt_cycles += TEST_BURST_DEADLINE_CYCLES - 1u;
 	adc_burst_tick();
 	const uint16_t one = 7u;
 	burst_hw_finish(&one, 1u);
 	zassert_equal(bridge_hw_adc_read_start(BRIDGE_ADC_CH0, 1u, burst_done), BRIDGE_HW_OK, "again");
+	mock_dwt_cycles += TEST_BURST_DEADLINE_CYCLES - 1u;
 	adc_burst_tick();
-	zassert_equal(adc_burst.state, ADC_BURST_RUNNING, "the earlier tick does not count against it");
+	zassert_equal(adc_burst[BURST_ADC3].state,
+	              ADC_BURST_RUNNING,
+	              "the earlier burst's elapsed time does not count against this one");
+}
+
+/* Each converter's burst ages on its own clock. */
+ZTEST(gd32_adc_seq, test_burst_watchdog_ages_each_converter_separately)
+{
+	burst_manual_reset();
+	mock_dwt_step = 0u;
+	zassert_equal(bridge_hw_adc_read_start(BRIDGE_ADC_CH0, 1u, burst_done), BRIDGE_HW_OK, "a");
+	mock_dwt_cycles += TEST_BURST_DEADLINE_CYCLES / 2u;
+	zassert_equal(bridge_hw_adc_read_start(BRIDGE_ADC_CH2, 1u, burst_done_b), BRIDGE_HW_OK, "b");
+	mock_dwt_cycles += TEST_BURST_DEADLINE_CYCLES / 2u + 1u;
+	adc_burst_tick();
+	zassert_equal(adc_burst[BURST_ADC3].state, ADC_BURST_IDLE, "the older burst expired");
+	zassert_equal(adc_burst[BURST_ADC2].state, ADC_BURST_RUNNING, "the younger one did not");
 }
 
 /* The blocking path (I2C): same burst, bounded wait, abort on expiry. */
@@ -1974,9 +2141,71 @@ ZTEST(gd32_adc_seq, test_blocking_read_times_out_aborts_and_reports_io)
 
 	burst_manual_reset(); /* trigger completes nothing */
 	zassert_equal(bridge_hw_adc_read(BRIDGE_ADC_CH0, 2u, mv), BRIDGE_HW_ERR_IO, "timed out");
-	zassert_equal(adc_burst.state, ADC_BURST_IDLE, "burst aborted, not leaked");
+	zassert_equal(adc_burst[BURST_ADC3].state, ADC_BURST_IDLE, "burst aborted, not leaked");
 	zassert_true(adc_periph_claim(ADC3), "claim released");
 	adc_periph_release(ADC3);
+}
+
+/* The wait is a TIME bound read from the live clock (DWT), not an iteration
+ * count.  With the counter advancing 1 cycle per read, the cycles the wait burns
+ * ARE the bound: the burst deadline at 216 MHz, and half the SMBus stretch window
+ * at the live core clock once that clock has fallen back to IRC8M. */
+ZTEST(gd32_adc_seq, test_blocking_read_wait_is_bounded_by_time_on_the_live_clock)
+{
+	uint16_t mv[2];
+
+	burst_manual_reset(); /* trigger completes nothing */
+	mock_dwt_step        = 1u;
+	bridge_core_clock_hz = 216000000u;
+	uint32_t t0          = mock_dwt_cycles;
+	zassert_equal(bridge_hw_adc_read(BRIDGE_ADC_CH0, 2u, mv), BRIDGE_HW_ERR_IO, "timed out");
+	uint32_t burned = mock_dwt_cycles - t0;
+	zassert_true(burned >= TEST_BURST_DEADLINE_CYCLES && burned < TEST_BURST_DEADLINE_CYCLES + 64u,
+	             "216 MHz: the burst deadline, %u cycles (%u)",
+	             TEST_BURST_DEADLINE_CYCLES,
+	             burned);
+
+	/* IRC8M fallback: 8 MHz.  Half of the 25 ms stretch window is 12.5 ms = 100000
+	 * cycles, far under the burst deadline, so the host gets IO inside the window. */
+	bridge_core_clock_hz = 8000000u;
+	t0                   = mock_dwt_cycles;
+	zassert_equal(bridge_hw_adc_read(BRIDGE_ADC_CH0, 2u, mv), BRIDGE_HW_ERR_IO, "timed out");
+	burned = mock_dwt_cycles - t0;
+	zassert_true(burned >= 100000u && burned < 100000u + 64u,
+	             "8 MHz: half the stretch window, 100000 cycles (%u)",
+	             burned);
+}
+
+/* A stale NVIC-pending completion vector.  The CS ISR aborts a burst whose FTF
+ * had already pended, then starts a NEW burst before the vector is serviced.
+ * When it finally runs the state is RUNNING again but the new arm cleared the
+ * flags: the handler must do nothing -- no delivery, no teardown of the new
+ * burst. */
+ZTEST(gd32_adc_seq, test_stale_pending_vector_does_not_touch_the_new_burst)
+{
+	burst_manual_reset();
+	mock_adc_set_routine_data(2048u);
+	zassert_equal(bridge_hw_adc_read_start(BRIDGE_ADC_CH0, 2u, burst_done), BRIDGE_HW_OK, "old");
+
+	/* The old burst's completion flags are up (the vector is pending) ... */
+	mock_dma_set_interrupt_flag(DMA1, DMA_CH4, DMA_INT_FLAG_FTF | DMA_INT_FLAG_ERR, SET);
+	/* ... and the CS ISR gets there first: abort, then a new request. */
+	bridge_hw_adc_read_abort(burst_done);
+	zassert_equal(adc_burst[BURST_ADC3].state, ADC_BURST_IDLE, "old burst aborted");
+	zassert_equal(bridge_hw_adc_read_start(BRIDGE_ADC_CH0, 2u, burst_done), BRIDGE_HW_OK, "new");
+	zassert_equal(adc_burst[BURST_ADC3].state, ADC_BURST_RUNNING, "new burst running");
+
+	DMA1_Channel4_IRQHandler(); /* the stale pending vector finally runs */
+	zassert_equal(burst_done_calls, 0u, "nothing delivered for a burst that has not finished");
+	zassert_equal(adc_burst[BURST_ADC3].state, ADC_BURST_RUNNING, "new burst untouched");
+	zassert_true((*mock_dma_chctl_ref(DMA1, DMA_CH4) & DMA_CHXCTL_CHEN) != 0u,
+	             "its DMA still armed");
+
+	/* The new burst then completes exactly once. */
+	const uint16_t codes[2] = { 2048u, 4095u };
+	burst_hw_finish(codes, 2u);
+	zassert_equal(burst_done_calls, 1u, "the new burst delivers once");
+	zassert_equal(burst_done_mv[1], 1800u, "with its own codes");
 }
 
 static void other_done(int rv, const uint16_t *mv, uint8_t samples)
@@ -1986,13 +2215,14 @@ static void other_done(int rv, const uint16_t *mv, uint8_t samples)
 	(void)samples;
 }
 
-/* The two readers share the burst slot but must not abort each other's burst. */
+/* Two callers must not abort each other's burst. */
 ZTEST(gd32_adc_seq, test_abort_only_cancels_the_callers_own_burst)
 {
 	burst_manual_reset();
 	zassert_equal(bridge_hw_adc_read_start(BRIDGE_ADC_CH0, 2u, burst_done), BRIDGE_HW_OK, "start");
 	bridge_hw_adc_read_abort(other_done);
-	zassert_equal(adc_burst.state, ADC_BURST_RUNNING, "someone else's callback: untouched");
+	zassert_equal(
+	    adc_burst[BURST_ADC3].state, ADC_BURST_RUNNING, "someone else's callback: untouched");
 }
 
 ZTEST_SUITE(gd32_adc_seq, NULL, NULL, NULL, NULL, NULL);

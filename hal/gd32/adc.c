@@ -17,6 +17,7 @@
 #include "bridge_board_config.h"
 #include "bridge_critical.h"
 #include "gd32_common.h"
+#include "i2c_timeout.h"
 
 /* ----------------------------------------------------------------- */
 /* ADC channels.                                                      */
@@ -294,8 +295,7 @@ void adc_apply_conv_format(uint32_t periph, uint8_t channel)
  * The SPL body spins `while (RSTCLB)` then `while (CLB)` with NO
  * timeout -- and the calibration FSM only advances on a healthy,
  * clocked converter.  adc_periph_restore() is reachable from the CS-EXTI
- * request handler (a burst's error/abort restore and
- * bridge_hw_adc_stream_end's restore), where an unbounded spin on a
+ * request handler (bridge_hw_adc_stream_end's restore), where an unbounded spin on a
  * wedged ADC takes the WHOLE LINK down -- the exact failure class the
  * read path's own EOC bound was added to stop (silicon 2026-06-04).
  * Without the irony: the self-heal for a wedged converter must not
@@ -328,7 +328,7 @@ bool adc_calibrate_bounded(uint32_t periph)
  * changes that sibling's clock. */
 bool adc_periph_boot_init(uint32_t periph)
 {
-	/* Boot, adc_periph_restore() (stream end, burst abort/timeout) and every
+	/* Boot, adc_periph_restore() (stream end) and every
 	 * other re-init funnel through here, so this is the one place that makes the
 	 * "burst format is applied" record true to the hardware again. */
 	adc_format_invalidate(periph);
@@ -474,21 +474,36 @@ void adc_periph_release(uint32_t periph)
  *   start()   CS EXTI ISR:  claim -> format (cached) -> arm DMA -> trigger
  *   DMA IRQ   FTF:          stop DMA -> codes to mV -> done() -> release
  *
- * State machine, adc_burst.state (one burst at a time, all converters; they
- * share one DMA channel):
+ * State machine, adc_burst[slot].state, one context per converter (each has its
+ * own burst DMA channel, bridge_board_config.h, so only a same-converter request
+ * is BUSY):
  *
  *   IDLE --claim--> RUNNING --FTF/ERR--> (finish) --> IDLE
  *                      |  \--abort / watchdog / sync timeout--> ABORTING --> IDLE
  *
  * The transition into RUNNING and into ABORTING happen under bridge_irq_lock();
- * the long work (DMA stop, converter restore) happens outside it, in the context
+ * the work (DMA stop, converter stand-down) happens outside it, in the context
  * that won the transition.  The completion IRQ acts only on RUNNING, so a burst
  * being torn down can never also complete.
  *
- * Interrupt priorities: the DMA IRQ has the CS EXTI's preemption priority
+ * Interrupt priorities: the DMA IRQs have the CS EXTI's preemption priority
  * (BRIDGE_ADC_BURST_IRQ_PRIO == BRIDGE_CS_IRQ_PRIO), so start()/abort() called
  * from the CS ISR and finish() never preempt each other.  The I2C ISR (lower
  * priority) may be preempted by either; it only ever uses the blocking wrapper.
+ *
+ * Teardown cost.  start()/abort() run in the prio-1 CS EXTI and finish() in the
+ * DMA IRQ, so an error/abort stand-down must be a handful of register writes:
+ * stop the DMA, clear ADCON, drop the DMA-request bits and the format record.
+ * It never recalibrates (tSTAB + a bounded calibration, up to 2 x 100000
+ * iterations on a wedged converter); the next burst misses the format record and
+ * pays that calibration on its own request instead.
+ *
+ * Time base.  The two time bounds below (the base-level watchdog and the I2C
+ * blocking wait) count DWT cycles, which run at the core clock.  A burst's
+ * duration is fixed in HCLK cycles (ADCCK = HCLK / 6, ADC_CLK_SYNC_HCLK_DIV6), so
+ * a bound in DWT cycles tracks it whatever the core clock is, including after a
+ * relock failure drops the part to IRC8M.  Counting main-loop wakes instead would
+ * not be a time base at all: the loop runs after EVERY interrupt.
  *
  * ---- applied-format record -------------------------------------------------
  *
@@ -509,8 +524,9 @@ void adc_periph_release(uint32_t periph)
  *
  * INVALIDATION.  The record is only true while nothing else touches the
  * converter.  Every other path that does MUST drop it:
- *   - adc_periph_boot_init(): boot, adc_periph_restore() (stream end, burst
- *     abort/timeout/error), and anything else that re-initialises a converter;
+ *   - adc_periph_boot_init(): boot, adc_periph_restore() (stream end), and
+ *     anything else that re-initialises a converter;
+ *   - adc_burst_converter_stop() (burst error, abort, watchdog, sync timeout);
  *   - adc_vref_measure() (ADC0 reprogrammed to VREFINT);
  *   - bridge_hw_adc_stream_begin() and adc_stream_recover_rovf() (adc_stream.c);
  *   - adc_deepsleep_quiesce() (power.c).
@@ -527,7 +543,25 @@ typedef struct {
 
 static adc_applied_fmt_t adc_applied_fmt[ADC_PERIPH_COUNT];
 
-adc_burst_t adc_burst;
+_Static_assert(ADC_BURST_COUNT == ADC_PERIPH_COUNT, "one burst context per converter");
+
+adc_burst_t adc_burst[ADC_BURST_COUNT];
+
+/* Per-converter burst DMA channel, DMAMUX multiplexer channel and IRQ, indexed by
+ * converter slot (bridge_board_config.h has the map and the reasoning). */
+static const dma_channel_enum adc_burst_dma_ch[ADC_BURST_COUNT] = BRIDGE_ADC_BURST_DMA_CHANNELS;
+static const uint8_t   adc_burst_dmamux_ch[ADC_BURST_COUNT]     = BRIDGE_ADC_BURST_DMAMUX_CHANNELS;
+static const IRQn_Type adc_burst_dma_irqn[ADC_BURST_COUNT]      = BRIDGE_ADC_BURST_DMA_IRQNS;
+
+/* Time bounds, in DWT cycles (see the Time base note above).
+ *
+ * ADC_BURST_RESIDENCY_CYCLES is ADC_READ_ISR_BUDGET_US expressed in core cycles
+ * at the nominal 216 MHz: the longest a burst that passed the occupancy check can
+ * convert for, since ADCCK is a fixed HCLK divisor.  Both bounds are a multiple
+ * of it so a healthy burst never trips them; they exist only to free a converter
+ * whose conversion or DMA request was lost. */
+#define ADC_BURST_RESIDENCY_CYCLES (ADC_READ_ISR_BUDGET_US * (PWM_TIMER_CLK_HZ / 1000000u))
+#define ADC_BURST_DEADLINE_CYCLES  (4u * ADC_BURST_RESIDENCY_CYCLES)
 
 void adc_format_invalidate(uint32_t periph)
 {
@@ -543,65 +577,69 @@ void adc_format_invalidate_all(void)
 	}
 }
 
-/* Claim the burst for `periph`: the converter flag AND the single burst slot, in
- * one critical section.  False = a burst (on any converter) or another claimant
- * of this converter is active; the caller answers BUSY. */
+/* Claim the burst for `periph`: the converter flag AND this converter's burst
+ * context, in one critical section.  False = a burst or another claimant of THIS
+ * converter is active; the caller answers BUSY.  Other converters are unaffected. */
 static bool adc_burst_claim(uint32_t periph)
 {
 	const uint8_t slot = adc_periph_slot(periph);
 
 	if (slot >= ADC_PERIPH_COUNT) return false;
 
+	adc_burst_t   *b  = &adc_burst[slot];
 	const uint32_t st = bridge_irq_lock();
-	const bool     ok = (adc_burst.state == ADC_BURST_IDLE) && !adc_periph_busy[slot];
+	const bool     ok = (b->state == ADC_BURST_IDLE) && !adc_periph_busy[slot];
 	if (ok) {
 		adc_periph_busy[slot] = true;
-		adc_burst.periph      = periph;
-		adc_burst.done        = 0;
-		adc_burst.age_ticks   = 0u;
-		adc_burst.state       = ADC_BURST_RUNNING;
+		b->periph             = periph;
+		b->done               = 0;
+		b->start_cycles       = DWT->CYCCNT;
+		b->state              = ADC_BURST_RUNNING;
 	}
 	bridge_irq_unlock(st);
 	return ok;
 }
 
-static void adc_burst_release(void)
+static void adc_burst_release(uint8_t slot)
 {
-	const uint32_t periph = adc_burst.periph;
+	adc_burst_t *b = &adc_burst[slot];
 
-	adc_burst.done  = 0;
-	adc_burst.state = ADC_BURST_IDLE;
-	adc_periph_release(periph);
+	b->done  = 0;
+	b->state = ADC_BURST_IDLE;
+	adc_periph_release(b->periph);
 }
 
 /* Bounded wait for CHEN to read clear (UM Rev1.2 s8.4.7: count/address may be
  * written only then); a few register reads, not a wait on conversions. */
 #define ADC_BURST_DMA_DISABLE_SPINS 64u
 
-static bool adc_burst_dma_disable_confirm(void)
+static bool adc_burst_dma_disable_confirm(uint8_t slot)
 {
-	dma_channel_disable(BRIDGE_ADC_BURST_DMA, BRIDGE_ADC_BURST_DMA_CH);
+	dma_channel_disable(BRIDGE_ADC_BURST_DMA, adc_burst_dma_ch[slot]);
 	for (uint32_t spin = 0u; spin < ADC_BURST_DMA_DISABLE_SPINS; ++spin) {
-		if ((DMA_CHCTL(BRIDGE_ADC_BURST_DMA, BRIDGE_ADC_BURST_DMA_CH) & DMA_CHXCTL_CHEN) == 0u) {
+		if ((DMA_CHCTL(BRIDGE_ADC_BURST_DMA, adc_burst_dma_ch[slot]) & DMA_CHXCTL_CHEN) == 0u) {
 			return true;
 		}
 	}
 	return false;
 }
 
-/* Program the burst channel: peripheral-to-memory, 16-bit, `samples` beats,
- * normal (non-circular) mode, FTF + ERR interrupts on.  CHEN is set last. */
-static bool adc_burst_dma_arm(uint32_t periph, uint8_t samples)
+/* Program the converter's burst channel: peripheral-to-memory, 16-bit, `samples`
+ * beats, normal (non-circular) mode, FTF + ERR interrupts on.  CHEN is set
+ * last. */
+static bool adc_burst_dma_arm(uint8_t slot, uint32_t periph, uint8_t samples)
 {
+	const dma_channel_enum ch = adc_burst_dma_ch[slot];
+
 	bridge_rcu_periph_clock_enable(RCU_DMAMUX);
 	bridge_rcu_periph_clock_enable(BRIDGE_ADC_BURST_DMA_RCU);
-	if (!adc_burst_dma_disable_confirm()) return false;
-	dma_deinit(BRIDGE_ADC_BURST_DMA, BRIDGE_ADC_BURST_DMA_CH);
+	if (!adc_burst_dma_disable_confirm(slot)) return false;
+	dma_deinit(BRIDGE_ADC_BURST_DMA, ch);
 
 	dma_parameter_struct init;
 	dma_struct_para_init(&init);
 	init.periph_addr  = (uint32_t)(uintptr_t)&ADC_RDATA(periph);
-	init.memory_addr  = (uint32_t)(uintptr_t)adc_burst.codes;
+	init.memory_addr  = (uint32_t)(uintptr_t)adc_burst[slot].codes;
 	init.direction    = DMA_PERIPHERAL_TO_MEMORY;
 	init.number       = samples;
 	init.periph_inc   = DMA_PERIPH_INCREASE_DISABLE;
@@ -610,28 +648,43 @@ static bool adc_burst_dma_arm(uint32_t periph, uint8_t samples)
 	init.memory_width = DMA_MEMORY_WIDTH_16BIT;
 	init.priority     = DMA_PRIORITY_HIGH;
 	init.request      = adc_dma_request_id(periph);
-	dma_init(BRIDGE_ADC_BURST_DMA, BRIDGE_ADC_BURST_DMA_CH, &init);
+	dma_init(BRIDGE_ADC_BURST_DMA, ch, &init);
 
-	dma_flag_clear(BRIDGE_ADC_BURST_DMA, BRIDGE_ADC_BURST_DMA_CH, DMA_FLAG_FTF | DMA_FLAG_ERR);
-	dma_interrupt_enable(BRIDGE_ADC_BURST_DMA, BRIDGE_ADC_BURST_DMA_CH, DMA_INT_FTF | DMA_INT_ERR);
+	dma_flag_clear(BRIDGE_ADC_BURST_DMA, ch, DMA_FLAG_FTF | DMA_FLAG_ERR);
+	dma_interrupt_enable(BRIDGE_ADC_BURST_DMA, ch, DMA_INT_FTF | DMA_INT_ERR);
 	nvic_irq_enable(
-	    BRIDGE_ADC_BURST_DMA_IRQN, BRIDGE_ADC_BURST_IRQ_PRIO, BRIDGE_ADC_BURST_IRQ_SUBPRIO);
-	dma_channel_enable(BRIDGE_ADC_BURST_DMA, BRIDGE_ADC_BURST_DMA_CH);
+	    adc_burst_dma_irqn[slot], BRIDGE_ADC_BURST_IRQ_PRIO, BRIDGE_ADC_BURST_IRQ_SUBPRIO);
+	dma_channel_enable(BRIDGE_ADC_BURST_DMA, ch);
 	return true;
 }
 
-/* Stand the burst channel down: channel off, DMAMUX request released (same
- * discipline as adc_stream_end, so a later stream selecting this ADC request on
- * the other controller never sees it routed twice), interrupt sources masked,
- * flags cleared.  False = CHEN would not clear. */
-static bool adc_burst_dma_stop(void)
+/* Stand the converter's burst channel down: channel off, DMAMUX request released
+ * (same discipline as adc_stream_end, so a later stream selecting this ADC
+ * request on the other controller never sees it routed twice), interrupt sources
+ * masked, flags cleared.  False = CHEN would not clear. */
+static bool adc_burst_dma_stop(uint8_t slot)
 {
-	const bool stopped = adc_burst_dma_disable_confirm();
+	const dma_channel_enum ch      = adc_burst_dma_ch[slot];
+	const bool             stopped = adc_burst_dma_disable_confirm(slot);
 
-	DMAMUX_RM_CHXCFG(BRIDGE_ADC_BURST_DMAMUX_CH) &= ~DMAMUX_RM_CHXCFG_MUXID;
-	dma_interrupt_disable(BRIDGE_ADC_BURST_DMA, BRIDGE_ADC_BURST_DMA_CH, DMA_INT_FTF | DMA_INT_ERR);
-	dma_flag_clear(BRIDGE_ADC_BURST_DMA, BRIDGE_ADC_BURST_DMA_CH, DMA_FLAG_FTF | DMA_FLAG_ERR);
+	DMAMUX_RM_CHXCFG(adc_burst_dmamux_ch[slot]) &= ~DMAMUX_RM_CHXCFG_MUXID;
+	dma_interrupt_disable(BRIDGE_ADC_BURST_DMA, ch, DMA_INT_FTF | DMA_INT_ERR);
+	dma_flag_clear(BRIDGE_ADC_BURST_DMA, ch, DMA_FLAG_FTF | DMA_FLAG_ERR);
 	return stopped;
+}
+
+/* Cheap converter stand-down for an error or abort (CS EXTI / DMA IRQ context):
+ * ADCON clear aborts anything still converting, the DMA-request bits and flags
+ * go, and the format record is dropped.  No tSTAB dwell, no recalibration: the
+ * next burst misses the record and redoes both inside its own request. */
+static void adc_burst_converter_stop(uint32_t periph)
+{
+	adc_disable(periph);
+	adc_dma_request_after_last_disable(periph);
+	adc_dma_mode_disable(periph);
+	adc_flag_clear(periph, ADC_FLAG_EOC);
+	adc_flag_clear(periph, ADC_FLAG_ROVF);
+	adc_format_invalidate(periph);
 }
 
 /* Make `periph` hold the burst format for (channel, samples).  True = ready to
@@ -680,51 +733,73 @@ static bool adc_burst_format_apply(const gd32_adc_ch_t *ch, uint8_t channel, uin
 }
 
 /* Common tail for completion and error.  Runs in the DMA IRQ. */
-static void adc_burst_finish(int rv)
+static void adc_burst_finish(uint8_t slot, int rv)
 {
-	const uint32_t periph = adc_burst.periph;
-	const bool     ok     = adc_burst_dma_stop();
+	adc_burst_t   *b      = &adc_burst[slot];
+	const uint32_t periph = b->periph;
+	const bool     ok     = adc_burst_dma_stop(slot);
 
 	if (rv == BRIDGE_HW_OK && (!ok || SET == adc_flag_get(periph, ADC_FLAG_ROVF))) {
 		rv = BRIDGE_HW_ERR_IO; /* a stuck channel or an overrun: the codes are not trusted */
 	}
 	if (rv == BRIDGE_HW_OK) {
-		for (uint8_t i = 0u; i < adc_burst.samples; ++i) {
-			adc_burst.mv[i] = adc_code_to_mv(adc_burst.codes[i], adc_burst.full_scale);
+		for (uint8_t i = 0u; i < b->samples; ++i) {
+			b->mv[i] = adc_code_to_mv(b->codes[i], b->full_scale);
 		}
 	} else {
-		/* ADCON clear aborts anything still converting; this also puts the converter
-		 * back on its single-shot baseline, recalibrates, and drops the format
-		 * record (adc_periph_boot_init).  Best effort and bounded. */
-		(void)adc_periph_restore(periph);
+		adc_burst_converter_stop(periph);
 	}
 
-	void (*const done)(int, const uint16_t *, uint8_t) = adc_burst.done;
-	if (done != 0) done(rv, adc_burst.mv, adc_burst.samples);
-	adc_burst_release();
+	void (*const done)(int, const uint16_t *, uint8_t) = b->done;
+	if (done != 0) done(rv, b->mv, b->samples);
+	adc_burst_release(slot);
 }
 
-/* Burst DMA transfer-complete / error interrupt.  Strong definition overriding
- * the vendor startup's weak alias; see bridge_board_config.h for the channel and
- * priority. */
-void DMA1_Channel1_IRQHandler(void)
+/* Burst DMA transfer-complete / error interrupt, one vector per converter.  The
+ * state check makes a stale pending harmless: an abort followed by a NEW burst
+ * started in the same CS ISR leaves the old vector pending while the state is
+ * RUNNING again, but the new arm cleared the flags, so neither source is set
+ * and nothing happens. */
+static void adc_burst_irq(uint8_t slot)
 {
-	const bool err = dma_interrupt_flag_get(
-	                     BRIDGE_ADC_BURST_DMA, BRIDGE_ADC_BURST_DMA_CH, DMA_INT_FLAG_ERR) != RESET;
-	const bool ftf = dma_interrupt_flag_get(
-	                     BRIDGE_ADC_BURST_DMA, BRIDGE_ADC_BURST_DMA_CH, DMA_INT_FLAG_FTF) != RESET;
+	const dma_channel_enum ch = adc_burst_dma_ch[slot];
+	const bool err = dma_interrupt_flag_get(BRIDGE_ADC_BURST_DMA, ch, DMA_INT_FLAG_ERR) != RESET;
+	const bool ftf = dma_interrupt_flag_get(BRIDGE_ADC_BURST_DMA, ch, DMA_INT_FLAG_FTF) != RESET;
 
-	if (adc_burst.state != ADC_BURST_RUNNING) {
+	if (adc_burst[slot].state != ADC_BURST_RUNNING) {
 		/* Nothing owns the channel (a stale pending, or a teardown already
 		 * took it): drop the flags so the vector does not re-enter. */
-		dma_flag_clear(BRIDGE_ADC_BURST_DMA, BRIDGE_ADC_BURST_DMA_CH, DMA_FLAG_FTF | DMA_FLAG_ERR);
+		dma_flag_clear(BRIDGE_ADC_BURST_DMA, ch, DMA_FLAG_FTF | DMA_FLAG_ERR);
 		return;
 	}
 	if (err) {
-		adc_burst_finish(BRIDGE_HW_ERR_IO);
+		adc_burst_finish(slot, BRIDGE_HW_ERR_IO);
 	} else if (ftf) {
-		adc_burst_finish(BRIDGE_HW_OK);
+		adc_burst_finish(slot, BRIDGE_HW_OK);
 	}
+}
+
+/* Strong definitions overriding the vendor startup's weak aliases; see
+ * bridge_board_config.h for the channel map and priority.  Converter slot n
+ * (ADC<n>) owns DMA1 CH(n+1). */
+void DMA1_Channel1_IRQHandler(void)
+{
+	adc_burst_irq(0u);
+}
+
+void DMA1_Channel2_IRQHandler(void)
+{
+	adc_burst_irq(1u);
+}
+
+void DMA1_Channel3_IRQHandler(void)
+{
+	adc_burst_irq(2u);
+}
+
+void DMA1_Channel4_IRQHandler(void)
+{
+	adc_burst_irq(3u);
 }
 
 int bridge_hw_adc_read_start(uint8_t channel, uint8_t samples, bridge_hw_adc_read_done_fn done)
@@ -755,7 +830,7 @@ int bridge_hw_adc_read_start(uint8_t channel, uint8_t samples, bridge_hw_adc_rea
 	 * multipliers -- and the sample window they multiply -- against
 	 * ADC_READ_ISR_BUDGET_US BEFORE touching the converter.  The SPI link no
 	 * longer sits in an ISR for this time, but the burst still holds the
-	 * converter, the one burst DMA channel and (for I2C) the caller; see
+	 * converter, its burst DMA channel and (for I2C) the caller; see
 	 * ADC_READ_ISR_BUDGET_US in gd32_common.h.  Rejecting rather than capping is
 	 * deliberate: silently halving an oversample ratio would return a reading
 	 * whose noise floor is not what the caller asked for, with STATUS_OK. */
@@ -767,24 +842,27 @@ int bridge_hw_adc_read_start(uint8_t channel, uint8_t samples, bridge_hw_adc_rea
 		return BRIDGE_HW_ERR_RANGE;
 	}
 
-	/* Claim the converter AND the burst slot (#133): covers read-vs-read,
-	 * read-vs-stream_begin and burst-vs-burst on a different converter (one DMA
-	 * channel).  Every return below must release. */
+	/* Claim the converter AND its burst context (#133): covers read-vs-read and
+	 * read-vs-stream_begin on one converter.  A burst on a DIFFERENT converter has
+	 * its own DMA channel and does not conflict.  Every return below must
+	 * release. */
 	if (!adc_burst_claim(ch->periph)) return BRIDGE_HW_ERR_BUSY;
-	adc_burst.done       = done;
-	adc_burst.samples    = samples;
-	adc_burst.full_scale = adc_full_scale_for_bits(adc_resolution_bits_cache[channel]);
+	const uint8_t slot = adc_periph_slot(ch->periph);
+	adc_burst_t  *b    = &adc_burst[slot];
+	b->done            = done;
+	b->samples         = samples;
+	b->full_scale      = adc_full_scale_for_bits(adc_resolution_bits_cache[channel]);
 
 	if (!adc_burst_format_apply(ch, channel, samples)) {
 		/* Calibration never finished: report IO rather than serve readings from
 		 * an unproven converter.  The record stays invalid, so the next burst
 		 * redoes the whole sequence.  Release before bailing (#133 x #80): a
 		 * stranded claim would answer BUSY until reboot. */
-		adc_burst_release();
+		adc_burst_release(slot);
 		return BRIDGE_HW_ERR_IO;
 	}
-	if (!adc_burst_dma_arm(ch->periph, samples)) {
-		adc_burst_release();
+	if (!adc_burst_dma_arm(slot, ch->periph, samples)) {
+		adc_burst_release(slot);
 		return BRIDGE_HW_ERR_IO;
 	}
 
@@ -793,79 +871,120 @@ int bridge_hw_adc_read_start(uint8_t channel, uint8_t samples, bridge_hw_adc_rea
 	adc_flag_clear(ch->periph, ADC_FLAG_EOC);
 	adc_flag_clear(ch->periph, ADC_FLAG_ROVF);
 
-	/* Go.  From here the DMA-complete interrupt owns the burst. */
+	/* Go.  From here the DMA-complete interrupt owns the burst; the watchdog's
+	 * clock starts at the trigger, not at the claim (the format apply above is
+	 * not part of the conversion). */
+	b->start_cycles = DWT->CYCCNT;
 	adc_software_trigger_enable(ch->periph, ADC_ROUTINE_CHANNEL);
 	return BRIDGE_HW_OK;
 }
 
 /* Tear a burst down that has already been moved to ABORTING by the caller. */
-static void adc_burst_teardown(void)
+static void adc_burst_teardown(uint8_t slot)
 {
-	const uint32_t periph = adc_burst.periph;
-
-	(void)adc_burst_dma_stop();
-	(void)adc_periph_restore(periph); /* ADCON clear stops the sequence; recalibrates */
-	adc_burst_release();
+	(void)adc_burst_dma_stop(slot);
+	adc_burst_converter_stop(adc_burst[slot].periph);
+	adc_burst_release(slot);
 }
 
 void bridge_hw_adc_read_abort(bridge_hw_adc_read_done_fn done)
 {
-	const uint32_t st = bridge_irq_lock();
-	const bool     mine =
-	    (done != 0) && (adc_burst.state == ADC_BURST_RUNNING) && (adc_burst.done == done);
-	if (mine) adc_burst.state = ADC_BURST_ABORTING;
-	bridge_irq_unlock(st);
+	if (done == 0) return;
 
-	if (mine) adc_burst_teardown();
+	for (uint8_t slot = 0u; slot < ADC_BURST_COUNT; ++slot) {
+		const uint32_t st = bridge_irq_lock();
+		const bool     mine =
+		    (adc_burst[slot].state == ADC_BURST_RUNNING) && (adc_burst[slot].done == done);
+		if (mine) adc_burst[slot].state = ADC_BURST_ABORTING;
+		bridge_irq_unlock(st);
+
+		if (mine) {
+			adc_burst_teardown(slot);
+			return; /* one command defers at a time: a callback owns at most one burst */
+		}
+	}
 }
 
-/* Watchdog: a burst takes microseconds (<= ADC_READ_ISR_BUDGET_US by the budget
- * above), so one still RUNNING two ticks later (>= 50 ms) never completed -- a
- * wedged converter or a lost DMA request.  Tear it down so the converter, the
- * DMA channel and the claim come back.  No callback: the SPI transport bounds
- * its own wait (SPI_DRAIN_REWIND_BOUND) and a new request cancels it, and
- * staging a reply from base level would race the CS ISR. */
-#define ADC_BURST_WATCHDOG_TICKS 2u
-
+/* Watchdog: a burst converts for at most ADC_BURST_RESIDENCY_CYCLES (the
+ * occupancy budget), so one still RUNNING after ADC_BURST_DEADLINE_CYCLES of
+ * elapsed time never completed -- a wedged converter or a lost DMA request.  Tear
+ * it down so the converter, the DMA channel and the claim come back.  No
+ * callback: the SPI transport bounds its own wait (SPI_DRAIN_REWIND_BOUND) and a
+ * new request cancels it, and staging a reply from base level would race the CS
+ * ISR.
+ *
+ * Aged by TIME, not by calls.  bridge_hw_tick() runs after EVERY wake of the main
+ * loop (`__WFI(); bridge_hw_tick();`): a host reply-read CS edge, a stream lap,
+ * an I2C event or SysTick each invoke it, so a per-call counter would kill a
+ * healthy burst on the next unrelated interrupt.  The unsigned subtraction is
+ * wrap-safe for any elapsed time under the 2^32-cycle DWT period (~19.9 s at
+ * 216 MHz); the tick runs at least every 50 ms. */
 void adc_burst_tick(void)
 {
-	bool expired = false;
+	for (uint8_t slot = 0u; slot < ADC_BURST_COUNT; ++slot) {
+		bool expired = false;
 
-	const uint32_t st = bridge_irq_lock();
-	if (adc_burst.state == ADC_BURST_RUNNING && ++adc_burst.age_ticks >= ADC_BURST_WATCHDOG_TICKS) {
-		adc_burst.state = ADC_BURST_ABORTING;
-		expired         = true;
+		const uint32_t st = bridge_irq_lock();
+		if (adc_burst[slot].state == ADC_BURST_RUNNING &&
+		    (uint32_t)(DWT->CYCCNT - adc_burst[slot].start_cycles) >= ADC_BURST_DEADLINE_CYCLES) {
+			adc_burst[slot].state = ADC_BURST_ABORTING;
+			expired               = true;
+		}
+		bridge_irq_unlock(st);
+
+		if (expired) adc_burst_teardown(slot);
 	}
-	bridge_irq_unlock(st);
-
-	if (expired) adc_burst_teardown();
 }
 
 void adc_deepsleep_quiesce(void)
 {
-	bool running = false;
+	for (uint8_t slot = 0u; slot < ADC_BURST_COUNT; ++slot) {
+		bool running = false;
 
-	const uint32_t st = bridge_irq_lock();
-	if (adc_burst.state == ADC_BURST_RUNNING) {
-		adc_burst.state = ADC_BURST_ABORTING;
-		running         = true;
+		const uint32_t st = bridge_irq_lock();
+		if (adc_burst[slot].state == ADC_BURST_RUNNING) {
+			adc_burst[slot].state = ADC_BURST_ABORTING;
+			running               = true;
+		}
+		bridge_irq_unlock(st);
+
+		if (running) adc_burst_teardown(slot);
 	}
-	bridge_irq_unlock(st);
-
-	if (running) adc_burst_teardown();
 	adc_format_invalidate_all();
 }
 
 /* Blocking read for the I2C link, whose reply must exist before the read phase
  * starts (its EV ISR clock-stretches meanwhile).  Same burst, same DMA: it spins
  * on a flag the DMA-complete IRQ sets -- not on EOC -- which is possible because
- * that IRQ outranks the I2C ISR.  The wait is a hard iteration bound; on expiry
- * the burst is aborted (converter restored) and IO reported.  This is the one
- * remaining wait in the ADC_READ path; it goes when I2C dispatch is deferred.
+ * that IRQ outranks the I2C ISR.
+ *
+ * INTERIM.  This wait sits in the priority-2 I2C ISR and is only tolerable for as
+ * long as ADC_READ is reachable over I2C at all.  From protocol 0.15 the
+ * maintainer's decision is that Linux on BRD_I2C is limited to GPIO + SE_RST +
+ * OTA: ADC_READ over I2C then answers STATUS_NOSUPPORT, and this function and its
+ * wait go away with it.  ADC_READ stays on SPI, deferred.
+ *
+ * The wait is bounded by ELAPSED TIME, read from the live clock (DWT), never by
+ * an iteration count (a raw count is ~5-9 ms at 216 MHz but ~27x longer on the
+ * IRC8M fallback).  The bound is the smaller of
+ *   - ADC_BURST_DEADLINE_CYCLES: a multiple of the burst's own worst case, which
+ *     is fixed in HCLK cycles and so valid at any core clock, and
+ *   - half the SMBus clock-stretch window (BRIDGE_I2C_STRETCH_TIMEOUT_US) at the
+ *     LIVE core clock, bridge_core_clock_hz, which relock/fallback keeps current:
+ *     on a degraded clock the host gets STATUS_IO inside the window instead of a
+ *     stretch timeout.
+ * On expiry the burst is aborted (converter stood down) and IO reported.
  *
  * Never call this from the SPI CS ISR (or anything at the burst IRQ's priority):
  * the completion could not run. */
-#define ADC_BURST_SYNC_SPINS 400000u
+static uint32_t adc_sync_wait_cycles(void)
+{
+	const uint64_t stretch_cycles =
+	    ((uint64_t)bridge_core_clock_hz * (BRIDGE_I2C_STRETCH_TIMEOUT_US / 2u)) / 1000000ull;
+
+	return (stretch_cycles < ADC_BURST_DEADLINE_CYCLES) ? (uint32_t)stretch_cycles
+	                                                    : ADC_BURST_DEADLINE_CYCLES;
+}
 
 static struct {
 	volatile bool done;
@@ -891,10 +1010,13 @@ int bridge_hw_adc_read(uint8_t channel, uint8_t samples, uint16_t *mv)
 {
 	if (mv == 0) return BRIDGE_HW_ERR_INVAL;
 
-	const int rv = bridge_hw_adc_read_start(channel, samples, adc_sync_done);
+	adc_sync.done = false;
+	const int rv  = bridge_hw_adc_read_start(channel, samples, adc_sync_done);
 	if (rv != BRIDGE_HW_OK) return rv;
 
-	for (uint32_t to = ADC_BURST_SYNC_SPINS; !adc_sync.done && to != 0u; --to) {
+	const uint32_t t0    = DWT->CYCCNT;
+	const uint32_t limit = adc_sync_wait_cycles();
+	while (!adc_sync.done && (uint32_t)(DWT->CYCCNT - t0) < limit) {
 		/* bounded wait for the DMA-complete IRQ's flag */
 	}
 	if (!adc_sync.done) {

@@ -186,8 +186,8 @@ FlagStatus  vref_status_get(void);
 /* DMA function surface.                                               */
 /* ------------------------------------------------------------------ */
 
-typedef enum { DMA_CH0 = 0, DMA_CH1 = 1 } dma_channel_enum;
-#define MOCK_DMA_CH_COUNT 2u
+typedef enum { DMA_CH0 = 0, DMA_CH1 = 1, DMA_CH2 = 2, DMA_CH3 = 3, DMA_CH4 = 4 } dma_channel_enum;
+#define MOCK_DMA_CH_COUNT 5u
 
 #define DMA_PERIPHERAL_TO_MEMORY    0u
 #define DMA_PERIPH_INCREASE_DISABLE 0u
@@ -259,8 +259,25 @@ void     mock_dma_set_interrupt_flag(uint32_t         dma_periph,
  * test, not a vendor-header interface. */
 void DMA0_Channel0_IRQHandler(void);
 void DMA1_Channel0_IRQHandler(void);
-/* Burst-read completion IRQ, supplied by the production adc.c. */
+/* Burst-read completion IRQs, supplied by the production adc.c: converter slot
+ * n (ADC<n>) owns DMA1 CH(n+1). */
 void DMA1_Channel1_IRQHandler(void);
+void DMA1_Channel2_IRQHandler(void);
+void DMA1_Channel3_IRQHandler(void);
+void DMA1_Channel4_IRQHandler(void);
+
+/* Cortex-M33 DWT cycle counter, as far as the burst time bounds need it: a
+ * free-running CYCCNT the test sets directly (mock_dwt_cycles) and that
+ * additionally advances by mock_dwt_step on every read, so a bounded spin on it
+ * terminates on the host.  `DWT->CYCCNT` is a read of that model. */
+typedef struct {
+	volatile uint32_t CYCCNT;
+} DWT_Type;
+DWT_Type *mock_dwt_ptr(void);
+#define DWT (mock_dwt_ptr())
+extern uint32_t mock_dwt_cycles;      /* the counter */
+extern uint32_t mock_dwt_step;        /* added after every CYCCNT read */
+extern uint32_t bridge_core_clock_hz; /* defined here: init.c is not linked */
 
 /* Test-only: called from adc_software_trigger_enable() (after the usual EOC
  * model).  Lets a test play the hardware finishing a burst -- fill the DMA
@@ -325,7 +342,14 @@ void timer_disable(uint32_t timer_periph);
 /* NVIC -- logged only.                                                */
 /* ------------------------------------------------------------------ */
 
-typedef enum { DMA0_Channel0_IRQn = 0, DMA1_Channel0_IRQn = 1, DMA1_Channel1_IRQn = 2 } IRQn_Type;
+typedef enum {
+	DMA0_Channel0_IRQn = 0,
+	DMA1_Channel0_IRQn = 1,
+	DMA1_Channel1_IRQn = 2,
+	DMA1_Channel2_IRQn = 3,
+	DMA1_Channel3_IRQn = 4,
+	DMA1_Channel4_IRQn = 5
+} IRQn_Type;
 
 void nvic_irq_enable(IRQn_Type nvic_irq,
                      uint8_t   nvic_irq_pre_priority,

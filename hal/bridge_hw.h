@@ -47,7 +47,7 @@
 /* * Both DMA controllers (DMA0 + DMA1, 7 channels each) are        */
 /*   available.  As built, ADC stream 0 owns DMA0 CH0 and stream 1  */
 /*   owns DMA1 CH0, so they run concurrently; the SPI transport owns */
-/*   DMA0 CH2 (TX) and CH3 (RX); ADC_READ bursts own DMA1 CH1 (map in */
+/*   DMA0 CH2 (TX) and CH3 (RX); ADC_READ bursts own DMA1 CH1..CH4 (map in */
 /*   bridge_board_config.h); I2C remains interrupt-driven.            */
 /* --------------------------------------------------------------- */
 
@@ -165,7 +165,7 @@ typedef void (*bridge_hw_adc_read_done_fn)(int rv, const uint16_t *mv, uint8_t s
  * BRIDGE_HW_OK: the burst is running and `done` will be called exactly once,
  * unless it is aborted first.  Any other value: nothing was started and `done`
  * will not be called (same codes bridge_hw_adc_read returns, plus BUSY while a
- * previous burst, on any converter, is still in flight). */
+ * previous burst on the same converter is still in flight). */
 int bridge_hw_adc_read_start(uint8_t channel, uint8_t samples, bridge_hw_adc_read_done_fn done);
 
 /* Cancel an in-flight burst that was started with `done`; `done` is NOT called.
