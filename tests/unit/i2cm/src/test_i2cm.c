@@ -473,4 +473,20 @@ ZTEST(i2cm, test_power_mode_refused_busy_while_a_job_runs)
 	bridge_hw_fake_reset();
 }
 
+/* RUN and SLEEP are never refused because of an I2C3 proxy job. */
+ZTEST(i2cm, test_run_and_sleep_accepted_while_a_job_runs)
+{
+	uint8_t reply[CAP];
+	size_t  n;
+
+	for (uint8_t mode = 0u; mode <= 1u; ++mode) {
+		const uint8_t req[10] = { mode, 0u, 8u, 0u, 0u, 0u, 0x10u, 0x27u, 0u, 0u };
+		bridge_hw_fake_reset();
+		bridge_hw_fake_i2cm_set_busy(true);
+		zassert_equal(disp(SPI, CMD_POWER_MODE_SET, req, sizeof req, reply, &n), STATUS_OK,
+		              "mode %u", (unsigned)mode);
+	}
+	bridge_hw_fake_reset();
+}
+
 ZTEST_SUITE(i2cm, NULL, NULL, NULL, NULL, NULL);
