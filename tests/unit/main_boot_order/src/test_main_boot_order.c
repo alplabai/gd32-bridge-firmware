@@ -8,6 +8,7 @@
  */
 
 #include <setjmp.h>
+#include <stdbool.h>
 #include <string.h>
 
 #include <zephyr/ztest.h>
@@ -29,6 +30,16 @@ static void note(char c)
 void bridge_hw_init(void)
 {
 	note('H');
+}
+static bool work_pending;
+static int  wfi_calls;
+bool        bridge_hw_work_pending(void)
+{
+	return work_pending;
+}
+void __WFI(void)
+{
+	wfi_calls++;
 }
 void bridge_hw_tick(void)
 {
@@ -57,4 +68,23 @@ ZTEST(main_boot_order, test_ota_boot_init_between_hw_and_transports)
 		(void)fw_main();
 	}
 	zassert_true(strcmp(seq, "HOSI") == 0, "want bridge_hw_init, ota_boot_init, spi, i2c");
+}
+
+/* A SET queued by an ISR after the last tick's check must not be left behind a
+ * WFI: with work pending the loop goes straight to the tick; with none it
+ * sleeps first. */
+ZTEST(main_boot_order, test_no_sleep_while_deferred_work_is_pending)
+{
+	work_pending = true;
+	wfi_calls    = 0;
+	if (setjmp(escape) == 0) {
+		(void)fw_main();
+	}
+	zassert_equal(wfi_calls, 0, "pending work: tick runs, no WFI");
+
+	work_pending = false;
+	if (setjmp(escape) == 0) {
+		(void)fw_main();
+	}
+	zassert_equal(wfi_calls, 1, "idle: sleeps once, then ticks");
 }

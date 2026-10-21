@@ -795,6 +795,7 @@ extern void bridge_hw_dsp_pump(void);
  * page-region per tick so BEGIN never blocks the SPI reply inline.  No-op
  * in the OTA-inert build. */
 extern void ota_erase_tick(void);
+extern bool ota_erase_active(void);
 /* Deferred low-power entry (gh#63): executes a mode 2/3 request latched
  * by bridge_hw_power_mode_set() on a quiet link, at base level -- never
  * from a transport ISR.  Strong impl in hal/gd32/power.c. */
@@ -902,6 +903,13 @@ static void bridge_fwdgt_arm(void)
 /* OTA trial gate (src/ota.c): true while this boot runs an unconfirmed
  * TRIAL image under the bootloader's watchdog. */
 extern bool ota_trial_unconfirmed(void);
+
+/* Deferred base-level work that must not be left behind a WFI (see main.c):
+ * a queued boot-config SET, and an OTA erase walk (one page per tick). */
+bool bridge_hw_work_pending(void)
+{
+	return boot_config_pending(NULL) || ota_erase_active();
+}
 
 void bridge_hw_tick(void)
 {
