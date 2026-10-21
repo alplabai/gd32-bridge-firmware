@@ -1633,67 +1633,66 @@ typedef struct {
 	size_t               reply_len;
 } nested_dispatch_probe_t;
 
-static void dispatch_chain_open_from_fake_hook(void *context)
+static const uint8_t nested_gpio_mask[4] = { 0x01u, 0x00u, 0x00u, 0x00u };
+
+static void dispatch_gpio_read_from_fake_hook(void *context)
 {
 	nested_dispatch_probe_t *probe = context;
 	uint8_t                  reply[REPLY_SCRATCH_CAP];
 
 	probe->reply_len = 0xDEADu;
 	probe->status    = protocol_dispatch(GD32_BRIDGE_LINK_SPI,
-	                                     CMD_ADC_DSP_CHAIN_OPEN,
-	                                     NULL,
-	                                     0u,
+	                                     CMD_GPIO_READ,
+	                                     nested_gpio_mask,
+	                                     sizeof(nested_gpio_mask),
 	                                     reply,
 	                                     sizeof(reply),
 	                                     &probe->reply_len);
 }
 
 /* SPI's CS EXTI can pre-empt an I2C dispatch while the outer handler is in
- * the HAL.  Use the non-atomic chain allocator from #139 as the probe: the
- * nested request must fail before a second HAL call, and the guard must
- * release when the outer request returns. */
+ * the HAL.  GPIO_READ is the probe because it is on the I2C allow-list (v0.15
+ * refuses the earlier DSP-chain allocator there): the nested request must fail
+ * before a second HAL call, and the guard must release when the outer request
+ * returns. */
 ZTEST(protocol, test_nested_dispatch_returns_busy_without_hal_mutation)
 {
 	uint8_t                 reply[REPLY_SCRATCH_CAP];
 	nested_dispatch_probe_t nested = { STATUS_OK, 0u };
 
 	bridge_hw_fake_reset();
-	bridge_hw_fake_dsp_chain_set_next_id(0x07u);
-	bridge_hw_fake_set_call_hook(
-	    FAKE_FN_ADC_DSP_CHAIN_OPEN, dispatch_chain_open_from_fake_hook, &nested);
+	bridge_hw_fake_gpio_set_pads(0x01u);
+	bridge_hw_fake_set_call_hook(FAKE_FN_GPIO_READ, dispatch_gpio_read_from_fake_hook, &nested);
 
 	size_t reply_len = 0xDEADu;
 	zassert_equal(protocol_dispatch(GD32_BRIDGE_LINK_I2C,
-	                                CMD_ADC_DSP_CHAIN_OPEN,
-	                                NULL,
-	                                0u,
+	                                CMD_GPIO_READ,
+	                                nested_gpio_mask,
+	                                sizeof(nested_gpio_mask),
 	                                reply,
 	                                sizeof(reply),
 	                                &reply_len),
 	              STATUS_OK,
 	              "outer I2C command completes");
-	zassert_equal(reply_len, 1u);
-	zassert_equal(reply[0], 0x07u, "outer allocator returns its chain id");
-	zassert_equal(bridge_hw_fake_call_count(FAKE_FN_ADC_DSP_CHAIN_OPEN),
-	              1u,
-	              "nested request never enters the HAL");
+	zassert_equal(reply_len, 4u);
+	zassert_equal(reply[0], 0x01u, "outer read returns the pad level");
+	zassert_equal(
+	    bridge_hw_fake_call_count(FAKE_FN_GPIO_READ), 1u, "nested request never enters the HAL");
 	zassert_equal(nested.status, STATUS_BUSY, "pre-empting SPI dispatch is refused");
 	zassert_equal(nested.reply_len, 0u, "BUSY reply has no payload");
 
-	bridge_hw_fake_dsp_chain_set_next_id(0x08u);
 	reply_len = 0xDEADu;
 	zassert_equal(protocol_dispatch(GD32_BRIDGE_LINK_SPI,
-	                                CMD_ADC_DSP_CHAIN_OPEN,
-	                                NULL,
-	                                0u,
+	                                CMD_GPIO_READ,
+	                                nested_gpio_mask,
+	                                sizeof(nested_gpio_mask),
 	                                reply,
 	                                sizeof(reply),
 	                                &reply_len),
 	              STATUS_OK,
 	              "a later dispatch succeeds after the outer request releases the guard");
-	zassert_equal(reply_len, 1u);
-	zassert_equal(reply[0], 0x08u);
-	zassert_equal(bridge_hw_fake_call_count(FAKE_FN_ADC_DSP_CHAIN_OPEN), 2u);
+	zassert_equal(reply_len, 4u);
+	zassert_equal(bridge_hw_fake_call_count(FAKE_FN_GPIO_READ), 2u);
 }
 
 /* Direct returns inside the inner switch must still pass through the outer

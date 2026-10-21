@@ -316,4 +316,275 @@ ZTEST(gd32_bridge_transport, test_status_seq_wraps_mod_16)
 	(void)hal_drain(buf, sizeof buf);
 }
 
+/* ------------------------------------------------------------------ */
+/* v0.15 -- 256-byte frames, >65 enforcement, the fresh-stage signal   */
+/* ------------------------------------------------------------------ */
+
+/* Builds `SOF | cmd | payload | CRC` (lo byte first) into `out`; returns its length. */
+static size_t build_frame(uint8_t *out, uint8_t cmd, const uint8_t *payload, size_t payload_len)
+{
+	out[0] = 0xA5u;
+	out[1] = cmd;
+	if (payload_len > 0u) memcpy(&out[2], payload, payload_len);
+	const uint16_t crc    = crc16_ccitt_false(out, 2u + payload_len);
+	out[2u + payload_len] = (uint8_t)(crc & 0xFFu);
+	out[3u + payload_len] = (uint8_t)(crc >> 8);
+	return 4u + payload_len;
+}
+
+/* Extended LINK_FEATURES (no STATUS_SEQ, so replies stay unstamped). */
+static void negotiate_ext(uint32_t want, uint16_t mp)
+{
+	const uint8_t p[6] = { (uint8_t)want,         (uint8_t)(want >> 8), (uint8_t)(want >> 16),
+		                   (uint8_t)(want >> 24), (uint8_t)mp,          (uint8_t)(mp >> 8) };
+	uint8_t       f[10];
+	uint8_t       sink[16];
+
+	transaction(f, build_frame(f, 0x81u, p, sizeof p));
+	(void)hal_drain(sink, sizeof sink);
+}
+
+static void negotiate_off(void)
+{
+	uint8_t sink[16];
+
+	negotiate(0x00u);
+	(void)hal_drain(sink, sizeof sink);
+}
+
+/* spi_slave_cs_high() reports whether a FRESH reply was staged -- what the
+ * HAL turns into the ATTN rising edge.  Decoded requests, error envelopes
+ * and the tar-pit breaker are fresh; the drain / empty rewinds are not. */
+ZTEST(gd32_bridge_transport, test_cs_high_reports_a_fresh_stage)
+{
+	uint8_t       buf[80];
+	const uint8_t zeros[4] = { 0 };
+
+	transport_spi_init();
+
+	spi_slave_cs_low();
+	for (size_t i = 0; i < sizeof ping_frame; i++)
+		spi_slave_rx_byte(ping_frame[i]);
+	zassert_true(spi_slave_cs_high(), "a decoded request stages a fresh reply");
+	(void)hal_drain(buf, sizeof buf);
+
+	spi_slave_cs_low();
+	for (size_t i = 0; i < sizeof zeros; i++)
+		spi_slave_rx_byte(zeros[i]);
+	zassert_false(spi_slave_cs_high(), "an all-0x00 reply-drain is a rewind, not a stage");
+	(void)hal_drain(buf, sizeof buf);
+
+	spi_slave_cs_low();
+	zassert_false(spi_slave_cs_high(), "an empty transaction is a rewind, not a stage");
+	(void)hal_drain(buf, sizeof buf);
+
+	/* Corrupted request (non-SOF, not all-zero): a fresh STATUS_IO envelope. */
+	const uint8_t junk[4] = { 0x12u, 0x34u, 0x56u, 0x78u };
+	spi_slave_cs_low();
+	for (size_t i = 0; i < sizeof junk; i++)
+		spi_slave_rx_byte(junk[i]);
+	zassert_true(spi_slave_cs_high(), "a mangled request stages the IO envelope");
+	(void)hal_drain(buf, sizeof buf);
+
+	/* Bad CRC: also fresh. */
+	const uint8_t badcrc[4] = { 0xA5u, 0x00u, 0x00u, 0x00u };
+	spi_slave_cs_low();
+	for (size_t i = 0; i < sizeof badcrc; i++)
+		spi_slave_rx_byte(badcrc[i]);
+	zassert_true(spi_slave_cs_high(), "a CRC failure stages the IO envelope");
+	(void)hal_drain(buf, sizeof buf);
+
+	/* Too short to be an envelope. */
+	const uint8_t shorty[2] = { 0xA5u, 0x00u };
+	spi_slave_cs_low();
+	for (size_t i = 0; i < sizeof shorty; i++)
+		spi_slave_rx_byte(shorty[i]);
+	zassert_true(spi_slave_cs_high(), "a runt frame stages the IO envelope");
+	(void)hal_drain(buf, sizeof buf);
+}
+
+/* The tar-pit breaker (13th consecutive rewind) swaps in the IO envelope: fresh. */
+ZTEST(gd32_bridge_transport, test_cs_high_tar_pit_breaker_is_a_fresh_stage)
+{
+	uint8_t       buf[80];
+	const uint8_t zeros[4]   = { 0 };
+	bool          fresh_seen = false;
+
+	transport_spi_init();
+	transaction(ping_frame, sizeof ping_frame);
+	(void)hal_drain(buf, sizeof buf);
+	for (int i = 0; i < 20; i++) {
+		spi_slave_cs_low();
+		for (size_t j = 0; j < sizeof zeros; j++)
+			spi_slave_rx_byte(zeros[j]);
+		const bool fresh = spi_slave_cs_high();
+		(void)hal_drain(buf, sizeof buf);
+		if (i < 12) zassert_false(fresh, "rewind %d is not fresh", i);
+		if (fresh) fresh_seen = true;
+	}
+	zassert_true(fresh_seen, "past the rewind bound the breaker stages a fresh IO envelope");
+}
+
+/* Only BATCH may exceed 65 bytes: an unknown opcode with exactly 65 reaches the
+ * dispatcher (NOSUPPORT); 66 is refused by the transport (INVAL), with or
+ * without BIG_FRAME. */
+ZTEST(gd32_bridge_transport, test_payload_over_65_is_refused_for_every_non_batch_opcode)
+{
+	uint8_t payload[260];
+	uint8_t frame[260 + 4];
+	uint8_t buf[80];
+
+	memset(payload, 0x5A, sizeof payload);
+	transport_spi_init();
+	negotiate_off();
+
+	for (int big = 0; big < 2; big++) {
+		if (big) negotiate_ext(GD32_BRIDGE_LINK_FEAT_BIG_FRAME, 252u);
+
+		size_t len = build_frame(frame, 0x99u, payload, 65u);
+		transaction(frame, len);
+		size_t n = hal_drain(buf, sizeof buf);
+		zassert_equal(n, 4u);
+		zassert_equal(
+		    buf[1], 0x06u, "65 B reaches dispatch: unknown opcode -> NOSUPPORT (big=%d)", big);
+
+		len = build_frame(frame, 0x99u, payload, 66u);
+		transaction(frame, len);
+		n = hal_drain(buf, sizeof buf);
+		zassert_equal(n, 4u);
+		zassert_equal(buf[1], 0x01u, "66 B -> INVAL by the transport (big=%d)", big);
+
+		/* OTA keeps its limit even on a BIG link. */
+		len = build_frame(frame, 0xF1u, payload, 66u);
+		transaction(frame, len);
+		n = hal_drain(buf, sizeof buf);
+		zassert_equal(buf[1], 0x01u, "OTA WRITE_CHUNK 66 B -> INVAL (big=%d)", big);
+
+		/* ADC_DSP_STAGE_PUSH too. */
+		len = build_frame(frame, 0x38u, payload, 100u);
+		transaction(frame, len);
+		n = hal_drain(buf, sizeof buf);
+		zassert_equal(buf[1], 0x01u, "DSP stage push over 65 -> INVAL (big=%d)", big);
+	}
+	negotiate_off();
+}
+
+/* The BATCH request ceiling is the negotiated max_payload: 65 until BIG_FRAME. */
+ZTEST(gd32_bridge_transport, test_batch_request_ceiling_is_the_negotiated_max_payload)
+{
+	uint8_t payload[260];
+	uint8_t frame[260 + 4];
+	uint8_t buf[80];
+
+	memset(payload, 0, sizeof payload);
+	transport_spi_init();
+
+	/* BATCH granted, BIG_FRAME not: 66 bytes is over max_payload 65 -> INVAL
+	 * (not the NOSUPPORT / validation answer a <= 65 request would get). */
+	negotiate_ext(GD32_BRIDGE_LINK_FEAT_BATCH, 65u);
+	size_t len = build_frame(frame, 0x04u, payload, 66u);
+	transaction(frame, len);
+	size_t n = hal_drain(buf, sizeof buf);
+	zassert_equal(n, 4u);
+	zassert_equal(buf[1], 0x01u, "66 > max_payload 65");
+
+	/* A 252-byte BATCH payload fits a BIG link's ceiling: it reaches the
+	 * dispatcher (garbage count -> validation INVAL, but through dispatch). */
+	negotiate_ext(GD32_BRIDGE_LINK_FEAT_BATCH | GD32_BRIDGE_LINK_FEAT_BIG_FRAME, 252u);
+	payload[0] = 17u; /* count > 16 -> OUT_OF_RANGE, which only dispatch can answer */
+	len        = build_frame(frame, 0x04u, payload, 252u);
+	zassert_equal(len, 256u, "the largest SPI frame");
+	transaction(frame, len);
+	n = hal_drain(buf, sizeof buf);
+	zassert_equal(n, 4u);
+	zassert_equal(buf[1], 0x08u, "252 B accepted by the transport; dispatch says OUT_OF_RANGE");
+
+	/* A negotiated max_payload below 252 is honoured. */
+	negotiate_ext(GD32_BRIDGE_LINK_FEAT_BATCH | GD32_BRIDGE_LINK_FEAT_BIG_FRAME, 100u);
+	len = build_frame(frame, 0x04u, payload, 101u);
+	transaction(frame, len);
+	n = hal_drain(buf, sizeof buf);
+	zassert_equal(buf[1], 0x01u, "101 > negotiated 100");
+	len = build_frame(frame, 0x04u, payload, 100u);
+	transaction(frame, len);
+	n = hal_drain(buf, sizeof buf);
+	zassert_equal(buf[1], 0x08u, "100 <= negotiated 100 reaches dispatch");
+	negotiate_off();
+}
+
+/* The RX/TX staging holds a full 256-byte frame: a 253-byte payload is one byte
+ * too many, the trailing CRC byte is dropped, and the CRC check fails loud. */
+ZTEST(gd32_bridge_transport, test_frame_one_byte_over_256_fails_the_crc)
+{
+	uint8_t payload[260];
+	uint8_t frame[260 + 4];
+	uint8_t buf[80];
+
+	memset(payload, 0, sizeof payload);
+	transport_spi_init();
+	negotiate_ext(GD32_BRIDGE_LINK_FEAT_BATCH | GD32_BRIDGE_LINK_FEAT_BIG_FRAME, 252u);
+
+	payload[0] = 17u;
+	size_t len = build_frame(frame, 0x04u, payload, 253u);
+	zassert_equal(len, 257u);
+	transaction(frame, len);
+	size_t n = hal_drain(buf, sizeof buf);
+	zassert_equal(n, 4u);
+	zassert_equal(buf[1], 0x05u, "STATUS_IO: the 257th byte was dropped");
+	negotiate_off();
+}
+
+/* A real BATCH larger than any legacy frame executes through the 256-byte path:
+ * 16 TMU_COMPUTE entries (12-byte args) = a 225-byte payload.  On the stub the
+ * first TMU op answers NOSUPPORT, so execution stops there. */
+ZTEST(gd32_bridge_transport, test_large_batch_is_decoded_and_stops_at_the_first_error)
+{
+	uint8_t payload[260];
+	uint8_t frame[260 + 4];
+	uint8_t buf[80];
+	size_t  off = 0;
+
+	memset(payload, 0, sizeof payload);
+	transport_spi_init();
+	negotiate_ext(GD32_BRIDGE_LINK_FEAT_BATCH | GD32_BRIDGE_LINK_FEAT_BIG_FRAME, 252u);
+
+	payload[off++] = 16u;
+	for (int i = 0; i < 16; i++) {
+		payload[off++] = 0x90u; /* TMU_COMPUTE */
+		payload[off++] = 12u;
+		off += 12u;
+	}
+	zassert_equal(off, 225u);
+	size_t len = build_frame(frame, 0x04u, payload, off);
+	zassert_equal(len, 229u, "well past the legacy 69-byte envelope");
+	transaction(frame, len);
+	size_t n = hal_drain(buf, sizeof buf);
+	zassert_equal(n, 4u + 1u + 2u, "SOF STATUS executed {status,len} CRC");
+	zassert_equal(buf[1], 0x00u, "outer OK");
+	zassert_equal(buf[2], 1u, "one op executed");
+	zassert_equal(buf[3], 0x06u, "TMU_COMPUTE on the stub: NOSUPPORT");
+	zassert_equal(buf[4], 0u, "non-OK sub-status has len 0");
+	negotiate_off();
+}
+
+/* The static reply scratch is shared: a long reply followed by a short one must
+ * not leak the earlier bytes into the later reply. */
+ZTEST(gd32_bridge_transport, test_reply_scratch_does_not_leak_between_requests)
+{
+	uint8_t frame[16];
+	uint8_t buf[80];
+	uint8_t req[1] = { 0x00u };
+
+	transport_spi_init();
+	negotiate_off();
+	transaction(frame, build_frame(frame, 0x02u, NULL, 0u)); /* GET_BUILD_ID: 20-byte reply */
+	size_t n = hal_drain(buf, sizeof buf);
+	zassert_equal(n, 24u);
+	(void)req;
+	transaction(ping_frame, sizeof ping_frame);
+	n = hal_drain(buf, sizeof buf);
+	zassert_equal(n, 4u, "a PING reply is exactly 4 bytes, whatever the scratch held");
+	zassert_mem_equal(buf, ping_frame, sizeof ping_frame);
+}
+
 ZTEST_SUITE(gd32_bridge_transport, NULL, NULL, NULL, NULL, NULL);
