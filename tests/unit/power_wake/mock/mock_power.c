@@ -48,7 +48,7 @@ void adc_deepsleep_quiesce(void)
 {
 	++mock_adc_quiesce_calls;
 }
-uint32_t   mock_i2cm_wakes;
+uint32_t mock_i2cm_wakes;
 
 void bridge_hw_i2cm_wake(void)
 {
