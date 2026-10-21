@@ -56,13 +56,18 @@ the whole region.
 
 Always erase the whole region, `0x08008000..0x08009FFF` (8 KB), before writing
 the record. A factory write that programs only the 44-byte record (for example
-a `gd32_flash`-style write of `ota-meta-rec0.bin`) leaves any older A/B records
+the alp-sdk `scripts/provision` step `gd32_flash`, which writes `ota-meta.bin` at `0x08008000`) leaves any older A/B records
 in the other metadata pages untouched. The valid record with the highest
 counter wins (`tools/gen_ota_metadata.py`), so a stale record from an earlier
 OTA can outrank the new one and boot slot B instead of slot A. Erase first,
 then write the 44 bytes at `0x08008000`; with everything else `0xFF`, record 0
 is the only valid record. Found on the bench (2026-10-21); a recovery-procedure
 requirement, not a firmware change.
+The `gd32_flash` step does not erase the region yet; it must erase
+`0x08008000..0x08009FFF` (or write the whole 8 KB region) before writing the
+record, otherwise a factory run reproduces the slot-B boot. That fix lives in
+alp-sdk (issue to be filed against `scripts/provision/steps.py`); until it
+lands, erase the region by hand as above.
 
 ## 2. Path A: external SWD probe (J-Link or OpenOCD)
 
