@@ -89,6 +89,11 @@ uint32_t rcu_clock_freq_get(uint32_t c)
 	(void)c;
 	return 0u;
 }
+/* hal/gd32/clock_hw.c reads the live APB1 clock; this suite never configures one. */
+uint32_t bridge_clock_apb1_hz(void)
+{
+	return 0u;
+}
 
 /* ---- seams / cross-TU symbols the HAL file references ------------------- */
 void spi_slave_cs_low(void)

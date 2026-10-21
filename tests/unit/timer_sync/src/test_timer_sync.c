@@ -35,6 +35,7 @@ volatile uint32_t mock_timer_ctl0[2];
 volatile uint32_t mock_timer_car[2];
 volatile uint32_t mock_timer_cv[2][4];
 volatile uint32_t mock_primask;
+uint32_t          bridge_core_clock_hz = 216000000u; /* pwm.c derives its prescaler from it */
 
 static unsigned pwm_mutation_calls;
 static unsigned pwm_upg_calls;
@@ -78,6 +79,13 @@ void timer_struct_para_init(timer_parameter_struct *initpara)
 void timer_deinit(uint32_t timer_periph)
 {
 	(void)timer_periph;
+}
+
+void timer_prescaler_config(uint32_t timer_periph, uint16_t prescaler, uint32_t pscreload)
+{
+	(void)timer_periph;
+	(void)prescaler;
+	(void)pscreload;
 }
 
 void timer_init(uint32_t timer_periph, const timer_parameter_struct *initpara)
