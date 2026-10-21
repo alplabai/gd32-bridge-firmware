@@ -174,6 +174,11 @@ typedef enum {
      * v0.16: grew again, 21 to 23 bits -- bits 21/22 are E1M IO15
      * (PB4) and IO26 (PC2).  Hosts relying on them must require
      * MINOR >= 16 (0.15 firmware ignores them). */
+	/* PWM_SET with period_ns == 0 (duty_ns must be 0, else STATUS_INVAL) is
+     * STOP: the channel's pad goes to its idle low level and its timer
+     * claim is released, so a sibling PWM_SINGLE_PULSE is accepted again.
+     * No protocol bump: firmware before this change answers period 0 with
+     * STATUS_OUT_OF_RANGE, which a host can use to detect it. */
 	CMD_PWM_SET = 0x20,
 	CMD_PWM_GET = 0x21,
 	/* v0.3: sticky per-channel PWM tuning (align mode, dead time, fault

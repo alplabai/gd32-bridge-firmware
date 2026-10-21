@@ -50,6 +50,8 @@ int bridge_hw_pwm_set(uint8_t channel, uint32_t period_ns, uint32_t duty_ns)
 {
 	if (channel >= PWM_CHANNEL_COUNT) return BRIDGE_HW_ERR_RANGE;
 	if (duty_ns > period_ns) return BRIDGE_HW_ERR_INVAL;
+	/* period 0 (duty already forced to 0 above) = STOP + release the claim. */
+	if (period_ns == 0u) return pwm_channel_stop(channel);
 
 	uint32_t  arr;
 	uint32_t  compare;
