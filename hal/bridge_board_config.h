@@ -125,6 +125,35 @@ _Static_assert((BRIDGE_GPIOA_LOCK_MASK & (1u << BRIDGE_ATTN_PIN_NUM)) == 0u,
  * Datasheet lists I2C0_SCL on PA15 and I2C0_SDA on PB9. */
 #define BRIDGE_I2C_GPIO_AF GPIO_AF_4
 
+/* =================================================================== */
+/* I2C3 master proxy (protocol v0.17, hal/gd32/i2cm.c) -- E1M-X I2C3.  */
+/* SoM 2625-R2: GD32 U41 PC8 = I2C3_SCL (pad A24), PC9 = I2C3_SDA      */
+/* (pad A23); no SoM pull-ups (carrier / module provide them).         */
+/* =================================================================== */
+#define BRIDGE_I2CM_PERIPH   I2C3
+#define BRIDGE_I2CM_RCU      RCU_I2C3
+#define BRIDGE_I2CM_RCU_IDX  IDX_I2C3
+#define BRIDGE_I2CM_CK_SRC   RCU_I2CSRC_APB1
+#define BRIDGE_I2CM_SCL_PORT GPIOC
+#define BRIDGE_I2CM_SCL_PIN  GPIO_PIN_8
+#define BRIDGE_I2CM_SDA_PORT GPIOC
+#define BRIDGE_I2CM_SDA_PIN  GPIO_PIN_9
+
+/* TODO(unverified): the alternate-function number that routes I2C3_SCL /
+ * I2C3_SDA onto PC8 / PC9.  It is in the GD32G553 datasheet's pin
+ * alternate-function table, which was not available when this driver was
+ * written (the vendor library headers carry the GPIO_AF_n names but no pin
+ * map, and no vendor example uses I2C3).  Until a build passes
+ * -DBRIDGE_I2CM_GPIO_AF=GPIO_AF_<n> with the number read from that table,
+ * CMD_I2CM_CONFIG answers BRIDGE_HW_ERR_NOTIMPL (wire STATUS_NOSUPPORT)
+ * and the pads stay hi-Z; the placeholder below is never applied. */
+#ifndef BRIDGE_I2CM_GPIO_AF
+#define BRIDGE_I2CM_GPIO_AF     GPIO_AF_0
+#define BRIDGE_I2CM_AF_VERIFIED 0
+#else
+#define BRIDGE_I2CM_AF_VERIFIED 1
+#endif
+
 /* I2C timing (PSC / SCLDEL / SDADEL) is computed at runtime in
  * bridge_transport_i2c_hw_init() from the live APB1 kernel clock, so it
  * needs no static value here.  Slave timing only needs setup/hold +

@@ -26,4 +26,13 @@
  * must leave I2C disabled rather than silently configure a non-SMBus timeout. */
 bool bridge_i2c_stretch_timeout_reload(uint32_t i2c_clk_hz, uint16_t *reload_out);
 
+/* Fast-mode PSC / SCLDELY / SDADELY derived from the live I2C kernel clock
+ * (hal/transport_hw_gd32.c; shared by the I2C0 slave and the I2C3 master
+ * proxy, hal/gd32/i2cm.c).  Returns false -- outputs untouched -- below the
+ * 4 MHz Fast-mode floor or if a field would not fit its 4 bits. */
+bool bridge_i2c_timing_derive(uint32_t  apb1_hz,
+                              uint32_t *psc,
+                              uint32_t *scl_dely,
+                              uint32_t *sda_dely);
+
 #endif /* GD32_BRIDGE_HAL_GD32_I2C_TIMEOUT_H */
