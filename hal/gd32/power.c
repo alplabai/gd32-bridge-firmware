@@ -799,8 +799,8 @@ void bridge_power_tick(void)
 			    (bridge_transport_i2c_hw_init() == BRIDGE_HW_OK) ? (uint8_t)0u : (uint8_t)1u;
 		}
 		/* The I2C3 proxy's pads/peripheral are not trusted across the mode:
-		 * mark it unconfigured (Linux re-CONFIGs on NOT_READY).  A job cannot
-		 * be running -- POWER_MODE_SET is refused BUSY while one is. */
+		 * mark it unconfigured (Linux re-CONFIGs on NOT_READY).  No job can be
+		 * queued or running: lp_link_quiet() refuses entry while one is. */
 		bridge_hw_i2cm_wake();
 		/* The timer keeps auto-reloading after a wake; stop it so it
 		 * does not interrupt the run-mode bridge every period. */
