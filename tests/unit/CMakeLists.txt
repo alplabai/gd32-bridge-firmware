@@ -616,7 +616,28 @@ target_compile_options(test_transport_hw_cs_exti PRIVATE ${TEST_FLAGS}
     -Wno-unused-variable -Wno-unused-parameter -Wno-unused-but-set-variable
     -Wno-pointer-to-int-cast)
 target_link_libraries(test_transport_hw_cs_exti PRIVATE ztest_shim)
+# Opt-in SPI fast re-init (gh#165): this build compiles the fast path in; the
+# `_default` twin below keeps the shipped default (always reset) under test.
+target_compile_definitions(test_transport_hw_cs_exti PRIVATE BRIDGE_SPI_FAST_REINIT=1)
 add_test(NAME transport_hw_cs_exti COMMAND test_transport_hw_cs_exti)
+
+add_executable(test_transport_hw_cs_exti_default
+    transport_hw_cs_exti/src/test_transport_hw_cs_exti.c
+    ${FW}/hal/gd32/i2c_event_priority.c
+    ${FW}/hal/gd32/i2c_timeout.c
+    ${FW}/hal/gd32/spi_dma_arm_status.c
+)
+target_include_directories(test_transport_hw_cs_exti_default PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/transport_hw_cs_exti/mock
+    ${FW}/hal
+    ${FW}/hal/gd32
+    ${FW}/src
+)
+target_compile_options(test_transport_hw_cs_exti_default PRIVATE ${TEST_FLAGS}
+    -Wno-unused-variable -Wno-unused-parameter -Wno-unused-but-set-variable
+    -Wno-pointer-to-int-cast)
+target_link_libraries(test_transport_hw_cs_exti_default PRIVATE ztest_shim)
+add_test(NAME transport_hw_cs_exti_default COMMAND test_transport_hw_cs_exti_default)
 
 # --- main_boot_order: gh#304 main() calls ota_boot_init() in the right slot --
 #
