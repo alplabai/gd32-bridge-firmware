@@ -191,6 +191,11 @@ static volatile uint8_t pwm_align_mode[2];
  * must not alter them while any sibling owns the same timer. */
 static volatile uint8_t pwm_timer_claims[2];
 
+bool bridge_pwm_claims_active(void)
+{
+	return (pwm_timer_claims[0] | pwm_timer_claims[1]) != 0u;
+}
+
 /* TIMER base -> pwm_align_mode index. */
 static uint8_t pwm_timer_index(uint32_t periph)
 {

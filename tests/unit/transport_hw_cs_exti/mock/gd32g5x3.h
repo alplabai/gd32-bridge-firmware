@@ -109,6 +109,9 @@ extern uint32_t mock_dma_enable_calls, mock_dma_cfg_channel, mock_dma_cfg_number
 #define i2c_timing_config(...)                 ((void)0)
 #define nvic_irq_enable(...)                   ((void)0)
 #define rcu_i2c_clock_config(...)              ((void)0)
+#define RCU_I2CSRC_IRC8M                       2u
+#define i2c_wakeup_from_deepsleep_enable(p)    ((void)(p))
+#define i2c_wakeup_from_deepsleep_disable(p)   ((void)(p))
 #define rcu_periph_clock_enable(...)           ((void)0)
 #define rcu_periph_reset_disable(...)          ((void)0)
 #define rcu_periph_reset_enable(...)           ((void)0)

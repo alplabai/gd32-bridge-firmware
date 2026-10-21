@@ -1076,6 +1076,27 @@ ZTEST(protocol, test_v015_power_mode_transition_quiesces_attn)
 	reset_links();
 }
 
+/* req[1] reaches the HAL as the flags byte, and a refused request (BUSY here)
+ * does not drive ATTN low: only an accepted transition quiesces. */
+ZTEST(protocol, test_power_mode_flags_pass_through_and_busy_does_not_quiesce)
+{
+	uint8_t reply[CAP];
+	size_t  n;
+	uint8_t req[10] = { 2u, 0x01u, 0, 0, 0, 0, 0, 0, 0, 0 };
+
+	reset_links();
+	zassert_equal(disp(GD32_BRIDGE_LINK_SPI, CMD_POWER_MODE_SET, req, 10u, reply, sizeof reply, &n),
+	              STATUS_OK);
+	zassert_equal(bridge_hw_fake_power_mode_last_flags(), 0x01u);
+	zassert_equal(bridge_hw_fake_attn_quiesce_calls(), 1u);
+
+	bridge_hw_fake_force(FAKE_FN_POWER_MODE_SET, BRIDGE_HW_ERR_BUSY);
+	zassert_equal(disp(GD32_BRIDGE_LINK_SPI, CMD_POWER_MODE_SET, req, 10u, reply, sizeof reply, &n),
+	              STATUS_BUSY);
+	zassert_equal(bridge_hw_fake_attn_quiesce_calls(), 1u, "BUSY leaves ATTN alone");
+	reset_links();
+}
+
 /* Removing ADC_STREAM2 mutes the watermark events and clears the pending ones:
  * READ2 would answer NOSUPPORT and nothing else could clear them. */
 ZTEST(protocol, test_v015_removing_adc_stream2_clears_and_mutes_events)
