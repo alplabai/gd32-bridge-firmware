@@ -10,13 +10,23 @@
   boot OUTPUT LOW (camera LDOs off). Hosts relying on them must require
   `PROTOCOL_VERSION_MINOR >= 17`.
 
+- CMake option `BRIDGE_I2CM_INTERNAL_PULLUP` (default OFF, bench only): internal
+  `GPIO_PUPD_PULLUP` on `PC8`/`PC9`. The I2C3 net has no pull-ups on the SoM or
+  the carrier I2C3 segment; production needs external pull-ups.
+- `CMD_PWM_SET` with `period_ns == 0` (`duty_ns == 0`) stops the channel and
+  releases its timer claim. Hosts must require `PROTOCOL_VERSION_MINOR >= 17`
+  (older firmware underflows the shared auto-reload on period 0).
+
 ### Changed
+
+- GPIO HAL errors map through `status_from_hw()`; the stub's `NOTIMPL` now
+  answers `STATUS_NOSUPPORT`.
 
 - `bridge_i2c_timing_derive()` (formerly the file-static `i2c_timing_derive()`)
   is shared by the I2C0 slave and the I2C3 master.
 - The E1M-X I2C3 proxy uses the GD32 I2C2 peripheral (`PC8` AF8 = I2C2_SCL,
   `PC9` AF8 = I2C2_SDA; GD32G553xx Datasheet Rev1.5 pin alternate-function
-  table), so `BRIDGE_I2CM_GPIO_AF` defaults to `GPIO_AF_8`. Not yet run on silicon.
+  table), so `BRIDGE_I2CM_GPIO_AF` defaults to `GPIO_AF_8`. Run on silicon (V2M103): CONFIG ok, NACK on absent addresses.
 - SCL high/low times are sized so `fSCL` never exceeds 100/400 kHz (tLOW/tHIGH
   4700/5300 ns and 1400/1100 ns), at or above the I2C spec minimums.
 - `bridge_hw_i2cm_tick()` runs first in `bridge_hw_tick()`.
